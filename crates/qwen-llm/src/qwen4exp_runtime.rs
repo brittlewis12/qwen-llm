@@ -1269,7 +1269,7 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
             .plan()
             .tail_range(self.next_position(), token_ids.len())?;
         let capture = bank.sink(range);
-        self.prefill_continuation_inner(token_ids, checkpoint, Some(&capture))?;
+        self.prefill_continuation_inner(token_ids, checkpoint, Some(&capture), None)?;
         Ok(capture.complete())
     }
 
@@ -1439,8 +1439,27 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
     where
         F: FnMut() -> Result<(), Qwen4ExpRuntimeError>,
     {
-        self.prefill_continuation_inner(token_ids, checkpoint, None)?;
+        self.prefill_continuation_inner(token_ids, checkpoint, None, None)?;
         self.logits()
+    }
+
+    /// Observe successful committed commands without changing their plan or
+    /// arithmetic. The callback is read-only and never sees pending/failed work.
+    pub fn prefill_continuation_with_observer<F>(
+        &mut self,
+        token_ids: &[u32],
+        checkpoint: F,
+        observer: &mut dyn FnMut(&Self, Range<usize>),
+    ) -> Result<Qwen4ExpCompletedLogits<'_>, Qwen4ExpRuntimeError>
+    where
+        F: FnMut() -> Result<(), Qwen4ExpRuntimeError>,
+    {
+        self.prefill_continuation_inner(token_ids, checkpoint, None, Some(observer))?;
+        self.logits()
+    }
+
+    pub fn packed_prefill_capacity(&self) -> Option<usize> {
+        self.workspace.packed_prefill_capacity()
     }
 
     fn prefill_continuation_inner<F>(
@@ -1448,6 +1467,7 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         token_ids: &[u32],
         mut checkpoint: F,
         capture: Option<&Qwen4ExpCaptureSink<'_>>,
+        mut observer: Option<&mut dyn FnMut(&Self, Range<usize>)>,
     ) -> Result<(), Qwen4ExpRuntimeError>
     where
         F: FnMut() -> Result<(), Qwen4ExpRuntimeError>,
@@ -1494,6 +1514,9 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
                     }
                     self.last_token_timing = None;
                     prefill_timing.record(timing);
+                    if let Some(observer) = observer.as_mut() {
+                        observer(self, range.clone());
+                    }
                 }
                 Err(source) => {
                     return Err(Qwen4ExpRuntimeError::Prefill {
@@ -1528,6 +1551,9 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
                     }
                     self.last_token_timing = Some(timing);
                     prefill_timing.record(timing);
+                    if let Some(observer) = observer.as_mut() {
+                        observer(self, expected - 1..expected);
+                    }
                 }
                 Err(source) => {
                     return Err(Qwen4ExpRuntimeError::Prefill {

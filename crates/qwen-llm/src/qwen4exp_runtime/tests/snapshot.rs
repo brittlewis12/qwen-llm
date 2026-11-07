@@ -90,3 +90,86 @@ fn snapshot_restore_replays_continuation_bit_exactly() {
         );
     }
 }
+
+#[test]
+#[ignore = "production lease + QWEN4EXP_Q3_K_XL_GGUF override; committed live-trajectory observer and bit-exact restore; model GPU"]
+fn live_checkpoint_observer_restores_exact_state() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+    let bytes = include_bytes!(
+        "../../../../../docs/bench/2026-08-29-qwen4exp-selected-semantic/natural-ssh.u32le"
+    );
+    let tokens: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .collect();
+    let ctx = MetalContext::new().unwrap();
+    let gguf = GgufFile::open(crate::test_fixtures::QWEN4EXP_Q3_K_XL.required()).unwrap();
+    let config = Qwen4ExpConfig::from_gguf(&gguf).unwrap();
+    let capacity = Qwen4ExpSessionCapacity::for_forward_limit(&config, 2210).unwrap();
+    let mut loaded =
+        Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, 128).unwrap();
+    let mut runner = loaded.create_runner(&ctx).unwrap();
+    assert_eq!(runner.packed_prefill_capacity(), Some(128));
+    runner.prefill(&tokens[..97]).unwrap();
+    for &token in &tokens[97..100] {
+        runner.forward_token(token).unwrap();
+    }
+    let initial = runner.capture_snapshot().unwrap();
+    let mut callbacks = 0;
+    assert!(
+        runner
+            .prefill_continuation_with_observer(
+                &tokens[100..356],
+                || Err(Qwen4ExpRuntimeError::Checkpoint(
+                    "cancel before command".into()
+                )),
+                &mut |_, _| callbacks += 1
+            )
+            .is_err()
+    );
+    assert_eq!(callbacks, 0, "no observation before a successful commit");
+    assert_eq!(runner.next_position(), 100);
+    let reference = runner
+        .prefill_continuation_with_command_checkpoint(&tokens[100..2200], || Ok(()))
+        .unwrap()
+        .to_vec();
+    let reference_state = snapshot_persistent_state(&runner);
+    runner.restore_snapshot(&initial).unwrap();
+    let mut checkpoint = None;
+    let observed = runner
+        .prefill_continuation_with_observer(&tokens[100..2200], || Ok(()), &mut |runner, range| {
+            assert_eq!(runner.next_position(), range.end);
+            if range.end == 2179 {
+                checkpoint = Some(runner.capture_snapshot().unwrap());
+            }
+        })
+        .unwrap()
+        .to_vec();
+    assert_f32_bits_eq("observer changes no prompt logits", &reference, &observed);
+    assert_eq!(reference_state, snapshot_persistent_state(&runner));
+    let mut tail = Vec::new();
+    for &token in &tokens[2200..2204] {
+        tail.push(runner.forward_token(token).unwrap().to_vec());
+    }
+    let end = snapshot_persistent_state(&runner);
+    runner
+        .restore_snapshot(&checkpoint.expect("committed full chunk after sparse frontier"))
+        .unwrap();
+    let restored = runner
+        .prefill_continuation_with_command_checkpoint(&tokens[2179..2200], || Ok(()))
+        .unwrap()
+        .to_vec();
+    assert_f32_bits_eq("restored prompt logits", &reference, &restored);
+    for (i, &token) in tokens[2200..2204].iter().enumerate() {
+        assert_f32_bits_eq(
+            "teacher-forced continuation",
+            &tail[i],
+            &runner.forward_token(token).unwrap().to_vec(),
+        );
+    }
+    assert_eq!(
+        end,
+        snapshot_persistent_state(&runner),
+        "all persistent tensors"
+    );
+}

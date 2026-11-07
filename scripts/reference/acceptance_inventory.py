@@ -33,6 +33,7 @@ SCOPES = {
     "lib": [
         "deepseek_v41::",
         "glm5_next_metal::tests::snapshot_gates::live_trajectory_observer_restore_is_exact",
+        "qwen4exp_runtime::tests::snapshot::live_checkpoint_observer_restores_exact_state",
         "metal::moe_grouped_generic::tests::staging_ownership::",
         "metal::moe_grouped_generic::tests::wide_activation_type::",
     ],

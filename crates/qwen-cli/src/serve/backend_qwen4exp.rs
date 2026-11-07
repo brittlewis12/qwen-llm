@@ -38,6 +38,7 @@ mod dflash;
 
 pub(super) struct Prepared {
     context_limit: usize,
+    checkpoint_ladder: super::checkpoint_ladder::Config,
     default_max_tokens: usize,
     release_sampling: crate::release_sampling::SamplingDefaults,
     tokenizer: Tokenizer,
@@ -106,6 +107,7 @@ impl Prepared {
             crate::drafter_policy::Lane::Serve,
         )?;
         Ok(Self {
+            checkpoint_ladder: super::checkpoint_ladder::Config::from_env()?,
             release_sampling: qwen4_sampling_defaults(gguf),
             context_limit,
             default_max_tokens,
@@ -326,7 +328,8 @@ impl FlashNextBackend {
             vocab_size,
             stop_tokens: prepared.stop_tokens,
             im_start: prepared.im_start,
-            cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_cache_plan.policy),
+            cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_cache_plan.policy)
+                .with_checkpoint_ladder(prepared.checkpoint_ladder),
             snapshot_cache_plan,
             template_style: super::items::TemplateStyle::House,
             control_cpu_reserve: 0,
@@ -388,6 +391,7 @@ impl GenerationBackend for FlashNextBackend {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        let conversation = super::checkpoint_ladder::conversation(request);
         self.idle_residency.before_request();
         // One resolution, shared with the output ceiling.
         let max_tokens = self.output_limits().max_tokens(request);
@@ -498,7 +502,16 @@ impl GenerationBackend for FlashNextBackend {
             let prefill_t0 = Instant::now();
             let mut capture_ms = 0.0;
             if let Some(boundary) = transcript_split {
-                prefill_segment(&mut runner, &prompt_ids[matched_tokens..boundary], sink)?;
+                capture_ms += prefill_ladder_segment(
+                    &mut runner,
+                    &mut self.cache,
+                    &self.ctx,
+                    &prompt_ids,
+                    matched_tokens..boundary,
+                    sink,
+                    conversation,
+                    self.control_cpu_reserve,
+                )?;
                 let capture_t0 = Instant::now();
                 if capture_snapshot(
                     &mut self.cache,
@@ -510,10 +523,21 @@ impl GenerationBackend for FlashNextBackend {
                 ) {
                     transcript_entry = self.cache.entry_for(&prompt_ids[..boundary]);
                 }
+                self.cache
+                    .record_tip(conversation, &(), &prompt_ids[..boundary]);
                 capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
             }
             let start = transcript_split.unwrap_or(matched_tokens);
-            prefill_segment(&mut runner, &prompt_ids[start..], sink)?;
+            capture_ms += prefill_ladder_segment(
+                &mut runner,
+                &mut self.cache,
+                &self.ctx,
+                &prompt_ids,
+                start..prompt_ids.len(),
+                sink,
+                conversation,
+                self.control_cpu_reserve,
+            )?;
             let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3 - capture_ms;
             let logits = runner
                 .logits()
@@ -531,6 +555,7 @@ impl GenerationBackend for FlashNextBackend {
                     "prompt",
                     self.control_cpu_reserve,
                 );
+                self.cache.record_tip(conversation, &(), &prompt_ids);
                 capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
             }
 
@@ -575,6 +600,7 @@ impl GenerationBackend for FlashNextBackend {
                         "completed",
                         self.control_cpu_reserve,
                     );
+                    self.cache.record_tip(conversation, &(), &consumed);
                     if let Some(entry) = pinned {
                         self.cache.unpin(entry);
                     }
@@ -596,12 +622,13 @@ impl GenerationBackend for FlashNextBackend {
             };
             tracing::info!(
                 target: "qwen_diag",
-                "serve phases: family=qwen4exp tokenize_ms={tokenize_ms:.1} restore_ms={restore_ms:.1} matched_tokens={matched_tokens} prefill_ms={prefill_ms:.1} prefill_tokens={} snapshot_capture_ms={capture_ms:.1}{transcript_phase} decode_ms={:.1} required_forwards={required} forward_limit={} transitions={} snapshot_cache_bytes={}",
+                "serve phases: family=qwen4exp tokenize_ms={tokenize_ms:.1} restore_ms={restore_ms:.1} matched_tokens={matched_tokens} prefill_ms={prefill_ms:.1} prefill_tokens={} snapshot_capture_ms={capture_ms:.1}{transcript_phase} decode_ms={:.1} required_forwards={required} forward_limit={} transitions={} snapshot_cache_bytes={} ladder={:?}",
                 prompt_ids.len() - matched_tokens,
                 generation.wall_ms,
                 self.forward_limit,
                 generation.transitions,
                 self.cache.indexed_bytes(),
+                self.cache.ladder_status(),
             );
             Ok(super::outcome::finish_generation(
                 prompt_ids.len(),
@@ -646,6 +673,41 @@ fn prefill_segment(
         })
         .map(|_| ());
     map_prefill_result(result, checkpoint_abort)
+}
+
+/// Observe one existing full packed command near the end of a long segment.
+/// Short appends take the previous API directly and make no extra state copy.
+fn prefill_ladder_segment(
+    runner: &mut Qwen4ExpTextRunner<'_, '_, '_>,
+    cache: &mut SnapshotCache<Qwen4ExpTextSnapshot>,
+    ctx: &MetalContext,
+    tokens: &[u32],
+    range: std::ops::Range<usize>,
+    sink: &mut dyn GenerationSink,
+    conversation: Option<super::checkpoint_ladder::Conversation>,
+    reserve: u64,
+) -> Result<f64, BackendFailure> {
+    let rows = runner.packed_prefill_capacity().unwrap_or(0);
+    if !cache.ladder_enabled() || conversation.is_none() || range.len() <= rows || rows == 0 {
+        prefill_segment(runner, &tokens[range], sink)?;
+        return Ok(0.0);
+    }
+    let mut elapsed = 0.0;
+    let mut checkpoint_abort = None;
+    let endpoint = range.end;
+    let result=runner.prefill_continuation_with_observer(&tokens[range], || sink.tick().map_err(|error| {
+        checkpoint_abort=Some(error);
+        Qwen4ExpRuntimeError::Checkpoint(format!("transport aborted during {FAMILY} prefill"))
+    }), &mut |runner, chunk| {
+        if chunk.len()==rows && chunk.end<endpoint && endpoint-chunk.end<=rows {
+            let started=Instant::now();
+            let retained=capture_snapshot_impl(cache,ctx,runner,&tokens[..chunk.end],"ladder",reserve,conversation);
+            elapsed+=started.elapsed().as_secs_f64()*1e3;
+            tracing::info!(target:"qwen_diag", "serve checkpoint: family=qwen4exp position={} retained={retained} ladder={:?}",chunk.end,cache.ladder_status());
+        }
+    }).map(|_|());
+    map_prefill_result(result, checkpoint_abort)?;
+    Ok(elapsed)
 }
 
 fn map_prefill_result<T>(
@@ -727,6 +789,26 @@ fn capture_snapshot(
     boundary: &'static str,
     control_cpu_reserve: u64,
 ) -> bool {
+    capture_snapshot_impl(
+        cache,
+        ctx,
+        runner,
+        tokens,
+        boundary,
+        control_cpu_reserve,
+        None,
+    )
+}
+
+fn capture_snapshot_impl(
+    cache: &mut SnapshotCache<Qwen4ExpTextSnapshot>,
+    ctx: &MetalContext,
+    runner: &Qwen4ExpTextRunner<'_, '_, '_>,
+    tokens: &[u32],
+    boundary: &'static str,
+    control_cpu_reserve: u64,
+    conversation: Option<super::checkpoint_ladder::Conversation>,
+) -> bool {
     if cache.max_bytes() == 0 {
         return false;
     }
@@ -737,7 +819,10 @@ fn capture_snapshot(
             return false;
         }
     };
-    let Some(entry_bytes) = cache.strict_eligibility(tokens, payload_bytes) else {
+    let Some(entry_bytes) = (match conversation {
+        Some(key) => cache.ladder_eligibility_in(key, &(), tokens, payload_bytes),
+        None => cache.strict_eligibility(tokens, payload_bytes),
+    }) else {
         tracing::info!(
             target: "qwen_diag",
             "serve: qwen4exp {boundary} snapshot not cached (already present or over budget); payload_bytes={payload_bytes} cache_budget_bytes={}",
@@ -761,7 +846,12 @@ fn capture_snapshot(
     match runner.capture_snapshot() {
         Ok(snapshot) => {
             debug_assert_eq!(snapshot.payload_bytes(), payload_bytes);
-            let inserted = cache.insert_strict(tokens.to_vec(), snapshot, entry_bytes);
+            let inserted = match conversation {
+                Some(key) => {
+                    cache.insert_ladder_in(key, (), tokens.to_vec(), snapshot, entry_bytes)
+                }
+                None => cache.insert_strict(tokens.to_vec(), snapshot, entry_bytes),
+            };
             if !inserted {
                 tracing::warn!("serve: qwen4exp {boundary} snapshot rejected at cache insertion");
             }

@@ -5600,8 +5600,29 @@
     "reason": "Explicit leased real-model witness: read-only committed observer, snapshot restore, all logits and persistent state exact against captured live trajectory."
   },
   {
+    "target": "lib",
+    "name": "qwen4exp_runtime::tests::snapshot::live_checkpoint_observer_restores_exact_state",
+    "class": "model",
+    "ignored": true,
+    "reason": "Explicit leased real-model witness: read-only committed observer, snapshot restore, all logits and persistent state exact against captured live trajectory."
+  },
+  {
     "target": "qwen",
     "name": "serve::backend_glm5_next::chunk_checkpoint::tests::live_targets_follow_committed_command_plan",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::execution::ladder_tests::last_committed_full_call_excludes_tip_and_small_appends",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::ladder_publishes_live_extensions_without_changing_calls_and_restores_a_fork",
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
@@ -5644,20 +5665,6 @@
   {
     "target": "qwen",
     "name": "serve::snapshot_cache::tests::ladder_shares_budget_preserves_history_and_respects_pins_and_held_arcs",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::execution::ladder_tests::last_committed_full_call_excludes_tip_and_small_appends",
-    "class": "cpu",
-    "ignored": false,
-    "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
-  },
-  {
-    "target": "qwen",
-    "name": "serve::backend_v41::reuse_tests::ladder_publishes_live_extensions_without_changing_calls_and_restores_a_fork",
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."

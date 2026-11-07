@@ -195,35 +195,39 @@ This job directory is separate from reusable model snapshots.
 
 ### Conversation checkpoint ladder
 
-GLM-5.3 Fast serve also retains checkpoints of live conversation extensions,
-not just the original cold shared-prefix prefill. The default-on ladder observes
-an existing committed full chunk strictly before a long request's endpoint;
-it never adds execution splits. Exact token-prefix keys and a separate
-`fast_trajectory_checkpoint_v1` namespace (shared cut, workspace rows, operand
-precision and lineage) authorize restore. This reproduces the captured live
-trajectory exactly; it does not relabel Fast's partition-dependent arithmetic
-as a cold-canonical execution. The existing canonical guards remain in place.
+GLM-5.3 Fast, DeepSeek V4.1 and Flash-Next retain checkpoints of long live
+conversation extensions. The default-on ladder observes an existing committed
+full chunk/call strictly before a long segment's endpoint; it never adds
+execution splits. V4.1 accepts only ready FullForward states (never CED), and
+Flash-Next uses its existing runtime snapshot identity. For GLM, exact
+token-prefix keys and a separate `fast_trajectory_checkpoint_v1` namespace
+(shared cut, workspace rows, operand precision and lineage) authorize restore.
+This reproduces the captured live trajectory exactly; it does not relabel Fast's
+partition-dependent arithmetic as a cold-canonical execution. The existing
+canonical guards remain in place.
 
 Up to five optional points per conversation family are thinned to preserve
-spaced older history. The current live tip and existing transcript snapshots
-remain available. A family is identified by its first user turn because the
-stateless API has no conversation id; this affects retention only, never restore
-compatibility. The auxiliary ceiling is `QWEN_SERVE_CHECKPOINT_LADDER_MIB`
-(`auto`: 8192 MiB), also capped at half the existing snapshot-cache budget.
-These are entries in that cache, not additional memory entitlement. Expiry,
-process-memory admission, pinning and pressure eviction still apply; denied
-copies leave the execution schedule unchanged. Small extensions do not add interior copies. To advance coverage through many
-short appends, GLM may instead capture a spaced endpoint after decode, outside
-the first-token path. Its `ladder_tip_capture_ms` reports that completion cost. `QWEN_SERVE_CHECKPOINT_LADDER=0` (or a zero auxiliary
-budget) restores the previous capture and lookup paths. Drafting paths continue
-to skip snapshot publication and reuse.
-
-DeepSeek V4.1 also retains ready FullForward checkpoints at existing scheduler
-call boundaries, including live extensions and 512-row calls under load.
-Already-captured transcript tips advance the ladder through short appends
-without another payload copy. Superseded tips are pruned where covered; a
-budget too small for coverage preserves the legacy fallback. CED-origin and
-poisoned states remain ineligible.
+spaced older history. The live tip and recent transcript/completed snapshot pair
+remain available; Superseded turn-tip snapshots are pruned where an older anchor
+covers them; a budget too small for coverage preserves the legacy fallback.
+Small shared-system snapshots keep their existing cache policy. A family is
+identified by its first user turn because the stateless API has no conversation
+id; this affects retention only, never restore compatibility. The auxiliary
+ceiling is `QWEN_SERVE_CHECKPOINT_LADDER_MIB` (`auto`: 8192 MiB), also capped at
+half the existing snapshot-cache budget. These are entries in that cache, not
+additional memory entitlement. Expiry, process-memory admission, pinning and
+pressure eviction still apply; denied copies leave the execution schedule
+unchanged. Small extensions do not add interior copies (V4.1 uses the
+scheduler's actual call width, including 512-row calls under load). At least
+4096 matching-prefix tokens separate optional retained points. V4.1 and
+Flash-Next promote already captured turn tips as history advances, with no
+second payload copy. When a GLM request has no full command, it may instead
+capture its committed endpoint after decode, outside the first-token path. This
+keeps coverage advancing through many short appends; its separate
+`ladder_tip_capture_ms` reports the remaining per-turn completion cost.
+`QWEN_SERVE_CHECKPOINT_LADDER=0` (or a zero auxiliary budget) restores the
+previous capture and lookup paths. Drafting paths continue to skip snapshot
+publication and reuse.
 
 ### Idle residency (no-copy families)
 
@@ -1228,6 +1232,13 @@ not introduce another execution split.
   All Fast precision settings use the existing `QWEN_GLM_PREFIX_REUSE`,
   `QWEN_GLM_FAST_SNAPSHOTS` and cache-budget controls; no new knob. Exact and
   serial execution are unchanged. [Evidence](bench/2026-10-12-glm-document-checkpoint/README.md).
+- The [conversation ladder](#conversation-checkpoint-ladder) separately publishes
+  actual live-trajectory checkpoints at existing committed commands. These use
+  `fast_trajectory_checkpoint_v1`; they never satisfy or seed the canonical
+  `ChunkOrigin` proof above. Lookup requires the same verified shared cut,
+  frozen rows, precision, lineage and exact token prefix. Live state wins ties.
+  Restore is exact relative to the captured trajectory; the older cold-canonical
+  equality evidence below applies to the original namespaces.
 - Fast operand precision (`QWEN_GLM_FAST_PRECISION`, read at startup and
   shown as `fast_precision=` in the startup limits line): `half` (default)
   stages quantized matrix operands in half precision; `dense_f32` runs the
@@ -1245,7 +1256,8 @@ The `serve phases:` line reports `reuse_source=live|snapshot|none`,
 `restore_ms`, `boundary_ms` (CPU time verifying the cuts), `snapshot_schedule`, `cuts`, each cut's capture outcome
 (`captured`, `present`, `ineligible`, `denied`, `failed`, `noncanonical`),
 `snapshot_capture_ms` and the cache's bytes and entries. `restore_origin`
-distinguishes `fast_chunk_checkpoint_v1`, `fast_shared_split_v1`, `exact_v1`
+distinguishes `fast_trajectory_checkpoint_v1`, `fast_chunk_checkpoint_v1`,
+`fast_shared_split_v1`, `exact_v1`
 and `none`. Document capture adds `checkpoint_target` (0 if ineligible),
 `checkpoint_captures` and `checkpoint_capture_ms`; that time is already included
 in `snapshot_capture_ms`. Private test JSON uses `chunk_*` for these three fields.

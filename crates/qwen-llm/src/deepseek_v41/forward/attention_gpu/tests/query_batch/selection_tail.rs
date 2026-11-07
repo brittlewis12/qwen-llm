@@ -460,3 +460,261 @@ fn long_selection_short_tails_match_prepared_per_row_and_continue() {
         });
     }
 }
+
+#[test]
+#[ignore = "self-leased M5 Ultra long owner publication parity; MTL_DEBUG_LAYER=1; shape-priced <=2 GiB CPU+Metal"]
+fn long_owner_publication_keeps_causal_selection_and_pending_pair() {
+    assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
+    assert!(crate::env_flag::read_default_on("QWEN_V41_COMPRESS_ROWS"));
+    assert!(crate::env_flag::read_default_on(
+        "QWEN_V41_COMPRESS_LONG_ROWS"
+    ));
+    let _lease = metal::acquire_metal_benchmark_lease().unwrap();
+    let ctx = MetalContext::new().unwrap();
+    assert_eq!(ctx.device_facts().name, "Apple M5 Ultra");
+    // Publication and index geometry are independent of attention head count.
+    // One attention head keeps this causal-state witness below its 2 GiB cap.
+    let c = Config {
+        heads: 1,
+        head_dim: 512,
+        index_heads: 32,
+        index_dim: 128,
+        index_topk: 512,
+        candidate_block: 8,
+        candidate_topk: 2048,
+        rope_dim: 64,
+        ..config()
+    };
+    let s = Schedule {
+        layers: 3,
+        kv_source_layers: vec![0, 1],
+        index_source_layers: vec![0, 1, 2],
+        compression_ratios: vec![2, 1, 1],
+        candidate_source_layer: Some(1),
+    };
+    let close = |a: &MetalTensor, b: &MetalTensor, count: usize| {
+        for (i, (&a, &b)) in f32_slice(a).unwrap()[..count]
+            .iter()
+            .zip(&f32_slice(b).unwrap()[..count])
+            .enumerate()
+        {
+            assert!(a.is_finite() && b.is_finite());
+            assert!(
+                (a - b).abs() <= 1e-4 + 1e-4 * b.abs(),
+                "element {i}: {a} vs {b}"
+            );
+        }
+    };
+    for start in [32768usize, 32769] {
+        objc2::rc::autoreleasepool(|_| {
+            let n = 512;
+            let limit = 2u64 << 30;
+            let capacity = start + n + 1;
+            let priced: u64 = buffer_bytes(&c, &s, capacity, n)
+                .into_iter()
+                .map(|v| ctx.price_shared_buffer_upper(v).unwrap().priced_upper_bytes)
+                .sum();
+            assert!(
+                priced + CPU_RESERVE + METAL_RESERVE <= limit,
+                "priced={priced} CPU={CPU_RESERVE} Metal reserve={METAL_RESERVE} limit={limit}"
+            );
+            assert!(
+                metal::evaluate_metal_memory_admission_with_cpu_bytes(
+                    priced + METAL_RESERVE,
+                    CPU_RESERVE,
+                    0,
+                    ctx.memory_signals(),
+                    true
+                )
+                .is_admitted()
+            );
+            let weights: Vec<_> = (0..s.layers)
+                .map(|id| {
+                    let mut w = scheduled_weights(&ctx, &c, &s, id, GgmlType::BF16);
+                    w.frequencies =
+                        op::rotary_frequencies(c.rope_dim, 160000.0, 65536, 16.0, 32.0, 1.0)
+                            .unwrap();
+                    w
+                })
+                .collect();
+            let refs: Vec<_> = weights.iter().collect();
+            let mut old = Workspace::new_with_schedule(&ctx, &c, capacity, &refs, &s).unwrap();
+            let mut new = Workspace::new_with_schedule(&ctx, &c, capacity, &refs, &s).unwrap();
+            seed(&ctx, &mut old, start);
+            seed(&ctx, &mut new, start);
+            let old_rows = Rows::new(&ctx, &c, capacity, n).unwrap();
+            let new_rows = Rows::new(&ctx, &c, capacity, n).unwrap();
+            let input = upload(
+                &ctx,
+                &values(c.hidden * n, 11),
+                vec![c.hidden as u64, n as u64],
+            )
+            .unwrap();
+            let old_out = prefill::allocate(&ctx, c.hidden, n, GgmlType::F32).unwrap();
+            let new_out = prefill::allocate(&ctx, c.hidden, n, GgmlType::F32).unwrap();
+            old.begin_batch(start, n).unwrap();
+            new.begin_batch(start, n).unwrap();
+            for (id, w) in weights.iter().enumerate() {
+                for (candidate, ws, rows, out) in [
+                    (false, &mut old, &old_rows, &old_out),
+                    (true, &mut new, &new_rows, &new_out),
+                ] {
+                    execute(&ctx, |enc| {
+                        ws.encode_rows_prepare(&ctx, enc, id, start, w, &input, rows)
+                            .unwrap();
+                        metal::dispatch_census_begin();
+                        metal::allocation_census_begin();
+                        if candidate {
+                            ws.encode_rows_serial(&ctx, enc, id, start, w, &input, rows)
+                                .unwrap();
+                        } else {
+                            for row in 0..n {
+                                ws.encode_batch_row_mode(
+                                    &ctx,
+                                    enc,
+                                    id,
+                                    start + row,
+                                    w,
+                                    &prefill::row(&input, c.hidden, row),
+                                    rows,
+                                    row,
+                                    true,
+                                    false,
+                                    GlobalKvMode::Ordinary,
+                                )
+                                .unwrap();
+                            }
+                            ws.select_rows_long(&ctx, enc, id, start, rows).unwrap();
+                        }
+                        assert!(metal::allocation_census_take().is_empty());
+                        let census = metal::dispatch_census_take();
+                        assert_eq!(
+                            census
+                                .iter()
+                                .filter(
+                                    |x| x.kernel == "kernel_deepseek_v41_attention_compress_rows"
+                                )
+                                .count(),
+                            usize::from(candidate && s.owns_kv(id))
+                        );
+                        ws.encode_rows_tiles(&ctx, enc, id, start, rows).unwrap();
+                        ws.finish_rows(&ctx, enc, w, rows, out).unwrap();
+                    });
+                }
+                // Different F32 reductions may exchange tied selected keys.
+                // Check publication arithmetic and causality here; full-model
+                // NLL/KL qualification checks the inference distribution.
+                for out in [&old_out, &new_out] {
+                    assert!(
+                        f32_slice(out).unwrap()[..c.hidden * n]
+                            .iter()
+                            .all(|x| x.is_finite())
+                    );
+                }
+                for (slot, &layer) in s.kv_source_layers.iter().enumerate() {
+                    let prefix = start / s.ratio(layer);
+                    assert_bits(
+                        &old.owners[slot].compressed,
+                        &new.owners[slot].compressed,
+                        prefix * c.head_dim,
+                    );
+                    assert_bits(
+                        &old.owners[slot].keys,
+                        &new.owners[slot].keys,
+                        prefix * c.index_dim,
+                    );
+                    if !(start + n).is_multiple_of(s.ratio(layer)) {
+                        assert_bits(
+                            &old.owners[slot].pending_value,
+                            &new.owners[slot].pending_value,
+                            c.head_dim,
+                        );
+                        assert_bits(
+                            &old.owners[slot].pending_gate,
+                            &new.owners[slot].pending_gate,
+                            c.head_dim,
+                        );
+                    }
+                }
+                // An early query must not select a key published by a later row.
+                for row in 0..n {
+                    let selected = ids(
+                        &prefill::row(&new_rows.selected, c.index_topk, row),
+                        c.index_topk,
+                    );
+                    assert!(selected.windows(2).all(|x| x[0] < x[1]));
+                    assert!(
+                        selected
+                            .iter()
+                            .all(|&key| key < (start + row + 1) / s.ratio(id))
+                    );
+                    if id > s.candidate_source_layer.unwrap() {
+                        let stride = capacity.div_ceil(c.candidate_block);
+                        let mask = ids(&prefill::row(&new_rows.candidates, stride, row), stride);
+                        assert!(
+                            selected
+                                .iter()
+                                .all(|&key| mask[key / c.candidate_block] == 1)
+                        );
+                    }
+                }
+                assert_eq!(old.batch, new.batch);
+                assert_eq!(
+                    (old.next_layer, old.next_position),
+                    (new.next_layer, new.next_position)
+                );
+                for (region, ((a, count), (b, other))) in old
+                    .causal_regions(start + n)
+                    .unwrap()
+                    .into_iter()
+                    .zip(new.causal_regions(start + n).unwrap())
+                    .enumerate()
+                {
+                    assert_eq!(count, other);
+                    // Completed groups leave dead pending scratch untouched;
+                    // an odd ratio-two tail remains authoritative for decode.
+                    if region > 0
+                        && (region - 1) % 4 >= 2
+                        && (start + n).is_multiple_of(s.ratio(s.kv_source_layers[(region - 1) / 4]))
+                    {
+                        continue;
+                    }
+                    close(a, b, count);
+                }
+            }
+            for (id, w) in weights.iter().enumerate() {
+                execute(&ctx, |enc| {
+                    old.encode(
+                        &ctx,
+                        enc,
+                        id,
+                        start + n,
+                        w,
+                        &prefill::row(&input, c.hidden, n - 1),
+                    )
+                    .unwrap();
+                    new.encode(
+                        &ctx,
+                        enc,
+                        id,
+                        start + n,
+                        w,
+                        &prefill::row(&input, c.hidden, n - 1),
+                    )
+                    .unwrap();
+                });
+                for out in [&old.output, &new.output] {
+                    assert!(
+                        f32_slice(out).unwrap()[..c.hidden]
+                            .iter()
+                            .all(|x| x.is_finite())
+                    );
+                }
+            }
+            assert_eq!(ids(old.status(), 1), [0]);
+            assert_eq!(ids(new.status(), 1), [0]);
+            old.validate_snapshot_position(capacity).unwrap();
+            new.validate_snapshot_position(capacity).unwrap();
+        });
+    }
+}

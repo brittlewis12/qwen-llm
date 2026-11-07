@@ -2082,10 +2082,14 @@ kernel void kernel_deepseek_v41_attention_compress_rows(
     uint position = (a.group0 + group) * a.ratio;
     device float *olat = out_latent + (ulong)(a.group0 + group) * 512;
     device float *okey = out_key + (ulong)(a.group0 + group) * 128;
-    for (uint d = tid; d < 512; d += 256) olat[d] = lat[d];
-    if (tid < 128) okey[tid] = key[tid];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Rotary coordinates have exactly one device-memory writer. A
+    // threadgroup-memory fence does not order a bulk device copy against
+    // another simdgroup's rotated stores to those same addresses.
     uint lrope = 512 - 2 * a.pairs;
+    uint krope = 128 - 2 * a.pairs;
+    for (uint d = tid; d < lrope; d += 256) olat[d] = lat[d];
+    if (tid < krope) okey[tid] = key[tid];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     if (tid < a.pairs) {
         uint off = lrope + 2 * tid;
         float angle = float(position) * freq[tid];
@@ -2094,7 +2098,6 @@ kernel void kernel_deepseek_v41_attention_compress_rows(
         olat[off] = u * c - w * s;
         olat[off + 1] = u * s + w * c;
     }
-    uint krope = 128 - 2 * a.pairs;
     if (tid < a.pairs) {
         uint off = krope + 2 * tid;
         float angle = float(position) * freq[tid];

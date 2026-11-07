@@ -311,6 +311,16 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
+    /// Extend batched owner publication to long batched selection on M5 Ultra
+    /// for 512..2048 rows at depth 32K+. No new buffers; complete ratio groups
+    /// reuse the existing compressor/key kernel and head/tail rows stay serial.
+    /// Disabling retains the per-row publication chain at pruned depths;
+    /// QWEN_V41_COMPRESS_ROWS=0 still disables all batched publication.
+    default_on compress_long_rows_enabled,
+    "QWEN_V41_COMPRESS_LONG_ROWS"
+);
+
+crate::env_flag!(
     /// Routes wide index-score rows through the Metal 4 tensor tile; disabling restores the scalar/simd index kernel for a same-binary A/B.
     default_on index_tensor_enabled,
     "QWEN_V41_INDEX_TENSOR"
@@ -867,9 +877,14 @@ impl Workspace {
         // ReusePublished replays against a completed authoritative cache; the
         // per-row path already suppresses its publication for that mode, and
         // the batch must match it. The split owner itself is an ordinary
-        // producer during the encoder phase only. Long batches keep the
-        // per-row publication chain.
-        let owner_batch = unpruned_batch
+        // producer during the encoder phase only. Long selection bounds each
+        // query by its own visible length, just like unpruned selection.
+        let owner_batch = (unpruned_batch
+            || long_batch
+                && ctx.device_facts().name == "Apple M5 Ultra"
+                && start >= 32768
+                && (512..=2048).contains(&rows.rows)
+                && compress_long_rows_enabled())
             && mode == GlobalKvMode::Ordinary
             && self.schedule.owns_kv(id)
             && compress_rows_enabled();
@@ -1197,7 +1212,7 @@ impl Workspace {
     /// publishes pruned rows' candidate blocks, and radix selection writes
     /// chronological top-k IDs (consumer layers restrict pruned rows to their
     /// candidate blocks). Same selected sets as the one-row path.
-    fn select_rows_long(
+    pub(super) fn select_rows_long(
         &mut self,
         ctx: &MetalContext,
         enc: &KernelEncoder,

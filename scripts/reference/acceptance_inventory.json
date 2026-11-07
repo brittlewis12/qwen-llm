@@ -617,6 +617,13 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_tail::long_owner_publication_keeps_causal_selection_and_pending_pair",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Self-leased M5 Ultra DEBUG=1 BF16 owner publication witness at aligned/odd 32K offsets; N512 long selection against per-row publication, bounded causal IDs, mixed owner/follower caches and following decode; one attention head, shape-priced <=2 GiB, no timing/model claim."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::query_batch::selection_tail::long_selection_short_tails_match_prepared_per_row_and_continue",
     "class": "gpu",
     "ignored": true,

@@ -6,6 +6,53 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - Flash-Next M4: Extend Compact Experts to IQ3_XXS
+
+- Code **`9c8e3a16`**, following the qualified IQ2_S/IQ3_S increment below,
+  on main **`229ba082`**. The same compact **64x32x32** tile now also covers
+  the **17 IQ3_XXS layers**, at the same **H2560/F640/E512/top10, M2048**
+  geometry. Original half operands/F32 K order, map and dead scratch;
+  no additional allocation. Physical Apple10 veto retained; no M5 routes
+  or short-append kernels changed.
+- Default on. **`QWEN_FN_M4_EXPERT_IQ3XXS32=0`** restores the specialized
+  IQ3_XXS N16 incumbent while retaining the first two formats.
+  **`QWEN_FN_M4_EXPERT_TILE32=0`** restores original routes for all formats.
+- Separate whole-native kill screen, first increment retained in both arms:
+  **6972.58 -> 6808.11 ms**, **1.02416x** additional pp4096 throughput.
+  ABBA, two retained calls/process after excluded full warm/census and
+  60 seconds stable thermal zero; pair ratios **1.03458 / 1.01378**,
+  identical endpoint hashes. Census confirms **60 -> 94** map/consumer
+  calls, including **34** new IQ3_XXS calls, per pp4096.
+- Combined-default short ordinary CLI smoke: **607.891 tok/s** versus
+  **562.218 tok/s** with the master rollback, one retained call/policy,
+  clean matching `9c8e3a16` build/runtime identities. The reverse pair and
+  fresh CPP repetitions **did not run**: external compilation prevented
+  a 60-second compiler-free thermal-zero interval within the **15-minute**
+  wait limit.
+  **0.96808x** against the earlier same-day **627.935 tok/s** CPP reference
+  is **provisional**, not a completed new standing campaign. The last
+  complete CPP comparison remains **0.93734x** for the first increment.
+- Distribution: **5120** code/prose target vectors, cold **2048** and
+  **512 after independent complete 32K prefixes**, all finite and
+  **bitwise identical, dNLL=KL=0**. The off baseline reproduces the literal
+  original all-off hashes from the prior qualification, so this covers
+  the combined default as well. The append's complete kernel counts are
+  identical and no mapped kernels engage.
+- Expanded three-format sparse/hot/tail/empty, offset/canary and refusal
+  differential passes with **Metal API/GPU validation**. Full
+  **`cargo test --release -p qwen-llm --lib -- --test-threads=1`**:
+  **2468 passed, 738 ignored**. Contracts passed tree
+  **`d1d0d9b35333c03cf620a21f1396e835631bf1b5`**.
+- Remaining candidates are indexed attention and routed-down kernels.
+  Chunk-wide QSA fusion and carrying compact maps through routed down
+  require attention/scratch lifetime changes; the current map borrows
+  the down output that must subsequently be overwritten. Further gains need
+  a larger attention/scratch lifetime rewrite.
+- Raw prototype `e4b4afb3`, final source/binaries, complete native arms,
+  distribution/validation receipts and incomplete CLI attempt on both hosts:
+  **`~/qwen-runs/2026-11-07-fn-m4b/2026-11-07-fn-m4b-iq3xxs-qualified-raw.tar.gz`**,
+  SHA-256 **`5f76bff41f68feb409c182876d3a01f71136bb3b8b3cf0c14830826c506ea1a8`**.
+
 ## 2026-11-07 - Flash-Next M4 pp4096: Compact N32 Expert Tiles
 
 - Base **`5735162d`**, measured code **`74a47743`**, retained at

@@ -6,6 +6,92 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - GLM M5 Prefill: Adaptive Expert Panels, +2.67% pp4096
+
+- Code **`73156314`**, base **`9187dd74`**, unchanged M5 Ultra UD-IQ3_XXS
+  alias. **Default on**, rollback **`QWEN_GLM53_PREFILL_PANELS=0`**.
+  The existing Fast/Half IQ gate/up adapter selects N32 panels for buckets
+  through 32 slots and N64 for larger buckets, as two disjoint count ranges
+  on the GPU. Rollout: Apple10, H4096/F2048/E288/top-8, equal IQ2_S or IQ3_S
+  gate/up, exactly **1024/2048 command rows**. Existing tensor/family/mode
+  gates remain mandatory; Exact/F32 and 512-row commands retain their paths.
+- Reuses the existing narrow/wide tensor kernels, native quantized banks,
+  Half input, F32 inner and original clamp/post-down weighting. **No new Metal
+  source, buffer, weight cache, precision change or memory-plan term.** Two
+  extra gate/up dispatches per MoE layer let small buckets avoid N64 padding;
+  large buckets reuse each decoded slab across twice as many slots. Resolve
+  and check every required PSO/binding before conversion or bucket mutation.
+  An unsupported wide PSO capacity retains the prepared N32 path.
+- Actual IQ2_S-bank operator screen, balanced and six-hot-expert/skewed
+  routes, one warm call per arm then twelve balanced three-arm samples. Every
+  gate/up output bit matches N32. At 2048 rows, N32 / all-N64 / adaptive
+  median **8.729 / 6.853 / 6.863 ms** balanced, **9.569 / 10.168 / 8.698**
+  skewed. At 1024, adaptive is **1.001x / 1.040x**; blindly widening loses
+  **24% / 16%**. The 513-row adaptive screen is mixed and is excluded.
+- Final production-call **same-binary ABBA**, one excluded warm plus two
+  retained runs/cell/arm, 30 s between arms. Ordinary forward/prefill and
+  full endpoint readback; prefix fills, snapshot restores, finite checks and
+  fingerprints outside timers. Selector **on in both arms**; only panel
+  rollback changes. Build lock + canonical Metal lease, nice 10; thermal
+  **0 before/after all four arms**. All samples retained in the raw archive.
+
+  | Cell / depth | Off median ms | On median ms | On tok/s | Ratio |
+  | --- | ---: | ---: | ---: | ---: |
+  | pp512 / 0 | 561.991 | 562.728 | 909.853 | 0.99869x |
+  | pp512 / 8192 | 647.204 | 647.900 | 790.245 | 0.99893x |
+  | pp512 / 32768 | 670.507 | 670.047 | 764.126 | 1.00069x |
+  | pp1024 / 0 | 921.682 | 908.094 | 1127.636 | 1.01496x |
+  | pp1024 / 8192 | 1057.011 | 1042.604 | 982.156 | 1.01382x |
+  | pp1024 / 32768 | 1103.523 | 1089.642 | 939.758 | 1.01274x |
+  | pp4096 / 0 | 3704.315 | 3607.845 | 1135.304 | 1.02674x |
+  | tg64 / 0 | 1007.134 | 1008.265 | 63.475 | 0.99888x |
+  | tg64 / 8192 | 1092.102 | 1091.208 | 58.651 | 1.00082x |
+  | tg64 / 32768 | 1111.535 | 1110.192 | 57.648 | 1.00121x |
+
+  **pp4096 +2.67%; pp1024 +1.50% / +1.38% / +1.27% at 0 / 8K / 32K.**
+  PP512 and TG controls stay within **0.14%**. All **84** PP endpoint and
+  **2304** decode vocabulary-vector fingerprints match the same-input
+  reference. Memory ledgers match across arms at every depth. pp4096 reaches
+  about **29.7%** of the unchanged 131.4-TFLOP/s useful-matmul reference
+  (34.387949 GF/token); no new CPP comparison is claimed.
+- Distribution qualification: independent on/off code (`sampling.rs`) and
+  prose (`CLI-UX.md`) prefixes, 128 sequential teacher-forced targets/cell.
+  Depth/command rows **4096/2048, 8192/1024, 32768/2048** for both documents:
+  **768 paired full-vocabulary vectors**, all finite, **bitwise identical**.
+  Thus **delta NLL = 0 nats/token, mean KL = 0**, argmax 768/768. Each arm's
+  475791360-byte F32 dump has SHA256
+  **`8d5b1a20fa32ab3c84b86b972ad764e215ab9ce11af7a65fd4273b14d1091a62`**.
+  Prefixes repeat frozen repository documents; this is the bounded numerical
+  comparison, not a task-accuracy or sampling claim.
+- Validation: two new M5 GPU tests pass with Metal validation. They compare
+  IQ2_S/IQ3_S compositions bitwise to the old path and sampled F64 oracles,
+  including bucket edges 31/32/33/63/64/65, clamps, immutable inputs, offset
+  guards and F32 refusal with a preserved-encoder arithmetic witness.
+  Full M5 `cargo test --release -p qwen-llm --lib`, required GPU tests and
+  Metal validation: **2454 passed, 0 failed, 738 ignored**, **124.74 s**.
+  `scripts/check-contracts.sh` passes on `73156314`, tree
+  **`62692c126f8fa9fdcbebcd2e25a538e331b7f2ec`**; local release typechecking
+  also passes. This log receipt changes documentation only.
+- Other kill tests, not shipped: single-query tensor MLA is **552 us**
+  versus warmed split attention **69 us**; partitioning PV lowers it to
+  **132 us**, still slower. The existing 128-row/device-Half Q6 kernel is
+  bitwise but only about **5%** faster at the KDA projection shape at 2048
+  rows (under 0.5% whole-prefill value), and **39% slower** at 512.
+  Looping N32 panels over eight group slots is flat on balanced routes and
+  about **40% slower** on skewed routes despite fewer empty threadgroups.
+  Isolated empty-group timings are not additive production costs. The
+  cooperative mHC finish kill is recorded in the selector entry below.
+- M4 retains its qualified routes; the selector micro saving is only about
+  1% of a whole token and the tensor panel transfer is M5-only. No laptop
+  throughput gain, speculation, format conversion or memory bypass is claimed.
+- Source patches, probes and negative attempts, all native samples, ledgers,
+  build/test/contract logs and quality receipt:
+  **`2026-11-07-glm-roof5-panels-raw.tar.gz`**, SHA256
+  **`3a1770d8fb5a4a07ea89a053941b00ae2480ad29f936dd3ece6673084759d365`**,
+  in `metagross:~/qwen-runs/2026-11-06-glm-roofline5/`. Both quality F32 dumps
+  and target metadata are retained beside it. Probe worktrees removed;
+  no merge and no benchmark/build workers left running.
+
 ## 2026-11-06 - GLM M5 Decode: Exact Selector Prefixes, +1.3%
 
 - Base **`a28026ef`**, M5 Ultra, unchanged UD-IQ3_XXS alias. **Default on**

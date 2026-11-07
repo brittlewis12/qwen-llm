@@ -6,6 +6,64 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - V4.1 Long Owner Publication: Warm Win, Native Kill
+
+- **Not shipped.** Prototype **`229eb204`**, scoped default-on candidate
+  **`8331f27f`**, removed **`ef1300f8`**. Same M5 Ultra and full GSQ-RCO
+  IQ2_XS / IQ4_NL Engram artifact as below. Extend the existing complete-group
+  publication kernel to ordinary owner batches already using long radix
+  selection; retain compressor, ownership, scratch and head/tail guards.
+  Candidate scope was M5 Ultra, 512-4096 rows. No new kernels or allocations.
+- Warm pp512@32K attribution: **8531 -> 2391 dispatches**, including four
+  batched publications replacing the per-row chains. Recapture at 16384
+  timestamp slots has **zero overflow**; the earlier 4096-slot trace's partial
+  kernel timings are discarded. Sampled attention serial **51.768 -> 35.356
+  ms**, whole-chunk GPU **555.917 -> 538.532 ms**, CPU encoding **4.492 ->
+  0.877 ms**. Stage spans overlap and are not an additive production budget.
+- Saved-prefix ABBA, separate processes, 30 s cooldowns, Full prefixes and
+  restores outside timing, one excluded warm call plus two retained/cell/arm:
+  pp512@32K median **597.085 -> 578.552 ms (1.03203x)**. All samples retained,
+  including the cold depth-zero sample and noisy 8K control. This warm screen
+  is not the native headline.
+- Prespecified native bar: **>=1.02x median** pp512@32K and <=1% control
+  regression. Ordinary family harness, `--pp 512 --depth 0,8192,32768 --runs
+  2 -o json`, model/row warmups, fresh states and untimed prefix fills;
+  separate-process **ABBA**, full logits copies, no snapshots or profiling.
+  Build/runtime identities match, build lock + Metal lease, nice 10, 30 s
+  cooldown, thermal **0 throughout** under two-second supervision:
+
+  | Depth | Off median ms | Candidate median ms | Ratio |
+  | ---: | ---: | ---: | ---: |
+  | 0 | 530.310 | 530.969 | 0.99876x |
+  | 8192 | 626.512 | 635.315 | 0.98614x |
+  | 32768 | 707.160 | 703.475 | **1.00524x** |
+
+  Retained 32K off: **705.599334,705.838959,708.480791,724.143416 ms**;
+  on: **668.210833,704.162625,711.258041,702.787625**. Pair ratios are
+  1.02847x / 1.01314x; pooled mean ratio 1.02069x, but the prespecified
+  median bar fails. The ineligible 8K control ranges 572-686 ms and also
+  misses its limit. Unresolved fresh-state variance prevents promotion.
+- Candidate quality passes: code/prose, independent Full prefixes at
+  8192 / 32768 / **32769**, pp512 then 128 sequential targets/document/cell,
+  **768 paired full-vocabulary vectors**, all finite, argmax **768/768**.
+  Worst |delta NLL| **0.003833966** (odd-depth code), worst mean KL
+  **0.000881342**, worst per-target KL **0.016697635**; 8K is bitwise exact.
+  Prefixes repeat the frozen documents to reach depth. Full M5 release lib
+  **2444 passed, 0 failed, 738 ignored**, including the candidate's expanded
+  large-offset publication/oracle/guard test; contracts pass on `8331f27f`.
+- Removed the switch, rollout and prototype test changes. `ef1300f8` restores
+  the entire qualified `61195bc8` tree exactly; its library subtree is also
+  identical to full-tested `d522942b`. Router priority below remains default
+  on with its existing distribution, CLI, full-library and contract receipts.
+  Cancelled the queued wider-shape/API and 32K CLI checks before GPU start.
+  Restored the qualified M5 checkout and frozen production binaries. No merge.
+- Next append value remains routed FFN: approximately **307 ms** inclusive,
+  with gate/up **189 ms** and down **92 ms**, in the matched warm trace.
+  All raw samples, plans, overflow capture, candidate distributions, validation,
+  source bundle and restoration receipt: **`2026-11-06-v41-roofline3-raw.tar`**,
+  SHA256 **`e4834a15813ef3a8fd3691eb36418b9985780fb28bc25484241368215d291b27`**,
+  beside `metagross:~/qwen-runs/2026-11-06-v41-roofline3/`.
+
 ## 2026-11-06 - V4.1 Decode: Router Priority, Native +1.4-1.7%
 
 - Base **`f1bb875c`**, screen **`9e1d26fc`**, production **`d522942b`**;

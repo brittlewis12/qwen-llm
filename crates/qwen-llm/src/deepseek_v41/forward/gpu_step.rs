@@ -5,6 +5,7 @@ use objc2_metal::MTLSize;
 
 pub(super) mod batch;
 pub(super) mod ced;
+mod prefill_overlap;
 
 #[cfg(test)]
 mod tests;
@@ -526,16 +527,20 @@ impl Workspace {
         let hc = &scratch.hc;
         let ffn = &scratch.ffn;
         let attention = &scratch.attention;
+        let overlap = prefill_overlap::selected(model, start, n);
         let mut engrams = Vec::with_capacity(scratch.engrams.len());
         let engram_prepare = profile::Wall("prefill_engram_prepare", [0; 4], profile::start());
         for slot in &self.engrams {
-            let values = model.engram_rows.decode_tokens(slot.layer, hashes)?;
             let (_, input, projected) = scratch
                 .engrams
                 .iter()
                 .find(|(layer, _, _)| *layer == slot.layer)
                 .ok_or("missing chunk Engram scratch")?;
-            write(input, &values)?;
+            // An Engram at layer zero has no preceding GPU work to cover it.
+            if !overlap || slot.layer == 0 {
+                let values = model.engram_rows.decode_tokens(slot.layer, hashes)?;
+                write(input, &values)?;
+            }
             engrams.push((slot.layer, input.clone(), projected.clone()));
         }
         drop(engram_prepare);
@@ -557,241 +562,280 @@ impl Workspace {
         } else {
             None
         };
-        let command = ctx
-            .queue
-            .commandBuffer()
-            .ok_or("Metal command buffer allocation")?;
-        let mut enc = match &samples {
-            Some(samples) => KernelEncoder::begin_sampled(&command, samples, 0, 1, false),
-            None => KernelEncoder::begin(&command),
-        };
-        let encoded = (|| -> Result<()> {
-            for (id, layer) in model.layers.iter().enumerate() {
-                cancelled(cancel)?;
-                if let Some((_, input, projected)) =
-                    engrams.iter().find(|(layer, _, _)| *layer == id)
-                {
-                    layer
-                        .engram
-                        .as_ref()
-                        .unwrap()
-                        .projection
-                        .encode_rows(&enc, input, projected, n)
-                        .map_err(|e| e.to_string())?;
-                    self.engrams
-                        .iter()
-                        .find(|slot| slot.layer == id)
-                        .unwrap()
-                        .gate
-                        .encode(ctx, &enc, &x, projected, n)?;
-                }
-                hc.encode(
-                    ctx,
-                    &enc,
-                    c,
-                    &layer.attn_hc.projection,
-                    &self.constants[id],
-                    &x,
-                    &incoming,
-                )
-                .map_err(|e| e.to_string())?;
-                if let Some(samples) = &samples {
-                    enc.finish();
-                    enc = KernelEncoder::begin_sampled(
+        let mut segment_start = 0;
+        while segment_start < model.layers.len() {
+            let segment_end = if overlap {
+                engrams
+                    .iter()
+                    .find(|(layer, _, _)| *layer > segment_start)
+                    .map_or(model.layers.len(), |(layer, _, _)| *layer)
+            } else {
+                model.layers.len()
+            };
+            // Drain this segment and its autoreleased encoder/driver objects
+            // before creating the next. Peak live scratch/commands stays one.
+            objc2::rc::autoreleasepool(|_| -> Result<()> {
+                let started = if segment_start == 0 {
+                    started
+                } else {
+                    profile::start()
+                };
+                let command = ctx
+                    .queue
+                    .commandBuffer()
+                    .ok_or("Metal command buffer allocation")?;
+                let mut enc = match &samples {
+                    Some(samples) => KernelEncoder::begin_sampled(
                         &command,
                         samples,
-                        id * PREFILL_LAYER_SAMPLES + 2,
-                        id * PREFILL_LAYER_SAMPLES + 3,
+                        segment_start * PREFILL_LAYER_SAMPLES,
+                        segment_start * PREFILL_LAYER_SAMPLES + 1,
                         false,
-                    );
-                }
-                self.attention.encode_rows_prepare_with_dense(
-                    ctx,
-                    &enc,
-                    id,
-                    start,
-                    &layer.attention,
-                    &hc.normalized,
-                    &attention,
-                    scratch.dense_weight.as_ref(),
-                )?;
-                if let Some(samples) = &samples {
-                    enc.finish();
-                    enc = KernelEncoder::begin_sampled(
-                        &command,
-                        samples,
-                        id * PREFILL_LAYER_SAMPLES + 4,
-                        id * PREFILL_LAYER_SAMPLES + 5,
-                        false,
-                    );
-                }
-                self.attention.encode_rows_serial(
-                    ctx,
-                    &enc,
-                    id,
-                    start,
-                    &layer.attention,
-                    &hc.normalized,
-                    &attention,
-                )?;
-                if let Some(samples) = &samples {
-                    enc.finish();
-                    enc = KernelEncoder::begin_sampled(
-                        &command,
-                        samples,
-                        id * PREFILL_LAYER_SAMPLES + 6,
-                        id * PREFILL_LAYER_SAMPLES + 7,
-                        false,
-                    );
-                }
-                self.attention
-                    .encode_rows_tiles(ctx, &enc, id, start, &attention)?;
-                if let Some(samples) = &samples {
-                    enc.finish();
-                    enc = KernelEncoder::begin_sampled(
-                        &command,
-                        samples,
-                        id * PREFILL_LAYER_SAMPLES + 8,
-                        id * PREFILL_LAYER_SAMPLES + 9,
-                        false,
-                    );
-                }
-                self.attention.finish_rows_with_dense(
-                    ctx,
-                    &enc,
-                    &layer.attention,
-                    &attention,
-                    &outputs,
-                    scratch.dense_weight.as_ref(),
-                    id as u32,
-                )?;
-                for (position, _, snapshot) in snapshots.iter().filter(|(_, layer, _)| *layer == id)
-                {
-                    let row = position - start;
-                    self.attention.capture_row(
-                        ctx,
-                        &enc,
-                        snapshot,
-                        &prefill::row(&hc.normalized, c.hidden, row),
-                        &prefill::row(&outputs, c.hidden, row),
-                        &attention,
-                        id,
-                        *position,
-                        row,
-                    )?;
-                }
-                metal::encode_mhc4_post_rows(
-                    ctx, &enc, c.hidden, n, &outputs, &x, &hc.post, &hc.comb, &half,
-                )
-                .map_err(|e| e.to_string())?;
-                if let Some(samples) = &samples {
-                    enc.finish();
-                    enc = KernelEncoder::begin_sampled(
-                        &command,
-                        samples,
-                        id * PREFILL_LAYER_SAMPLES + 10,
-                        id * PREFILL_LAYER_SAMPLES + 11,
-                        false,
-                    );
-                }
-                match &samples {
-                    Some(samples) => self.ffn.encode_rows_with_dense(
-                        ctx,
-                        &mut ffn_gpu::SampledRows {
-                            enc: &mut enc,
-                            command: &command,
-                            samples,
-                            base: id * PREFILL_LAYER_SAMPLES + 12,
-                        },
-                        c,
-                        layer,
-                        id,
-                        &half,
-                        &hc.pre,
-                        &x,
-                        &ffn,
-                        scratch.dense_weight.as_ref(),
                     ),
-                    None => self.ffn.encode_rows_dense(
-                        ctx,
-                        &enc,
-                        c,
-                        layer,
-                        id,
-                        &half,
-                        &hc.pre,
-                        &x,
-                        &ffn,
-                        scratch.dense_weight.as_ref(),
-                    ),
-                }
-                .map_err(|e| e.to_string())?;
-                // Lagged incoming pre is the previous block's mix for this same token.
-                metal::encode_copy_offset_f32(ctx, &enc, &ffn.hc.pre, 0, &incoming, 4 * n)
-                    .map_err(|e| e.to_string())?;
-                if with_logits && id + 1 == model.layers.len() {
-                    let last = prefill::row(&x, 4 * c.hidden, n - 1)
-                        .view_bytes(0, vec![c.hidden as u64, 4]);
-                    metal::encode_mhc4_collapse(
-                        ctx,
-                        &enc,
-                        c.hidden,
-                        &last,
-                        &prefill::row(&incoming, 4, n - 1),
-                        &self.collapsed,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    metal::encode_rms_norm_mul_rows_f32(
-                        ctx,
-                        &enc,
-                        &self.collapsed,
-                        &self.norm,
-                        &self.normalized,
-                        1,
-                        c.hidden,
-                        c.norm_eps,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    model
-                        .head
-                        .encode(&enc, &self.normalized, &self.logits)
+                    None => KernelEncoder::begin(&command),
+                };
+                let encoded = (|| -> Result<()> {
+                    for id in segment_start..segment_end {
+                        let layer = &model.layers[id];
+                        cancelled(cancel)?;
+                        if let Some((_, input, projected)) =
+                            engrams.iter().find(|(layer, _, _)| *layer == id)
+                        {
+                            layer
+                                .engram
+                                .as_ref()
+                                .unwrap()
+                                .projection
+                                .encode_rows(&enc, input, projected, n)
+                                .map_err(|e| e.to_string())?;
+                            self.engrams
+                                .iter()
+                                .find(|slot| slot.layer == id)
+                                .unwrap()
+                                .gate
+                                .encode(ctx, &enc, &x, projected, n)?;
+                        }
+                        hc.encode(
+                            ctx,
+                            &enc,
+                            c,
+                            &layer.attn_hc.projection,
+                            &self.constants[id],
+                            &x,
+                            &incoming,
+                        )
                         .map_err(|e| e.to_string())?;
-                }
-                if let Some(samples) = &samples {
-                    if id + 1 < model.layers.len() {
-                        enc.finish();
-                        enc = KernelEncoder::begin_sampled(
-                            &command,
-                            samples,
-                            (id + 1) * PREFILL_LAYER_SAMPLES,
-                            (id + 1) * PREFILL_LAYER_SAMPLES + 1,
-                            false,
-                        );
+                        if let Some(samples) = &samples {
+                            enc.finish();
+                            enc = KernelEncoder::begin_sampled(
+                                &command,
+                                samples,
+                                id * PREFILL_LAYER_SAMPLES + 2,
+                                id * PREFILL_LAYER_SAMPLES + 3,
+                                false,
+                            );
+                        }
+                        self.attention.encode_rows_prepare_with_dense(
+                            ctx,
+                            &enc,
+                            id,
+                            start,
+                            &layer.attention,
+                            &hc.normalized,
+                            &attention,
+                            scratch.dense_weight.as_ref(),
+                        )?;
+                        if let Some(samples) = &samples {
+                            enc.finish();
+                            enc = KernelEncoder::begin_sampled(
+                                &command,
+                                samples,
+                                id * PREFILL_LAYER_SAMPLES + 4,
+                                id * PREFILL_LAYER_SAMPLES + 5,
+                                false,
+                            );
+                        }
+                        self.attention.encode_rows_serial(
+                            ctx,
+                            &enc,
+                            id,
+                            start,
+                            &layer.attention,
+                            &hc.normalized,
+                            &attention,
+                        )?;
+                        if let Some(samples) = &samples {
+                            enc.finish();
+                            enc = KernelEncoder::begin_sampled(
+                                &command,
+                                samples,
+                                id * PREFILL_LAYER_SAMPLES + 6,
+                                id * PREFILL_LAYER_SAMPLES + 7,
+                                false,
+                            );
+                        }
+                        self.attention
+                            .encode_rows_tiles(ctx, &enc, id, start, &attention)?;
+                        if let Some(samples) = &samples {
+                            enc.finish();
+                            enc = KernelEncoder::begin_sampled(
+                                &command,
+                                samples,
+                                id * PREFILL_LAYER_SAMPLES + 8,
+                                id * PREFILL_LAYER_SAMPLES + 9,
+                                false,
+                            );
+                        }
+                        self.attention.finish_rows_with_dense(
+                            ctx,
+                            &enc,
+                            &layer.attention,
+                            &attention,
+                            &outputs,
+                            scratch.dense_weight.as_ref(),
+                            id as u32,
+                        )?;
+                        for (position, _, snapshot) in
+                            snapshots.iter().filter(|(_, layer, _)| *layer == id)
+                        {
+                            let row = position - start;
+                            self.attention.capture_row(
+                                ctx,
+                                &enc,
+                                snapshot,
+                                &prefill::row(&hc.normalized, c.hidden, row),
+                                &prefill::row(&outputs, c.hidden, row),
+                                &attention,
+                                id,
+                                *position,
+                                row,
+                            )?;
+                        }
+                        metal::encode_mhc4_post_rows(
+                            ctx, &enc, c.hidden, n, &outputs, &x, &hc.post, &hc.comb, &half,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        if let Some(samples) = &samples {
+                            enc.finish();
+                            enc = KernelEncoder::begin_sampled(
+                                &command,
+                                samples,
+                                id * PREFILL_LAYER_SAMPLES + 10,
+                                id * PREFILL_LAYER_SAMPLES + 11,
+                                false,
+                            );
+                        }
+                        match &samples {
+                            Some(samples) => self.ffn.encode_rows_with_dense(
+                                ctx,
+                                &mut ffn_gpu::SampledRows {
+                                    enc: &mut enc,
+                                    command: &command,
+                                    samples,
+                                    base: id * PREFILL_LAYER_SAMPLES + 12,
+                                },
+                                c,
+                                layer,
+                                id,
+                                &half,
+                                &hc.pre,
+                                &x,
+                                &ffn,
+                                scratch.dense_weight.as_ref(),
+                            ),
+                            None => self.ffn.encode_rows_dense(
+                                ctx,
+                                &enc,
+                                c,
+                                layer,
+                                id,
+                                &half,
+                                &hc.pre,
+                                &x,
+                                &ffn,
+                                scratch.dense_weight.as_ref(),
+                            ),
+                        }
+                        .map_err(|e| e.to_string())?;
+                        // Lagged incoming pre is the previous block's mix for this same token.
+                        metal::encode_copy_offset_f32(ctx, &enc, &ffn.hc.pre, 0, &incoming, 4 * n)
+                            .map_err(|e| e.to_string())?;
+                        if with_logits && id + 1 == model.layers.len() {
+                            let last = prefill::row(&x, 4 * c.hidden, n - 1)
+                                .view_bytes(0, vec![c.hidden as u64, 4]);
+                            metal::encode_mhc4_collapse(
+                                ctx,
+                                &enc,
+                                c.hidden,
+                                &last,
+                                &prefill::row(&incoming, 4, n - 1),
+                                &self.collapsed,
+                            )
+                            .map_err(|e| e.to_string())?;
+                            metal::encode_rms_norm_mul_rows_f32(
+                                ctx,
+                                &enc,
+                                &self.collapsed,
+                                &self.norm,
+                                &self.normalized,
+                                1,
+                                c.hidden,
+                                c.norm_eps,
+                            )
+                            .map_err(|e| e.to_string())?;
+                            model
+                                .head
+                                .encode(&enc, &self.normalized, &self.logits)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        if let Some(samples) = &samples {
+                            if id + 1 < segment_end {
+                                enc.finish();
+                                enc = KernelEncoder::begin_sampled(
+                                    &command,
+                                    samples,
+                                    (id + 1) * PREFILL_LAYER_SAMPLES,
+                                    (id + 1) * PREFILL_LAYER_SAMPLES + 1,
+                                    false,
+                                );
+                            }
+                        }
                     }
+                    cancelled(cancel)?;
+                    Ok(())
+                })();
+
+                enc.end();
+                encoded?;
+                let pending = prefill_overlap::Submitted::commit(
+                    command,
+                    [start, segment_end - segment_start, n, segment_start],
+                    started,
+                );
+                self.commands += 1;
+                if overlap && segment_end < model.layers.len() {
+                    cancelled(cancel)?;
+                    let (_, input, _) = engrams
+                        .iter()
+                        .find(|(layer, _, _)| *layer == segment_end)
+                        .ok_or("missing next chunk Engram")?;
+                    let _read = profile::Wall(
+                        "prefill_engram_wait",
+                        [segment_end, n, 0, 0],
+                        profile::start(),
+                    );
+                    let values = model.engram_rows.decode_tokens(segment_end, hashes)?;
+                    cancelled(cancel)?;
+                    write(input, &values)?;
                 }
-            }
-            cancelled(cancel)?;
-            Ok(())
-        })();
-        enc.end();
-        encoded?;
-        let encode_ms = started.map(|s| s.elapsed().as_secs_f64() * 1000.0);
-        let wait = std::time::Instant::now();
-        let result = metal::commit_and_wait(&command).map_err(|e| e.to_string());
-        self.commands += 1;
-        if let Some(encode_ms) = encode_ms {
-            profile::submitted_with_driver_scheduling(
-                "prefill_chunk_rows",
-                [start, model.layers.len(), n, 0],
-                encode_ms,
-                wait.elapsed().as_secs_f64() * 1000.0,
-                result.is_ok(),
-                command.GPUStartTime(),
-                command.GPUEndTime(),
-                || (command.kernelStartTime(), command.kernelEndTime()),
-            );
+                // On a read/cancellation/encode error the guard drains before
+                // this pool or the caller's chunk resources can be released.
+                pending.wait()?;
+                cancelled(cancel)?;
+                Ok(())
+            })?;
+            segment_start = segment_end;
         }
-        result?;
         let _finish = profile::Wall("prefill_host_finish", [0; 4], profile::start());
         if let Some(samples) = &samples {
             let times = ctx

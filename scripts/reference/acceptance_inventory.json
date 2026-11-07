@@ -2325,6 +2325,55 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::prefill_overlap::tests::cancellation_during_each_read_drains_and_preserves_position",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::prefill_overlap::tests::failed_prefix_completion_is_drained_and_never_commits_position",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::prefill_overlap::tests::panic_during_read_drains_before_unwinding_to_caller",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::prefill_overlap::tests::read_failure_after_each_prefix_drains_and_poisons",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::prefill_overlap::tests::segmented_prefill_matches_one_command_and_decode_bitwise",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::prefill_overlap::tests::stage_sampling_across_segments_keeps_results_and_valid_timestamps",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::prefill_overlap::tests::submitted_drop_waits_for_the_copy_before_returning",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::gpu_step::tests::batched_dispatch_profile_times_every_dispatch_without_changing_logits",
     "class": "gpu",
     "ignored": false,

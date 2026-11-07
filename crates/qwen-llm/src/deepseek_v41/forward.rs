@@ -907,6 +907,7 @@ impl<'a> Forward<'a> {
         tokens: &[u32],
         cancel: Option<&AtomicBool>,
     ) -> std::result::Result<Vec<f32>, StateError> {
+        let selection = profile::Wall("prefill_select", [0; 4], profile::start());
         let rows = self
             .select_prefill(
                 state,
@@ -915,6 +916,7 @@ impl<'a> Forward<'a> {
                 state.prefill_rows,
             )?
             .selected_rows;
+        drop(selection);
         prefill::run(self, state, tokens, cancel, rows, true)
     }
 

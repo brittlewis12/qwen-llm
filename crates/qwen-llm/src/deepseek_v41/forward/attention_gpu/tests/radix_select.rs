@@ -176,6 +176,187 @@ fn mma_index_scores_match_index_heads_rows() {
     );
 }
 
+/// Later reindexing must preserve allowed scores and selection, including
+/// per-query masks, nonzero query/output offsets and partial eight-key tails.
+#[test]
+fn masked_mma_index_preserves_allowed_scores_and_selection() {
+    let ctx = MetalContext::new().unwrap();
+    let config = Config::default();
+    let (first, n) = (3usize, 5usize);
+    for (start, pattern) in [
+        (65531usize, 0usize),
+        (131067, 0),
+        (131067, 1),
+        (131067, 2),
+        (262139, 0),
+    ] {
+        let last = start + first + n;
+        let stride = last + 3;
+        let mask_stride = last.div_ceil(8) + 5;
+        let qrows = first + n;
+        let make = |n: usize, seed: usize| {
+            (0..n)
+                .map(|i| ((i * 2_654_435_761usize + seed) % 1_000_003) as f32 / 500_000.0 - 1.0)
+                .collect::<Vec<_>>()
+        };
+        let up = |v: &[f32]| upload(&ctx, v, vec![v.len() as u64]).unwrap();
+        let q = up(&make(qrows * 4096, 3));
+        let w = up(&make(qrows * 32, 5));
+        let keys = up(&make(last * 128, 7));
+        let mut masks = vec![0u32; qrows * mask_stride];
+        for row in 0..qrows {
+            let blocks = (start + row + 1).div_ceil(8);
+            for block in 0..blocks {
+                masks[row * mask_stride + block] = match pattern {
+                    1 => 1,
+                    2 => 0,
+                    _ => {
+                        u32::from((block * 4051 + row * 37) % blocks < 2048 || block + 1 == blocks)
+                    }
+                };
+            }
+        }
+        let mask_backing = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[vec![99u32; 4], masks.clone(), vec![99u32; 4]].concat()),
+            vec![(masks.len() + 8) as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let mask = mask_backing.view_subrange(4, vec![masks.len() as u64]);
+        let backing = [
+            up(&vec![-12345.0; n * stride + 32]),
+            up(&vec![-12345.0; n * stride + 32]),
+        ];
+        let scores = backing
+            .each_ref()
+            .map(|t| t.view_subrange(16, vec![(n * stride) as u64]));
+        execute(&ctx, |enc| {
+            for i in 0..2 {
+                encode_index_scores_rows_kernel(
+                    &ctx,
+                    enc,
+                    &config,
+                    if i == 0 {
+                        IndexRowsKernel::Mma
+                    } else {
+                        IndexRowsKernel::MmaMasked
+                    },
+                    [start, 1, last, first, n, stride],
+                    &q,
+                    &w,
+                    &keys,
+                    &scores[i],
+                    (i == 1).then_some((&mask, mask_stride)),
+                )
+                .unwrap();
+            }
+        });
+        let old = f32_slice(&scores[0]).unwrap();
+        let new = f32_slice(&scores[1]).unwrap();
+        for row in 0..n {
+            let length = start + first + row + 1;
+            for key in 0..stride {
+                let i = row * stride + key;
+                if key >= length {
+                    assert_eq!((old[i], new[i]), (-12345.0, -12345.0));
+                } else if masks[(first + row) * mask_stride + key / 8] != 0 {
+                    assert_eq!(
+                        old[i].to_bits(),
+                        new[i].to_bits(),
+                        "start={start} row={row} key={key}"
+                    );
+                } else {
+                    assert_eq!(new[i], 0.0);
+                }
+            }
+        }
+        for t in &backing {
+            let f = f32_slice(t).unwrap();
+            assert!(
+                f[..16]
+                    .iter()
+                    .chain(&f[f.len() - 16..])
+                    .all(|&x| x == -12345.0)
+            );
+        }
+        // Production masks retain 2048 blocks. Also test all/none masks; even
+        // an empty mask must retain the selector's deterministic -Inf ties.
+        let selected = [
+            tensor(&ctx, qrows * 512, GgmlType::I32).unwrap(),
+            tensor(&ctx, qrows * 512, GgmlType::I32).unwrap(),
+        ];
+        let status = [
+            tensor(&ctx, 1, GgmlType::I32).unwrap(),
+            tensor(&ctx, 1, GgmlType::I32).unwrap(),
+        ];
+        execute(&ctx, |enc| {
+            for i in 0..2 {
+                pipeline(&ctx, enc, "select_radix_rows").unwrap();
+                enc.set_bytes(0, &[start as u32, 1u32, 512, 8]);
+                enc.set_bytes(1, &[stride as u32, mask_stride as u32, n as u32, 1]);
+                enc.set_bytes(2, &[512u32, first as u32, 2048, 0]);
+                for (slot, t) in [
+                    (3, &scores[i]),
+                    (4, &mask),
+                    (5, &selected[i]),
+                    (6, &status[i]),
+                ] {
+                    enc.set_tensor(slot, t);
+                }
+                enc.dispatch(
+                    MTLSize {
+                        width: 1,
+                        height: n,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 1024,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+            }
+        });
+        let bits = |t: &MetalTensor| unsafe {
+            std::slice::from_raw_parts(
+                t.buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(t.offset as usize)
+                    .cast::<u32>(),
+                t.n_elements() as usize,
+            )
+            .to_vec()
+        };
+        assert_eq!(bits(&selected[0]), bits(&selected[1]));
+        assert_eq!(bits(&status[0]), bits(&status[1]));
+        assert_eq!(&bits(&mask_backing)[4..4 + masks.len()], &masks);
+        // Refuse incomplete mask planes before any dispatch is encoded.
+        let cmd = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&cmd);
+        for bad_stride in [0, last.div_ceil(8) - 1, mask_stride + 100] {
+            assert!(
+                encode_index_scores_rows_kernel(
+                    &ctx,
+                    &enc,
+                    &config,
+                    IndexRowsKernel::MmaMasked,
+                    [start, 1, last, first, n, stride],
+                    &q,
+                    &w,
+                    &keys,
+                    &scores[1],
+                    Some((&mask, bad_stride))
+                )
+                .is_err()
+            );
+        }
+        enc.end();
+    }
+}
+
 type IndexRowsEncoder = fn(
     &MetalContext,
     &KernelEncoder,

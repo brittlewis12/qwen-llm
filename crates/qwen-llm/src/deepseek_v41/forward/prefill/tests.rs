@@ -126,13 +126,15 @@ fn chunk_dispatch_and_submission_census() {
             assert_eq!(
                 inventory,
                 [
+                    "prefill_admission",
                     "prefill_chunk_rows",
                     "prefill_embedding",
                     "prefill_engram_hash",
                     "prefill_engram_prepare",
                     "prefill_host_finish",
                     "prefill_host_prepare",
-                    "prefill_scratch_prepare"
+                    "prefill_scratch_prepare",
+                    "prefill_scratch_release"
                 ]
             );
             for name in ["prefill_host_prepare", "prefill_engram_prepare"] {
@@ -314,13 +316,31 @@ fn public_single_row_prefill_uses_one_scalar_command() {
             .sum::<usize>(),
         1
     );
-    // Host Engram row reads are a wall span, not a command.
-    assert!(
-        report
+    // Host reads, planning and release are wall spans, not commands.
+    assert!(report.operations.iter().all(|o| {
+        [
+            "gpu_step",
+            "decode_engram_rows",
+            "prefill_select",
+            "prefill_admission",
+            "prefill_scratch_release",
+        ]
+        .contains(&o.operation)
+    }));
+    for name in [
+        "prefill_select",
+        "prefill_admission",
+        "prefill_scratch_release",
+    ] {
+        let span = report
             .operations
             .iter()
-            .all(|o| ["gpu_step", "decode_engram_rows"].contains(&o.operation))
-    );
+            .find(|o| o.operation == name)
+            .unwrap();
+        assert_eq!(span.completed_submits, 0);
+        assert!(span.gpu_ms.is_none());
+        assert!(span.wall_ms.is_finite() && span.wall_ms >= 0.0);
+    }
     assert_eq!(
         model.step(&mut batch, 1, None).unwrap(),
         model.step(&mut serial, 1, None).unwrap()

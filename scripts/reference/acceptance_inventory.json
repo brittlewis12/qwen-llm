@@ -5640,5 +5640,12 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Pure device/layout/dtype rollout predicate; no Metal context, model import or device allocation."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::masked_mma_index_preserves_allowed_scores_and_selection",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
   }
 ]

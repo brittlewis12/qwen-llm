@@ -1262,6 +1262,7 @@ pub(super) fn run_captured(
     with_logits: bool,
     mut capture: Option<&mut dyn capture::Capture>,
 ) -> std::result::Result<Vec<f32>, StateError> {
+    let admission = profile::Wall("prefill_admission", [0; 4], profile::start());
     op::require(!tokens.is_empty(), "empty prefill suffix")?;
     op::require(
         (1..=MAX_CHUNK_ROWS).contains(&chunk_rows),
@@ -1322,6 +1323,7 @@ pub(super) fn run_captured(
     state.last_prefill = None;
     let end = state.position() + tokens.len();
     let policy = scratch_policy();
+    drop(admission);
     let mut scratch = if policy == ScratchPolicy::Reuse && rows > 1 {
         let span = profile::Wall("prefill_scratch_prepare", [0; 4], profile::start());
         let scratch = state
@@ -1420,6 +1422,11 @@ pub(super) fn run_captured(
         #[cfg(test)]
         tests::lifetime::completed_chunk(model.ctx, state, chunk.len());
     }
+    // Buffer release is part of fresh-call latency too. Keep it visible to an
+    // active profile; all GPU commands and chunk autorelease pools are drained.
+    let release = profile::Wall("prefill_scratch_release", [0; 4], profile::start());
+    drop(scratch);
+    drop(release);
     state.last_prefill = Some(PrefillGeometry {
         start: end - tokens.len(),
         tokens: tokens.len(),

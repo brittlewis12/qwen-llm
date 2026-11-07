@@ -18,6 +18,16 @@ mod range_tests;
 
 pub(super) const TILE: usize = 512;
 
+/// Skip source-mask-rejected eight-key panels in later F32 index layers for
+/// ordinary 512..2048-row appends at depth 128K+ on M5 Ultra. Allowed scores
+/// retain their MMA and head-sum order; no new tensors or precision changes.
+/// Default on; 0/false/no restores full-domain scoring. Read per call for A/B.
+const MASKED_REINDEX_ENV: &str = "QWEN_V41_MASKED_REINDEX";
+
+fn masked_reindex_enabled() -> bool {
+    crate::env_flag::read_default_on(MASKED_REINDEX_ENV)
+}
+
 #[cfg(test)]
 thread_local! {
     static OLD_HOST_LOOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1293,20 +1303,38 @@ impl Workspace {
             if last_length <= c.index_topk {
                 continue;
             }
-            super::encode_index_scores_rows_long(
+            // Later index layers already restrict selection to the source
+            // layer's candidates. At long depth, avoid scoring rejected blocks.
+            let masked_index = mask
+                && ratio == 1
+                && c.candidate_block == 8
+                && c.candidate_topk == 2048
+                && c.index_topk == 512
+                && start >= 131_072
+                && (512..=2048).contains(&rows.rows)
+                && super::index_ilp_supported(c)
+                && super::select_grid_enabled()
+                && self.global_mode(id, start, rows.rows)? == GlobalKvMode::Ordinary
+                && ctx.device_facts().name == "Apple M5 Ultra"
+                && masked_reindex_enabled();
+            let kernel = if masked_index {
+                super::IndexRowsKernel::MmaMasked
+            } else if super::select_grid_enabled() {
+                super::IndexRowsKernel::Mma
+            } else {
+                super::IndexRowsKernel::Ilp
+            };
+            super::encode_index_scores_rows_kernel(
                 ctx,
                 enc,
                 c,
-                start,
-                ratio,
-                last_length,
-                first,
-                n,
-                width,
+                kernel,
+                [start, ratio, last_length, first, n, width],
                 &rows.index_query,
                 &rows.index_weights,
                 &self.owners[owner].keys,
                 &rows.select_scores,
+                masked_index.then_some((&rows.candidates, candidates_stride)),
             )?;
             if let Some(block_scores) = &block_scores {
                 pipeline(ctx, enc, "select_block_scores_rows")?;

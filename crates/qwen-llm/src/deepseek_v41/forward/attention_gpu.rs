@@ -1251,6 +1251,7 @@ fn encode_index_scores_rows_ilp(
         weights,
         keys,
         scores,
+        None,
     )
 }
 
@@ -1283,6 +1284,7 @@ fn encode_index_scores_rows_mma(
         weights,
         keys,
         scores,
+        None,
     )
 }
 
@@ -1319,6 +1321,7 @@ fn encode_index_scores_rows_long(
         weights,
         keys,
         scores,
+        None,
     )
 }
 
@@ -1326,6 +1329,7 @@ fn encode_index_scores_rows_long(
 enum IndexRowsKernel {
     Ilp,
     Mma,
+    MmaMasked,
 }
 
 /// Shared binding of the 32x128 long-row index kernels. `g`: chunk start,
@@ -1341,12 +1345,37 @@ fn encode_index_scores_rows_kernel(
     weights: &MetalTensor,
     keys: &MetalTensor,
     scores: &MetalTensor,
+    candidates: Option<(&MetalTensor, usize)>,
 ) -> Result<()> {
     let [start, ratio, max_length, first, n, stride] = g;
     op::require(index_ilp_supported(c), "ILP index geometry")?;
+    let mask_stride = if let Some((mask, mask_stride)) = candidates {
+        let mask_rows = first.checked_add(n).ok_or("index mask rows overflow")?;
+        let extent = mask_rows
+            .checked_mul(mask_stride)
+            .ok_or("index mask extent overflow")?;
+        op::require(
+            matches!(kernel, IndexRowsKernel::MmaMasked)
+                && ratio == 1
+                && c.candidate_block == 8
+                && mask_stride >= max_length.div_ceil(8)
+                && mask.dtype == GgmlType::I32
+                && mask.offset.is_multiple_of(4)
+                && extent <= mask.n_elements() as usize,
+            "masked index candidate geometry",
+        )?;
+        mask_stride
+    } else {
+        op::require(
+            !matches!(kernel, IndexRowsKernel::MmaMasked),
+            "masked index needs candidates",
+        )?;
+        0
+    };
     let (suffix, keys_per_group) = match kernel {
         IndexRowsKernel::Ilp => ("index_heads_rows_ilp", 64),
         IndexRowsKernel::Mma => ("index_heads_rows_mma", 128),
+        IndexRowsKernel::MmaMasked => ("index_heads_rows_mma_masked", 128),
     };
     pipeline(ctx, enc, suffix)?;
     enc.set_bytes(
@@ -1367,12 +1396,23 @@ fn encode_index_scores_rows_kernel(
             c.index_heads as u32,
         ],
     );
-    enc.set_bytes(2, &[stride as u32, n as u32, 0, 0]);
+    enc.set_bytes(
+        2,
+        &[
+            stride as u32,
+            n as u32,
+            if candidates.is_some() { 8 } else { 0 },
+            mask_stride as u32,
+        ],
+    );
     enc.set_tensor(3, query);
     enc.set_tensor(4, weights);
     enc.set_tensor(5, keys);
     enc.set_tensor(6, scores);
     enc.set_bytes(7, &(first as u32));
+    if let Some((mask, _)) = candidates {
+        enc.set_tensor(8, mask);
+    }
     enc.dispatch(
         MTLSize {
             width: max_length.div_ceil(keys_per_group),

@@ -6,6 +6,82 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - Flash-Next Dispatch Reduction: M5 Decode +7.0-7.5%
+
+- Base **`a28026ef`**, qualified production code **`15a8777d`**, unchanged
+  **GSQ-RCO IQ3_S** artifact. **Default on for the tensor-capable M5 tier**;
+  **M4 keeps its incumbents**. No operand narrowing, weight repacking, new GPU
+  buffer or admission change. Three independent rollback switches:
+  **`QWEN_FN_GDN_CONTROLS_FUSED=0`**, **`QWEN_FN_GDN_PREP_FUSED=0`**,
+  **`QWEN_FN_FFN_PROJECTIONS_FUSED=0`**. Setting all three restores the base;
+  the existing cooperative-F32, L2-pair, Q6-r1, IQ4_XS-fast and wide-scale
+  rollbacks retain priority where applicable.
+- Independent native 8K kill tests, each on top of the preceding retained
+  stages: separate-process **ABBA**, 64 excluded warm steps, 32 targets x four
+  restored-entry repeats/arm, full logits copies. Prespecified **>=1.01x whole
+  decode**, both pair directions positive, finite outputs. No profiler splits.
+
+  | Retained stage | Dispatch change | Fewer calls/token | M5 whole-decode ratio |
+  | --- | --- | ---: | ---: |
+  | Independent F32 alpha/beta + decay | 3 -> 1 at 36 GDN sites | 72 | 1.02047x |
+  | Controls + causal conv/SiLU + Q/K L2 norm | 3 -> 1 at 36 GDN sites | 72 more | 1.01401x |
+  | Router + shared gate/up + shared-scale projections | 4 -> 1 at 48 FFN sites | 144 | 1.03259x |
+
+  Every stage preserves all sixteen complete native-stream fingerprints.
+  Final 8K census **1604 -> 1316 dispatches/token**, one encoder/command buffer:
+  **36** combined GDN calls and **48** mixed-format FFN packets. GDN prep
+  retains the incumbent per-channel conv, L2 and projection reduction orders.
+  FFN packets support Q4_K/Q5_K/Q6_K/IQ4_XS pairs with F32 router/scale;
+  shared-output storage holds gate/up until SiLU consumes it, then shared down
+  overwrites it. This avoids extending the routed-output scratch lifetime.
+- **Discard HC injection/next-norm fusion** (`30fcae13`, removed `d412bcfa`):
+  46 fewer calls gives only **1.00446x M5**, **0.99602x M4** whole decode.
+  Its shader, API changes and knob are removed. **Reject M4 rollouts** of
+  controls (**1.00474x**, opposite pair directions) and FFN projections
+  (**1.00895x**, below the 1% bar). This round's delivered reduction is 288
+  calls, judged by whole-token value rather than the original 400-500 estimate.
+- Final ordinary release CLI, all three off/default, separate processes:
+  `suite --tg 64 --depth 0,8192,32768 --runs 2 --seed 1`; model/row warmups,
+  fresh states, untimed prefix fills, full endpoint copies. Build/runtime
+  identities match. Build lock + canonical Metal lease, nice 10, thermal
+  pressure **0 before/after every timing arm**, all samples retained:
+
+  | M5 depth | Off tok/s | Default tok/s | On/off | llama.cpp v0.9.0 tok/s | On/cpp |
+  | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 0 | 72.5151 | 77.9679 | 1.0752x | 65.9775 | 1.1817x |
+  | 8192 | 68.1938 | 73.1830 | 1.0732x | 64.5182 | 1.1343x |
+  | 32768 | 66.4718 | 71.0982 | 1.0696x | 61.7644 | 1.1511x |
+
+  CPP is the unchanged exact-artifact **`cd959bae99ff`** reference from the
+  prior roofline entries, not rerun here. Using the census's unchanged logical
+  payload and measured streaming denominator, 8K reaches about **34.6%** of
+  the bandwidth ceiling versus **32.3%** off; this is not a DRAM counter.
+- Packed prefill body is unchanged. Off/default controls, two retained samples:
+  pp4096 **1875.690 / 1880.105 ms (0.99765x)**;
+  pp512@32K **363.510 / 363.625 ms (0.99968x)**. No prefill win claimed.
+- Cumulative independent teacher forcing: frozen code/prose, complete prefixes,
+  **128 targets/document at 0/8K/32K, 768 pairs**. All logits finite and every
+  full-vocabulary vector bitwise equal: **dNLL = mean/max KL = 0**, argmax
+  **768/768**. Each on cell witnesses 36 GDN prep and 48 FFN packet calls;
+  off cells witness none. Native-stream hashes match at each stage; natural-
+  text vectors match with all retained stages enabled.
+- Full M5 `cargo test --release -p qwen-llm --lib` on **`15a8777d`**:
+  **2453 passed, 0 failed, 738 ignored**, 115.34 s. New operators check
+  projection/decay, conv state, convolved QKV, Q/K norm, mixed quant pairs,
+  independent gate/up weights, cancellation, offsets, guards, scratch tail and
+  refusal before dispatch. Both focused tests also pass with **Metal API and
+  GPU validation enabled** (2 passed, 5.22 s). CPU-only
+  **`scripts/check-contracts.sh` passes on `a447b3d3`**, tree
+  **`31ee71693bc5e320be01e6e573771fd7b3fab988`**. That tree changes only the
+  generated ENV reference after the qualified code; this final PERF-only
+  addition is path/whitespace checked.
+- All raw arms, quality/census, build and validation logs, frozen documents,
+  temporary helper sources and reconstruction patch series:
+  **`2026-11-07-fn-roofline5-raw.tar.gz`**, SHA256
+  **`0e22e0aba9221cedf1d1fdf2a2496cf0b70db7d57616b74157216462286b5c25`**, under
+  `~/qwen-runs/2026-11-07-fn-roofline5/` on both machines. Temporary runners
+  and example binaries removed. Branch unmerged; no owned work left running.
+
 ## 2026-11-06 - Flash-Next Dispatch Reduction, Stage 1: GDN Controls +1.7-1.9%
 
 - Base **`a28026ef`**; prototype **`eddc0aa3`**, operator/quality/CLI witness

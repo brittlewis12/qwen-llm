@@ -1,17 +1,19 @@
 # V4.1 CED Prefill Design
 
-Date: 2026-10-23. Status: experimental native cold shrinking executor implemented;
-full-model qualification and performance acceptance remain open. The ordinary
-full-forward path remains the reference and default. Bounded-128 replay and
-encoder replay are not implemented by this executor.
+Date: 2026-10-23. Current status: qualified native cold shrinking CED is the
+default for `qwen run` and ordinary `qwen-bench`, with optional Full fallback.
+Full remains the reference and explicit rollback. Serving remains Full.
+Bounded-128 replay and encoder replay are not implemented by this executor.
 
 ## Native Interface And Qualification
 
 `Forward::prefill_with_execution` accepts `FullForward` or `ShrinkingCed` and
 returns final logits plus the actual execution report. Cold text `qwen run`
-and `qwen-bench` expose the opt-in through
-`QWEN_V41_PREFILL_EXECUTION=shrinking_ced`; unset or `full_forward` preserves
-ordinary execution. Serving does not read this control. Unsupported schedules,
+and ordinary `qwen-bench` prefer shrinking CED with the measured 4 GiB soft
+resident mapping target (P4) when the variable is unset or explicitly
+`QWEN_V41_PREFILL_EXECUTION=shrinking_ced`. Setting it to `full_forward`
+restores ordinary Full execution and its untargeted resident mapping.
+Serving does not read this control. Unsupported schedules,
 nonzero starting positions, and declined CED admission fall back before state
 mutation, reporting the reason and actual full-forward execution. Execution
 failures after mutation poison the provisional state instead of restarting it.
@@ -23,14 +25,17 @@ states support scalar continuation and snapshot restore/growth, but their
 origin excludes them from serving prefix reuse. Counters report completed
 encoder, publication, seed, and decoder work rather than inferred savings.
 
-Controlled nonuniform real-Metal fixtures establish scalar-native bitwise
-cache/logit parity, including restore/growth and 256 teacher-forced scalar
-steps. Separate arithmetic tests distinguish genuinely scalar original chunk
-tails from singleton tiles created by shrinking. Multi-chunk controlled and
-stock full-model comparisons are acceptance gates, not implied by those small
-fixtures. Frozen original 8K production and token-major scalar references
-retain boundary E/P, routing controls, every causal cache, and 256 continuation
-tokens; diagnostic capture time is not a prefill performance measurement.
+Serving needs request-level cold planning across its checkpoint cuts and
+interleaved prefill calls, plus CED-origin live/snapshot reuse integration.
+Changing the cold CLI policy does not change that Full-only serving contract.
+
+The [2026-10-25 cold-profile qualification](bench/2026-10-25-v41-current-ced-8k.md#cold-profile-delivery)
+passed all 257 complete vocabulary heads and all 56 causal-region hashes at
+each position, including 256 teacher-forced scalar steps, against Full and the
+frozen P4 reference. Restore/growth and admitted-width witnesses also passed.
+Separate arithmetic tests distinguish genuinely scalar original chunk tails
+from singleton tiles created by shrinking. These completed checks are the
+exactness basis for the default; no arithmetic or qualification bar changes.
 
 Memory reports distinguish the priced incremental admission ledger from Metal
 allocation samples and cumulative process `ru_maxrss`. Phase samples are not a
@@ -38,7 +43,7 @@ continuous driver high-water, and process peak RSS is not an isolated CED peak.
 Neither these observations nor dependency-work counts establish a wall-time
 speedup or model-wide quality equivalence.
 
-## Recommendation
+## Original Implementation Recommendation (2026-10-23)
 
 Implement a cold, opt-in shrinking dependency-preserving executor directly.
 Keep rectangular reconstruction as a diagnostic control, not the optimization's

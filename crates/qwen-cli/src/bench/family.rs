@@ -1423,7 +1423,7 @@ mod tests {
             vocab: 257,
             full_chunk_rows: crate::family_options::V41_PREFILL_ROWS,
             state: None,
-            requested_execution: PrefillExecution::ShrinkingCed,
+            requested_execution: crate::family_options::parse_v41_prefill_execution(None).unwrap(),
             position: 0,
             ced_allowed: true,
             last_execution: PrefillExecution::FullForward,

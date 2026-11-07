@@ -45,10 +45,10 @@ pub(crate) fn v41_execution_geometry(
     value
 }
 
-/// Cold run/ordinary bench: unset/full_forward = Full/None; shrinking_ced = optional CED with measured 4 GiB soft resident target (P4), retained on Full fallback. Serving ignores it; paired mapping is independent.
+/// Cold run/ordinary bench: unset/shrinking_ced = optional CED with measured 4 GiB soft resident target (P4), retained on Full fallback; full_forward = Full/None rollback. Serving stays Full; paired mapping is independent.
 pub(crate) const V41_PREFILL_EXECUTION_ENV: &str = "QWEN_V41_PREFILL_EXECUTION";
 
-/// The explicit cold CED profile includes the measured P4 resident mapping.
+/// The default cold CED profile includes the measured P4 resident mapping.
 /// Serving and paired controls do not use this cold-only policy.
 pub(crate) fn v41_cold_execution_target(
     execution: qwen_llm::deepseek_v41::forward::PrefillExecution,
@@ -92,7 +92,7 @@ pub(crate) fn parse_v41_prefill_execution(
 ) -> Result<qwen_llm::deepseek_v41::forward::PrefillExecution> {
     use qwen_llm::deepseek_v41::forward::PrefillExecution;
     match value {
-        None => Ok(PrefillExecution::FullForward),
+        None => Ok(PrefillExecution::ShrinkingCed),
         Some(value) if value == "full_forward" => Ok(PrefillExecution::FullForward),
         Some(value) if value == "shrinking_ced" => Ok(PrefillExecution::ShrinkingCed),
         _ => bail!(
@@ -363,7 +363,7 @@ mod tests {
     fn v41_cold_prefill_parser_defaults_and_valid_values() {
         use qwen_llm::deepseek_v41::forward::PrefillExecution;
         for (value, expected, target) in [
-            (None, PrefillExecution::FullForward, None),
+            (None, PrefillExecution::ShrinkingCed, Some(4_294_967_296)),
             (Some("full_forward"), PrefillExecution::FullForward, None),
             (
                 Some("shrinking_ced"),
@@ -457,7 +457,7 @@ mod tests {
     fn v41_cold_run_and_ordinary_bench_load_selected_profile_plan() {
         use qwen_llm::deepseek_v41::forward::PrefillExecution::{FullForward, ShrinkingCed};
         for (value, execution, target) in [
-            (None, FullForward, None),
+            (None, ShrinkingCed, Some(4_294_967_296)),
             (Some("full_forward"), FullForward, None),
             (Some("shrinking_ced"), ShrinkingCed, Some(4_294_967_296)),
         ] {
@@ -493,7 +493,7 @@ mod tests {
     fn v41_cold_selected_full_fallback_retains_p4_and_geometry() {
         use qwen_llm::deepseek_v41::forward::PrefillExecution::{FullForward, ShrinkingCed};
         let (selected, loaded_storage) = v41_load_cold(
-            ShrinkingCed,
+            parse_v41_prefill_execution(None).unwrap(),
             None,
             |target| {
                 let mut plan = cold_fixture(ShrinkingCed, target);

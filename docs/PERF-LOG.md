@@ -6,6 +6,167 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - GLM Decode Census: Structural Gap, Verifier Proposal
+
+- Base **`9573228d`**, branch **`perf/glm-roofline4`**, M5 Ultra / M4 Max.
+  **Diagnosis only; no runtime change.** Same UD-IQ3_XXS trunk on M5 and
+  laptop-suited Maya-M IQ2_S on M4 as the roofline entry below. No memory
+  admission overrides. Previous measured streaming references remain
+  **1106.57 / 505.79 GB/s**; actual executed GGUF types, 8/288 routed banks,
+  full head, KDA state read/write and unique KV traffic define the optimistic
+  logical-byte floor. This is not a DRAM transaction counter.
+- Ordinary tg64, one excluded warm run then **two retained** runs/cell,
+  full logits readback. Restore/prefix work outside timers; salted synthetic
+  prefix, teacher-forced xorshift IDs rather than a task-quality corpus.
+  Build lock + canonical Metal lease, nice 10 on both machines; M4 holds the
+  build lock for the whole campaign. Thermal pressure **0 before/after every
+  campaign**. Cold warm runs are retained in raw data and excluded by protocol.
+
+  | Machine | Depth | Retained ms/token | Tok/s | Logical-byte floor ms | Roof % |
+  | --- | ---: | --- | ---: | ---: | ---: |
+  | M5 / UD | 0 | 15.7212, 15.6958 | 63.660 | 9.442 | 60.1 |
+  | M5 / UD | 8192 | 17.2379, 17.2300 | 58.025 | 9.539 | 55.4 |
+  | M5 / UD | 32768 | 17.6011, 17.5965 | 56.822 | 9.555 | 54.3 |
+  | M4 / Maya | 0 | 30.9577, 31.0498 | 32.254 | 20.303 | 65.5 |
+  | M4 / Maya | 8192 | 33.8215, 33.9735 | 29.501 | 20.507 | 60.5 |
+
+- **Attribution method and limits.** Capture real dispatch geometry, tensor
+  types, bindings and counts at 8K. Per-dispatch sampled encoders preserve
+  logits but perturb the graph: ends are nonmonotonic, and attributing their
+  completion increments produces impossible family bandwidths. Those timings
+  and the exploratory scaled summaries are **rejected**. Instead replay each
+  kernel's actual weight/binding cohort in an ordinary unsampled command,
+  two warm plus four retained GPU durations; report the median. Scratch inputs
+  are representative final scratch values, not frozen per-layer activations.
+  KDA/append are separately replayed with a snapshot/continuation witness.
+  These isolated family costs remove native inter-family scheduling/cache
+  interactions; they are **not exact production critical-path allocations**.
+- Matched four-token ordinary windows at positions 8224-8227: M5 wall/GPU
+  **17.681 / 16.679 ms**, CPU encode **0.346 ms**; M4 **33.084 / 32.189 ms**,
+  CPU encode **0.489 ms**. The ordinary tg64 headline above differs by a few
+  percent because its input window/residency differs. For the following gap
+  budget use these matched windows, not a rescaled tg64 result:
+  `excess = cohort_ms - logical_bytes / streaming_BW`,
+  `gap share = excess / (matched_wall_ms - total_logical_byte_floor_ms)`.
+  Denominators are **8.141 / 12.576 ms**. Remaining native GPU interaction
+  and wall-minus-GPU time stay explicit rather than being assigned to kernels.
+  Rates count logical payload, not all activation scratch or repeated KV loads;
+  low attention/mHC bandwidth percentages also reflect scalar/SFU work,
+  reductions and occupancy. The streaming triad is a reference rather than
+  a strict read-only/cache ceiling; small >100% rows are retained.
+
+  **M5, 8K: per-kernel-family cohort census**
+
+  | Family | Dispatches/token | GPU ms/token | Logical GB/s | BW roof % | Excess ms | Gap share % |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | Q6 other/shared | 145 | 2.999 | 919.1 | 83.1 | 0.508 | 6.2 |
+  | Q6 KDA QKV | 34 | 2.617 | 1072.7 | 96.9 | 0.080 | 1.0 |
+  | routed gate/up IQ2_S | 41 | 2.013 | 875.5 | 79.1 | 0.420 | 5.2 |
+  | routed down IQ3_S | 39 | 1.525 | 737.5 | 66.6 | 0.509 | 6.2 |
+  | Q8 linears | 184 | 1.442 | 574.5 | 51.9 | 0.693 | 8.5 |
+  | mHC | 270 | 1.114 | 35.1 | 3.2 | 1.079 | 13.3 |
+  | MLA attention | 22 | 0.761 | 30.3 | 2.7 | 0.741 | 9.1 |
+  | KDA recurrence | 34 | 0.661 | 483.5 | 43.7 | 0.372 | 4.6 |
+  | small kernels / embedding | 178 | 0.540 | 0.3 | 0.0 | 0.540 | 6.6 |
+  | index score/selection | 44 | 0.518 | 11.2 | 1.0 | 0.513 | 6.3 |
+  | F32 routers/linears | 53 | 0.469 | 434.7 | 39.3 | 0.285 | 3.5 |
+  | Q6 head | 1 | 0.459 | 1133.1 | 102.4 | -0.011 | -0.1 |
+  | routed down IQ4_XS | 3 | 0.093 | 1151.1 | 104.0 | -0.004 | -0.0 |
+  | routed gate/up IQ3_S | 1 | 0.086 | 673.2 | 60.8 | 0.034 | 0.4 |
+  | Native GPU interaction residual | — | 1.381 | — | — | 1.381 | 17.0 |
+  | Wall minus GPU | — | 1.001 | — | — | 1.001 | 12.3 |
+
+  **M4, 8K: per-kernel-family cohort census**
+
+  | Family | Dispatches/token | GPU ms/token | Logical GB/s | BW roof % | Excess ms | Gap share % |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | Q6 other/shared | 193 | 8.646 | 374.1 | 74.0 | 2.251 | 17.9 |
+  | routed gate/up IQ2_S | 42 | 6.380 | 283.0 | 56.0 | 2.810 | 22.3 |
+  | Q6 KDA QKV | 34 | 5.747 | 488.5 | 96.6 | 0.196 | 1.6 |
+  | routed down IQ3_XXS | 34 | 2.702 | 323.3 | 63.9 | 0.975 | 7.8 |
+  | mHC | 450 | 1.889 | 75.7 | 15.0 | 1.606 | 12.8 |
+  | Q8 linears | 214 | 1.161 | 181.2 | 35.8 | 0.745 | 5.9 |
+  | Q6 head | 1 | 1.032 | 504.2 | 99.7 | 0.003 | 0.0 |
+  | KDA recurrence | 34 | 1.014 | 315.5 | 62.4 | 0.381 | 3.0 |
+  | MLA attention | 22 | 0.920 | 25.1 | 5.0 | 0.875 | 7.0 |
+  | routed down IQ3_S | 8 | 0.686 | 336.5 | 66.5 | 0.230 | 1.8 |
+  | index score/selection | 44 | 0.653 | 8.9 | 1.8 | 0.642 | 5.1 |
+  | F32 routers/linears | 42 | 0.569 | 348.4 | 68.9 | 0.177 | 1.4 |
+  | small kernels / embedding | 177 | 0.461 | 0.3 | 0.1 | 0.460 | 3.7 |
+  | Native GPU interaction residual | — | 0.330 | — | — | 0.330 | 2.6 |
+  | Wall minus GPU | — | 0.895 | — | — | 0.895 | 7.1 |
+
+- Family replays total **15.298 / 31.859 ms**, versus matched ordinary GPU
+  **16.679 / 32.189 ms**. The interaction residual includes **11 in-place
+  scalar scales** not replayed, plus native scheduling/cache/data differences.
+  Thus the family gap shares are a diagnostic excess-cost budget, not an exact
+  causal decomposition or an additive speedup prediction. Counts including
+  the scales are **1060 / 1306 dispatches/token** at 8K and 32K where measured;
+  depth-zero **972 / 1218**. October's 1040-1310 range still fits; the large
+  headroom does not imply that all these launches cost a fixed number of us.
+  Maya's F32 mHC path uses **450** dispatches versus UD Q8's **270**; its KDA
+  small projections are **102** versus fused **34**, and its grouped MLA
+  latent weights are Q6_K rather than Q8_0. This is not a device-only A/B.
+- **IQ format/geometry reference, useful MAC FLOP/s.** Additional real IQ
+  weight-block probes use compact same-type banks, top-8, 34 launches/command,
+  two warm plus eight retained runs. Full layer geometry, one hot 8-expert set
+  versus rotation through 64 experts; the hot case is not guaranteed to fit
+  cache. Small-output probes are retained but do not reproduce original bank
+  strides and are not used as a peak. These are measured native-kernel
+  references, not hardware compute roofs or a count of IQ integer operations.
+  Tensor/MMA TFLOP peaks are not applicable to scalar IQ GEMV dequantization.
+
+  | Machine / family | Census useful TFLOP/s | Hot / rotating reference TFLOP/s | % of hot reference |
+  | --- | ---: | --- | ---: |
+  | M5 IQ2_S gate/up | 5.47 | 5.77 / 5.53 | 94.8 |
+  | M5 IQ3_S down | 3.43 | 4.32 / 3.51 | 79.5 |
+  | M4 IQ2_S gate/up | 1.77 | 1.84 / 1.83 | 96.2 |
+  | M4 IQ3_XXS down | 1.69 | 1.72 / 1.66 | 98.0 |
+  | M4 IQ3_S down | 1.57 | 1.70 / 1.66 | 92.3 |
+
+- **Reading the gap.** Q6 KDA Q/K/V already reaches **97%** of the streaming
+  reference on both machines, and the full head approximately **100%**.
+  M5 mHC + attention/index selection consume **2.39 ms** of cohort time and
+  about **29%** of the excess budget while reading little unique payload;
+  other small kernels and Q8 skinny projections add latency/occupancy costs.
+  M4's routed IQ kernels account for **32%** of the excess budget and already
+  approach their measured format/geometry reference. Its other/shared Q6
+  shapes account for another **18%**. CPU encoding alone is only **2.0% /
+  1.5%** of matched wall time; an encode-only graph rewrite cannot close the
+  gap. Expanding IQ weights to Q8 trades dequant for substantially more bytes
+  and laptop memory pressure; there is no evidence here to promote that trade.
+- **Bigger move to weigh: dedicated 2-4-row Q6_K weight-decode reuse in the
+  existing verifier**, followed by speculation only if the target budget pays.
+  Existing Fast/Half packet expert/router and Q8 few-row policies already
+  exist; this is a new Q6 multi-output kernel/HC-tail effort, not enabling
+  them again. Preserve Exact/F32 operand/reduction contracts; qualify any
+  Fast/Half numerical change at the distribution level. Dense weight reuse
+  addresses both machines; sparse expert overlap must be measured, not assumed.
+  M5's current all-row verifier at 8K takes **31.536 / 49.322 / 120.739 ms**
+  for 2/4/8 rows, versus **34.468 / 68.936 / 137.872 ms** serial. These are
+  target-only synthetic diagnostic costs, not speculative throughput or a
+  quality qualification. M4's additional verifier allocation was declined
+  by normal memory admission after its completed decode census; no bypass.
+  Proposed kill target: four-row verification **35-40 ms** and total drafting/
+  recovery **<=5 ms**; at **3 accepted tokens/block**, this would yield about
+  **1.15-1.29x** on M5. These are conditional engineering targets, not measured
+  gains; M4 needs its own budget/acceptance screen. Estimate **1-2 weeks**
+  including kernels, rejected-prefix recovery, Exact/F32 and distribution
+  checks. Current one-row tuning has no clear path to that size of win.
+  **Stop here for the user's choice; no new default or rollout knob.**
+- Validation: all **40** sampled full-vocabulary vectors match ordinary
+  forward bits, finite, zero profile overflow. Capture/replay and stateful
+  replay each preserve before/after restored-continuation logits on both
+  machines. All temporary instrumentation/examples removed locally and on
+  M5; library/kernel trees exactly match `9573228d`. Documentation-only
+  `scripts/check-contracts.sh` passes; no new numerical policy to qualify
+  and no production library change requiring another full GPU suite.
+  No merge; no benchmark/build worker left running.
+- Raw native/profile/cohort/format samples, actual tensor inventories, source
+  patches/examples, scripts, build logs and rejected-method audit:
+  `metagross:~/qwen-runs/2026-11-06-glm-roofline4/2026-11-06-glm-roofline4-raw.tar.gz`,
+  SHA256 **`5dbafcd708d9d74f9ba7e8f31e09e84e88b73ffc1f685cba906d8e36573461e3`**.
+
 ## 2026-11-06 - V4.1 M5 Decode Census: Structural Gap, Stop Before Redesign
 
 - **Report only; no runtime change.** Frozen **`9573228d`**, M5 Ultra,

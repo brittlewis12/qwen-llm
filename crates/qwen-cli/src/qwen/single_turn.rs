@@ -969,8 +969,12 @@ pub(crate) fn execute_single_turn_request(
     let mut first_delivery_ms = None;
     let mut first_callback_duration_ms = None;
     let mut first_delivery_allocated = None;
-    let greedy_gpu_decision =
-        resolve_greedy_gpu_decision(greedy_gpu_mode, sampling_config, args.prompt_lookup);
+    let greedy_gpu_decision = resolve_greedy_gpu_decision(
+        greedy_gpu_mode,
+        sampling_config,
+        args.prompt_lookup,
+        a3b_gpu_greedy_qualified(loaded.arch()),
+    );
     let use_gpu_greedy = greedy_gpu_decision.enabled;
     #[allow(unused_assignments)]
     let mut dflash_stats: Option<DflashDecodeStats> = None;

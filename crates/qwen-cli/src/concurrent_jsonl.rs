@@ -3782,14 +3782,14 @@ mod tests {
             args.concurrency,
             0.0,
             Some(ModelFamily::Qwen35),
-            GreedyGpuArgmaxMode::DefaultOff,
+            GreedyGpuArgmaxMode::Auto,
         )
         .unwrap();
         validate_model_family_with_modes(
             args.concurrency,
             0.0,
             Some(ModelFamily::Qwen35Moe),
-            GreedyGpuArgmaxMode::DefaultOff,
+            GreedyGpuArgmaxMode::Auto,
         )
         .unwrap();
         validate_model_family_with_modes(
@@ -3804,7 +3804,7 @@ mod tests {
                 args.concurrency,
                 0.0,
                 Some(ModelFamily::Qwen4Exp),
-                GreedyGpuArgmaxMode::DefaultOff,
+                GreedyGpuArgmaxMode::Auto,
             )
             .is_err()
         );
@@ -3830,7 +3830,7 @@ mod tests {
             invalid.concurrency,
             invalid.temperature,
             Some(ModelFamily::Qwen35),
-            GreedyGpuArgmaxMode::DefaultOff,
+            GreedyGpuArgmaxMode::Auto,
         )
         .unwrap_err();
         assert!(error.to_string().contains("greedy decoding"));

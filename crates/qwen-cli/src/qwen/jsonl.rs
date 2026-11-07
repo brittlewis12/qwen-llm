@@ -1143,8 +1143,12 @@ pub(crate) fn run_jsonl_request(
         .context("load producer-declared stop tokens")?;
     let sampling_config = prepared.sampling;
     let mut sampler = Sampler::new(sampling_config).context("initialize request sampler")?;
-    let greedy_gpu_decision =
-        resolve_greedy_gpu_decision(greedy_gpu_mode, sampling_config, args.prompt_lookup);
+    let greedy_gpu_decision = resolve_greedy_gpu_decision(
+        greedy_gpu_mode,
+        sampling_config,
+        args.prompt_lookup,
+        a3b_gpu_greedy_qualified(loaded.arch()),
+    );
     let (generation, generated_text, prompt_lookup_stats) = if args.prompt_lookup {
         let (result, generated_text) = decode_prompt_lookup(
             loaded,

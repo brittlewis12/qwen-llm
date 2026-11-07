@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Exact GPU greedy selection is automatic for eligible A3B serial run/JSONL requests.
+/// Set 0/false/no for full-logits CPU selection; positive values retain model/request
+/// qualification and cannot force dense, sampled or prompt-lookup requests.
+pub(crate) const GREEDY_GPU_ARGMAX_ENV: &str = "QWEN_GREEDY_GPU_ARGMAX";
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum DeepSeekV4PrefetchMode {
     Off,
@@ -172,8 +177,7 @@ pub(crate) fn apply_deepseek_v4_prefetch(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GreedyGpuArgmaxMode {
-    DefaultOff,
-    ForceEnabled,
+    Auto,
     ExplicitRollback,
 }
 
@@ -203,13 +207,13 @@ impl DeepSeekV4MultigroupSelectorArg {
 
 pub(crate) fn parse_greedy_gpu_argmax_mode(value: Option<&OsStr>) -> GreedyGpuArgmaxMode {
     match value {
-        None => GreedyGpuArgmaxMode::DefaultOff,
+        None => GreedyGpuArgmaxMode::Auto,
         Some(value)
             if value
                 .to_str()
                 .is_some_and(qwen_llm::env_flag::env_value_truthy) =>
         {
-            GreedyGpuArgmaxMode::ForceEnabled
+            GreedyGpuArgmaxMode::Auto
         }
         Some(value)
             if value
@@ -229,10 +233,30 @@ pub(crate) fn configured_greedy_gpu_argmax_mode() -> GreedyGpuArgmaxMode {
     })
 }
 
+pub(crate) fn a3b_gpu_greedy_qualified(arch: qwen_llm::model::Arch) -> bool {
+    arch.kind == qwen_llm::model::ArchKind::Moe
+        && arch.n_layer == 40
+        && arch.hidden_size == 2048
+        && arch.vocab_size == 248_320
+        && arch.full_attention_interval == 4
+        && arch.n_q_heads == 16
+        && arch.n_kv_heads == 2
+        && arch.attn_head_dim == 256
+        && arch.gdn_n_k_heads == 16
+        && arch.gdn_n_v_heads == 32
+        && arch.gdn_head_dim == 128
+        && arch.gdn_conv_kernel == 4
+        && arch.expert_count == 256
+        && arch.expert_used_count == 8
+        && arch.expert_feed_forward_length == 512
+        && arch.expert_shared_feed_forward_length == 512
+}
+
 pub(crate) fn resolve_greedy_gpu_decision(
     mode: GreedyGpuArgmaxMode,
     sampling: SamplingConfig,
     prompt_lookup: bool,
+    qualified_model: bool,
 ) -> GreedyGpuDecision {
     if mode == GreedyGpuArgmaxMode::ExplicitRollback {
         return GreedyGpuDecision {
@@ -246,15 +270,12 @@ pub(crate) fn resolve_greedy_gpu_decision(
             reason: "ineligible_request",
         };
     }
-    match mode {
-        GreedyGpuArgmaxMode::ExplicitRollback => unreachable!("handled above"),
-        GreedyGpuArgmaxMode::ForceEnabled => GreedyGpuDecision {
-            enabled: true,
-            reason: "force_enabled",
-        },
-        GreedyGpuArgmaxMode::DefaultOff => GreedyGpuDecision {
-            enabled: false,
-            reason: "default_off",
+    GreedyGpuDecision {
+        enabled: qualified_model,
+        reason: if qualified_model {
+            "auto_a3b"
+        } else {
+            "unqualified_model"
         },
     }
 }

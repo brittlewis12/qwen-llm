@@ -3624,10 +3624,8 @@ mod tests {
             )
             .is_err()
         );
-        validate_greedy_gpu_mode(GreedyGpuArgmaxMode::DefaultOff, Some(DENSE_BATCH8_WIDTH))
-            .unwrap();
-        validate_greedy_gpu_mode(GreedyGpuArgmaxMode::ForceEnabled, Some(MOE_BATCH16_WIDTH))
-            .unwrap();
+        validate_greedy_gpu_mode(GreedyGpuArgmaxMode::Auto, Some(DENSE_BATCH8_WIDTH)).unwrap();
+        validate_greedy_gpu_mode(GreedyGpuArgmaxMode::Auto, Some(MOE_BATCH16_WIDTH)).unwrap();
 
         let mut invalid = test_args();
         invalid.batch_size = Some(4);

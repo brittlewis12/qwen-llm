@@ -4039,57 +4039,53 @@ fn decode_policy_labels_name_selection_residency() {
 }
 
 #[test]
-fn gpu_greedy_policy_is_default_off_forceable_and_rollbackable() {
-    let modes = [
-        GreedyGpuArgmaxMode::DefaultOff,
-        GreedyGpuArgmaxMode::ForceEnabled,
+fn gpu_greedy_policy_is_qualified_default_on_and_rollbackable() {
+    for mode in [
+        GreedyGpuArgmaxMode::Auto,
         GreedyGpuArgmaxMode::ExplicitRollback,
-    ];
-    let requests = [
-        (SamplingConfig::default(), false),
-        (SamplingConfig::qwen_chat(7), false),
-        (SamplingConfig::default(), true),
-    ];
-    for mode in modes {
-        for (sampling, prompt_lookup) in requests {
-            let request_eligible = sampling.temperature == 0.0 && !prompt_lookup;
-            let expected = if mode == GreedyGpuArgmaxMode::ExplicitRollback {
-                GreedyGpuDecision {
-                    enabled: false,
-                    reason: "disabled_by_explicit_rollback",
-                }
-            } else if !request_eligible {
-                GreedyGpuDecision {
-                    enabled: false,
-                    reason: "ineligible_request",
-                }
-            } else if mode == GreedyGpuArgmaxMode::ForceEnabled {
-                GreedyGpuDecision {
-                    enabled: true,
-                    reason: "force_enabled",
-                }
-            } else {
-                GreedyGpuDecision {
-                    enabled: false,
-                    reason: "default_off",
-                }
-            };
-            assert_eq!(
-                resolve_greedy_gpu_decision(mode, sampling, prompt_lookup),
-                expected,
-                "mode={mode:?} sampled={} prompt_lookup={prompt_lookup}",
-                sampling.temperature > 0.0,
-            );
+    ] {
+        for (sampling, prompt_lookup) in [
+            (SamplingConfig::default(), false),
+            (SamplingConfig::qwen_chat(7), false),
+            (SamplingConfig::default(), true),
+        ] {
+            for qualified in [false, true] {
+                let expected = if mode == GreedyGpuArgmaxMode::ExplicitRollback {
+                    GreedyGpuDecision {
+                        enabled: false,
+                        reason: "disabled_by_explicit_rollback",
+                    }
+                } else if sampling.temperature > 0.0 || prompt_lookup {
+                    GreedyGpuDecision {
+                        enabled: false,
+                        reason: "ineligible_request",
+                    }
+                } else {
+                    GreedyGpuDecision {
+                        enabled: qualified,
+                        reason: if qualified {
+                            "auto_a3b"
+                        } else {
+                            "unqualified_model"
+                        },
+                    }
+                };
+                assert_eq!(
+                    resolve_greedy_gpu_decision(mode, sampling, prompt_lookup, qualified),
+                    expected
+                );
+            }
         }
     }
-
     for value in ["1", "true", "TRUE", "yes", "YES"] {
         assert_eq!(
             parse_greedy_gpu_argmax_mode(Some(OsStr::new(value))),
-            GreedyGpuArgmaxMode::ForceEnabled
+            GreedyGpuArgmaxMode::Auto
         );
     }
-    for value in ["0", "false", "FALSE", "no", "NO"] {
+    for value in [
+        "0", "false", "FALSE", "no", "NO", "", "invalid", "True", "2",
+    ] {
         assert_eq!(
             parse_greedy_gpu_argmax_mode(Some(OsStr::new(value))),
             GreedyGpuArgmaxMode::ExplicitRollback
@@ -4097,14 +4093,8 @@ fn gpu_greedy_policy_is_default_off_forceable_and_rollbackable() {
     }
     assert_eq!(
         parse_greedy_gpu_argmax_mode(None),
-        GreedyGpuArgmaxMode::DefaultOff
+        GreedyGpuArgmaxMode::Auto
     );
-    for value in ["", "invalid", "True", "2"] {
-        assert_eq!(
-            parse_greedy_gpu_argmax_mode(Some(OsStr::new(value))),
-            GreedyGpuArgmaxMode::ExplicitRollback
-        );
-    }
     use std::os::unix::ffi::OsStringExt;
     let non_unicode = std::ffi::OsString::from_vec(vec![0xff]);
     assert_eq!(

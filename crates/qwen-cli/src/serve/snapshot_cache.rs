@@ -100,10 +100,15 @@ impl<V, N: PartialEq> SnapshotCache<V, N> {
         let tips = self.tips.entry(key).or_default();
         tips.retain(|&other| other != id);
         tips.push(id);
+        // Keep the original deeper branch hot while serving an older fork.
+        let mut deepest = tips.clone();
+        deepest.sort_by_key(|id| self.entries.get(id).map_or(0, |e| e.tokens.len()));
+        let deepest: Vec<_> = deepest.into_iter().rev().take(2).collect();
         let old = tips
             .iter()
             .take(tips.len().saturating_sub(2))
             .copied()
+            .filter(|id| !deepest.contains(id))
             .collect::<Vec<_>>();
         for id in old {
             let covered = self.entries.get(&id).is_some_and(|tip| {
@@ -530,6 +535,34 @@ mod tests {
             cache.indexed_bytes() <= before,
             "promotion allocates no payload"
         );
+        let mut tiny = lru(1_000_000).with_checkpoint_ladder(Config::testing(1));
+        for i in 2..8 {
+            let tokens = vec![i; 5000];
+            assert!(tiny.insert_strict(tokens.clone(), "legacy", 20_001));
+            tiny.record_tip(Some(key), &(), &tokens);
+        }
+        assert_eq!(
+            tiny.len(),
+            6,
+            "insufficient coverage budget preserves legacy fallback"
+        );
+        let anchor = vec![1; 10000];
+        let bytes = cache.ladder_eligibility_in(key, &(), &anchor, 1).unwrap();
+        assert!(cache.insert_ladder_in(key, (), anchor, "deep anchor", bytes));
+        let mut branches = Vec::new();
+        for (len, marker) in [(12000, 2), (12001, 3), (6000, 4), (6001, 5)] {
+            let mut tokens = vec![1; len];
+            tokens[len - 1] = marker;
+            assert!(cache.insert_strict(tokens.clone(), "branch tip", (len * 4 + 1) as u64));
+            cache.record_tip(Some(key), &(), &tokens);
+            branches.push(tokens);
+        }
+        for tokens in branches {
+            assert!(
+                cache.entry_for(&tokens).is_some(),
+                "fork keeps original deep tip and recent pair"
+            );
+        }
     }
 
     #[test]

@@ -208,7 +208,9 @@ canonical guards remain in place.
 
 Up to five optional points per conversation family are thinned to preserve
 spaced older history. The live tip and recent transcript/completed snapshot pair
-remain available; Superseded turn-tip snapshots are pruned where an older anchor
+remain available. The deepest pair also survives an older-message fork, so
+returning to the deeper branch keeps its hot tip. Superseded turn-tip snapshots
+are pruned where an older anchor
 covers them; a budget too small for coverage preserves the legacy fallback.
 Small shared-system snapshots keep their existing cache policy. A family is
 identified by its first user turn because the stateless API has no conversation

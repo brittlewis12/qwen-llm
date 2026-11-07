@@ -35,6 +35,9 @@ pub(crate) fn try_encode(
     {
         return Ok(false);
     }
+    if small_tiles_enabled() && super::hc_dot::try_encode(ctx, enc, w, x, y, k, n, m)? {
+        return Ok(true);
+    }
     if small_tiles_enabled() && super::small_f32_mma::try_encode(ctx, enc, w, x, y, k, n, m)? {
         return Ok(true);
     }
@@ -201,7 +204,9 @@ mod tests {
             let census = crate::metal::dispatch_census_take();
             assert_eq!(census.len(), 1);
             assert_eq!(census[0].threads_width, 128);
-            let tile = if census[0].kernel.ends_with("_m32")
+            let tile = if census[0].kernel == "kernel_qwen4exp_hc_inject_dot4_f32" {
+                4
+            } else if census[0].kernel.ends_with("_m32")
                 || census[0].kernel == "kernel_qwen4exp_small_f32_mma_k128_s4"
             {
                 32

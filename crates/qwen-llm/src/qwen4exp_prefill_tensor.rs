@@ -1,5 +1,6 @@
 //! Additional screened row cohorts for the Flash-Next prompt routes.
 
+mod hc_dot;
 pub(crate) mod small_f32;
 mod small_f32_mma;
 

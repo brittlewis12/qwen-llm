@@ -6,6 +6,147 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - V4.1 Fresh Appends: Publication, Masked Reindex and Dense Tails
+
+- Measured from **`229ba082`**, final code **`cf1abc0d`** rebased onto
+  **`156e7779`**. M5 Ultra only; same production four-shard
+  **DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS** and disk-only **IQ4_NL Engram**,
+  all **384 experts/top-6**, with the real mixed tensor types. Ordinary native Full planner: **4096-row ceiling**,
+  **169,404,710,912 B load / 5,292,032 B binding** in every Full timing arm. The serving
+  and nonzero-depth append path stays Full across the cold-CED landing. Logical
+  512/1300/2048-row appends each remain one chunk. No memory expansion.
+- Fresh-process census: real prefix, then first append plus full endpoint
+  copy; no append warmup or snapshot replay. Sampled GPU commands are within
+  **0.00-1.34%** of unsampled, with identical endpoint vectors. These are
+  ranking spans, not an additive partition: nested FFN and Engram/driver spans
+  overlap. All nonempty sampled stages have valid GPU timestamps.
+
+  | Rows / depth | Unsampled wall / GPU ms | FFN ms | Publication/index/selection ms | Attention prepare + finish ms | Attention tiles ms |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | 512 / 32768 | 608.564 / 554.457 | 307.149 | 51.846 | 114.437 | 57.866 |
+  | 512 / 131072 | 737.642 / 668.520 | 308.266 | 162.199 | 114.528 | 59.594 |
+  | 2048 / 32768 | 1808.836 / 1590.370 | 763.703 | 207.077 | 323.555 | 231.336 |
+  | 2048 / 131072 | 2299.460 / 2031.942 | 764.794 | 646.649 | 323.709 | 238.570 |
+
+  Routed gate/up plus down is **281-282 / 667-669 ms**, almost independent
+  of depth. **16.9869312 useful GFLOP/token** gives **30.8-30.9 / 52.0-52.1
+  TFLOP/s**, about **24 / 40%** of the 130-TFLOP/s half-tensor reference;
+  IQ unpack, barriers and padded expert tiles are outside useful FLOPs.
+  GPU commands account for **88-91%** of wall; CPU encode is **5.1 / 16 ms**.
+- Three default-on changes, each with **`=0` rollback**:
+  **`QWEN_V41_COMPRESS_LONG_ROWS`** batches complete-group owner publication
+  for ordinary **512..2048 rows at depth 32K+**. Head/tail rows remain scalar,
+  every query keeps its causal bound, ReusePublished stays excluded, and
+  **COMPRESS_ROWS=0** still vetoes batching. No new buffers. At 512 rows,
+  dispatches fall **8531 -> 2391** at 32K and **8665 -> 2525** at 128K;
+  2048 rows remove **24,572 dispatches**.
+  **`QWEN_V41_MASKED_REINDEX`** skips source-mask-rejected eight-key panels
+  in later F32 index layers at **128K+**, ordinary **512..2048 rows**, ratio 1,
+  index 32x128, top-512, candidate top-2048. Allowed keys retain their MMA
+  and head-sum order; selection excludes rejected zero scores. Same scratch,
+  precision and dispatch count. Grid/radix rollbacks still take precedence.
+  **`QWEN_V41_DENSE_WIDE_TAILS`** retains the existing guarded wide tensor
+  tile for unaligned **512..2048-row** appends in the qualified dense cohort;
+  **DENSE_WIDE=0** still vetoes it. No shader, padding or cache-threshold change.
+  Prefixes at 4096 rows retain their incumbent routes.
+- The causal cache witness caught an existing batched-compressor write race
+  under Metal shader validation: bulk copies wrote rotary coordinates which
+  another simdgroup then overwrote behind a threadgroup-only memory fence.
+  Bulk copies now stop before the rotary tail, giving each device coordinate
+  one writer. [Apple's synchronization guide](https://developer.apple.com/documentation/apple-silicon/porting-your-metal-code-to-apple-silicon)
+  distinguishes device and threadgroup fences. This safety fix stays in both
+  performance A/B arms. The witness checks prefix bytes, live pending pairs,
+  cache arithmetic, causal/masked IDs, cursor continuity and following decode,
+  under a priced **2 GiB CPU+Metal** cap.
+- Final corrected-shader publication+reindex A/B: same frozen binary,
+  independent fresh processes, unsampled **ABBA four/cell**, except **eight
+  predeclared arms at 2K/32K**. Both switches off versus on; dense-tail policy
+  is inactive at these aligned row counts. Gates: **>=1.02x / 10 ms at 32K**,
+  **>=1.04x / 25 ms at 128K**, positive chronological pairs (>=3/4 at 2K/32K).
+
+  | Rows / depth | Both off ms | Both on ms | Off/on |
+  | --- | ---: | ---: | ---: |
+  | 512 / 32768 | 588.953 | 570.861 | 1.03169x |
+  | 512 / 131072 | 704.677 | 635.668 | 1.10856x |
+  | 2048 / 32768 | 1685.335 | 1597.724 | 1.05483x |
+  | 2048 / 131072 | 2171.374 | 1886.742 | 1.15086x |
+
+  Every final cell clears its gate; all chronological pairs are positive.
+  Pre-fix incremental mask-only ABBA (publication on, source `b2270b89`)
+  is **1.06670x / 1.08237x** at 512/2048 rows and 128K, bitwise endpoints.
+  Earlier screens, including the anomalous 2K/32K host-stall arm, remain in
+  raw evidence; no samples are removed or ratios multiplied.
+- Dense-tail operator screen, canonical embedded tensor library: actual Q5_K
+  projection mix at **513/1025/1300/2047 rows**, weighted **1.249/1.381/1.428/
+  1.472x**, all output bits and poisoned tail guards intact. Fresh 1300/128K
+  whole-call kill **1395.727 -> 1306.621 ms, 1.06820x** cleared the declared
+  **1.05x** gate. Confirm publication/reindex fixed on, tail switch ABBA:
+
+  | Rows / depth | Tails off ms | Tails on ms | Off/on |
+  | --- | ---: | ---: | ---: |
+  | 1300 / 32768 | 1239.829 | 1145.650 | 1.08221x |
+  | 1300 / 131072 | 1394.136 | 1306.004 | 1.06748x |
+
+  Both chronological pairs are positive, each whole-call median clears
+  **1.05x**, and every full endpoint vector is bitwise equal.
+- Distribution qualification, full **129280-word** vectors, 128 teacher
+  targets/cell/policy: unseen prose/Rust suffix absent from the repeated
+  prefix, **512/32768** NLL **3.080133 -> 3.076784**, dNLL **-0.00334870**,
+  mean/max KL **0.00234482 / 0.01296203**; **2048/131073** NLL
+  **0.729328 -> 0.727759**, dNLL **-0.00156935**, mean/max KL
+  **0.00089671 / 0.01723670**. Both pass **|dNLL| <=0.005, mean KL <=0.01**;
+  first cell matches **122/128** argmaxes. Corrected-shader full-vector hashes
+  match the earlier quality runs separately for each policy. Supplementary
+  six code/prose cells (512/1024/1300/2048 rows, aligned/odd 32K/128K depths,
+  768 targets/policy) have mean KL <=**3.24e-6**, |dNLL| <=**8.67e-6**.
+  Mask-only corrected-shader **1300/131073** is bitwise over 128 targets;
+  prior three mask cells are bitwise over 384. Dense-tail unseen-suffix
+  **1300/32769 and 1300/131073** are bitwise over all **256 targets/policy**;
+  NLL **0.883868 / 0.730558**, dNLL = mean/max KL = **0**.
+- Frozen aligned probes **`f2cc1b61`**, tail probes **`f6754e79`**
+  (`research/v41-wide-tails`). Final code keeps those kernels/bindings;
+  differences are the default-on tail gate, pure geometry-test refactor,
+  profile-inventory expectations and rebases over M4/cold-CED policy work.
+  On qualified **`3b7e6c9f`** (`research/v41-next-3b-qualified`), API+shader
+  validation passes the causal publication
+  witness and existing wide-tile tail witness. Full
+  `cargo test --offline --locked --release -p qwen-llm --lib`:
+  **2469 passed, 0 failed, 739 ignored**, **122.31 s**.
+  Ordinary CLI on the same clean build, switches unset: **132372 input + 4
+  output tokens**, expected **`V41_OK`**, EOS. Telemetry confirms final chunk
+  **[131072,132372)** is **1300 rows**, Full execution with no fallback.
+  CPU contracts pass **`3b7e6c9f`**, tree
+  **`faed8847f619597bff828998ee362532efc644ba`**. Final rebase **`cf1abc0d`**
+  changes no bytes anywhere in `crates/qwen-llm` or `kernels` relative to that
+  qualified source. Rebased default cold-CED CLI: **38164 input + 4 output**,
+  expected **`V41_OK`**, EOS, **shrinking CED without fallback**, clean matching
+  build identity. Its final input encoder chunk is **[36864,38164)**, 1300 rows.
+  Rebased **`scripts/check-contracts.sh` passes `cf1abc0d`**, tree
+  **`ea9aee130078a50e57e0f24c0ef9919983c4d717`**.
+- After all three changes, fresh **1300/131072** sampled census: wall
+  **1288.028 ms**, GPU commands **1249.382 ms (97%)**, encode **4.509 ms**.
+  FFN parent **554.325 ms**; routed gate/up + down **489.093 ms (39% GPU)**,
+  about **45.15 useful TFLOP/s**, **35%** of the half-tensor reference.
+  Dense attention prepare/finish **241.231 ms (19%)**, index/selection
+  **244.172 ms (20%)**, attention tiles **161.495 ms (13%)**, attention
+  HC/Engram **36.449 ms**. Endpoint bits equal the unsampled tail-on screen;
+  stage children still overlap. Host planning is **0.020 ms**, scratch release
+  **1.470 ms**. The first Engram wait remains partly exposed; its reported
+  **56.099 ms** aggregate includes time overlapped with GPU work.
+  Stop here: the next substantial target is a new IQ dequant/load pipeline
+  and tighter expert-row/tile packing. A **25% cut in routed-kernel time** projects about **122 ms / 9.5%**
+  of this append, not a measured gain; budget roughly **1-2 engineering weeks**
+  for a prototype, scratch/admission work and numeric qualification. Decode
+  retains the prior census's quant/serialization limits; no new decode path.
+- All GPU packets use build.lock, nice 10 and canonical per-process Metal
+  leases; thermal pressure **0 before, throughout and after** retained arms.
+  Three late packets refused **before child start** at pressure 1; their logs
+  are retained. Resume followed a recorded **60 s at pressure 0**; only those
+  unstarted packets were retried, with no append warmup or discarded sample.
+  Commands, frozen sources/binary hashes, plans, every sample/failed check,
+  complete quality vectors and receipts on metagross:
+  `$HOME/qwen-runs/2026-11-07-v41-next`. No decode policy changes.
+
 ## 2026-11-07 - V4.1 Bounded-Window Replay: Not Promoted
 
 - **Shrinking CED remains the default.** The approximate bounded-window policy

@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - Flash-Next Dispatch Reduction, Stage 1: GDN Controls +1.7-1.9%
+
+- Base **`a28026ef`**; prototype **`eddc0aa3`**, operator/quality/CLI witness
+  **`6150189e`**, hardware scope **`ce782a7c`**. Same GSQ-RCO IQ3_S artifact.
+  **Default on for the M5 tensor-capable tier**, H2560/value48/HD128, F32
+  controls and aligned vector operands. **`QWEN_FN_GDN_CONTROLS_FUSED=0`**
+  restores separate beta/sigmoid, alpha and decay dispatches; the cooperative
+  F32 rollback remains effective. Preserve both incumbent reduction orders,
+  combine the independent projections, publish alpha and decay together.
+  Existing buffers/admission, no repacking or new operand precision.
+- Native 8K kill: 64 excluded warm steps, 32 targets x four restored-entry
+  repeats/arm, full logits copies, separate-process **ABBA**. M5 mean wall
+  **14.619533 -> 14.326308 ms/token (1.02047x)**; both pair ratios
+  **1.01887x / 1.02207x**. All sixteen complete-stream fingerprints match.
+  Dispatch census **1604 -> 1532**, with **36** new control calls replacing
+  three calls at each GDN site. Timing campaigns hold build lock + Metal lease,
+  nice 10; thermal pressure **0 before/after every arm**.
+- **Reject M4 rollout**: same ABBA is only **1.00474x**, pair ratios
+  **0.99439x / 1.01510x**. It misses the prespecified >=1% whole-token bar
+  and consistent-direction check despite identical outputs. M4 keeps incumbent.
+- Ordinary release CLI `suite --tg 64 --depth 0,8192,32768 --runs 2 --seed 1`,
+  separate off/on processes, model/row warmups, untimed fresh prefix fills,
+  full endpoint copies, matching build identities, thermal 0 around both arms:
+
+  | M5 depth | Off tok/s | Default tok/s | On/off | llama.cpp v0.9.0 tok/s | On/cpp |
+  | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 0 | 72.5809 | 73.9580 | 1.0190x | 65.9775 | 1.1210x |
+  | 8192 | 68.4960 | 69.6768 | 1.0172x | 64.5182 | 1.0800x |
+  | 32768 | 66.7451 | 67.8617 | 1.0167x | 61.7644 | 1.0987x |
+
+  Comparator is the unchanged exact-artifact `cd959bae99ff` reference from the
+  prior roofline entries; llama.cpp was not rerun for this incremental check.
+- Independent off/on teacher forcing: frozen code/prose, **128 targets/doc
+  at 0/8K/32K, 768 pairs**. All finite, every full-vocabulary vector bitwise
+  equal, **dNLL = mean/max KL = 0**, argmax **768/768**. The focused GPU
+  operator compares beta, alpha and decay against separate dispatches, including
+  offsets, output guards, cancellation, softplus extremes and fallback refusal.
+- Full M5 `cargo test --release -p qwen-llm --lib` on `6150189e`:
+  **2452 passed, 0 failed, 738 ignored**, 113.82 s. The scoped rollout adds
+  only the tensor-capability gate; numerical kernels are identical. Final
+  cumulative checks and raw-receipt archive are recorded with the later stages.
+  No merge; subsequent prototypes are not promoted by this stage's receipts.
+
 ## 2026-11-06 - Flash-Next Decode Census: Structural Gap, No New Rollout
 
 - Base **`9573228d`**, M5 Ultra and M4 Max, same **GSQ-RCO IQ3_S** artifact

@@ -6,7 +6,7 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLDevice;
 
 crate::env_flag!(
-    /// M512 Full append Engram/GPU overlap on M5 Ultra at depth 8K+, for the 40-layer 5120/2304/384/top-6 layout and Engram consumers at layers 1/14, enabled by default (fresh-process appends 1.09-1.14x, bitwise identical). Set to 0 for A/B or rollback, which retains preparation before one GPU command.
+    /// Full append Engram/GPU overlap on M5 Ultra for 512-2048 command rows at depth 32K+ (512 rows also at 8K+), with the 40-layer 5120/2304/384/top-6 layout and Engram consumers at layers 1/14. Enabled by default; 0 retains preparation before one GPU command for A/B or rollback. Logical chunk rows need not align to a tensor tile.
     default_on enabled,
     "QWEN_V41_ENGRAM_OVERLAP"
 );
@@ -24,8 +24,7 @@ pub(super) fn selected(model: &Forward<'_>, start: usize, rows: usize) -> bool {
         return value;
     }
     let c = &model.config;
-    rows == 512
-        && start >= 8192
+    ((rows == 512 && start >= 8192) || ((513..=2048).contains(&rows) && start >= 32768))
         && [
             c.hidden,
             c.intermediate,

@@ -61,7 +61,20 @@ fn segmented_prefill_matches_one_command_and_decode_bitwise() {
             model.layers[0].engram = model.layers[1].engram.take();
             model.engram_hash.layers[0].layer = 0;
         }
-        for (prefix, n) in [(0usize, 3usize), (5, 7), (0, 33)] {
+        for (prefix, n) in [
+            (0usize, 3usize),
+            (5, 7),
+            (0, 33),
+            (0, 512),
+            (5, 1024),
+            (0, 1300),
+            (5, 2048),
+        ] {
+            // The automatic cohort has consumers at 1/14; retain the small
+            // layer-zero cases without repeating the wide-row campaign there.
+            if at_zero && n >= 512 {
+                continue;
+            }
             let mut old = model.new_state(prefix + n + 5).unwrap();
             let mut new = model.new_state(prefix + n + 5).unwrap();
             let tokens = (0..prefix + n + 5)
@@ -79,7 +92,8 @@ fn segmented_prefill_matches_one_command_and_decode_bitwise() {
                 model.prefill(&mut new, &tokens[prefix..prefix + n], None)
             })
             .unwrap();
-            assert_eq!(a, b);
+            let bits = |v: Vec<f32>| v.into_iter().map(f32::to_bits).collect::<Vec<_>>();
+            assert_eq!(bits(a), bits(b), "prefix={prefix}, rows={n}");
             assert_eq!(
                 new.gpu_step.as_ref().unwrap().commands,
                 if at_zero { 2 } else { 3 }
@@ -88,8 +102,8 @@ fn segmented_prefill_matches_one_command_and_decode_bitwise() {
             assert_eq!(old.addresses, new.addresses);
             for &t in &tokens[prefix + n..] {
                 assert_eq!(
-                    model.step(&mut old, t, None).unwrap(),
-                    model.step(&mut new, t, None).unwrap()
+                    bits(model.step(&mut old, t, None).unwrap()),
+                    bits(model.step(&mut new, t, None).unwrap())
                 );
             }
         }

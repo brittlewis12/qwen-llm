@@ -12,7 +12,6 @@ use objc2_metal::{
     MTLResource, MTLSize,
 };
 
-mod hc_boundary;
 mod hc_device;
 #[path = "qwen4exp_hc_read.rs"]
 mod hc_read;
@@ -571,16 +570,12 @@ pub struct GatedResidualMetalRead<'scratch, 'resources, 'pass> {
     scratch: &'scratch mut GatedResidualMetalScratch,
 }
 
-impl<'scratch, 'resources, 'pass> GatedResidualMetalRead<'scratch, 'resources, 'pass> {
+impl GatedResidualMetalRead<'_, '_, '_> {
     pub fn mixed(&self) -> &MetalTensor {
         &self.scratch.mixed
     }
 
     pub fn encode_combine(self) -> Result<(), Qwen4ExpMetalError> {
-        self.encode_combine_inner()
-    }
-
-    fn encode_combine_inner(&self) -> Result<(), Qwen4ExpMetalError> {
         if self.injection_prepared {
             encode_hc_injection(
                 self.ctx,
@@ -627,62 +622,6 @@ impl<'scratch, 'resources, 'pass> GatedResidualMetalRead<'scratch, 'resources, '
             self.scratch.hidden_size,
         )?;
         Ok(())
-    }
-
-    /// Complete this branch and immediately read the next block from the same
-    /// residual. The consumed read owns the normalization scratch and encoder;
-    /// no caller-provided "already normalized" state can escape this boundary.
-    pub(crate) fn encode_combine_and_mix(
-        self,
-        next_output: &'resources MetalTensor,
-        eps: f32,
-        weights: GatedResidualMetalReadWeights<'_>,
-        next_inject: &'resources MetalTensor,
-    ) -> Result<Self, Qwen4ExpMetalError> {
-        validate_and_preflight_gated_residual_mix(
-            self.ctx,
-            self.hyper_input,
-            next_output,
-            eps,
-            weights,
-            next_inject,
-            self.scratch,
-        )?;
-        let prepared = self.injection_prepared
-            && hc_boundary::try_encode(
-                self.ctx,
-                self.encoder,
-                self.block_output,
-                &self.scratch.injection,
-                self.hyper_input,
-                weights.norm,
-                self.scratch,
-                eps,
-            )?;
-        if !prepared {
-            self.encode_combine_inner()?;
-        }
-        let injection_prepared = encode_read(
-            self.ctx,
-            self.encoder,
-            self.hyper_input,
-            eps,
-            weights,
-            self.scratch,
-            self.scratch.branch_count * self.scratch.hidden_size,
-            true,
-            Some(next_inject),
-            prepared,
-        )?;
-        Ok(Self {
-            injection_prepared,
-            ctx: self.ctx,
-            encoder: self.encoder,
-            hyper_input: self.hyper_input,
-            block_output: next_output,
-            inject: next_inject,
-            scratch: self.scratch,
-        })
     }
 }
 
@@ -825,7 +764,6 @@ pub fn encode_gated_residual_mix<'scratch, 'resources, 'pass>(
         hyper_hidden,
         true,
         Some(inject),
-        false,
     )?;
     Ok(GatedResidualMetalRead {
         injection_prepared,
@@ -1440,7 +1378,6 @@ pub(crate) fn encode_final_gated_residual_mix_with_policy<'scratch>(
         hyper_hidden,
         allow_hc_up_mix,
         None,
-        false,
     )?;
     Ok(GatedResidualMetalFinalRead { scratch })
 }
@@ -1541,20 +1478,17 @@ fn encode_read(
     hyper_hidden: usize,
     allow_hc_up_mix: bool,
     inject: Option<&MetalTensor>,
-    normalized_prepared: bool,
 ) -> Result<bool, Qwen4ExpMetalError> {
-    if !normalized_prepared {
-        encode_hc_norm(
-            ctx,
-            enc,
-            hyper_input,
-            weights.norm,
-            &scratch.normalized,
-            scratch.branch_count,
-            scratch.hidden_size,
-            eps,
-        )?;
-    }
+    encode_hc_norm(
+        ctx,
+        enc,
+        hyper_input,
+        weights.norm,
+        &scratch.normalized,
+        scratch.branch_count,
+        scratch.hidden_size,
+        eps,
+    )?;
     let fused = hc_read::try_encode(ctx, enc, weights.down, inject, scratch)?;
     if fused.is_none() {
         encode_mat_vec_dispatch(

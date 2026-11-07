@@ -24,7 +24,7 @@ inline void small_f32(constant small_f32_args &a,
 }
 
 [[max_total_threads_per_threadgroup(32)]]
-kernel void kernel_fn_roof6_f32_n4_m8_s1(constant small_f32_args &a [[buffer(0)]],device const float*w [[buffer(1)]],device const float*x [[buffer(2)]],device float*y [[buffer(3)]],uint group [[threadgroup_position_in_grid]]) { small_f32<8,8,1>(a,w,x,y,group); }
+kernel void kernel_fn_roof6_f32_n4_m8_s1(constant small_f32_args &a [[buffer(0)]],device const float*w [[buffer(1)]],device const float*x [[buffer(2)]],device float*y [[buffer(3)]],uint group [[threadgroup_position_in_grid]]) { small_f32<8,16,1>(a,w,x,y,group); }
 
 [[max_total_threads_per_threadgroup(32)]]
 kernel void kernel_fn_roof6_f32_n4_m16_s1(constant small_f32_args &a [[buffer(0)]],device const float*w [[buffer(1)]],device const float*x [[buffer(2)]],device float*y [[buffer(3)]],uint group [[threadgroup_position_in_grid]]) { small_f32<16,8,1>(a,w,x,y,group); }

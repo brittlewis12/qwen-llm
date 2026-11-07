@@ -746,7 +746,6 @@ fn dispatch_command(
         Cmd::DecodeBlockSliceTrace(a) => run_decode_block_slice_trace(a),
         Cmd::DecodeBlockSliceMarginSweep(a) => run_decode_block_slice_margin_sweep(a),
         Cmd::DecodeBlockSliceRealMargin(a) => run_decode_block_slice_real_margin(a),
-        Cmd::DecodeMoeRouterRepackCheck(a) => run_decode_moe_router_repack_check(a),
         Cmd::MoeDownMicro(a) => run_moe_down_micro(a),
         Cmd::MoeGateupMicro(a) => run_moe_gateup_micro(a),
         Cmd::MoeBatchSweep(a) => run_moe_batch_sweep(a),
@@ -1083,7 +1082,7 @@ fn run_gguf_storage_plan(args: GgufStoragePlanArgs) -> Result<()> {
         }
         GgufStorageEmbeddingPolicy::Disabled => false,
     };
-    let requests = model_weight_storage_requests(&model, native_embedding, args.router_f16)?;
+    let requests = model_weight_storage_requests(&model, native_embedding)?;
     let direct = requests
         .iter()
         .filter(|request| request.kind == ModelWeightStorageKind::Direct)
@@ -1225,7 +1224,7 @@ fn run_gguf_storage_plan(args: GgufStoragePlanArgs) -> Result<()> {
         "mtp_descriptor_bytes": mtp_descriptor_bytes,
         "native_quant_embedding": native_embedding,
         "embedding_policy": args.embedding_policy.label(),
-        "router_f16": args.router_f16,
+        "router_f16": false,
         "page_size": page_size,
         "required_alignment": args.alignment,
         "device_max_buffer_length": device_max_buffer_length,

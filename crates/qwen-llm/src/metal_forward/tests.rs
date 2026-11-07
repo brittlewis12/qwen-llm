@@ -544,28 +544,12 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
     assert!(parse_gguf_parallel_copy_mode(Some("enabled")).is_err());
     assert!(parse_gguf_parallel_copy_mode(Some("")).is_err());
 
-    let valid = |router_f16| {
-        validate_parallel_copy_policy(
-            GgufParallelCopyMode::ForcedCopy,
-            GgufNoCopyMode::Disabled,
-            false,
-            false,
-            router_f16,
-        )
-    };
-    assert!(valid(None).is_ok());
-    assert!(valid(Some("0")).is_ok());
-    assert!(valid(Some("false")).is_ok());
-    assert!(valid(Some("1")).is_err());
-    assert!(valid(Some("invalid")).is_err());
-
     assert!(
         validate_parallel_copy_policy(
             GgufParallelCopyMode::ForcedPread,
             GgufNoCopyMode::Disabled,
             false,
             false,
-            None,
         )
         .is_ok()
     );
@@ -575,7 +559,6 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
             GgufNoCopyMode::Forced,
             false,
             false,
-            None,
         )
         .is_err()
     );
@@ -585,7 +568,6 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
             GgufNoCopyMode::Forced,
             false,
             false,
-            None,
         )
         .is_err()
     );
@@ -595,7 +577,6 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
             GgufNoCopyMode::Disabled,
             true,
             false,
-            None,
         )
         .is_err()
     );
@@ -605,7 +586,6 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
             GgufNoCopyMode::Disabled,
             false,
             true,
-            None,
         )
         .is_err()
     );
@@ -615,7 +595,6 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
             GgufNoCopyMode::Forced,
             true,
             true,
-            Some("invalid"),
         )
         .is_ok()
     );
@@ -871,7 +850,7 @@ fn assert_generic_retained_contract(
     native_embedding: bool,
     contract: GenericRetainedContract,
 ) {
-    let expected = model_weight_storage_requests(model, native_embedding, false)
+    let expected = model_weight_storage_requests(model, native_embedding)
         .expect("generic fixture storage requests");
     let direct = expected
         .iter()
@@ -1248,7 +1227,7 @@ fn load_plan_matches_previous_schedules_when_fixtures_are_present() {
         let gguf = GgufFile::open(&path).expect("open fixture headers only");
         let model = Model::from_gguf(&gguf).expect("bind fixture descriptors");
         let expected =
-            model_weight_storage_requests(&model, true, false).expect("build fixture storage plan");
+            model_weight_storage_requests(&model, true).expect("build fixture storage plan");
         let identities = expected
             .iter()
             .map(expected_model_weight_identity)
@@ -1347,8 +1326,7 @@ fn assert_parallel_fixture_is_bit_exact(
     let tokens = [
         7734, 264, 12654, 709, 310, 12204, 279, 76938, 8240, 5199, 7638, 13,
     ];
-    let expected =
-        model_weight_storage_requests(&model, true, false).expect("parallel storage requests");
+    let expected = model_weight_storage_requests(&model, true).expect("parallel storage requests");
     let embedding_selection = resolve_native_quant_embedding(
         native_quant_embedding_mode(),
         native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),
@@ -1392,7 +1370,7 @@ fn assert_parallel_fixture_is_bit_exact(
     assert_eq!(plan.cuts, storage.plan.cuts);
     assert_eq!(plan.worker_bytes, storage.plan.worker_bytes);
 
-    let choices = ResolvedWeightLoadChoices::resolve(embedding_selection, false);
+    let choices = ResolvedWeightLoadChoices::resolve(embedding_selection);
     let (parallel_model, model_load_lines) = capture_metal_load_lines(|| {
         MetalModel::load_with_direct_storage(
             &ctx,
@@ -1483,8 +1461,8 @@ fn gguf_no_copy_split_a10b_resources_outlive_loader() {
         let model = Model::from_gguf(&gguf).expect("bind split A10B fixture");
         assert_eq!(gguf.shard_count(), 3);
         assert!(native_quant_embedding_storage_supported(&model));
-        let expected = model_weight_storage_requests(&model, true, false)
-            .expect("split A10B storage requests");
+        let expected =
+            model_weight_storage_requests(&model, true).expect("split A10B storage requests");
         let direct = expected
             .iter()
             .filter(|request| request.kind == ModelWeightStorageKind::Direct)
@@ -4857,8 +4835,7 @@ fn metal_27b_byte_ledger() {
     let before = g.revalidate_retained_shard_stamps().expect("source stamps");
     let m = Model::from_gguf(&g).expect("bind");
     let native_embedding = production_native_quant_embedding_storage_enabled(&m);
-    let router_f16 = moe_router_f16_enabled();
-    let plans = dense_iq_native_storage_comparison_plans(&m, native_embedding, router_f16)
+    let plans = dense_iq_native_storage_comparison_plans(&m, native_embedding)
         .expect("complete old/native storage plans");
     for (native, requests) in [false, true].into_iter().zip(plans) {
         let mut source_bytes = 0u64;
@@ -4893,7 +4870,7 @@ fn metal_27b_byte_ledger() {
             serde_json::json!({
                 "schema": "dense_iq_storage_plan_v1", "model": model_path,
                 "native_dense_iq": native, "native_embedding": native_embedding,
-                "router_f16": router_f16, "inventory_digest": model_weight_storage_inventory_digest(&requests),
+                "router_f16": false, "inventory_digest": model_weight_storage_inventory_digest(&requests),
                 "source_bytes": source_bytes, "logical_resident_bytes": resident_bytes,
                 "converted_count": converted_count, "converted_resident_bytes": converted_bytes,
                 "remaining_inflation_bytes": resident_bytes.saturating_sub(source_bytes),

@@ -1,3 +1,5 @@
+> Historical router-repack experiment: the F16 router load/planning choice and its CLI diagnostic were removed after neutral decode and regressive prefill results. Commands below apply to the archived builds.
+
 # v0.604 Dense-27B Topology-Preserving Parallel-Copied Loader Pilot
 
 Status: preregistered; implementation and every product child remain unrun.

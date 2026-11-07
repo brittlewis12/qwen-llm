@@ -101,7 +101,6 @@ crate::env_flag!(
 );
 crate::env_flag!(default_on decode_moe_grouped_finalizer_enabled, "QWEN_DECODE_MOE_GROUPED_FINALIZER");
 crate::env_flag!(default_on decode_attn_sigmoid_mul_enabled, "QWEN_DECODE_ATTN_SIGMOID_MUL");
-crate::env_flag!(default_off moe_router_f16_enabled, "QWEN_MOE_ROUTER_F16");
 crate::env_flag!(perf_ablation decode_gdn_noop_front_enabled, "QWEN_DECODE_GDN_NOOP_FRONT");
 crate::env_flag!(perf_ablation decode_gdn_noop_out_enabled, "QWEN_DECODE_GDN_NOOP_OUT");
 crate::env_flag!(default_on decode_gdn_fused_beta_proj_enabled, "QWEN_DECODE_GDN_FUSED_BETA_PROJ");
@@ -148,11 +147,10 @@ impl NativeQuantEmbeddingSelection {
 
 const GGUF_NO_COPY_ALIGNMENT: usize = 32;
 const PARALLEL_COPY_MAX_WORKERS: usize = 4;
-const PARALLEL_COPY_AUTO_OVERRIDE_ENVS: [&str; 7] = [
+const PARALLEL_COPY_AUTO_OVERRIDE_ENVS: [&str; 6] = [
     "QWEN_GGUF_NO_COPY",
     "QWEN_GGUF_NO_COPY_PREFAULT",
     "QWEN_NATIVE_QUANT_EMBED",
-    "QWEN_MOE_ROUTER_F16",
     "QWEN_MOE_IQ3_EXPERT_NATIVE",
     "QWEN_PREFILL_MOE_GROUPED_IQ3_GATEUP",
     "QWEN_PREFILL_ATTN_FUSED_QKV_G8",
@@ -265,7 +263,6 @@ fn resolve_gguf_storage_load_configuration_from_values(
     prefault: Option<&str>,
     native_embedding_present: bool,
     native_embedding_mode: NativeQuantEmbeddingMode,
-    router_f16: Option<&str>,
 ) -> Result<GgufStorageLoadConfiguration, MfError> {
     let no_copy_mode = parse_gguf_no_copy_mode(no_copy)?;
     let parallel_mode = parse_gguf_parallel_copy_mode(parallel_copy)?;
@@ -275,7 +272,6 @@ fn resolve_gguf_storage_load_configuration_from_values(
         no_copy_mode,
         prefault.is_some(),
         native_embedding_present,
-        router_f16,
     )?;
     validate_forced_storage_embedding_policy(parallel_mode, native_embedding_mode)?;
     if matches!(
@@ -306,27 +302,12 @@ pub fn resolve_gguf_storage_load_configuration() -> Result<GgufStorageLoadConfig
         Err(std::env::VarError::NotPresent) => NativeQuantEmbeddingMode::Auto,
         Err(std::env::VarError::NotUnicode(_)) => NativeQuantEmbeddingMode::Invalid,
     };
-    let router_f16 = match storage_environment_value("QWEN_MOE_ROUTER_F16") {
-        Ok(value) => value,
-        Err(_)
-            if parallel_copy.as_deref().is_some_and(|value| {
-                parse_gguf_parallel_copy_mode(Some(value))
-                    .is_ok_and(GgufParallelCopyMode::is_forced)
-            }) =>
-        {
-            return Err(MfError::LoadPolicy(
-                "QWEN_MOE_ROUTER_F16 is not valid Unicode with parallel copy".to_string(),
-            ));
-        }
-        Err(_) => None,
-    };
     resolve_gguf_storage_load_configuration_from_values(
         no_copy.as_deref(),
         parallel_copy.as_deref(),
         prefault.as_deref(),
         native_embedding_present,
         native_embedding_mode,
-        router_f16.as_deref(),
     )
 }
 
@@ -631,16 +612,14 @@ struct ResolvedStoragePolicy {
 #[derive(Clone, Copy, Debug)]
 struct ResolvedWeightLoadChoices {
     embedding_selection: NativeQuantEmbeddingSelection,
-    router_f16: bool,
     fused_qkv_g8: bool,
     dense_iq_native: bool,
 }
 
 impl ResolvedWeightLoadChoices {
-    fn resolve(embedding_selection: NativeQuantEmbeddingSelection, router_f16: bool) -> Self {
+    fn resolve(embedding_selection: NativeQuantEmbeddingSelection) -> Self {
         Self {
             embedding_selection,
-            router_f16,
             fused_qkv_g8: prefill_attn_fused_qkv_g8_enabled(),
             dense_iq_native: dense_iq_native_storage_enabled(),
         }
@@ -653,7 +632,6 @@ impl ResolvedWeightLoadChoices {
         model_weight_storage_requests_with_policy(
             model,
             self.embedding_selection.uses_native(),
-            self.router_f16,
             self.dense_iq_native,
         )
     }
@@ -736,8 +714,7 @@ pub fn model_weight_storage_requests_for_runtime<'a>(
             &model.token_embd.shape,
         ),
     );
-    ResolvedWeightLoadChoices::resolve(embedding_selection, moe_router_f16_enabled())
-        .storage_requests(model)
+    ResolvedWeightLoadChoices::resolve(embedding_selection).storage_requests(model)
 }
 
 pub fn runtime_retained_mapping_unsupported_reason(
@@ -1548,19 +1525,7 @@ impl<'a> MetalWeightLoader<'a> {
     }
 
     fn load_router_weight(&mut self, desc: &TensorDesc) -> Result<MetalTensor, MfError> {
-        if !self.choices.router_f16 {
-            return self.load_f32(desc);
-        }
-        let f32 = crate::codec::dequant_to_f32(desc, self.gguf.slice(desc))?;
-        let f16: Vec<half::f16> = f32.iter().copied().map(half::f16::from_f32).collect();
-        let tensor = MetalTensor::from_bytes(
-            self.ctx,
-            bytemuck::cast_slice(&f16),
-            desc.shape.clone(),
-            GgmlType::F16,
-        )?;
-        self.record_source(desc, SourceMaterialization::ConvertedF16, tensor.n_bytes())?;
-        Ok(tensor)
+        self.load_f32(desc)
     }
 
     fn load_moe_expert(&mut self, desc: &TensorDesc) -> Result<MetalTensor, MfError> {
@@ -1788,8 +1753,7 @@ impl MetalModel {
             ),
         );
         emit_native_quant_embedding_policy(model, embedding_selection);
-        let router_f16 = moe_router_f16_enabled();
-        let choices = ResolvedWeightLoadChoices::resolve(embedding_selection, router_f16);
+        let choices = ResolvedWeightLoadChoices::resolve(embedding_selection);
         let expected = choices.storage_requests(model)?;
         // Common Qwen weight-realization boundary: every public MetalModel load
         // path (load, load_with_options, additional-weight-bytes, and Runtime)
@@ -2076,8 +2040,7 @@ impl MetalModel {
             ),
         );
         emit_native_quant_embedding_policy(model, embedding_selection);
-        let router_f16 = moe_router_f16_enabled();
-        let choices = ResolvedWeightLoadChoices::resolve(embedding_selection, router_f16);
+        let choices = ResolvedWeightLoadChoices::resolve(embedding_selection);
         let expected_storage_requests = choices.storage_requests(model)?;
         let direct_storage = direct_storage_for_load(
             ctx,

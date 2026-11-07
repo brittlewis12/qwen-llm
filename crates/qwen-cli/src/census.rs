@@ -47,10 +47,6 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_PAGE_SIZE)]
     page_size: u64,
 
-    /// Model the opt-in F16 MoE router storage plan.
-    #[arg(long)]
-    router_f16: bool,
-
     /// Thinking policy used by the shared Qwen messages renderer.
     #[arg(long, value_enum, default_value_t = ThinkingPolicy::Auto)]
     thinking: ThinkingPolicy,
@@ -192,16 +188,9 @@ fn main() -> Result<()> {
         .with_context(|| format!("open GGUF {}", args.model.display()))?;
     let model = Model::from_gguf(&gguf).context("bind model")?;
     let native_embedding = production_native_quant_embedding_storage_enabled(&model);
-    let requests = model_weight_storage_requests(&model, native_embedding, args.router_f16)
+    let requests = model_weight_storage_requests(&model, native_embedding)
         .context("construct base-model storage request plan")?;
-    let loader = loader_census(
-        &gguf,
-        &model,
-        &requests,
-        native_embedding,
-        args.router_f16,
-        args.page_size,
-    )?;
+    let loader = loader_census(&gguf, &model, &requests, native_embedding, args.page_size)?;
 
     let conversations = if args.messages.is_empty() {
         Value::Null
@@ -217,7 +206,7 @@ fn main() -> Result<()> {
         )?
     };
 
-    let ignored_environment_overrides = ["QWEN_NATIVE_QUANT_EMBED", "QWEN_MOE_ROUTER_F16"]
+    let ignored_environment_overrides = ["QWEN_NATIVE_QUANT_EMBED"]
         .into_iter()
         .filter_map(|name| std::env::var_os(name).map(|_| name))
         .collect::<Vec<_>>();
@@ -274,7 +263,6 @@ fn loader_census(
     model: &Model<'_>,
     requests: &[ModelWeightStorageRequest<'_>],
     native_embedding: bool,
-    router_f16: bool,
     page_size: u64,
 ) -> Result<Value> {
     let mut shards = Vec::with_capacity(gguf.shards.len());
@@ -384,7 +372,7 @@ fn loader_census(
         "plan_semantics": "production_default_with_explicit_overrides",
         "embedding_policy_requested": "production_auto",
         "native_embedding_resolved": native_embedding,
-        "router_f16": router_f16,
+        "router_f16": false,
         "inventory_digest": model_weight_storage_inventory_digest(requests),
         "request_count": requests.len(),
         "logical_source_bytes": logical_source_bytes,

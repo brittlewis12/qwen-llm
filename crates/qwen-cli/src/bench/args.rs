@@ -110,8 +110,6 @@ pub(crate) enum Cmd {
     DecodeBlockSliceMarginSweep(DecodeBlockSliceMarginSweepArgs),
     /// Real-prompt summary sweep for block-slice replay route margins.
     DecodeBlockSliceRealMargin(DecodeBlockSliceRealMarginArgs),
-    /// Real-prompt top-k check for opt-in F16 MoE router repacks.
-    DecodeMoeRouterRepackCheck(DecodeMoeRouterRepackCheckArgs),
     /// Exact-shape MoE routed-down primitive microbench.
     MoeDownMicro(MoeDownMicroArgs),
     /// Exact-shape MoE routed gate/up primitive microbench.
@@ -256,9 +254,6 @@ pub(crate) struct GgufStoragePlanArgs {
     /// Token-embedding materialization policy used by the copied baseline.
     #[arg(long, value_enum, default_value = "production-auto")]
     pub(crate) embedding_policy: GgufStorageEmbeddingPolicy,
-    /// Price the opt-in F16 MoE router conversion.
-    #[arg(long)]
-    pub(crate) router_f16: bool,
     /// `text` or `json`.
     #[arg(short = 'o', long, value_enum, default_value = "json")]
     pub(crate) output: OutputFormat,
@@ -812,22 +807,6 @@ pub(crate) struct DecodeBlockSliceRealMarginArgs {
     /// Replay-margin threshold used by optional economics fallback modeling.
     #[arg(long, default_value = "0.0003")]
     pub(crate) margin_threshold: f32,
-}
-
-#[derive(Parser, Debug)]
-pub(crate) struct DecodeMoeRouterRepackCheckArgs {
-    /// Path to a GGUF file.
-    #[arg(short = 'm', long)]
-    pub(crate) model: PathBuf,
-    /// Read one or more real prompt token streams from text files.
-    #[arg(long)]
-    pub(crate) file: Vec<PathBuf>,
-    /// Number of prompt files to use as independent slots.
-    #[arg(long, default_value = "4")]
-    pub(crate) tokens: usize,
-    /// Prompt context positions to sweep.
-    #[arg(long = "context", value_delimiter = ',', default_value = "512")]
-    pub(crate) contexts: Vec<usize>,
 }
 
 #[derive(Parser, Debug)]

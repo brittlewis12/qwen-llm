@@ -10138,8 +10138,6 @@ pub fn encode_packed_verify_layer_major_inner_for(
                             n * kv_dim,
                         )?;
                         target_session.kv_n_pos[ai] = start_position as usize + n;
-                        let group = n_q / n_kv;
-
                         crate::metal::encode_attn_prefill_v4_g6_q2_c32_f32(
                             base.ctx,
                             &enc,

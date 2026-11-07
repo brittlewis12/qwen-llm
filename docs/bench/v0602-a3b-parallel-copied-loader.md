@@ -1,3 +1,5 @@
+> Historical router-repack experiment: the F16 router load/planning choice and its CLI diagnostic were removed after neutral decode and regressive prefill results. Commands below apply to the archived builds.
+
 > Historical loader experiment: owned-arena and page-rounded-copy selectors were removed. Commands below target the archived builds; ordinary copy/pread policies remain available.
 
 # v0.602 A3B Topology-Preserving Parallel-Copied Loader Pilot

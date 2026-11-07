@@ -225,14 +225,10 @@ pub(crate) fn moe_routed_down_decode_supported(down: GgmlType) -> bool {
 pub(super) fn push_moe_weight_requests<'a>(
     requests: &mut Vec<ModelWeightStorageRequest<'a>>,
     moe: &MoeFfn<'a>,
-    router_f16: bool,
     dense_iq_native: bool,
 ) -> Result<(), MfError> {
-    if router_f16 {
-        push_model_weight_request(requests, moe.gate_inp, ModelWeightStorageKind::ConvertedF16)?;
-    } else {
-        push_f32_weight_request(requests, moe.gate_inp)?;
-    }
+    push_f32_weight_request(requests, moe.gate_inp)?;
+
     push_native_weight_request_with_policy(
         requests,
         WeightRole::ExpertBank,

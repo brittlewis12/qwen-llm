@@ -1,3 +1,5 @@
+> Historical router-repack experiment: the F16 router load/planning choice and its CLI diagnostic were removed after neutral decode and regressive prefill results. Commands below apply to the archived builds.
+
 # v0.434 MoE Router F16 Repack
 
 Goal: test the do-less hypothesis that MoE router `gate_inp` is a realized

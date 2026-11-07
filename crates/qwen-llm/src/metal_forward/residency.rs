@@ -169,16 +169,9 @@ pub(super) fn validate_native_iq_matrix_storage(desc: &TensorDesc) -> Result<(),
 pub(crate) fn dense_iq_native_storage_comparison_plans<'a>(
     model: &Model<'a>,
     native_quant_embedding: bool,
-    router_f16: bool,
 ) -> Result<[Vec<ModelWeightStorageRequest<'a>>; 2], MfError> {
-    let old = model_weight_storage_requests_with_policy(
-        model,
-        native_quant_embedding,
-        router_f16,
-        false,
-    )?;
-    let native =
-        model_weight_storage_requests_with_policy(model, native_quant_embedding, router_f16, true)?;
+    let old = model_weight_storage_requests_with_policy(model, native_quant_embedding, false)?;
+    let native = model_weight_storage_requests_with_policy(model, native_quant_embedding, true)?;
     Ok([old, native])
 }
 
@@ -686,12 +679,10 @@ pub fn production_native_quant_embedding_storage_enabled(model: &Model<'_>) -> b
 pub fn model_weight_storage_requests<'a>(
     model: &Model<'a>,
     native_quant_embedding: bool,
-    router_f16: bool,
 ) -> Result<Vec<ModelWeightStorageRequest<'a>>, MfError> {
     model_weight_storage_requests_with_policy(
         model,
         native_quant_embedding,
-        router_f16,
         dense_iq_native_storage_enabled(),
     )
 }
@@ -699,7 +690,6 @@ pub fn model_weight_storage_requests<'a>(
 pub(crate) fn model_weight_storage_requests_with_policy<'a>(
     model: &Model<'a>,
     native_quant_embedding: bool,
-    router_f16: bool,
     dense_iq_native: bool,
 ) -> Result<Vec<ModelWeightStorageRequest<'a>>, MfError> {
     if native_quant_embedding && !native_quant_embedding_storage_supported(model) {
@@ -792,7 +782,7 @@ pub(crate) fn model_weight_storage_requests_with_policy<'a>(
                     dense_iq_native,
                 )?;
                 if let Some(moe) = gdn.ffn_moe.as_ref() {
-                    push_moe_weight_requests(&mut requests, moe, router_f16, dense_iq_native)?;
+                    push_moe_weight_requests(&mut requests, moe, dense_iq_native)?;
                 }
             }
             Block::Attn(attn) => {
@@ -843,7 +833,7 @@ pub(crate) fn model_weight_storage_requests_with_policy<'a>(
                 push_f32_weight_request(&mut requests, attn.q_norm)?;
                 push_f32_weight_request(&mut requests, attn.k_norm)?;
                 if let Some(moe) = attn.ffn_moe.as_ref() {
-                    push_moe_weight_requests(&mut requests, moe, router_f16, dense_iq_native)?;
+                    push_moe_weight_requests(&mut requests, moe, dense_iq_native)?;
                 }
             }
         }

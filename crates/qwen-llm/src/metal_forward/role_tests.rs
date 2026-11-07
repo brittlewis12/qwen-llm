@@ -275,8 +275,7 @@ fn dense_iq_role_storage_complete_plans_preserve_excluded_roles() {
         let bank = desc(dtype, &[256, 3, 2]);
         for kind in [ArchKind::Dense, ArchKind::Moe] {
             let model = model(&matrix, &vector, &bank, kind);
-            let [old, native] =
-                dense_iq_native_storage_comparison_plans(&model, false, false).unwrap();
+            let [old, native] = dense_iq_native_storage_comparison_plans(&model, false).unwrap();
             assert_eq!(old.len(), if kind == ArchKind::Dense { 28 } else { 38 });
             assert_eq!(old.len(), native.len());
             let mut changed = 0;
@@ -296,7 +295,7 @@ fn dense_iq_role_storage_complete_plans_preserve_excluded_roles() {
             // Tied embedding/head uses the same descriptor, but neither gains admission.
             assert_eq!(native[0].kind, ModelWeightStorageKind::ConvertedF32);
             assert_eq!(native[2].kind, ModelWeightStorageKind::ConvertedF32);
-            let embedding_plan = model_weight_storage_requests(&model, true, false);
+            let embedding_plan = model_weight_storage_requests(&model, true);
             if dtype == GgmlType::IQ1_M {
                 let requests = embedding_plan.unwrap();
                 assert_eq!(requests[0].kind, ModelWeightStorageKind::Direct);
@@ -452,13 +451,10 @@ fn dense_iq_role_storage_resolved_choices_freeze_policy() {
         let matrix = desc(dtype, &[256, 3]);
         let vector = desc(GgmlType::F32, &[256]);
         let model = model(&matrix, &vector, &matrix, ArchKind::Dense);
-        let [old, native] = dense_iq_native_storage_comparison_plans(&model, false, false).unwrap();
+        let [old, native] = dense_iq_native_storage_comparison_plans(&model, false).unwrap();
         for enabled in [false, true] {
             let choices = with_dense_iq_native_storage(enabled, || {
-                ResolvedWeightLoadChoices::resolve(
-                    NativeQuantEmbeddingSelection::AutoUnpromoted,
-                    false,
-                )
+                ResolvedWeightLoadChoices::resolve(NativeQuantEmbeddingSelection::AutoUnpromoted)
             });
             with_dense_iq_native_storage(!enabled, || {
                 assert_eq!(choices.dense_iq_native, enabled);
@@ -470,7 +466,7 @@ fn dense_iq_role_storage_resolved_choices_freeze_policy() {
                 assert_ne!(
                     model_weight_storage_inventory_digest(&frozen),
                     model_weight_storage_inventory_digest(
-                        &model_weight_storage_requests(&model, false, false).unwrap()
+                        &model_weight_storage_requests(&model, false).unwrap()
                     ),
                 );
                 for role in [
@@ -697,10 +693,7 @@ fn dense_iq_role_storage_private_loader_materializes_and_finishes() {
         let bank = gguf.tensors.iter().find(|t| t.name == "bank").unwrap();
         for native in [false, true] {
             let choices = with_dense_iq_native_storage(native, || {
-                ResolvedWeightLoadChoices::resolve(
-                    NativeQuantEmbeddingSelection::AutoUnpromoted,
-                    false,
-                )
+                ResolvedWeightLoadChoices::resolve(NativeQuantEmbeddingSelection::AutoUnpromoted)
             });
             with_dense_iq_native_storage(!native, || {
                 let mut loader =
@@ -758,7 +751,7 @@ fn dense_iq_role_storage_private_loader_materializes_and_finishes() {
         // Checked admission rejects malformed native geometry before recording any
         // materialization, even if the ambient scope would have selected F32.
         let choices = with_dense_iq_native_storage(true, || {
-            ResolvedWeightLoadChoices::resolve(NativeQuantEmbeddingSelection::AutoUnpromoted, false)
+            ResolvedWeightLoadChoices::resolve(NativeQuantEmbeddingSelection::AutoUnpromoted)
         });
         with_dense_iq_native_storage(false, || {
             let mut loader = MetalWeightLoader::new(&ctx, &gguf, DirectStorage::Copied, choices);
@@ -1116,7 +1109,7 @@ fn iq1_m_embedding_policy_is_role_and_fingerprint_scoped() {
         model.tied_embeddings = tied;
         for dense_iq_native in [false, true] {
             let choices = with_dense_iq_native_storage(dense_iq_native, || {
-                ResolvedWeightLoadChoices::resolve(selection, false)
+                ResolvedWeightLoadChoices::resolve(selection)
             });
             let requests = with_dense_iq_native_storage(!dense_iq_native, || {
                 choices.storage_requests(&model).unwrap()
@@ -1147,7 +1140,7 @@ fn iq1_m_embedding_policy_is_role_and_fingerprint_scoped() {
     let malformed = model(&bad_embedding, &vector, &bad_embedding, ArchKind::Dense);
     // Disable native projections: this rejection must come from the selected
     // embedding contract, not from a later projection sharing its descriptor.
-    assert!(model_weight_storage_requests_with_policy(&malformed, true, false, false).is_err());
+    assert!(model_weight_storage_requests_with_policy(&malformed, true, false).is_err());
 }
 
 #[test]
@@ -1158,7 +1151,7 @@ fn iq1_m_embedding_loader_and_gather_use_frozen_choice() {
     let gguf = GgufFile::open(&fixture.0).unwrap();
     let desc = gguf.tensors.iter().find(|t| t.name == "matrix").unwrap();
     let decoded = crate::codec::dequant_to_f32(desc, gguf.try_slice(desc).unwrap()).unwrap();
-    let choices = ResolvedWeightLoadChoices::resolve(NativeQuantEmbeddingSelection::Forced, false);
+    let choices = ResolvedWeightLoadChoices::resolve(NativeQuantEmbeddingSelection::Forced);
     let mut loader = MetalWeightLoader::new(&ctx, &gguf, DirectStorage::Copied, choices);
     let mut malformed = desc.clone();
     malformed.n_bytes -= 1;
@@ -1174,10 +1167,7 @@ fn iq1_m_embedding_loader_and_gather_use_frozen_choice() {
         (Invalid, true),
     ] {
         let choices = with_dense_iq_native_storage(false, || {
-            ResolvedWeightLoadChoices::resolve(
-                resolve_native_quant_embedding(mode, true, promoted),
-                false,
-            )
+            ResolvedWeightLoadChoices::resolve(resolve_native_quant_embedding(mode, true, promoted))
         });
         let native = choices.embedding_selection.uses_native();
         let embedding = with_dense_iq_native_storage(true, || {

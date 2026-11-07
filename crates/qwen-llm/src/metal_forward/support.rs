@@ -182,7 +182,6 @@ pub(super) fn validate_parallel_copy_policy(
     no_copy_mode: GgufNoCopyMode,
     prefault_present: bool,
     native_embedding_present: bool,
-    router_f16: Option<&str>,
 ) -> Result<(), MfError> {
     if !parallel_mode.is_forced() {
         return Ok(());
@@ -202,16 +201,7 @@ pub(super) fn validate_parallel_copy_policy(
             "parallel copy requires production-auto native embedding selection".to_string(),
         ));
     }
-    match router_f16 {
-        None => Ok(()),
-        Some(value) if crate::env_flag::env_value_falsy(value) => Ok(()),
-        Some(value) if crate::env_flag::env_value_truthy(value) => Err(MfError::LoadPolicy(
-            "QWEN_MOE_ROUTER_F16 is invalid with parallel copy".to_string(),
-        )),
-        Some(value) => Err(MfError::LoadPolicy(format!(
-            "invalid QWEN_MOE_ROUTER_F16 value {value:?} with parallel copy"
-        ))),
-    }
+    Ok(())
 }
 
 pub(super) fn hash_layout_bytes(hash: &mut u64, bytes: &[u8]) {

@@ -1192,6 +1192,10 @@ pub fn encode_mat_vec_iq3_s_nc2_f32(
 
 crate::env_flag!(default_on matvec_iq4_xs_fast_enabled, "QWEN_MATVEC_IQ4_XS_FAST");
 
+pub(crate) fn mat_vec_packet_quant_enabled(q6: bool, iq4: bool) -> bool {
+    (!q6 || q6k_r1_enabled()) && (!iq4 || matvec_iq4_xs_fast_enabled())
+}
+
 pub fn encode_mat_vec_iq4_xs_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,

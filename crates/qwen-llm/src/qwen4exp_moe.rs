@@ -1,5 +1,6 @@
 //! One-token Metal MoE execution for Qwen3.8-Flash-Next.
 
+mod projections;
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     MetalTimestampSampleBuffer, encode_axpy_rowwise_f32, encode_axpy_scalar_f32,
@@ -1628,7 +1629,8 @@ fn encode_singleton_step(
     let tag = capture.and_then(|layer| dispatch_census_tag_scope(|| format!("moe.native.{layer}")));
     #[cfg(test)]
     let child_router = crate::qwen4exp_child_profile::span(enc, "moe_router");
-    encode_singleton_router(ctx, enc, input, weights, buffers)?;
+    let projections = projections::try_encode(ctx, enc, input, weights, buffers)?;
+    encode_singleton_router(ctx, enc, input, weights, buffers, projections)?;
     #[cfg(test)]
     drop(child_router);
     #[cfg(test)]
@@ -1639,7 +1641,14 @@ fn encode_singleton_step(
     drop(child_routed);
     #[cfg(test)]
     let child_shared = crate::qwen4exp_child_profile::span(enc, "moe_shared");
-    encode_singleton_shared_gate_up(ctx, enc, input, weights, buffers)?;
+    if projections {
+        let n = weights.geometry.shared_intermediate_size as u64;
+        let gate = buffers.shared_output.view_subrange(0, vec![n]);
+        let up = buffers.shared_output.view_subrange(n, vec![n]);
+        encode_silu_mul_f32(ctx, enc, &gate, &up, buffers.shared_inner)?;
+    } else {
+        encode_singleton_shared_gate_up(ctx, enc, input, weights, buffers)?;
+    }
     encode_singleton_shared_down(ctx, enc, weights, buffers)?;
     #[cfg(test)]
     drop(child_shared);
@@ -1662,17 +1671,20 @@ fn encode_singleton_router(
     input: &MetalTensor,
     weights: Qwen4ExpMoeMetalWeights<'_>,
     buffers: Qwen4ExpMoeSingletonBuffers<'_>,
+    projections: bool,
 ) -> Result<(), Qwen4ExpMoeError> {
     let g = weights.geometry;
-    encode_mat_vec_dispatch(
-        ctx,
-        enc,
-        weights.router,
-        input,
-        buffers.router_logits,
-        g.hidden_size,
-        g.expert_count,
-    )?;
+    if !projections {
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.router,
+            input,
+            buffers.router_logits,
+            g.hidden_size,
+            g.expert_count,
+        )?;
+    }
     #[cfg(test)]
     let probed = singleton_observe::topk_native::encode_if_active(ctx, enc, buffers, g);
     #[cfg(not(test))]
@@ -1700,19 +1712,21 @@ fn encode_singleton_router(
             )?;
         }
     }
-    let gate = if gate_wide() {
-        encode_dot_sigmoid_wide_f32
-    } else {
-        encode_dot_sigmoid_f32
-    };
-    gate(
-        ctx,
-        enc,
-        weights.shared_router,
-        input,
-        buffers.shared_scale,
-        g.hidden_size,
-    )?;
+    if !projections {
+        let gate = if gate_wide() {
+            encode_dot_sigmoid_wide_f32
+        } else {
+            encode_dot_sigmoid_f32
+        };
+        gate(
+            ctx,
+            enc,
+            weights.shared_router,
+            input,
+            buffers.shared_scale,
+            g.hidden_size,
+        )?;
+    }
     Ok(())
 }
 
@@ -3336,6 +3350,7 @@ pub(crate) fn preflight(
     ctx: &MetalContext,
     weights: Qwen4ExpMoeMetalWeights<'_>,
 ) -> Result<(), Qwen4ExpMoeError> {
+    projections::preflight(ctx, weights)?;
     preflight_projection(ctx, weights.router.dtype)?;
     preflight_projection(ctx, weights.shared_down.dtype)?;
     let (routed_gate_kernel, routed_gate_threads) = match weights.routed_gate.dtype {

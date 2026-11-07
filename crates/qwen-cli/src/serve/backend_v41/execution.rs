@@ -169,6 +169,7 @@ impl Settings {
         )?;
         let mut checkpoint_cuts = Vec::new();
         let mut shared_cut = None;
+        let mut generation_cut = None;
         if let Some(boundaries) = boundaries {
             for (name, offset) in [
                 ("shared_prefix", boundaries.shared_prefix_end),
@@ -186,6 +187,9 @@ impl Settings {
                 }) {
                     if name == "shared_prefix" {
                         shared_cut = Some(prefix.len());
+                    }
+                    if name == "generation_header" {
+                        generation_cut = Some(prefix.len());
                     }
                     checkpoint_cuts.push(prefix.len());
                 } else {
@@ -264,6 +268,7 @@ impl Settings {
             ids,
             checkpoint_cuts,
             shared_cut,
+            generation_cut,
             conversation: super::super::checkpoint_ladder::conversation(request),
             ladder_attempted: false,
             ladder_capture_ms: 0.0,
@@ -341,6 +346,7 @@ impl Settings {
             .find(|&cut| cut > position)
             .unwrap_or(ids.len());
         if !run.ladder_attempted
+            && segment_end == run.generation_cut.unwrap_or(ids.len())
             && reuse.ladder_enabled()
             && ladder_candidate(position, endpoint, segment_end, max_rows)
             && let Some(conversation) = run.conversation
@@ -547,6 +553,7 @@ pub(super) struct Run<S> {
     pub(super) ids: Vec<u32>,
     checkpoint_cuts: Vec<usize>,
     shared_cut: Option<usize>,
+    generation_cut: Option<usize>,
     conversation: Option<super::super::checkpoint_ladder::Conversation>,
     ladder_attempted: bool,
     ladder_capture_ms: f64,

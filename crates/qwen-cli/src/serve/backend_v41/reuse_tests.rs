@@ -1447,4 +1447,53 @@ fn ladder_publishes_live_extensions_without_changing_calls_and_restores_a_fork()
         observations[0], observations[1],
         "capture never adds a prefill cut"
     );
+    // A large verified system prefix must not consume the one interior copy:
+    // the useful final existing body call is 12000 + 3*4096 = 24288.
+    let mut reuse = Recorded {
+        restore_checkpoint: true,
+        ..Default::default()
+    };
+    reuse.cache = reuse
+        .cache
+        .with_checkpoint_ladder(super::super::checkpoint_ladder::Config::testing(500000));
+    let prompt = format!("{}{}hh", "s".repeat(12000), "u".repeat(16000));
+    let boundaries = PromptBoundaries {
+        shared_prefix_end: Some(12000),
+        generation_header_start: Some(28000),
+    };
+    settings
+        .execute(
+            &request,
+            &prompt,
+            Some(boundaries),
+            &mut Sink,
+            |_, _, _| Ok(()),
+            |_| Ok(vec![]),
+            &mut reuse,
+            |state, ids, _, head| {
+                state.extend_from_slice(ids);
+                let mut logits = vec![0.; 257];
+                if head {
+                    logits[256] = 100.;
+                }
+                Ok(logits)
+            },
+            |_, _, _| panic!("EOS has no forward"),
+            || Duration::ZERO,
+        )
+        .unwrap();
+    let ids: Vec<u32> = prompt.bytes().map(u32::from).collect();
+    assert!(
+        reuse.cache.entry_for(&ids[..24288]).is_some(),
+        "last body call captured"
+    );
+    assert!(
+        reuse.cache.entry_for(&ids[..8192]).is_none(),
+        "system segment does not spend interior copy"
+    );
+    assert!(
+        reuse.cache.entry_for(&ids[..12000]).is_some(),
+        "existing shared snapshot preserved"
+    );
+    assert_eq!(reuse.cache.ladder_status().0, 1);
 }

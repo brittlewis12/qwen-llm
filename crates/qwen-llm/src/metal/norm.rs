@@ -1098,6 +1098,10 @@ pub fn encode_l2_norm_batched_f32(
 
 crate::env_flag!(default_on l2_pair_hd128_r4_enabled, "QWEN_L2_PAIR_HD128_R4");
 
+pub(crate) fn l2_pair_cooperative_enabled() -> bool {
+    l2_pair_hd128_r4_enabled()
+}
+
 #[cfg(test)]
 pub(crate) fn l2_pair_hd128_r4_enabled_for_test() -> bool {
     l2_pair_hd128_r4_enabled()

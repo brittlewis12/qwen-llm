@@ -623,7 +623,8 @@ pub fn encode_gated_delta_net<'a>(
         geometry.hidden_size,
         geometry.value_width(),
     )?;
-    if !controls::try_encode(ctx, enc, input, weights, workspace)? {
+    let fusion = controls::try_encode(ctx, enc, input, weights, workspace)?;
+    if fusion == controls::Fusion::Incumbent {
         encode_mat_vec_f32_sigmoid(
             ctx,
             enc,
@@ -651,15 +652,17 @@ pub fn encode_gated_delta_net<'a>(
             &workspace.decay,
         )?;
     }
-    encode_ssm_conv_silu_f32(
-        ctx,
-        enc,
-        &workspace.qkv,
-        &workspace.conv_state,
-        weights.conv,
-        &workspace.qkv_conv,
-        geometry.conv_width(),
-    )?;
+    if fusion != controls::Fusion::ControlsAndPrep {
+        encode_ssm_conv_silu_f32(
+            ctx,
+            enc,
+            &workspace.qkv,
+            &workspace.conv_state,
+            weights.conv,
+            &workspace.qkv_conv,
+            geometry.conv_width(),
+        )?;
+    }
 
     let query = workspace
         .qkv_conv
@@ -672,17 +675,19 @@ pub fn encode_gated_delta_net<'a>(
         (2 * geometry.key_width()) as u64,
         vec![geometry.value_width() as u64],
     );
-    encode_l2_norm_pair_batched_f32(
-        ctx,
-        enc,
-        &query,
-        &workspace.query_norm,
-        &key,
-        &workspace.key_norm,
-        geometry.key_heads,
-        geometry.head_dim,
-        geometry.eps,
-    )?;
+    if fusion != controls::Fusion::ControlsAndPrep {
+        encode_l2_norm_pair_batched_f32(
+            ctx,
+            enc,
+            &query,
+            &workspace.query_norm,
+            &key,
+            &workspace.key_norm,
+            geometry.key_heads,
+            geometry.head_dim,
+            geometry.eps,
+        )?;
+    }
     encode_gdn_step_decay_f32(
         ctx,
         enc,

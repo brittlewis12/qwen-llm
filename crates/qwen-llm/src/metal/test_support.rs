@@ -23,7 +23,7 @@ impl Drop for LeaseFixture {
     }
 }
 
-pub(super) fn offset_tensor(
+pub(crate) fn offset_tensor(
     ctx: &MetalContext,
     prefix: usize,
     data: &[u8],
@@ -50,7 +50,7 @@ pub(super) fn max_abs_diff_finite(label: &str, actual: &[f32], expected: &[f32])
     crate::compare::assert_max_abs_diff_f32(label, actual.iter(), expected.iter())
 }
 
-pub(super) fn tensor_f32_at_offset(tensor: &MetalTensor) -> Vec<f32> {
+pub(crate) fn tensor_f32_at_offset(tensor: &MetalTensor) -> Vec<f32> {
     let n = tensor.n_elements() as usize;
     unsafe {
         let src = tensor
@@ -74,7 +74,7 @@ pub(super) fn tensor_backing_bytes(tensor: &MetalTensor) -> Vec<u8> {
     }
 }
 
-pub(super) fn assert_offset_guards(tensor: &MetalTensor, prefix: usize, suffix: usize) {
+pub(crate) fn assert_offset_guards(tensor: &MetalTensor, prefix: usize, suffix: usize) {
     let bytes = tensor_backing_bytes(tensor);
     assert!(bytes[..prefix].iter().all(|&byte| byte == 0xA5));
     assert!(

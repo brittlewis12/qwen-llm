@@ -325,7 +325,7 @@ mod sparse;
 mod tensor;
 mod tensor_ops;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod testing;
 #[cfg(test)]
 mod tests;

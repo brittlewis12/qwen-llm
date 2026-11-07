@@ -3,8 +3,9 @@ using namespace metal;
 
 struct fn_f32_mma_args { uint k; uint n; uint m; };
 
-// Host qualifies complete M32/K128 tiles for HC injection (N4) and GDN
-// controls (N48). Keep both operands and accumulation in F32. Each SIMD group
+// Host qualifies complete M32/K128 tiles for HC injection (N4), GDN
+// controls (N48), and the M4 router (N512). Keep operands and accumulation
+// in F32. Each SIMD group
 // owns eight query rows; the four groups reuse one transposed weight panel.
 [[max_total_threads_per_threadgroup(128)]]
 kernel void kernel_qwen4exp_small_f32_mma_k128_s4(

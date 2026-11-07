@@ -315,13 +315,23 @@ crate::env_flag!(
     "QWEN_FN_PREFILL_PARALLEL_BUCKET"
 );
 
+crate::env_flag!(
+    /// Extend Flash-Next's stable parallel expert bucketing to non-tensor, pre-Apple10 devices at H2560/E512/top10 and the existing qualified 512..2048-row prefill widths. Same counts, ascending route-slot order, buffers and dispatch count. Set 0 for the M4 serial incumbent. QWEN_FN_PREFILL_PARALLEL_BUCKET=0 still disables both device routes; Apple10 devices retain their original qualification even with tensor operations disabled.
+    default_on m4_parallel_bucket_enabled,
+    "QWEN_FN_M4_PARALLEL_BUCKET"
+);
+
 fn parallel_bucket_qualified(
     ctx: &MetalContext,
     g: Qwen4ExpMoeMetalGeometry,
     tokens: usize,
 ) -> bool {
     parallel_bucket_enabled()
-        && ctx.tensor_ops_status().is_available()
+        && (ctx.tensor_ops_status().is_available()
+            || (m4_parallel_bucket_enabled()
+                && !ctx
+                    .device
+                    .supportsFamily(objc2_metal::MTLGPUFamily::Apple10)))
         && (g.hidden_size, g.expert_count, g.experts_per_token) == (2560, 512, 10)
         && crate::qwen4exp_prefill_tensor::rows_qualified(tokens)
         && pipeline_supports(ctx, "kernel_moe_route_bucket_slots_parallel_f32", 256, 0)
@@ -2529,6 +2539,18 @@ fn encode_packed_router_projection(
     if packed_router_e8p32_strict_qualified(ctx, geometry, weight.dtype, tokens) {
         if let Some(pipeline) = router_tensor::pipeline(ctx, geometry, weight.dtype, tokens)? {
             router_tensor::encode(enc, &pipeline, weight, input, output)?;
+            return Ok(());
+        }
+        if crate::qwen4exp_prefill_tensor::small_f32_mma::try_encode(
+            ctx,
+            enc,
+            weight,
+            input,
+            output,
+            geometry.hidden_size,
+            geometry.expert_count,
+            tokens,
+        )? {
             return Ok(());
         }
         encode_mat_mat_f32_router_e8p32_strict(

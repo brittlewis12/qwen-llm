@@ -3501,7 +3501,7 @@ fn encode_packed_step(
     if weights.index_key.dtype == GgmlType::BF16 {
         // These values become persistent selector state. Keep F32 activations
         // instead of taking the global BF16-activation mat-mat shortcut.
-        encode_mat_mat_bf16_f32(
+        if !crate::qwen4exp_prefill_tensor::qsa_index_mma::try_encode(
             ctx,
             enc,
             weights.index_key,
@@ -3510,7 +3510,18 @@ fn encode_packed_step(
             g.hidden_size,
             g.index_head_dim,
             tokens,
-        )?;
+        )? {
+            encode_mat_mat_bf16_f32(
+                ctx,
+                enc,
+                weights.index_key,
+                input,
+                &views.index_key_raw,
+                g.hidden_size,
+                g.index_head_dim,
+                tokens,
+            )?;
+        }
     } else {
         encode_mat_mat_dispatch_without_fewrow(
             ctx,
@@ -3738,7 +3749,7 @@ fn encode_packed_step(
             "qwen4exp.qsa.selected_index_projection".into()
         });
         if weights.index_query.dtype == GgmlType::BF16 {
-            encode_mat_mat_bf16_f32(
+            if !crate::qwen4exp_prefill_tensor::qsa_index_mma::try_encode(
                 ctx,
                 enc,
                 weights.index_query,
@@ -3747,7 +3758,18 @@ fn encode_packed_step(
                 g.hidden_size,
                 g.index_query_width(),
                 plan.selected_tokens,
-            )?;
+            )? {
+                encode_mat_mat_bf16_f32(
+                    ctx,
+                    enc,
+                    weights.index_query,
+                    &selected_input,
+                    &selected_raw_query,
+                    g.hidden_size,
+                    g.index_query_width(),
+                    plan.selected_tokens,
+                )?;
+            }
         } else {
             encode_mat_mat_dispatch_without_fewrow(
                 ctx,

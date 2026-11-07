@@ -2399,7 +2399,6 @@ pub(super) fn dflash_attn_two_range_readback(
     ctx_len: usize,
     noise_start_pos: u32,
     swa_window: u32,
-    online: bool,
     full_gqa_split4: bool,
     swa_split4: bool,
     noncausal_noise: bool,
@@ -2503,7 +2502,7 @@ pub(super) fn dflash_attn_two_range_readback(
                 noise_start_pos,
                 !noncausal_noise,
             )
-        } else if online {
+        } else {
             encode_dflash_attn_online_two_range_scan_f32(
                 ctx,
                 enc,
@@ -2522,26 +2521,6 @@ pub(super) fn dflash_attn_two_range_readback(
                 noise_start_pos,
                 swa_window,
                 ctx_scan_start,
-                !noncausal_noise,
-            )
-        } else {
-            encode_dflash_attn_two_range_f32(
-                ctx,
-                enc,
-                &q_t,
-                &k_ctx_t,
-                &v_ctx_t,
-                &k_noise_t,
-                &v_noise_t,
-                &pos_t,
-                &o_t,
-                n,
-                n_q_heads,
-                n_kv_heads,
-                head_dim,
-                ctx_len,
-                noise_start_pos,
-                swa_window,
                 !noncausal_noise,
             )
         }

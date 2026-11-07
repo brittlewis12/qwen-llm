@@ -33,10 +33,9 @@ use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTimestampSampleBuffer,
     encode_add_inplace_f32, encode_argmax_f32, encode_argmax_top2_f32, encode_axpy_rowwise_f32,
     encode_copy_offset_f32, encode_dflash_attn_f32, encode_dflash_attn_full_gqa_split4_f32,
-    encode_dflash_attn_online_two_range_scan_f32, encode_dflash_attn_two_range_f32,
-    encode_dflash2_conv_f32, encode_ffn_fused_swiglu_q4_k_mma8_f32, encode_fill_f32,
-    encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
-    encode_gdn_prep_packed_ckpt_f32, encode_gdn_prep_packed_f32,
+    encode_dflash_attn_online_two_range_scan_f32, encode_dflash2_conv_f32,
+    encode_ffn_fused_swiglu_q4_k_mma8_f32, encode_fill_f32, encode_gdn_decay_chain_batched_f32,
+    encode_gdn_decay_chain_f32, encode_gdn_prep_packed_ckpt_f32, encode_gdn_prep_packed_f32,
     encode_gdn_step_decay_packed_ckpt_f32, encode_gdn_step_decay_packed_f32,
     encode_gdn_step_decay_packed_prefill_f32, encode_get_rows_f32, encode_l2_norm_batched_f32,
     encode_l2_norm_pair_batched_f32, encode_mat_mat_f32_router_e8p32, encode_moe_down_iq4_xs_f32,
@@ -259,20 +258,6 @@ crate::env_flag!(default_on dense_packed_gdn_step_enabled, "QWEN_DENSE_GDN_STEP_
 crate::env_flag!(
     default_off mtp_attn_q2_shared_kv_enabled,
     "QWEN_MTP_ATTN_Q2_SHARED_KV"
-);
-// Generalizes the q2 shared-KV path to the whole verify chain
-// (2 <= n <= 8): one chunked attention call instead of one per row.
-// Equivalent by construction — the prefill v4 kernel masks with
-// `k_pos <= base_pos + row`, so row i sees exactly `[0, start+i]`, the
-// same set the per-token loop gives it; only FP summation order differs
-// (E1 tier, like the shipped q2 path).
-crate::env_flag!(
-    default_off mtp_attn_qn_shared_kv_enabled,
-    "QWEN_MTP_ATTN_QN_SHARED_KV"
-);
-crate::env_flag!(
-    default_off mtp_attn_qn_matrix_enabled,
-    "QWEN_MTP_ATTN_QN_MATRIX"
 );
 crate::env_flag!(
     default_on prefill_attn_gdn_scratch_overlay_enabled,
@@ -503,8 +488,6 @@ pub fn ensure_prompt_lookup_n8_supported(
 crate::env_flag!(default_on dflash_batched_proj_enabled, "QWEN_DFLASH_BATCHED_PROJ");
 
 crate::env_flag!(default_off dflash_trace_phase3_split_enabled, "QWEN_DFLASH_TRACE_PHASE3_SPLIT");
-
-crate::env_flag!(default_off dflash_attn_two_range_enabled, "QWEN_DFLASH_ATTN_TWO_RANGE");
 
 // DFlash 2 ablation: take each position's top-1 candidate instead of the
 // selector lattice walk (conv stays active). Isolates the selector's
@@ -835,8 +818,6 @@ crate::env_flag!(perf_ablation prefill_noop_moe_grouped_down_enabled, "QWEN_PREF
 crate::env_flag!(perf_ablation prefill_noop_moe_grouped_reduce_enabled, "QWEN_PREFILL_NOOP_MOE_GROUPED_REDUCE");
 
 crate::env_flag!(default_on prefill_moe_grouped_enabled, "QWEN_PREFILL_MOE_GROUPED");
-
-crate::env_flag!(default_off mtp_moe_verify_grouped_ffn_enabled, "QWEN_MTP_MOE_VERIFY_GROUPED_FFN");
 
 crate::env_flag!(default_on mtp_moe_verify_batched_mixer_enabled, "QWEN_MTP_MOE_VERIFY_BATCHED_MIXER");
 
@@ -7298,14 +7279,7 @@ fn resolve_prefill_scratch_plan_modes(
             && block_size == 2
             && head_dim == 256
             && attn_group == 6
-            && mtp_attn_q2_shared_kv_enabled())
-        // V1: same packs, any verify chain length up to the pack's row
-        // capacity (ATTN_PREFILL_V4_PACKED_ROWS = 8, which is what the
-        // non-`block_size == 2` sizing branch already allocates).
-        || (include_spec_packs
-            && head_dim == 256
-            && attn_group == 6
-            && mtp_attn_qn_shared_kv_enabled());
+            && mtp_attn_q2_shared_kv_enabled());
     let enable_attn_fused_qkv_g8 = matches!(
         std::env::var("QWEN_PREFILL_ATTN_FUSED_QKV_G8").as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
@@ -9201,243 +9175,6 @@ fn encode_packed_verify_inner_impl(
 // encode_packed_verify_layer_major_inner — H5.3b.4-5 layer-major path
 // =============================================================================
 
-fn encode_packed_verify_moe_grouped_ffn_after_mixer(
-    caller: PackedVerifyCaller,
-    base: &MetalForward<'_>,
-    enc: &KernelEncoder,
-    block: &MetalBlock,
-    x_pack: &MetalTensor,
-    h_pack: &MetalTensor,
-    layer_scratch: &MetalDFlashLayerMajorScratch,
-    n: usize,
-    h: usize,
-    layer: u32,
-) -> Result<bool, DFlashError> {
-    let arch = &base.model.arch;
-    let (ffn_gate, ffn_up, ffn_down, moe) = match block {
-        MetalBlock::Gdn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
-        MetalBlock::Attn(b) => (&b.ffn_gate, &b.ffn_up, &b.ffn_down, b.ffn_moe.as_ref()),
-    };
-    let Some(moe) = moe else {
-        return Ok(false);
-    };
-
-    let topk = arch.expert_used_count.min(arch.expert_count) as usize;
-    let n_expert = arch.expert_count as usize;
-    let f_exp = arch.expert_feed_forward_length as usize;
-    let f_shared = arch.expert_shared_feed_forward_length as usize;
-    if topk == 0
-        || topk > 16
-        || n_expert == 0
-        || n_expert > 256
-        || !h.is_multiple_of(256)
-        || !f_exp.is_multiple_of(256)
-    {
-        return Ok(false);
-    }
-
-    // Specialized kernels are tried first inside the encode helpers; every
-    // dtype with a generic instantiation is eligible.
-    if prefill_moe_grouped_ineligibility(
-        moe.gate_exps.dtype,
-        moe.up_exps.dtype,
-        moe.down_exps.dtype,
-        h,
-        f_exp,
-    )
-    .is_some()
-    {
-        return Ok(false);
-    }
-    if !(prefill_moe_packed_route_enabled()
-        && moe_router_shared_ffn_batching_eligible(moe.gate_inp.dtype)
-        && moe.gate_inp_shexp.dtype == GgmlType::F32)
-    {
-        return Ok(false);
-    }
-    let packed_shared_path = f_shared == 0
-        || (prefill_moe_packed_shared_enabled()
-            && moe_router_shared_ffn_batching_eligible(ffn_gate.dtype)
-            && moe_router_shared_ffn_batching_eligible(ffn_up.dtype)
-            && moe_router_shared_ffn_batching_eligible(ffn_down.dtype));
-    if !packed_shared_path {
-        return Ok(false);
-    }
-
-    let moe_topk_idx_pack = layer_scratch
-        .moe_topk_idx_pack
-        .view_subrange(0, vec![(n * topk) as u64]);
-    let moe_router_probs_pack = layer_scratch
-        .moe_router_probs_pack
-        .view_subrange(0, vec![(n * n_expert) as u64]);
-    let moe_topk_weight_pack = layer_scratch
-        .moe_topk_weight_pack
-        .view_subrange(0, vec![(n * topk) as u64]);
-    let moe_shared_gate_pack = layer_scratch
-        .moe_shared_gate_pack
-        .view_subrange(0, vec![n as u64]);
-    let moe_group_count_pack = layer_scratch
-        .moe_group_count_pack
-        .view_subrange(0, vec![n_expert as u64]);
-    let moe_group_ids_pack = layer_scratch
-        .moe_group_ids_pack
-        .view_subrange(0, vec![(n_expert * n) as u64]);
-    let moe_group_inner_pack = layer_scratch
-        .moe_group_inner_pack
-        .view_subrange(0, vec![(n * topk * f_exp) as u64]);
-    let moe_group_out_pack = layer_scratch
-        .moe_group_out_pack
-        .view_subrange(0, vec![(n * topk * h) as u64]);
-    let ffn_delta_pack = layer_scratch
-        .mixer_out_pack
-        .view_subrange(0, vec![(n * h) as u64]);
-    let shared_gate_pack = layer_scratch
-        .moe_shared_ffn_gate_pack
-        .view_subrange(0, vec![(n * f_shared) as u64]);
-    let shared_up_pack = layer_scratch
-        .moe_shared_ffn_up_pack
-        .view_subrange(0, vec![(n * f_shared) as u64]);
-    let shared_inner_pack = layer_scratch
-        .moe_shared_ffn_inner_pack
-        .view_subrange(0, vec![(n * f_shared) as u64]);
-    let shared_out_pack = layer_scratch
-        .moe_shared_ffn_out_pack
-        .view_subrange(0, vec![(n * h) as u64]);
-
-    encode_moe_route_logits_dispatch(
-        base.ctx,
-        enc,
-        &moe.gate_inp,
-        h_pack,
-        &moe_router_probs_pack,
-        h,
-        n_expert,
-        n,
-    )?;
-    encode_fill_f32(base.ctx, enc, &moe_group_count_pack, 0.0)?;
-    crate::metal::encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32_status(
-        base.ctx,
-        enc,
-        &moe_router_probs_pack,
-        &moe.gate_inp_shexp,
-        h_pack,
-        &moe_topk_idx_pack,
-        &moe_topk_weight_pack,
-        &moe_shared_gate_pack,
-        &moe_group_count_pack,
-        &moe_group_ids_pack,
-        &layer_scratch
-            .moe_route_status_pack
-            .view_subrange(0, vec![n as u64]),
-        n_expert,
-        topk,
-        h,
-        n,
-    )?;
-    encode_prefill_moe_grouped_swiglu(
-        base.ctx,
-        enc,
-        moe,
-        h_pack,
-        &moe_group_count_pack,
-        &moe_group_ids_pack,
-        &moe_group_inner_pack,
-        h,
-        f_exp,
-        n_expert,
-        topk,
-        n,
-        prefill_moe_grouped_q4_n32_all_enabled(arch, n),
-        prefill_moe_hot_expert_min_slots(),
-        false,
-    )?;
-    encode_prefill_moe_grouped_down(
-        base.ctx,
-        enc,
-        &moe.down_exps,
-        &moe_group_inner_pack,
-        &moe_group_count_pack,
-        &moe_group_ids_pack,
-        &moe_group_out_pack,
-        f_exp,
-        h,
-        n_expert,
-        n,
-        layer,
-        false,
-    )?;
-    crate::metal::encode_moe_weighted_sum_packed_f32(
-        base.ctx,
-        enc,
-        &moe_group_out_pack,
-        &moe_topk_weight_pack,
-        &ffn_delta_pack,
-        h,
-        topk,
-        n,
-    )?;
-
-    if f_shared > 0 {
-        encode_verify_mat_mat(
-            caller,
-            base.ctx,
-            enc,
-            ffn_gate,
-            h_pack,
-            &shared_gate_pack,
-            h,
-            f_shared,
-            n,
-        )?;
-        encode_verify_mat_mat(
-            caller,
-            base.ctx,
-            enc,
-            ffn_up,
-            h_pack,
-            &shared_up_pack,
-            h,
-            f_shared,
-            n,
-        )?;
-        encode_silu_mul_f32(
-            base.ctx,
-            enc,
-            &shared_gate_pack,
-            &shared_up_pack,
-            &shared_inner_pack,
-        )?;
-        crate::half_telemetry::record(
-            base.ctx,
-            enc,
-            crate::half_telemetry::SITE_QWEN35MOE_SHARED_DOWN,
-            layer,
-            &shared_inner_pack,
-        );
-        encode_verify_mat_mat(
-            caller,
-            base.ctx,
-            enc,
-            ffn_down,
-            &shared_inner_pack,
-            &shared_out_pack,
-            f_shared,
-            h,
-            n,
-        )?;
-        encode_axpy_rowwise_f32(
-            base.ctx,
-            enc,
-            &shared_out_pack,
-            &moe_shared_gate_pack,
-            &ffn_delta_pack,
-            h,
-            n,
-        )?;
-    }
-    encode_add_inplace_f32(base.ctx, enc, x_pack, &ffn_delta_pack)?;
-    Ok(true)
-}
 //
 // Per H5 plan rev 6 §H5.3b.4-5 (codex layer-major partner session, v0.65):
 // rewrite packed_verify so that each layer's batched-batchable kernels
@@ -9781,57 +9518,23 @@ pub fn encode_packed_verify_layer_major_inner_for(
                     blit.end();
                 }
             }
-            let ffn_batched = if mtp_moe_verify_grouped_ffn_enabled() {
+
+            for n_idx in 0..n {
                 let enc = KernelEncoder::begin(&cmd_buf);
-                let done = encode_packed_verify_moe_grouped_ffn_after_mixer(
-                    caller,
-                    base,
+                encode_copy_offset_f32(base.ctx, &enc, &x_pack, n_idx * h, &target_session.x, h)?;
+                encode_copy_offset_f32(base.ctx, &enc, &h_pack, n_idx * h, &target_session.h, h)?;
+                base.encode_moe_ffn_after_mixer_by_index(&enc, il, target_session)?;
+                encode_scatter_offset_f32(
+                    base.ctx,
                     &enc,
-                    block,
+                    &target_session.x,
                     &x_pack,
-                    &h_pack,
-                    layer_scratch,
-                    n,
+                    n_idx * h,
                     h,
-                    il as u32,
                 )?;
                 enc.end();
-                emit_mtp_verify_count_phase(trace_counts, il as isize, "moe", "ffn_grouped");
-                done
-            } else {
-                false
-            };
-            if !ffn_batched {
-                for n_idx in 0..n {
-                    let enc = KernelEncoder::begin(&cmd_buf);
-                    encode_copy_offset_f32(
-                        base.ctx,
-                        &enc,
-                        &x_pack,
-                        n_idx * h,
-                        &target_session.x,
-                        h,
-                    )?;
-                    encode_copy_offset_f32(
-                        base.ctx,
-                        &enc,
-                        &h_pack,
-                        n_idx * h,
-                        &target_session.h,
-                        h,
-                    )?;
-                    base.encode_moe_ffn_after_mixer_by_index(&enc, il, target_session)?;
-                    encode_scatter_offset_f32(
-                        base.ctx,
-                        &enc,
-                        &target_session.x,
-                        &x_pack,
-                        n_idx * h,
-                        h,
-                    )?;
-                    enc.end();
-                }
             }
+
             for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
                 if lid as usize == il {
                     let enc = KernelEncoder::begin(&cmd_buf);
@@ -10450,21 +10153,6 @@ pub fn encode_packed_verify_layer_major_inner_for(
                             && tile0 == 32
                             && tile1 == 32)
                             .then_some(nwg1)
-                    } else if mtp_attn_qn_shared_kv_enabled()
-                        && (2..=ATTN_PREFILL_V4_PACKED_ROWS).contains(&n)
-                        && shared_kv_shape_ok
-                    {
-                        // One call covers every row, so only the final
-                        // extent's schedule matters. The c32 kernel is a
-                        // fixed template: require the heuristic to agree
-                        // that 32 is the right tile (same guard the q2
-                        // path uses). nwg follows the retuned selector
-                        // (2026-08-22: 128/512 tiers for group 4|6); the
-                        // encoder and partials support up to
-                        // ATTN_V4_MAX_NWG.
-                        let n_pos = start_position as usize + n;
-                        (crate::metal::attn_v4_choose_tile_c(n_pos, 6) == 32)
-                            .then(|| crate::metal::attn_v4_choose_nwg(n_pos, 6))
                     } else {
                         None
                     };
@@ -10547,78 +10235,22 @@ pub fn encode_packed_verify_layer_major_inner_for(
                         )?;
                         target_session.kv_n_pos[ai] = start_position as usize + n;
                         let group = n_q / n_kv;
-                        let matrix_mode = mtp_attn_qn_matrix_enabled()
-                            && layer_scratch.scratch_plan.modes.enable_attn_matrix
-                            && !layer_scratch.scratch_plan.modes.attn_matrix_online
-                            && layer_scratch.attn_matrix_max_pos as usize
-                                >= start_position as usize + n;
-                        if matrix_mode {
-                            // Tier-3 matrix reader: KQ (MMA, per-row causal)
-                            // -> softmax -> direct-V KQV. No V transpose.
-                            let n_pos = start_position as usize + n;
-                            let scores = layer_scratch
-                                .attn_matrix_scores_pack
-                                .view_subrange(0, vec![(n * n_q * n_pos) as u64]);
-                            crate::metal::encode_attn_matrix_kq_f32(
-                                base.ctx,
-                                &enc,
-                                &attn_q_normed_pack,
-                                &target_session.kv_k[ai],
-                                &scores,
-                                n,
-                                start_position as usize,
-                                n_pos,
-                                n_kv * head_dim,
-                                n_q,
-                                n_kv,
-                                group,
-                                head_dim,
-                                true,
-                            )?;
-                            crate::metal::encode_attn_matrix_softmax_f32(
-                                base.ctx,
-                                &enc,
-                                &scores,
-                                n,
-                                start_position as usize,
-                                n_pos,
-                                n_q,
-                                n_kv,
-                                group,
-                                head_dim,
-                            )?;
-                            crate::metal::encode_attn_matrix_kqv_direct_v_f32(
-                                base.ctx,
-                                &enc,
-                                &scores,
-                                &target_session.kv_v[ai],
-                                &attn_o_pack,
-                                n,
-                                start_position as usize,
-                                n_pos,
-                                n_kv * head_dim,
-                                n_q,
-                                n_kv,
-                                group,
-                                head_dim,
-                                true,
-                            )?;
-                        } else {
-                            crate::metal::encode_attn_prefill_v4_g6_q2_c32_f32(
-                                base.ctx,
-                                &enc,
-                                &attn_q_normed_pack,
-                                &target_session.kv_k[ai],
-                                &target_session.kv_v[ai],
-                                &layer_scratch.attn_prefill_v4_o_partial_pack,
-                                &layer_scratch.attn_prefill_v4_ml_partial_pack,
-                                &attn_o_pack,
-                                n,
-                                start_position as usize,
-                                nwg,
-                                true,
-                            )?;
-                        }
+
+                        crate::metal::encode_attn_prefill_v4_g6_q2_c32_f32(
+                            base.ctx,
+                            &enc,
+                            &attn_q_normed_pack,
+                            &target_session.kv_k[ai],
+                            &target_session.kv_v[ai],
+                            &layer_scratch.attn_prefill_v4_o_partial_pack,
+                            &layer_scratch.attn_prefill_v4_ml_partial_pack,
+                            &attn_o_pack,
+                            n,
+                            start_position as usize,
+                            nwg,
+                            true,
+                        )?;
+
                         enc.end();
                     } else {
                         // The generic path appends and attends one causal row at
@@ -10869,85 +10501,64 @@ pub fn encode_packed_verify_layer_major_inner_for(
                 && n_expert <= 256
                 && router_batching_eligible
                 && moe.gate_inp_shexp.dtype == GgmlType::F32;
-            let ffn_batched = if mtp_moe_verify_grouped_ffn_enabled() {
-                let enc = KernelEncoder::begin(&cmd_buf);
-                let done = encode_packed_verify_moe_grouped_ffn_after_mixer(
-                    caller,
-                    base,
-                    &enc,
-                    block,
-                    &x_pack,
-                    &h_pack,
-                    layer_scratch,
-                    n,
-                    h,
-                    il as u32,
-                )?;
-                enc.end();
-                emit_mtp_verify_count_phase(trace_counts, il as isize, "moe", "ffn_grouped");
-                done
+
+            let packed_route = if use_batched_route {
+                let router_probs_pack = layer_scratch
+                    .moe_router_probs_pack
+                    .view_subrange(0, vec![(n * n_expert) as u64]);
+                let topk_idx_pack = layer_scratch
+                    .moe_topk_idx_pack
+                    .view_subrange(0, vec![(n * topk) as u64]);
+                let topk_weight_pack = layer_scratch
+                    .moe_topk_weight_pack
+                    .view_subrange(0, vec![(n * topk) as u64]);
+                let shared_gate_pack = layer_scratch
+                    .moe_shared_gate_pack
+                    .view_subrange(0, vec![n as u64]);
+                {
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    encode_moe_route_logits_dispatch(
+                        base.ctx,
+                        &enc,
+                        &moe.gate_inp,
+                        &h_pack,
+                        &router_probs_pack,
+                        h,
+                        n_expert,
+                        n,
+                    )?;
+                    encode_topk_logits_softmax_dot_sigmoid_packed_f32_status(
+                        base.ctx,
+                        &enc,
+                        &router_probs_pack,
+                        &moe.gate_inp_shexp,
+                        &h_pack,
+                        &topk_idx_pack,
+                        &topk_weight_pack,
+                        &shared_gate_pack,
+                        &layer_scratch
+                            .moe_route_status_pack
+                            .view_subrange(0, vec![n as u64]),
+                        n_expert,
+                        topk,
+                        h,
+                        n,
+                    )?;
+                    enc.end();
+                }
+                emit_mtp_verify_count_phase(trace_counts, il as isize, "moe", "route_pack");
+                Some((topk_idx_pack, topk_weight_pack, shared_gate_pack))
             } else {
-                false
+                None
             };
-            if !ffn_batched {
-                let packed_route = if use_batched_route {
-                    let router_probs_pack = layer_scratch
-                        .moe_router_probs_pack
-                        .view_subrange(0, vec![(n * n_expert) as u64]);
-                    let topk_idx_pack = layer_scratch
-                        .moe_topk_idx_pack
-                        .view_subrange(0, vec![(n * topk) as u64]);
-                    let topk_weight_pack = layer_scratch
-                        .moe_topk_weight_pack
-                        .view_subrange(0, vec![(n * topk) as u64]);
-                    let shared_gate_pack = layer_scratch
-                        .moe_shared_gate_pack
-                        .view_subrange(0, vec![n as u64]);
-                    {
-                        let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_moe_route_logits_dispatch(
-                            base.ctx,
-                            &enc,
-                            &moe.gate_inp,
-                            &h_pack,
-                            &router_probs_pack,
-                            h,
-                            n_expert,
-                            n,
-                        )?;
-                        encode_topk_logits_softmax_dot_sigmoid_packed_f32_status(
-                            base.ctx,
-                            &enc,
-                            &router_probs_pack,
-                            &moe.gate_inp_shexp,
-                            &h_pack,
-                            &topk_idx_pack,
-                            &topk_weight_pack,
-                            &shared_gate_pack,
-                            &layer_scratch
-                                .moe_route_status_pack
-                                .view_subrange(0, vec![n as u64]),
-                            n_expert,
-                            topk,
-                            h,
-                            n,
-                        )?;
-                        enc.end();
-                    }
-                    emit_mtp_verify_count_phase(trace_counts, il as isize, "moe", "route_pack");
-                    Some((topk_idx_pack, topk_weight_pack, shared_gate_pack))
-                } else {
-                    None
-                };
-                if mtp_moe_verify_row_views_enabled() {
-                    for n_idx in 0..n {
-                        let row_x = x_pack.view_subrange((n_idx * h) as u64, vec![h as u64]);
-                        let row_h = h_pack.view_subrange((n_idx * h) as u64, vec![h as u64]);
-                        let old_x = std::mem::replace(&mut target_session.x, row_x);
-                        let old_h = std::mem::replace(&mut target_session.h, row_h);
-                        let route_old = if let Some((idx_pack, weight_pack, shared_pack)) =
-                            packed_route.as_ref()
-                        {
+            if mtp_moe_verify_row_views_enabled() {
+                for n_idx in 0..n {
+                    let row_x = x_pack.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                    let row_h = h_pack.view_subrange((n_idx * h) as u64, vec![h as u64]);
+                    let old_x = std::mem::replace(&mut target_session.x, row_x);
+                    let old_h = std::mem::replace(&mut target_session.h, row_h);
+                    let route_old =
+                        if let Some((idx_pack, weight_pack, shared_pack)) = packed_route.as_ref() {
                             let row_idx =
                                 idx_pack.view_subrange((n_idx * topk) as u64, vec![topk as u64]);
                             let row_weight =
@@ -10961,63 +10572,11 @@ pub fn encode_packed_verify_layer_major_inner_for(
                         } else {
                             None
                         };
-                        let row_result = (|| -> Result<(), DFlashError> {
-                            let enc = KernelEncoder::begin(&cmd_buf);
-                            if route_old.is_none() {
-                                base.encode_moe_route_prepare_by_index(&enc, il, target_session)?;
-                            }
-                            if concurrent_ffn {
-                                enc.end();
-                                base.encode_moe_ffn_apply_gpu_concurrent_shared(
-                                    &cmd_buf,
-                                    target_session,
-                                    ffn_gate,
-                                    ffn_up,
-                                    ffn_down,
-                                    moe,
-                                )?;
-                            } else {
-                                base.encode_moe_ffn_apply_gpu(
-                                    &enc,
-                                    target_session,
-                                    ffn_gate,
-                                    ffn_up,
-                                    ffn_down,
-                                    moe,
-                                )?;
-                                enc.end();
-                            }
-                            Ok(())
-                        })();
-                        target_session.x = old_x;
-                        target_session.h = old_h;
-                        if let Some((old_idx, old_weight, old_shared)) = route_old {
-                            target_session.moe_topk_idx = old_idx;
-                            target_session.moe_topk_weight = old_weight;
-                            target_session.moe_shared_gate = old_shared;
-                        }
-                        row_result?;
-                    }
-                } else {
-                    for n_idx in 0..n {
+                    let row_result = (|| -> Result<(), DFlashError> {
                         let enc = KernelEncoder::begin(&cmd_buf);
-                        encode_copy_offset_f32(
-                            base.ctx,
-                            &enc,
-                            &x_pack,
-                            n_idx * h,
-                            &target_session.x,
-                            h,
-                        )?;
-                        encode_copy_offset_f32(
-                            base.ctx,
-                            &enc,
-                            &h_pack,
-                            n_idx * h,
-                            &target_session.h,
-                            h,
-                        )?;
-                        base.encode_moe_route_prepare_by_index(&enc, il, target_session)?;
+                        if route_old.is_none() {
+                            base.encode_moe_route_prepare_by_index(&enc, il, target_session)?;
+                        }
                         if concurrent_ffn {
                             enc.end();
                             base.encode_moe_ffn_apply_gpu_concurrent_shared(
@@ -11028,16 +10587,6 @@ pub fn encode_packed_verify_layer_major_inner_for(
                                 ffn_down,
                                 moe,
                             )?;
-                            let enc = KernelEncoder::begin(&cmd_buf);
-                            encode_scatter_offset_f32(
-                                base.ctx,
-                                &enc,
-                                &target_session.x,
-                                &x_pack,
-                                n_idx * h,
-                                h,
-                            )?;
-                            enc.end();
                         } else {
                             base.encode_moe_ffn_apply_gpu(
                                 &enc,
@@ -11047,20 +10596,82 @@ pub fn encode_packed_verify_layer_major_inner_for(
                                 ffn_down,
                                 moe,
                             )?;
-                            encode_scatter_offset_f32(
-                                base.ctx,
-                                &enc,
-                                &target_session.x,
-                                &x_pack,
-                                n_idx * h,
-                                h,
-                            )?;
                             enc.end();
                         }
+                        Ok(())
+                    })();
+                    target_session.x = old_x;
+                    target_session.h = old_h;
+                    if let Some((old_idx, old_weight, old_shared)) = route_old {
+                        target_session.moe_topk_idx = old_idx;
+                        target_session.moe_topk_weight = old_weight;
+                        target_session.moe_shared_gate = old_shared;
+                    }
+                    row_result?;
+                }
+            } else {
+                for n_idx in 0..n {
+                    let enc = KernelEncoder::begin(&cmd_buf);
+                    encode_copy_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &x_pack,
+                        n_idx * h,
+                        &target_session.x,
+                        h,
+                    )?;
+                    encode_copy_offset_f32(
+                        base.ctx,
+                        &enc,
+                        &h_pack,
+                        n_idx * h,
+                        &target_session.h,
+                        h,
+                    )?;
+                    base.encode_moe_route_prepare_by_index(&enc, il, target_session)?;
+                    if concurrent_ffn {
+                        enc.end();
+                        base.encode_moe_ffn_apply_gpu_concurrent_shared(
+                            &cmd_buf,
+                            target_session,
+                            ffn_gate,
+                            ffn_up,
+                            ffn_down,
+                            moe,
+                        )?;
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_scatter_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &target_session.x,
+                            &x_pack,
+                            n_idx * h,
+                            h,
+                        )?;
+                        enc.end();
+                    } else {
+                        base.encode_moe_ffn_apply_gpu(
+                            &enc,
+                            target_session,
+                            ffn_gate,
+                            ffn_up,
+                            ffn_down,
+                            moe,
+                        )?;
+                        encode_scatter_offset_f32(
+                            base.ctx,
+                            &enc,
+                            &target_session.x,
+                            &x_pack,
+                            n_idx * h,
+                            h,
+                        )?;
+                        enc.end();
                     }
                 }
-                emit_mtp_verify_count_phase(trace_counts, il as isize, "moe", "ffn_row_loop");
             }
+            emit_mtp_verify_count_phase(trace_counts, il as isize, "moe", "ffn_row_loop");
+
             for (k_idx, &lid) in target_layer_ids.iter().enumerate() {
                 if lid as usize == il {
                     let enc = KernelEncoder::begin(&cmd_buf);
@@ -17383,10 +16994,6 @@ impl MetalDFlashDraftDecoder<'_, '_> {
                     cfg.selector_top_k,
                 );
             let online_two_range_attn = dflash_attn_online_two_range_enabled();
-            let two_range_attn = full_gqa_split4_attn
-                || swa_split4_attn
-                || online_two_range_attn
-                || dflash_attn_two_range_enabled();
             // pos_k staging hoisted to the top of draft_block (v0.77) —
             // the full ctx ‖ noise layout serves both the two-range
             // kernels (read the first ctx_len entries) and the legacy
@@ -17492,27 +17099,6 @@ impl MetalDFlashDraftDecoder<'_, '_> {
                     noise_start_pos,
                     swa_window_arg,
                     ctx_scan_start,
-                    cfg.causal,
-                )?;
-            } else if two_range_attn {
-                let pos_ctx_view = self.session.pos_k.view_subrange(0, vec![ctx_len as u64]);
-                encode_dflash_attn_two_range_f32(
-                    ctx_metal,
-                    &enc,
-                    &self.session.q_buf,
-                    &self.session.k_ctx_cache[layer_idx],
-                    &self.session.v_ctx_cache[layer_idx],
-                    &self.session.k_noise,
-                    &self.session.v_noise,
-                    &pos_ctx_view,
-                    &self.session.attn_o_full,
-                    n,
-                    n_q,
-                    n_kv,
-                    head_dim,
-                    ctx_len,
-                    noise_start_pos,
-                    swa_window_arg,
                     cfg.causal,
                 )?;
             } else {

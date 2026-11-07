@@ -1,3 +1,5 @@
+> Historical experiment: the legacy three-pass drafter, QN verifier attention and grouped verifier FFN selectors were removed in the knob sweep. Commands below apply to the recorded historical builds.
+
 # W0c-econ: A3B verifier economics after the W0b decomposition
 
 Status: PREREGISTERED (frozen before any timed run). Date: 2026-07-20.

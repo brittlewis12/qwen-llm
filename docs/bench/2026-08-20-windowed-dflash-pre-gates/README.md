@@ -1,3 +1,5 @@
+> Historical experiment: the legacy three-pass drafter, QN verifier attention and grouped verifier FFN selectors were removed in the knob sweep. Commands below apply to the recorded historical builds.
+
 # Windowed DFlash Pre-Gates — 2026-08-20
 
 Preregistered falsifier packet for the "windowed drafter context" leverage map

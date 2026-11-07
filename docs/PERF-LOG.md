@@ -6,6 +6,60 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - GLM M5 Decode: Exact Selector Prefixes, +1.3%
+
+- Base **`a28026ef`**, M5 Ultra, unchanged UD-IQ3_XXS alias. **Default on**
+  for single-query top-512 selection on Apple10; rollback
+  **`QWEN_GLM53_DSA_SELECT=0`**. Stop radix refinement when all keys in the
+  chosen bucket are needed, retaining its exact lower bound, and replace
+  two thread-zero compaction scans with stable integer SIMD prefixes.
+  Ascending IDs, threshold ties, signed-zero/subnormal ordering, counts and
+  fail-closed status are unchanged. No floating-point operand/expression or
+  reduction changes, new allocation, command or dispatch. Exact/F32 retain
+  their arithmetic. Other devices and multi-query selection retain the prior
+  path. Speculation is out of scope.
+- M5 selector microprobe, two warm + eight retained GPU samples: 2K pools
+  **42.796 -> 20.262 us**, 8K **71.245 -> 46.969 us**. Every ID/count/status
+  matches the old kernel, including ties, signed zeros, invalid visibility and
+  NaNs. M4 micro **49.132 -> 18.718 us** at 2K, but estimated whole-token
+  value is only about 1%; no laptop rollout or model-speed claim.
+- Same-binary native **ABBA**, one excluded warm plus two retained runs/cell
+  per arm, 30 s between arms. Ordinary tg64 forward calls and pp4096 with
+  full logits readback; prefixes and snapshot restores outside timing.
+  Fingerprinting/finite checks follow the timer. Build lock + canonical
+  Metal lease, nice 10; thermal **0 before/after all four arms**.
+
+  | Cell / depth | Off samples ms | On samples ms | Median ratio |
+  | --- | --- | --- | ---: |
+  | tg64 / 0 | 1006.930208,1006.786500,1007.311458,1008.469292 | 1007.105625,1007.229083,1008.317000,1008.740333 | 0.99935x |
+  | tg64 / 8192 | 1105.316334,1105.655958,1107.998292,1107.988542 | 1091.500042,1091.730334,1093.075208,1092.839584 | **1.01331x** |
+  | tg64 / 32768 | 1126.840208,1126.446375,1126.402667,1127.518167 | 1112.738667,1111.779250,1112.153500,1110.624834 | **1.01320x** |
+  | pp4096 / 0 | 3707.274542,3708.292917,3706.867500,3708.824542 | 3706.685958,3709.785791,3709.401041,3707.573500 | 0.99981x |
+
+  Saves about **0.23 ms/token** at both sparse depths. All **2304** decoded
+  vocabulary-vector fingerprints match their same-input reference (576
+  distinct row/seed/depth observations, four arms); all 12 PP endpoints also
+  match. This is exact index-set work, with no numerical policy change.
+  Independent CPU-sort/guard tests cover capacities 513..32768, top-k
+  1/17/512, closely spaced keys, ties, signed zeros/subnormals, nonfinite
+  scores, per-query all-visible selection and invalid visibility.
+  Full release-library and contract qualification are pending below.
+- mHC kill: a cooperative SIMD Sinkhorn finish saves **7.352 -> 6.855 us**
+  per call, only about **0.045 ms/token / 0.3%** at 90 calls. Combination
+  coefficients change by up to 2.98e-8 in the bounded fixture. Removed the
+  prototype; the whole-token value does not justify a numerical rollout.
+- Current pp4096 attribution: two 2048-row profiled commands, coarse
+  routed-expert spans **772.8 / 772.4 ms**, combined MLA **377.6 / 513.6**,
+  KDA input projections **207.9 / 207.9**. Profiled command GPU **1890.1 /
+  2096.2 ms** versus ordinary whole pp4096 about 3708 ms; these perturbed
+  stage spans are not an exclusive production budget. Next bounded tests
+  target single-query MLA PV occupancy and already-prepared Half inputs for
+  large Q6 KDA projections. No expanded weight cache or memory bypass.
+- Raw samples, source patch, probes, input protocol and rejected mHC screen:
+  **`2026-11-06-glm-roof5-selector-raw.tar.gz`**, SHA256
+  **`1ce9053b12bf7e53a6426058ccc35300942a62c15f9cc330fe60d335190b1b2c`**,
+  retained beside `metagross:~/qwen-runs/2026-11-06-glm-roofline5/`.
+
 ## 2026-11-07 - Flash-Next Dispatch Reduction: M5 Decode +7.0-7.5%
 
 - Base **`a28026ef`**, qualified production code **`15a8777d`**, unchanged

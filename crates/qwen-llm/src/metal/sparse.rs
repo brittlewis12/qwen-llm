@@ -17,6 +17,12 @@
 use super::checks::{bad_shape, check_disjoint, check_tensor, require_serial, to_u32};
 use super::*;
 
+crate::env_flag!(
+    /// Default-on M5 single-query GLM top-512 selector with exact radix-prefix termination and parallel integer compaction. Zero restores the previous selector. Scores, stable tie order, failure status and Exact/F32 arithmetic are unchanged.
+    default_on glm53_selector_requested,
+    "QWEN_GLM53_DSA_SELECT"
+);
+
 /// Selector status for a well-formed selection.
 pub const SELECT_STATUS_OK: i32 = 0;
 
@@ -253,7 +259,15 @@ pub fn encode_select_top_k_ids(
         query_count: u32,
         emit_ranked: u32,
     }
-    let pso = ctx.pipeline("kernel_deepseek_v4_select_top_k_radix4_ids_f32")?;
+    let fast = query_count == 1
+        && top_k == 512
+        && ctx.device_facts().gpu_families.apple10
+        && glm53_selector_requested();
+    let pso = ctx.pipeline(if fast {
+        "kernel_glm53_select_top_k_ids_fast"
+    } else {
+        "kernel_deepseek_v4_select_top_k_radix4_ids_f32"
+    })?;
     if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < THREADS {
         return Err(bad_shape(K, "needs 256 threads of 32-lane simdgroups"));
     }
@@ -493,6 +507,116 @@ mod tests {
         let mut picked: Vec<i32> = rows[..k.min(visible)].iter().map(|&r| r as i32).collect();
         picked.sort_unstable();
         picked
+    }
+
+    #[test]
+    fn prefix_selector_matches_sort_with_ties_guards_and_failures() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        let pso = ctx.pipeline("kernel_glm53_select_top_k_ids_fast").unwrap();
+        for capacity in [513usize, 1100, 2048, 8192, 32768] {
+            for k in [1usize, 17, 512] {
+                let visible = [
+                    capacity as i32,
+                    capacity as i32 - 1,
+                    513,
+                    512,
+                    7,
+                    0,
+                    capacity as i32 + 1,
+                    capacity as i32,
+                    -1,
+                    capacity as i32,
+                    7,
+                ];
+                let q = visible.len();
+                let mut scores = noise(53, capacity * q, 10.0);
+                for r in 0..capacity {
+                    scores[capacity + r] = (r % 37) as f32;
+                    scores[2 * capacity + r] = f32::from_bits(1.0f32.to_bits() + r as u32);
+                    scores[3 * capacity + r] = match r % 6 {
+                        0 => 0.0,
+                        1 => -0.0,
+                        2 => f32::from_bits(1),
+                        3 => -f32::from_bits(3),
+                        4 => f32::MAX,
+                        _ => -f32::MAX,
+                    };
+                    scores[4 * capacity + r] = -2.0;
+                }
+                scores[7 * capacity + 1] = f32::INFINITY;
+                scores[9 * capacity + 5] = f32::NAN;
+                scores[10 * capacity + 17] = f32::NAN; // outside visibility
+                let input = tensor(
+                    &ctx,
+                    &scores,
+                    vec![capacity as u64, q as u64],
+                    GgmlType::F32,
+                );
+                let vis = tensor(&ctx, &visible, vec![q as u64], GgmlType::I32);
+                let ids = tensor(
+                    &ctx,
+                    &vec![-7i32; k * q],
+                    vec![k as u64, q as u64],
+                    GgmlType::I32,
+                );
+                let counts = tensor(&ctx, &vec![-7i32; q], vec![q as u64], GgmlType::I32);
+                let status = tensor(&ctx, &vec![-7i32; q], vec![q as u64], GgmlType::I32);
+                let before = tensor_backing_bytes(&input);
+                run(&ctx, |enc| {
+                    enc.set_pipeline(&pso);
+                    enc.set_bytes(0, &[capacity as u32, k as u32, q as u32, 0]);
+                    for (slot, t) in [&input, &vis, &ids, &counts, &status].iter().enumerate() {
+                        enc.set_tensor(slot + 1, t);
+                    }
+                    enc.set_threadgroup_memory(0, 1024);
+                    enc.set_threadgroup_memory(1, 1024);
+                    enc.dispatch(
+                        MTLSize {
+                            width: q,
+                            height: 1,
+                            depth: 1,
+                        },
+                        MTLSize {
+                            width: 256,
+                            height: 1,
+                            depth: 1,
+                        },
+                    );
+                });
+                assert_eq!(before, tensor_backing_bytes(&input));
+                for t in [&ids, &counts, &status] {
+                    crate::metal::test_support::assert_offset_guards(t, 16, 16);
+                }
+                let (ids, counts, status) = (read_i32(&ids), read_i32(&counts), read_i32(&status));
+                for query in 0..q {
+                    let valid = visible[query] > 0 && visible[query] as usize <= capacity;
+                    let n = if valid { visible[query] as usize } else { 0 };
+                    let row = &scores[query * capacity..query * capacity + n];
+                    let error = if !valid {
+                        1
+                    } else if row.iter().any(|v| !v.is_finite()) {
+                        2
+                    } else {
+                        0
+                    };
+                    let mut want = if error == 0 {
+                        cpu_select(row, n, k)
+                    } else {
+                        (0..k.min(n)).map(|r| r as i32).collect()
+                    };
+                    let count = want.len();
+                    want.resize(k, -1);
+                    assert_eq!(
+                        status[query], error,
+                        "capacity={capacity} k={k} query={query}"
+                    );
+                    assert_eq!(counts[query], count as i32);
+                    assert_eq!(&ids[query * k..(query + 1) * k], &want);
+                }
+            }
+        }
     }
 
     /// Top-512 of GLM-sized pool scores: distinct values, heavy ties at the

@@ -4233,7 +4233,24 @@ kernel void kernel_deepseek_v4_select_top_k_multigroup_publish_f32(
     }
 }
 
-template <bool Radix4, bool EmitMask>
+// Stable integer prefix over thread IDs; each SIMD group contributes one sum.
+inline uint ds4_selector_exclusive_prefix(uint value,
+        threadgroup uint * scratch, threadgroup uint * shared,
+        uint groups, ushort sg, ushort lane) {
+    const uint local = simd_prefix_exclusive_sum(value);
+    if (lane == 31u) scratch[sg] = local + value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0u) {
+        const uint count = lane < groups ? scratch[lane] : 0u;
+        const uint prefix = simd_prefix_exclusive_sum(count);
+        if (lane < groups) scratch[lane] = prefix;
+        if (lane == 31u) shared[0] = prefix + count;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return local + scratch[sg];
+}
+
+template <bool Radix4, bool EmitMask, bool FastIds = false>
 __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
         constant ds4_indexer_select_args & args,
         device const float * scores,
@@ -4293,7 +4310,7 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     int error = int(shared[0]);
 
-    if (error != 0) {
+    if (error != 0 || (FastIds && visible <= args.top_k)) {
         if (EmitMask) {
             for (uint row = lane; row < args.row_capacity; row += width) {
                 selected_mask[mask_base + row] = row < selected_count ? 1 : 0;
@@ -4356,6 +4373,7 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
                 shared[16] = chosen;
                 shared[17] = remaining;
                 shared[18] = found ? 0u : 3u;
+                if (FastIds) shared[19] = shared[chosen];
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             error = int(shared[18]);
@@ -4363,6 +4381,9 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
             prefix |= shared[16] << uint(shift);
             rank = shared[17];
             prefix_mask |= 0xfu << uint(shift);
+            // Every key in the selected bucket is needed; lower bits cannot
+            // change the selected set. The prefix is a valid lower bound.
+            if (FastIds && rank == shared[19]) break;
         }
     } else {
         // Resolve the 1-based kth score by counting one radix bit per pass.
@@ -4425,19 +4446,26 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
         const uint key = ds4_selector_order_key(scores[query * args.row_capacity + row]);
         if (key == threshold_key) ++local_equal;
     }
-    lane_scratch[lane] = local_equal;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (lane == 0u) {
-        uint equal_total = 0u;
-        for (uint index = 0u; index < width; ++index) {
-            const uint count = lane_scratch[index];
-            lane_scratch[index] = equal_total;
-            equal_total += count;
+    uint equal_before;
+    if (FastIds) {
+        equal_before = ds4_selector_exclusive_prefix(local_equal, lane_scratch, shared,
+            simdgroup_count, simdgroup, simd_lane);
+    } else {
+        lane_scratch[lane] = local_equal;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (lane == 0u) {
+            uint equal_total = 0u;
+            for (uint index = 0u; index < width; ++index) {
+                const uint count = lane_scratch[index];
+                lane_scratch[index] = equal_total;
+                equal_total += count;
+            }
+            shared[0] = equal_total;
         }
-        shared[0] = equal_total;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        equal_before = lane_scratch[lane];
+
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    const uint equal_before = lane_scratch[lane];
 
     uint local_equal_seen = 0u;
     uint local_selected = 0u;
@@ -4449,19 +4477,28 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
         if (at_threshold) ++local_equal_seen;
         if (selected) ++local_selected;
     }
-    lane_scratch[lane] = local_selected;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (lane == 0u) {
-        uint selected_total = 0u;
-        for (uint index = 0u; index < width; ++index) {
-            const uint count = lane_scratch[index];
-            lane_scratch[index] = selected_total;
-            selected_total += count;
+    uint output_slot;
+    if (FastIds) {
+        output_slot = ds4_selector_exclusive_prefix(local_selected, lane_scratch, shared,
+            simdgroup_count, simdgroup, simd_lane);
+        if (lane == 0u) shared[1] = shared[0] == selected_count ? 0u : 3u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    } else {
+        lane_scratch[lane] = local_selected;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (lane == 0u) {
+            uint selected_total = 0u;
+            for (uint index = 0u; index < width; ++index) {
+                const uint count = lane_scratch[index];
+                lane_scratch[index] = selected_total;
+                selected_total += count;
+            }
+            shared[0] = selected_total;
+            shared[1] = selected_total == selected_count ? 0u : 3u;
         }
-        shared[0] = selected_total;
-        shared[1] = selected_total == selected_count ? 0u : 3u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        output_slot = lane_scratch[lane];
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
     error = int(shared[1]);
     if (error != 0) {
         if (EmitMask) {
@@ -4482,7 +4519,6 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
         return;
     }
 
-    uint output_slot = lane_scratch[lane];
     local_equal_seen = 0u;
     for (uint row = chunk_start; row < chunk_end; ++row) {
         const uint key = ds4_selector_order_key(scores[query * args.row_capacity + row]);
@@ -4590,6 +4626,26 @@ kernel void kernel_deepseek_v4_select_top_k_radix4_ids_f32(
         ushort simdgroup [[simdgroup_index_in_threadgroup]],
         ushort simd_lane [[thread_index_in_simdgroup]]) {
     ds4_select_top_k_parallel_impl<true, false>(
+        args, scores, visible_counts, cache_order_ids, cache_order_ids,
+        cache_order_ids, selected_counts, status, lane_scratch, shared,
+        lane, query, width, simdgroup, simd_lane);
+}
+
+kernel void kernel_glm53_select_top_k_ids_fast(
+        constant ds4_indexer_select_args & args [[buffer(0)]],
+        device const float * scores [[buffer(1)]],
+        device const int * visible_counts [[buffer(2)]],
+        device int * cache_order_ids [[buffer(3)]],
+        device int * selected_counts [[buffer(4)]],
+        device int * status [[buffer(5)]],
+        threadgroup uint * lane_scratch [[threadgroup(0)]],
+        threadgroup uint * shared [[threadgroup(1)]],
+        uint lane [[thread_index_in_threadgroup]],
+        uint query [[threadgroup_position_in_grid]],
+        uint width [[threads_per_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort simd_lane [[thread_index_in_simdgroup]]) {
+    ds4_select_top_k_parallel_impl<true, false, true>(
         args, scores, visible_counts, cache_order_ids, cache_order_ids,
         cache_order_ids, selected_counts, status, lane_scratch, shared,
         lane, query, width, simdgroup, simd_lane);
@@ -5045,6 +5101,106 @@ kernel void kernel_mhc4_pre_finish(
             combination + row * DS4_CONNECTIONS * DS4_CONNECTIONS);
         for (uint s = 0; s < DS4_CONNECTIONS; ++s) {
             gates[s] = row_pre[s];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    device const float * r = residual + row * width;
+    device float * out = collapsed + row * args.hidden;
+    float sumsq = 0.0f;
+    for (uint i = tid; i < args.hidden; i += ntg) {
+        float value = 0.0f;
+        for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+            value += r[source * args.hidden + i] * gates[source];
+        }
+        out[i] = value;
+        sumsq += value * value;
+    }
+    sumsq = simd_sum(sumsq);
+    if (lane == 0) partial[sg] = sumsq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumsq = (lane < (ntg + 31u) / 32u) ? partial[lane] : 0.0f;
+    sumsq = simd_sum(sumsq);
+    const float norm_scale = rsqrt(sumsq / float(args.hidden) + args.norm_eps);
+    device float * y = normed + row * args.hidden;
+    for (uint i = tid; i < args.hidden; i += ntg) {
+        y[i] = (out[i] * norm_scale) * norm_weight[i];
+    }
+}
+
+
+kernel void kernel_glm53_mhc4_pre_finish_simd(
+        constant mhc4_pre_args & args [[buffer(0)]],
+        device const float * residual [[buffer(1)]],
+        device const float * partial_dots [[buffer(2)]],
+        device const float * partial_sumsq [[buffer(3)]],
+        device const float * scale [[buffer(4)]],
+        device const float * base [[buffer(5)]],
+        device const float * norm_weight [[buffer(6)]],
+        device float * mixes [[buffer(7)]],
+        device float * pre [[buffer(8)]],
+        device float * post [[buffer(9)]],
+        device float * combination [[buffer(10)]],
+        device float * collapsed [[buffer(11)]],
+        device float * normed [[buffer(12)]],
+        threadgroup float * shared [[threadgroup(0)]],
+        uint row [[threadgroup_position_in_grid]],
+        uint tid [[thread_position_in_threadgroup]],
+        ushort sg [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]],
+        uint ntg [[threads_per_threadgroup]]) {
+    if (row >= args.rows) return;
+    threadgroup float * reduced = shared;       // 24 dots, then the sum of squares
+    threadgroup float * gates = shared + 32;    // pre[4]
+    threadgroup float * partial = shared + 64;  // one sum per simdgroup
+    const uint width = args.hidden * DS4_CONNECTIONS;
+    if (sg <= DS4_PARAMETERS) {
+        float sum = 0.0f;
+        for (uint c = lane; c < args.chunks; c += 32u) {
+            const uint unit = row * args.chunks + c;
+            sum += sg < DS4_PARAMETERS
+                ? partial_dots[unit * DS4_PARAMETERS + sg]
+                : partial_sumsq[unit];
+        }
+        sum = simd_sum(sum);
+        if (lane == 0) reduced[sg] = sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0u) {
+        const float inverse = rsqrt(reduced[DS4_PARAMETERS] / float(width) + args.hc_rms_eps);
+        if (lane < DS4_PARAMETERS) mixes[row * DS4_PARAMETERS + lane] = reduced[lane] * inverse;
+        const uint src = lane & 3u;
+        const uint cbase = 8u + 4u * src;
+        float4 c;
+        c.x = (reduced[cbase] * inverse) * scale[2] + base[cbase];
+        c.y = (reduced[cbase + 1u] * inverse) * scale[2] + base[cbase + 1u];
+        c.z = (reduced[cbase + 2u] * inverse) * scale[2] + base[cbase + 2u];
+        c.w = (reduced[cbase + 3u] * inverse) * scale[2] + base[cbase + 3u];
+        float row_max = -INFINITY;
+        row_max = max(row_max, c.x); row_max = max(row_max, c.y);
+        row_max = max(row_max, c.z); row_max = max(row_max, c.w);
+        c = exp(c - row_max);
+        float sum = 0.0f;
+        sum += c.x; sum += c.y; sum += c.z; sum += c.w;
+        c = c * (1.0f / sum) + args.hc_eps;
+        float4 col = 0.0f;
+        for (ushort source = 0u; source < 4u; ++source) col += simd_shuffle(c, source);
+        c *= 1.0f / (col + args.hc_eps);
+        for (uint iteration = 1u; iteration < DS4_SINKHORN_ITERATIONS; ++iteration) {
+            sum = 0.0f;
+            sum += c.x; sum += c.y; sum += c.z; sum += c.w;
+            c *= 1.0f / (sum + args.hc_eps);
+            col = 0.0f;
+            for (ushort source = 0u; source < 4u; ++source) col += simd_shuffle(c, source);
+            c *= 1.0f / (col + args.hc_eps);
+        }
+        if (lane < 4u) {
+            const float gate = 1.0f / (1.0f + exp(-((reduced[lane] * inverse) * scale[0] + base[lane]))) + args.hc_eps;
+            pre[row * 4u + lane] = gate;
+            post[row * 4u + lane] = 2.0f / (1.0f + exp(-((reduced[4u + lane] * inverse) * scale[1] + base[4u + lane])));
+            device float4 * dst = (device float4 *)(combination + row * 16u);
+            dst[lane] = c;
+            gates[lane] = gate;
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);

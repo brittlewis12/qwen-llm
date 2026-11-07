@@ -6,6 +6,136 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - Flash-Next M4 Prefill: Matrix Projections and Stable Bucketing
+
+- Measured base **`f6547e85`**, qualified measurement source **`ab682dcf`**,
+  preserved at **`evidence/fn-m4-qualified`**. Rebased over main **`d9f98b38`**
+  (V4.1-only landing); every Flash-Next and Metal file is byte-identical.
+  Combined code/test/ENV **`41269782`**, tree
+  **`f475eeb5316baf5c957317220ebf00b8f1d7deff`**. Same **GSQ-RCO IQ3_S**
+  artifact on M4 Max (external weights archive) and M5 Ultra (model-search
+  root). Three independently screened, default-on M4 routes; no new device
+  buffers, weight repacking, dispatches or operand narrowing. Rollbacks:
+  **`QWEN_FN_M4_ROUTER_MMA=0`**, **`QWEN_FN_M4_QSA_INDEX_MMA=0`**,
+  **`QWEN_FN_M4_PARALLEL_BUCKET=0`**.
+- Router: reuse full-F32 SIMD matrix tiles for the existing qualified
+  **K2560/N512, M512/1024/2048** strict-router cohorts. The existing
+  `QWEN4EXP_PACKED_ROUTER_E8P32_STRICT=0` veto retains priority. QSA index:
+  exactly widen BF16 weights and keep activations/accumulation F32 at
+  **K2560/N128 or N512, M512..2048**. A shifted final SIMD tile reads only
+  valid rows and scatters only its own outputs, covering **M2045** without
+  padding buffers. Selector-state precision is retained. Bucketing: enable
+  the existing stable 256-thread-per-expert scan at **H2560/E512/top10** and
+  the existing short-row qualification; counts and ascending slot order are
+  exact. `QWEN_FN_PREFILL_PARALLEL_BUCKET=0` still disables both device routes.
+  Physical Apple10 devices retain their prior routes even without the tensor
+  tier. Existing HC/GDN F32 controls retain their separate switches.
+- Final whole-call standing, all three off versus actual unset defaults:
+
+  | M4 work / depth | Off tok/s | Default tok/s | On/off | Fresh CPP tok/s | On/CPP | % compute ceiling |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | pp4096 / 0 | 519.937 | 547.515 | 1.05304x | 633.035 | 0.86491x | 43.65% |
+  | pp512 / 32768 | 449.915 | 505.814 | 1.12434x | 500.207 | 1.01121x | 41.13% |
+
+  Cold: clean ordinary release CLI, `suite --pp 4096 --depth 0 --runs 2
+  --seed 1`, **BAAB**, 60 seconds stable thermal zero before each process;
+  four retained calls/policy, pair ratios **1.02320 / 1.08293**. Build/runtime
+  identities match clean `ab682dcf`. Append: production native call plus full
+  endpoint copy, real independent prefixes, snapshot restoration outside
+  timing, 60 seconds stable zero after prefix, excluded warm call plus two
+  retained calls/arm. Intermediate router/index-only arm **477.511 tok/s**;
+  enabling bucketing gives **1.06064x** whole-append time ratio. Every native
+  on/off endpoint comparison is bitwise. These native calls use seed 13;
+  their gains and the seed-1 CLI gains differ, so stage ratios are not multiplied.
+- CPP is the unchanged **v0.9.0 `cd959bae99ff`** binary, same artifact,
+  **b2048/ub2048, F16 KV**, two repetitions. Append keeps the cached-prefix
+  cell after cooling between tests; two fresh series agree at **497.824 /
+  500.207 tok/s**. Earlier frozen references **624.071 / 528.972** are retained
+  in prior entries: current defaults are **0.87733x / 0.95622x** against those.
+  Compute percentages reuse **12.51159 / 12.76135 GFLOP/token** and measured
+  **15.695 TFLOP/s** SIMD MMA ceiling; useful matmul FLOPs omit dequantization,
+  padding, nonlinearities, recurrence and launch work. Every kept timing arm
+  has thermal pressure **0 before/after**, build lock plus canonical Metal
+  lease, nice 10. Correctness-only quality runs may overlap CPU compilation.
+- Separate-process **ABBA** primary kill tests at pp4096, excluded warm call
+  and two retained native calls/arm; prespecified >=1% whole-call gain and
+  positive pair directions. Router holds index/bucketing off; index holds
+  router/bucketing off; bucketing holds both matrix routes on. Warm-only
+  census proves the intended routes; retained timing calls have no counters.
+
+  | Stage | Off ms | On ms | Speedup | Pair ratios |
+  | --- | ---: | ---: | ---: | --- |
+  | F32 router matrix | 7741.384 | 7433.020 | 1.04149x | 1.05792 / 1.02533 |
+  | BF16/F32 QSA index matrix | 8008.781 | 7294.315 | 1.09795x | 1.13767 / 1.05794 |
+  | Stable parallel bucket | 7810.373 | 7556.306 | 1.03362x | 1.02014 / 1.04715 |
+
+  Cold census: **96** strict router calls become matrix calls; **36** scalar
+  BF16 index calls become the new matrix kernel; **96** serial bucket calls
+  become parallel. No dispatch-count increase.
+- Why these stages: CPP already uses matrix projections and compact expert
+  maps. Our explicit F32 selector-state path had scalar BF16/F32 matmuls;
+  M4 routing used scalar-ordered F32 loops and serial bucketing. Dense Q6,
+  HC matrix projections and GDN recurrence were already close. Diagnostic
+  cold GPU spans, **ms per pp4096**, before changes:
+
+  | Stage | qwen-llm | CPP |
+  | --- | ---: | ---: |
+  | Routed router projection | 262.3 | 40.2 |
+  | QSA index key/query projection | 298.0 | 14.2 |
+  | Dominant IQ2_S/IQ3_XXS/IQ3_S gate/up | 1475.0 | 1296.4 |
+  | IQ4_NL/Q2_0 routed down | 777.1 | 645.5 |
+  | Attention QK/softmax/PV | 1077.0 | 743.7 |
+  | HC BF16 matrix projections | 490.5 | 480.9 |
+  | Dense Q6_K matrix projections | 1085.6 | 1112.3 |
+  | GDN recurrence | 443.1 | 445.1 |
+
+  Native per-dispatch spans and CPP per-fused-node sampled serial encoders
+  are ranking diagnostics, **not an additive wall budget**. Native has zero
+  missing pairs/overflow. CPP counters cover two complete invocations and are
+  normalized accordingly; its instrumented cold wall is 4.7% slower. The
+  temporary private profiler preserves arithmetic/fusion and was removed.
+  The thermal-failed deep profiler is excluded. CPP also crops the final FFN
+  to requested output rows; optional HC concatenation is not active here.
+- Distribution: frozen code/prose, independent complete prefixes, full-vocab
+  F64 NLL/KL(off||on), **2048 targets/document at 0**, **512/document at 32K**.
+  A=all off, B=router only, C=all on: **5120 targets, 10,240 adjacent-stage
+  vector comparisons**. Every vector is finite and bitwise identical across
+  stages; incremental and combined **dNLL = mean/max KL = 0**. Unchanged bars
+  |dNLL| <=0.005 and mean KL <=0.01. Baseline vector files removed.
+- M5 control: all three new switches off/on give identical complete census
+  and endpoint bits; zero new matrix-route calls, the same **96** existing
+  parallel bucket calls. No M5 speedup claimed. Pre-rebase full
+  `cargo test --release -p qwen-llm --lib`: **2460 passed, 0 failed,
+  738 ignored** on each machine (**M4 93.27 s / M5 115.64 s**). The rebased
+  combined M4 suite passes **2467 tests**, 0 failed, 738 ignored, **93.86 s**.
+  The duplicate combined M5 GPU run was canceled while still queued, before
+  launching a child; its prior full suite/control covers the identical
+  Flash-Next/Metal source. Two focused M4
+  matrix tests also pass with **Metal API and shader validation enabled**:
+  F64 accuracy, poisoned outputs, offsets/guards, partial tiles and refusal
+  before dispatch for aliases, short/unaligned views and concurrent encoders.
+  The strict-router fallback differential now explicitly disables both optional
+  routes; exact logits/top-k/weights/bucket assertions remain intact. Its old
+  kernel-name assumption caused the first M4 full-suite failure, retained in
+  the receipts. Final **`scripts/check-contracts.sh` passes on `41269782`**;
+  this PERF-only addition is path/whitespace checked.
+- Drop compact expert-grid linear search: exploratory **1.072x** does not
+  survive ABBA (**0.98117x**, pair **1.01079 / 0.95079**); per-tile scans of
+  512 counts consume the saved scheduling budget. Prototype removed. Decode
+  Q2_0 rotating-bank screen: two rows/SIMD group **61.387 -> 33.569 us**,
+  **1.83x** operator gain, max error **5.96e-8**; only about **0.25 ms/token
+  (~1%)** expected whole value, so no production route or decode gain claimed.
+  Decode remains around **47%** of the census's optimistic useful-byte roof.
+  Remaining costs span HC, IQ format decode and serial QSA. A fused indexed
+  QK/softmax/PV path has a plausible **few-percent** whole-call budget, but
+  needs new attention kernels and cache/capture/numeric qualification.
+- Raw arms, profiles, frozen corpus, helper sources/binaries, reconstruction
+  patches, failed screens and validation/build logs:
+  **`2026-11-07-fn-m4-final-raw.tar.gz`**, SHA256
+  **`6d852368fe4227fbb43ed6025eb5c2a3f0d62721a0f9a1668ca2eee7e1f70424`**, under
+  `~/qwen-runs/2026-11-07-fn-m4/` on both machines. Temporary example sources
+  and private CPP worktree removed; branch unmerged, no owned work left running.
+
 ## 2026-11-07 - V4.1 Engram/GPU Append Overlap: 1.09-1.14x Appends, Default On
 
 - Code **`976c1890`**, base **`f6547e85`**. **Enabled by default**;

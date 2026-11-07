@@ -15,15 +15,24 @@ fn dense_wide_policy_is_bounded() {
         (2304, 5120),
     ] {
         for rows in [512, 1024, 2048, 4096] {
-            assert!(dense_wide_geometry(true, input, output, rows));
-            assert!(!dense_wide_geometry(false, input, output, rows));
+            for tails in [false, true] {
+                assert!(dense_wide_geometry(true, input, output, rows, tails));
+                assert!(!dense_wide_geometry(false, input, output, rows, tails));
+            }
+        }
+        for rows in [513, 1025, 1300, 2047] {
+            assert!(dense_wide_geometry(true, input, output, rows, true));
+            assert!(!dense_wide_geometry(true, input, output, rows, false));
+            assert!(!dense_wide_geometry(false, input, output, rows, true));
         }
     }
-    for rows in [0, 1, 64, 256, 511, 513, 1025, 4097, 8192] {
-        assert!(!dense_wide_geometry(true, 8192, 5120, rows));
+    for rows in [0, 1, 64, 256, 511, 2049, 4095, 4097, 8192] {
+        for tails in [false, true] {
+            assert!(!dense_wide_geometry(true, 8192, 5120, rows, tails));
+        }
     }
     for shape in [(1280, 4096), (5120, 512), (8192, 5119)] {
-        assert!(!dense_wide_geometry(true, shape.0, shape.1, 512));
+        assert!(!dense_wide_geometry(true, shape.0, shape.1, 512, true));
     }
 }
 

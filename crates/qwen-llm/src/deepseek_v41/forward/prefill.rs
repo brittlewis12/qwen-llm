@@ -480,10 +480,24 @@ crate::env_flag!(
     "QWEN_V41_DENSE_WIDE"
 );
 
-fn dense_wide_geometry(m5_ultra: bool, input: usize, output: usize, rows: usize) -> bool {
+crate::env_flag!(
+    /// Keep the existing guarded 64-row tensor tile for unaligned agent
+    /// appends of 512..2048 rows. No padding, cache or allocation change;
+    /// `=0` restores the aligned-row gate. DENSE_WIDE still vetoes both.
+    default_on dense_wide_tails_enabled,
+    "QWEN_V41_DENSE_WIDE_TAILS"
+);
+
+fn dense_wide_geometry(
+    m5_ultra: bool,
+    input: usize,
+    output: usize,
+    rows: usize,
+    tails: bool,
+) -> bool {
     m5_ultra
         && (512..=MAX_CHUNK_ROWS).contains(&rows)
-        && rows.is_multiple_of(64)
+        && (rows.is_multiple_of(64) || (tails && rows <= 2048))
         && matches!(
             (input, output),
             (1280, 32768) | (4096, 1024) | (8192, 5120) | (5120, 2304) | (2304, 5120)
@@ -566,6 +580,7 @@ impl Linear<'_> {
                 self.input,
                 self.output,
                 rows,
+                dense_wide_tails_enabled(),
             )
     }
 

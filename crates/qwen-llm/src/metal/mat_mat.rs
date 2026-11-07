@@ -826,7 +826,7 @@ pub(crate) fn encode_mat_mat_q4_legacy_mm_f32(
     enc.set_tensor(1, weight);
     enc.set_tensor(2, x);
     enc.set_tensor(3, y);
-    enc.set_threadgroup_memory(0, mat_mat_qk_threadgroup_memory(n_out, n_query, 32));
+    enc.set_threadgroup_memory(0, 8192);
     enc.dispatch(
         MTLSize {
             width: n_query.div_ceil(32),
@@ -2278,64 +2278,6 @@ pub fn encode_ffn_fused_swiglu_q4_k_mma8_f32(
     Ok(())
 }
 
-crate::env_flag!(default_off matmat_qk_llama_smem_enabled, "QWEN_MATMAT_QK_LLAMA_SMEM");
-
-/// Q4_K mat-mat: `Y = W · X^T` where
-///   * `W` is Q4_K `[n_out, n_in]` (row-major in Q4_K block bytes)
-///   * `X` is F32 `[n_query, n_in]` row-major
-///   * `Y` is F32 `[n_query, n_out]` row-major — equivalently
-///     `Y[c * n_out + r]` for cell `(r, c)` of the kernel's
-///     "[n_out, n_query] col-major" view (the bytes are bit-identical;
-///     llama's notation just uses column-major framing).
-///
-/// **For layer-major H5.3b.4-5 plumbing, treat the output as
-/// row-major `[n_query, n_out]`.** This means downstream consumers
-/// (FFN silu_mul, residual_add, chained mat-mat with this output
-/// as `srcB`) work without any transpose: the bytes ARE in the
-/// row-major order the next mat-mat call expects as input. The
-/// H5.3b.0 layout sanity test verified this equivalence at three
-/// corner cells.
-///
-/// Lifts the 64×32×32 simdgroup_matrix tile from llama.cpp
-/// `kernel_mul_mm_q4_K_f32` (classic non-MPS-tensor path,
-/// ggml-metal.metal:9440-9648). Per H5.3b plan rev 6.
-///
-/// Constraints:
-///   * `n_in % 256 == 0` (Q4_K super-block alignment)
-///   * `n_in % 32 == 0` (kernel's NK_MM=32 K-step)
-///   * The kernel internally tiles N to 32 (NR1_MM); host should
-///     pass `n_query` directly (kernel handles N < 32 via partial-
-///     output-tile path with threadgroup-mem buffered write).
-///
-/// Threadgroup memory: 5120/6144 bytes for full tiles, 8192 when edge-store
-/// scratch is needed.
-/// Threadgroup size: 128 threads (4 simdgroups × 32 lanes).
-///
-/// **NOT bit-exact** with N successive `encode_mat_vec_q4_k_f32`
-/// (codex Q3 correction). The lifted kernel stages activations
-/// through half before float accumulation; cosine ≥ 0.999 vs
-/// scalar-float mat-vec is the gate (vs cos ≥ 0.9999 against a
-/// CPU mat-mat oracle that uses the same staging).
-pub(crate) fn mat_mat_qk_threadgroup_memory(n_out: usize, n_query: usize, nr1: usize) -> usize {
-    mat_mat_qk_threadgroup_memory_with_policy(n_out, n_query, nr1, matmat_qk_llama_smem_enabled())
-}
-
-pub(crate) fn mat_mat_qk_threadgroup_memory_with_policy(
-    n_out: usize,
-    n_query: usize,
-    nr1: usize,
-    llama_smem: bool,
-) -> usize {
-    if !llama_smem {
-        return 8192;
-    }
-    if n_out.is_multiple_of(64) && n_query.is_multiple_of(nr1) {
-        if nr1 == 16 { 5120 } else { 6144 }
-    } else {
-        8192
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MatMatQ4KN64Mode {
     Auto,
@@ -2364,8 +2306,6 @@ pub(crate) fn mat_mat_q4_k_use_n64(n_in: usize, n_out: usize, n_query: usize) ->
         MatMatQ4KN64Mode::Auto => !(n_query <= 512 && (n_in <= 2048 || n_out <= 2048)),
     }
 }
-
-crate::env_flag!(default_off mat_mat_n16_v2_enabled, "QWEN_MATMAT_N16_V2");
 
 crate::env_flag!(default_on mat_mat_q5_k_n64_enabled, "QWEN_MATMAT_Q5_K_N64");
 
@@ -2400,6 +2340,41 @@ pub(crate) fn mat_mat_q6_k_n64_min_query() -> usize {
     })
 }
 
+/// Q4_K mat-mat: `Y = W · X^T` where
+///   * `W` is Q4_K `[n_out, n_in]` (row-major in Q4_K block bytes)
+///   * `X` is F32 `[n_query, n_in]` row-major
+///   * `Y` is F32 `[n_query, n_out]` row-major — equivalently
+///     `Y[c * n_out + r]` for cell `(r, c)` of the kernel's
+///     "[n_out, n_query] col-major" view (the bytes are bit-identical;
+///     llama's notation just uses column-major framing).
+///
+/// **For layer-major H5.3b.4-5 plumbing, treat the output as
+/// row-major `[n_query, n_out]`.** This means downstream consumers
+/// (FFN silu_mul, residual_add, chained mat-mat with this output
+/// as `srcB`) work without any transpose: the bytes ARE in the
+/// row-major order the next mat-mat call expects as input. The
+/// H5.3b.0 layout sanity test verified this equivalence at three
+/// corner cells.
+///
+/// Lifts the 64×32×32 simdgroup_matrix tile from llama.cpp
+/// `kernel_mul_mm_q4_K_f32` (classic non-MPS-tensor path,
+/// ggml-metal.metal:9440-9648). Per H5.3b plan rev 6.
+///
+/// Constraints:
+///   * `n_in % 256 == 0` (Q4_K super-block alignment)
+///   * `n_in % 32 == 0` (kernel's NK_MM=32 K-step)
+///   * The kernel internally tiles N to 32 (NR1_MM); host should
+///     pass `n_query` directly (kernel handles N < 32 via partial-
+///     output-tile path with threadgroup-mem buffered write).
+///
+/// Threadgroup memory: 8192 bytes, including edge-store scratch.
+/// Threadgroup size: 128 threads (4 simdgroups × 32 lanes).
+///
+/// **NOT bit-exact** with N successive `encode_mat_vec_q4_k_f32`
+/// (codex Q3 correction). The lifted kernel stages activations
+/// through half before float accumulation; cosine ≥ 0.999 vs
+/// scalar-float mat-vec is the gate (vs cos ≥ 0.9999 against a
+/// CPU mat-mat oracle that uses the same staging).
 pub fn encode_mat_mat_q4_k_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2464,16 +2439,8 @@ pub fn encode_mat_mat_q4_k_f32(
     let use_n64 = mat_mat_q4_k_use_n64(n_in, n_out, n_query)
         && n_query.is_multiple_of(64)
         && n_out.is_multiple_of(64);
-    // H5.6 M2a: raw-block-staged N16 kernel (v2). The v1 A-path dequants
-    // straight from device with ~2.7x byte amplification; v2 stages raw
-    // super-blocks to threadgroup memory coalesced. K must cover whole
-    // super-blocks. Rollback: QWEN_MATMAT_N16_V2=0.
-    let use_n16_v2 =
-        n_query == 16 && !use_n64 && n_in.is_multiple_of(256) && mat_mat_n16_v2_enabled();
     let kernel_name = if use_n64 {
         "kernel_mat_mat_q4_K_f32_n64"
-    } else if use_n16_v2 {
-        "kernel_mat_mat_q4_K_f32_n16_v2"
     } else if n_query == 16 {
         "kernel_mat_mat_q4_K_f32_n16"
     } else {
@@ -2501,14 +2468,7 @@ pub fn encode_mat_mat_q4_k_f32(
     } else {
         32
     };
-    let smem = if use_n64 {
-        8192
-    } else if use_n16_v2 {
-        // raw 9216 + sa 4096 + sb 1024 (kernel doc block).
-        14336
-    } else {
-        mat_mat_qk_threadgroup_memory(n_out, n_query, nr1)
-    };
+    let smem = 8192;
     enc.set_threadgroup_memory(0, smem);
     let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
@@ -2896,11 +2856,7 @@ pub fn encode_mat_mat_q6_k_f32(
     } else {
         32
     };
-    let smem = if use_n64 {
-        8192
-    } else {
-        mat_mat_qk_threadgroup_memory(n_out, n_query, nr1)
-    };
+    let smem = 8192;
     enc.set_threadgroup_memory(0, smem);
     let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
@@ -3112,11 +3068,7 @@ pub fn encode_mat_mat_q5_k_f32(
     } else {
         32
     };
-    let smem = if use_n64 {
-        8192
-    } else {
-        mat_mat_qk_threadgroup_memory(n_out, n_query, nr1)
-    };
+    let smem = 8192;
     enc.set_threadgroup_memory(0, smem);
     let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
@@ -3232,7 +3184,7 @@ pub fn encode_mat_mat_q8_0_f32(
     enc.set_tensor(3, y);
 
     let nr1 = if n_query == 16 { 16 } else { 32 };
-    enc.set_threadgroup_memory(0, mat_mat_qk_threadgroup_memory(n_out, n_query, nr1));
+    enc.set_threadgroup_memory(0, 8192);
     let n_tg_x = n_query.div_ceil(nr1);
     let n_tg_y = n_out.div_ceil(64);
     enc.dispatch(
@@ -5489,34 +5441,6 @@ mod tests {
             assert_eq!(mismatches.load(Ordering::Relaxed), 0);
             let _ = std::fs::remove_file(path);
         }
-    }
-
-    #[test]
-    fn mat_mat_qk_threadgroup_memory_matches_full_tile_policy() {
-        assert_eq!(
-            mat_mat_qk_threadgroup_memory_with_policy(5120, 16, 16, false),
-            8192
-        );
-        assert_eq!(
-            mat_mat_qk_threadgroup_memory_with_policy(5120, 16, 16, true),
-            5120
-        );
-        assert_eq!(
-            mat_mat_qk_threadgroup_memory_with_policy(5120, 32, 32, true),
-            6144
-        );
-        assert_eq!(
-            mat_mat_qk_threadgroup_memory_with_policy(5120, 1024, 32, true),
-            6144
-        );
-        assert_eq!(
-            mat_mat_qk_threadgroup_memory_with_policy(5121, 32, 32, true),
-            8192
-        );
-        assert_eq!(
-            mat_mat_qk_threadgroup_memory_with_policy(5120, 31, 32, true),
-            8192
-        );
     }
 
     #[test]

@@ -1,3 +1,5 @@
+> Historical experiment: N16-v2 and reduced-smem runtime selectors were removed in the knob sweep. Commands below describe the recorded historical builds.
+
 # v0.129 Drift-Controlled Dense FFN Candidates
 
 Status: clean `v0.129` follow-up after adding `prefill_sweep.py`

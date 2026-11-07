@@ -1770,7 +1770,6 @@ pub(crate) fn projection_kernel_names(
         (GgmlType::Q4_K, true) => &[
             "kernel_mat_mat_q4_K_f32",
             "kernel_mat_mat_q4_K_f32_n16",
-            "kernel_mat_mat_q4_K_f32_n16_v2",
             "kernel_mat_mat_q4_K_f32_n64",
             "kernel_mat_vec_q4_K_nc2_rp4_f32",
             "kernel_mat_vec_q4_K_nc4_f32",

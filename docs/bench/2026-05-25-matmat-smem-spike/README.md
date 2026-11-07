@@ -1,3 +1,5 @@
+> Historical experiment: N16-v2 and reduced-smem runtime selectors were removed in the knob sweep. Commands below describe the recorded historical builds.
+
 Mat-mat threadgroup-memory parity spike from dirty code after `v0.126`.
 
 Hypothesis:

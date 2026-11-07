@@ -2622,8 +2622,6 @@ fn smalln_mma_micro_27b() {
 ///
 /// `cargo test -p qwen-llm --release --test dflash_correctness \
 ///   smalln_selection_sweep_27b -- --ignored --nocapture`
-/// (run a second time with `QWEN_MATMAT_N16_V2=1` for the v2 rows —
-/// the flag latches on first read.)
 #[test]
 #[ignore = "slow: loads 27B; run explicitly (see doc comment)"]
 fn smalln_selection_sweep_27b() {

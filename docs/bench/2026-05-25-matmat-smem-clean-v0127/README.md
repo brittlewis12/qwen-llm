@@ -1,3 +1,5 @@
+> Historical experiment: N16-v2 and reduced-smem runtime selectors were removed in the knob sweep. Commands below describe the recorded historical builds.
+
 Clean v0.127 mat-mat smem A/B follow-up.
 
 Purpose:

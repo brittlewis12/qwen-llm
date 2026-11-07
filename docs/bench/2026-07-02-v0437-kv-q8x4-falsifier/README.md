@@ -1,3 +1,5 @@
+> Historical experiment: Qwen Q8 KV, G8 attention sidecars and QT4 prefill were removed in the knob sweep. Commands below describe historical builds.
+
 # v0.437 KV-Q8x4 Attention Falsifier
 
 Goal: close the reopened KV-Q8 question with a reader micro-oracle that preserves

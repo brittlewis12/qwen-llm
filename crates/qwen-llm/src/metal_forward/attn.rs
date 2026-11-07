@@ -10,20 +10,6 @@ pub(super) fn prefill_attn_fused_qkv_g8_enabled() -> bool {
     )
 }
 
-pub(crate) fn kv_cache_dtype_for_arch(arch: &crate::model::Arch) -> GgmlType {
-    let enabled = kv_q8_flag();
-    let group = (arch.n_q_heads / arch.n_kv_heads.max(1)) as usize;
-    if enabled
-        && arch.attn_head_dim == 256
-        && ((arch.kind == ArchKind::Dense && group == 6)
-            || (arch.kind == ArchKind::Moe && group == 8))
-    {
-        GgmlType::Q8_0
-    } else {
-        GgmlType::F16
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum SnapshotKvStorageKind {
@@ -332,16 +318,6 @@ impl<'a> MetalForward<'a> {
                 kv_dst_off,
                 kv_dim,
             )?,
-            GgmlType::Q8_0 => encode_scatter_offset_f32_to_q8_0_kv(
-                self.ctx,
-                enc,
-                &s.attn_k_normed,
-                &s.attn_v_now,
-                &s.kv_k[attn_i],
-                &s.kv_v[attn_i],
-                kv_dst_off,
-                kv_dim,
-            )?,
             other => {
                 return Err(MfError::UnsupportedDtype {
                     name: "attention KV cache".into(),
@@ -579,16 +555,6 @@ impl<'a> MetalForward<'a> {
         })?;
         match s.kv_k[attn_i].dtype {
             GgmlType::F16 => encode_scatter_offset_f32_to_f16_kv(
-                self.ctx,
-                enc,
-                &s.attn_k_normed,
-                &s.attn_v_now,
-                &s.kv_k[attn_i],
-                &s.kv_v[attn_i],
-                kv_dst_off,
-                kv_dim,
-            )?,
-            GgmlType::Q8_0 => encode_scatter_offset_f32_to_q8_0_kv(
                 self.ctx,
                 enc,
                 &s.attn_k_normed,

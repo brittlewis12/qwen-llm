@@ -3,11 +3,11 @@ use crate::metal::{
 };
 use crate::metal_forward::{
     ATTN_V4_MAX_NWG, MetalAdditionalQueueResidencySetGuard, MetalBlock, MetalForward, MetalModel,
-    MetalSession, MfError, kv_cache_dtype_for_arch,
+    MetalSession, MfError,
 };
 use crate::model::{Arch, ArchKind};
 use crate::sampling::{GreedySelection, SamplingError};
-use crate::tensor::{GgmlType, ggml_type_layout_raw};
+use crate::tensor::GgmlType;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue};
 
 pub(crate) const QWEN_QUEUE2_WIDTH: usize = 2;
@@ -329,7 +329,7 @@ pub(crate) fn qwen_queue2_session_upper_bytes(
         capacity,
         gdn_layers,
         attention_layers,
-        kv_cache_dtype_for_arch(&model.arch),
+        GgmlType::F16,
         |logical_bytes| {
             ctx.price_shared_buffer_upper(logical_bytes)
                 .map(|priced| priced.priced_upper_bytes)
@@ -471,16 +471,7 @@ fn session_upper_bytes_with_pricer(
     )?;
     let kv_bytes = match kv_dtype {
         GgmlType::F16 => checked_mul(kv_elements, 2, "F16 KV bytes")?,
-        GgmlType::Q8_0 => {
-            let (block, bytes) =
-                ggml_type_layout_raw(GgmlType::Q8_0 as u32).expect("Q8_0 layout is defined");
-            if !kv_elements.is_multiple_of(block) {
-                return Err(QwenQueue2Error::Validation(format!(
-                    "Q8_0 KV elements {kv_elements} are not block aligned"
-                )));
-            }
-            checked_mul(kv_elements / block, bytes, "Q8_0 KV bytes")?
-        }
+
         other => {
             return Err(QwenQueue2Error::Validation(format!(
                 "unsupported KV dtype {other:?}"

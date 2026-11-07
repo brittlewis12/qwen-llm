@@ -57,13 +57,13 @@ use crate::metal::{
     encode_qk_rms_norm_rope_f32_packed_consecutive, encode_residual_rms_norm_mul_f32,
     encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32,
     encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_rope_neox_pair_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_q8_0_kv,
-    encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32, encode_sigmoid_mul_gate_strided_f32,
-    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
-    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_dot_sigmoid_f32_status,
-    encode_topk_logits_softmax_f32, encode_topk_logits_softmax_f32_status,
-    encode_topk_logits_softmax_parallel_f32, encode_topk_logits_softmax_parallel_f32_status,
-    evaluate_metal_memory_admission, host_page_size_bytes, plan_retained_storage,
+    encode_scatter_offset_f32_to_f16_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
+    encode_sigmoid_mul_gate_strided_f32, encode_silu_mul_f32, encode_split_q_gate_f32,
+    encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
+    encode_topk_logits_softmax_dot_sigmoid_f32_status, encode_topk_logits_softmax_f32,
+    encode_topk_logits_softmax_f32_status, encode_topk_logits_softmax_parallel_f32,
+    encode_topk_logits_softmax_parallel_f32_status, evaluate_metal_memory_admission,
+    host_page_size_bytes, plan_retained_storage,
 };
 use crate::model::ArchKind;
 use crate::sampling::{BoundedTopKEvidence, GreedySelection, SampledToken, Sampler, SamplingError};
@@ -76,9 +76,7 @@ use std::{cell::Cell, collections::HashSet, mem::MaybeUninit, sync::OnceLock};
 /// Sets the size of session-resident partial buffers; see
 /// `attn_v4_choose_nwg` for the selection heuristic.
 pub const ATTN_V4_MAX_NWG: usize = 1024;
-use crate::tensor::{GgmlType, TensorDesc, ggml_type_layout_raw};
-
-crate::env_flag!(default_off kv_q8_flag, "QWEN_KV_Q8");
+use crate::tensor::{GgmlType, TensorDesc};
 
 crate::env_flag!(default_on concurrent_gdn_moe_decode_enabled, "QWEN_DECODE_MOE_CONCURRENT_GDN");
 crate::env_flag!(
@@ -577,20 +575,10 @@ impl MetalModel {
         } else {
             arch.n_kv_heads * arch.attn_head_dim
         };
-        let (kv_bytes_per_token, kv_storage_kind) = match kv_cache_dtype_for_arch(arch) {
-            _ if n_attn_layers == 0 => (0, SnapshotKvStorageKind::None),
-            GgmlType::F16 => (kv_dim_elements * 2, SnapshotKvStorageKind::F16),
-            GgmlType::Q8_0 => {
-                let (block, bytes) =
-                    ggml_type_layout_raw(GgmlType::Q8_0 as u32).expect("Q8_0 layout is defined");
-                assert!(u64::from(kv_dim_elements).is_multiple_of(block));
-                (
-                    u32::try_from(u64::from(kv_dim_elements) / block * bytes)
-                        .expect("Q8_0 KV bytes per token fit u32"),
-                    SnapshotKvStorageKind::Q8_0,
-                )
-            }
-            _ => unreachable!("unsupported snapshot KV storage"),
+        let (kv_bytes_per_token, kv_storage_kind) = if n_attn_layers == 0 {
+            (0, SnapshotKvStorageKind::None)
+        } else {
+            (kv_dim_elements * 2, SnapshotKvStorageKind::F16)
         };
         let gdn_conv_elements_per_layer = if n_gdn_layers == 0 {
             0
@@ -2521,27 +2509,15 @@ impl MetalSession {
             }
         }
 
-        // KV cache defaults to F16 storage (matches llama.cpp's default
-        // --cache-type-k f16). Experimental dense long-context path can
-        // switch to Q8_0 via `QWEN_KV_Q8=1`; this is currently limited to the
-        // dense group6 / head_dim=256 shape.
-        let kv_dtype = kv_cache_dtype_for_arch(arch);
+        // KV cache uses F16 storage.
         let mut kv_k = Vec::new();
         let mut kv_v = Vec::new();
         let mut kv_n_pos = Vec::new();
         for b in &model.blocks {
             if matches!(b, MetalBlock::Attn(_)) {
                 let shape = kv_shape.clone();
-                kv_k.push(match kv_dtype {
-                    GgmlType::F16 => MetalTensor::zeros_f16(ctx, shape.clone())?,
-                    GgmlType::Q8_0 => MetalTensor::zeros_q8_0(ctx, shape.clone())?,
-                    _ => unreachable!(),
-                });
-                kv_v.push(match kv_dtype {
-                    GgmlType::F16 => MetalTensor::zeros_f16(ctx, shape.clone())?,
-                    GgmlType::Q8_0 => MetalTensor::zeros_q8_0(ctx, shape.clone())?,
-                    _ => unreachable!(),
-                });
+                kv_k.push(MetalTensor::zeros_f16(ctx, shape.clone())?);
+                kv_v.push(MetalTensor::zeros_f16(ctx, shape.clone())?);
                 kv_n_pos.push(0);
             }
         }

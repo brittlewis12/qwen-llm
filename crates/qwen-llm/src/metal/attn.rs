@@ -664,11 +664,6 @@ pub fn attn_v4_choose_nwg(n_pos: usize, group: usize) -> usize {
 ///
 /// `QWEN_ATTN_V4_TILE_C={16,32,64,128}` is an A/B knob for whole-model sweeps.
 pub fn attn_v4_choose_tile_c(n_pos: usize, group: usize) -> usize {
-    if group == 8
-        && let Some(tile_c) = attn_v4_g8_vstage_c()
-    {
-        return tile_c;
-    }
     static TILE_C_OVERRIDE: OnceLock<Option<usize>> = OnceLock::new();
     if let Some(tile_c) = *TILE_C_OVERRIDE.get_or_init(|| {
         std::env::var("QWEN_ATTN_V4_TILE_C")
@@ -686,40 +681,6 @@ pub fn attn_v4_choose_tile_c(n_pos: usize, group: usize) -> usize {
     } else {
         32
     }
-}
-
-pub(crate) fn attn_v4_g8_vstage_c() -> Option<usize> {
-    static VSTAGE_C: OnceLock<Option<usize>> = OnceLock::new();
-    *VSTAGE_C.get_or_init(|| {
-        std::env::var("QWEN_ATTN_V4_G8_VSTAGE_C")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|v| matches!(*v, 16 | 32))
-    })
-}
-
-pub(crate) fn attn_v4_g8_bcast_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("QWEN_ATTN_V4_G8_BCAST").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-        )
-    })
-}
-
-/// W1b partition-packing opt-in: `QWEN_ATTN_V4_PACK=4` packs 4 partitions
-/// (one simdgroup each) into 128-thread TGs for the g8/t4/C64 F16 decode
-/// main. Default off; see docs/bench/2026-07-06-w1b-attn-partition-pack/.
-pub(crate) fn attn_v4_pack() -> usize {
-    static PACK: OnceLock<usize> = OnceLock::new();
-    *PACK.get_or_init(|| {
-        std::env::var("QWEN_ATTN_V4_PACK")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|v| *v == 4)
-            .unwrap_or(1)
-    })
 }
 
 /// Group-tile subgroup size for v4's decode main pass.
@@ -933,11 +894,11 @@ pub fn encode_attn_decode_v4_f32(
             detail: format!("group={group} unsupported; expected one of {{4, 6, 8, 16}}"),
         });
     }
-    if k_cache.dtype != v_cache.dtype || !matches!(k_cache.dtype, GgmlType::F16 | GgmlType::Q8_0) {
+    if k_cache.dtype != v_cache.dtype || k_cache.dtype != GgmlType::F16 {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4",
             detail: format!(
-                "k/v expected matching F16 or Q8_0 dtypes, got {:?}/{:?}",
+                "k/v expected F16 dtypes, got {:?}/{:?}",
                 k_cache.dtype, v_cache.dtype
             ),
         });
@@ -1010,28 +971,7 @@ pub fn encode_attn_decode_v4_f32(
         rows_per_partition: u32,
         scale: f32,
     }
-    let use_g8_bcast = k_cache.dtype == GgmlType::F16
-        && group == 8
-        && matches!(group_tile, 2 | 4)
-        && tile_c == 64
-        && attn_v4_g8_bcast_enabled();
-    let use_g8_vstage = !use_g8_bcast
-        && k_cache.dtype == GgmlType::F16
-        && group == 8
-        && group_tile == 4
-        && attn_v4_g8_vstage_c() == Some(tile_c);
-    // W1b: partition-packed main (opt-in; exact same per-simdgroup dataflow)
-    let use_pack4 = !use_g8_bcast
-        && !use_g8_vstage
-        && k_cache.dtype == GgmlType::F16
-        && group == 8
-        && group_tile == 4
-        && tile_c == 64
-        && attn_v4_pack() == 4;
     let use_register_q = (group == 6 || (group == 8 && group_tile == 4))
-        && !use_pack4
-        && !use_g8_bcast
-        && !use_g8_vstage
         && k_cache.dtype == GgmlType::F16
         && ATTN_REGISTER_Q_OVERRIDE.with(|s| s.get()).unwrap_or(false);
     let pipeline_name = if use_register_q && group == 8 {
@@ -1060,35 +1000,13 @@ pub fn encode_attn_decode_v4_f32(
                 });
             }
         }
-    } else if use_pack4 {
-        "kernel_attn_decode_v4_g8_t4_c64_pack4_f32"
-    } else if use_g8_bcast {
-        match group_tile {
-            2 => "kernel_attn_decode_v4_g8_t2_c64_bcast_f32",
-            4 => "kernel_attn_decode_v4_g8_t4_c64_bcast_f32",
-            _ => unreachable!(),
-        }
-    } else if use_g8_vstage {
-        match tile_c {
-            16 => "kernel_attn_decode_v4_g8_t4_c16_vstage_f32",
-            32 => "kernel_attn_decode_v4_g8_t4_c32_vstage_f32",
-            _ => {
-                return Err(MetalError::BadShape {
-                    kernel: "attn_decode_v4",
-                    detail: format!("vstage C={tile_c} unsupported; expected 16 or 32"),
-                });
-            }
-        }
     } else if group_tile == group {
         match (k_cache.dtype, group, tile_c) {
             (GgmlType::F16, 4, 16) => "kernel_attn_decode_v4_g4_c16_f32",
             (GgmlType::F16, 4, 32) => "kernel_attn_decode_v4_g4_f32",
             (GgmlType::F16, 4, 64) => "kernel_attn_decode_v4_g4_c64_f32",
             (GgmlType::F16, 4, 128) => "kernel_attn_decode_v4_g4_c128_f32",
-            (GgmlType::Q8_0, 6, 16) => "kernel_attn_decode_v4_q8_c16_f32",
-            (GgmlType::Q8_0, 6, 32) => "kernel_attn_decode_v4_q8_f32",
-            (GgmlType::Q8_0, 6, 64) => "kernel_attn_decode_v4_q8_c64_f32",
-            (GgmlType::Q8_0, 6, 128) => "kernel_attn_decode_v4_q8_c128_f32",
+
             (GgmlType::F16, 6, 16) => "kernel_attn_decode_v4_c16_f32",
             (GgmlType::F16, 6, 32) => "kernel_attn_decode_v4_f32",
             (GgmlType::F16, 6, 64) => "kernel_attn_decode_v4_c64_f32",
@@ -1097,22 +1015,12 @@ pub fn encode_attn_decode_v4_f32(
             (GgmlType::F16, 8, 32) => "kernel_attn_decode_v4_g8_f32",
             (GgmlType::F16, 8, 64) => "kernel_attn_decode_v4_g8_c64_f32",
             (GgmlType::F16, 8, 128) => "kernel_attn_decode_v4_g8_c128_f32",
-            (GgmlType::Q8_0, 8, 16) => "kernel_attn_decode_v4_q8_g8_c16_f32",
-            (GgmlType::Q8_0, 8, 32) => "kernel_attn_decode_v4_q8_g8_f32",
-            (GgmlType::Q8_0, 8, 64) => "kernel_attn_decode_v4_q8_g8_c64_f32",
-            (GgmlType::Q8_0, 8, 128) => "kernel_attn_decode_v4_q8_g8_c128_f32",
+
             (GgmlType::F16, 16, 16) => "kernel_attn_decode_v4_g16_c16_f32",
             (GgmlType::F16, 16, 32) => "kernel_attn_decode_v4_g16_f32",
             (GgmlType::F16, 16, 64) => "kernel_attn_decode_v4_g16_c64_f32",
             (GgmlType::F16, 16, 128) => "kernel_attn_decode_v4_g16_c128_f32",
-            (GgmlType::Q8_0, _, _) => {
-                return Err(MetalError::BadShape {
-                    kernel: "attn_decode_v4",
-                    detail: format!(
-                        "Q8_0 KV main kernels currently support only group=6/group=8; got group={group}, tile_c={tile_c}"
-                    ),
-                });
-            }
+
             _ => {
                 return Err(MetalError::BadShape {
                     kernel: "attn_decode_v4",
@@ -1132,14 +1040,7 @@ pub fn encode_attn_decode_v4_f32(
             (GgmlType::F16, 8, 2, 32) => "kernel_attn_decode_v4_g8_t2_f32",
             (GgmlType::F16, 8, 2, 64) => "kernel_attn_decode_v4_g8_t2_c64_f32",
             (GgmlType::F16, 8, 2, 128) => "kernel_attn_decode_v4_g8_t2_c128_f32",
-            (GgmlType::Q8_0, 8, 4, 16) => "kernel_attn_decode_v4_q8_g8_t4_c16_f32",
-            (GgmlType::Q8_0, 8, 4, 32) => "kernel_attn_decode_v4_q8_g8_t4_f32",
-            (GgmlType::Q8_0, 8, 4, 64) => "kernel_attn_decode_v4_q8_g8_t4_c64_f32",
-            (GgmlType::Q8_0, 8, 4, 128) => "kernel_attn_decode_v4_q8_g8_t4_c128_f32",
-            (GgmlType::Q8_0, 8, 2, 16) => "kernel_attn_decode_v4_q8_g8_t2_c16_f32",
-            (GgmlType::Q8_0, 8, 2, 32) => "kernel_attn_decode_v4_q8_g8_t2_f32",
-            (GgmlType::Q8_0, 8, 2, 64) => "kernel_attn_decode_v4_q8_g8_t2_c64_f32",
-            (GgmlType::Q8_0, 8, 2, 128) => "kernel_attn_decode_v4_q8_g8_t2_c128_f32",
+
             (GgmlType::F16, 16, 8, 16) => "kernel_attn_decode_v4_g16_t8_c16_f32",
             (GgmlType::F16, 16, 8, 32) => "kernel_attn_decode_v4_g16_t8_f32",
             (GgmlType::F16, 16, 8, 64) => "kernel_attn_decode_v4_g16_t8_c64_f32",
@@ -1148,14 +1049,7 @@ pub fn encode_attn_decode_v4_f32(
             (GgmlType::F16, 16, 4, 32) => "kernel_attn_decode_v4_g16_t4_f32",
             (GgmlType::F16, 16, 4, 64) => "kernel_attn_decode_v4_g16_t4_c64_f32",
             (GgmlType::F16, 16, 4, 128) => "kernel_attn_decode_v4_g16_t4_c128_f32",
-            (GgmlType::Q8_0, _, _, _) => {
-                return Err(MetalError::BadShape {
-                    kernel: "attn_decode_v4",
-                    detail: format!(
-                        "Q8_0 KV subgroup kernels currently support only group=8 tile2/tile4; got group={group}, group_tile={group_tile}, tile_c={tile_c}"
-                    ),
-                });
-            }
+
             _ => {
                 return Err(MetalError::BadShape {
                     kernel: "attn_decode_v4",
@@ -1190,79 +1084,28 @@ pub fn encode_attn_decode_v4_f32(
     // Threadgroup memory:
     //   threadgroup(0) sq[group_tile * DK halves]
     //   threadgroup(1) ss[group_tile * C floats]
-    // The vstage proof fuses both group8/tile4 simdgroups into one TG, so it
-    // allocates both simdgroups' Q/score scratch plus a shared V tile.
-    if use_g8_bcast {
-        let sq_bytes = group_tile * DK * 2;
-        enc.set_threadgroup_memory(0, sq_bytes);
-        enc.dispatch(
-            MTLSize {
-                width: n_kv_heads,
-                height: group / group_tile,
-                depth: nwg,
-            },
-            MTLSize {
-                width: 32,
-                height: 1,
-                depth: 1,
-            },
-        );
-    } else if use_pack4 {
-        const PACK: usize = 4;
-        // sq is SHARED across the packed partitions; ss is per-simdgroup.
-        enc.set_threadgroup_memory(0, group_tile * DK * 2);
-        enc.set_threadgroup_memory(1, PACK * group_tile * tile_c * std::mem::size_of::<f32>());
-        enc.dispatch(
-            MTLSize {
-                width: n_kv_heads,
-                height: group / group_tile,
-                depth: nwg.div_ceil(PACK),
-            },
-            MTLSize {
-                width: 32 * PACK,
-                height: 1,
-                depth: 1,
-            },
-        );
-    } else if use_g8_vstage {
-        enc.set_threadgroup_memory(0, 2 * group_tile * DK * 2);
-        enc.set_threadgroup_memory(1, 2 * group_tile * tile_c * std::mem::size_of::<f32>());
-        enc.set_threadgroup_memory(2, tile_c * head_dim * 2);
-        enc.dispatch(
-            MTLSize {
-                width: n_kv_heads,
-                height: 1,
-                depth: nwg,
-            },
-            MTLSize {
-                width: 64,
-                height: 1,
-                depth: 1,
-            },
-        );
-    } else {
-        let sq_bytes = if use_register_q {
-            16
-        } else {
-            group_tile * DK * 2
-        }; // unused Q slot remains aligned
-        let ss_bytes = group_tile * tile_c * std::mem::size_of::<f32>();
-        enc.set_threadgroup_memory(0, sq_bytes);
-        enc.set_threadgroup_memory(1, ss_bytes);
 
-        enc.dispatch(
-            MTLSize {
-                width: n_kv_heads,
-                height: group / group_tile,
-                depth: nwg,
-            },
-            MTLSize {
-                width: 32,
-                height: 1,
-                depth: 1,
-            },
-        );
-    }
+    let sq_bytes = if use_register_q {
+        16
+    } else {
+        group_tile * DK * 2
+    }; // unused Q slot remains aligned
+    let ss_bytes = group_tile * tile_c * std::mem::size_of::<f32>();
+    enc.set_threadgroup_memory(0, sq_bytes);
+    enc.set_threadgroup_memory(1, ss_bytes);
+
+    enc.dispatch(
+        MTLSize {
+            width: n_kv_heads,
+            height: group / group_tile,
+            depth: nwg,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
 
     // -------- Reduce kernel ----------------------------------------------
     #[repr(C)]
@@ -1357,11 +1200,11 @@ pub fn encode_attn_decode_v4_main_only_f32(
             detail: format!("group={group} unsupported; expected one of {{4, 6, 8, 16}}"),
         });
     }
-    if k_cache.dtype != v_cache.dtype || !matches!(k_cache.dtype, GgmlType::F16 | GgmlType::Q8_0) {
+    if k_cache.dtype != v_cache.dtype || k_cache.dtype != GgmlType::F16 {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4_main",
             detail: format!(
-                "k/v expected matching F16 or Q8_0 dtypes, got {:?}/{:?}",
+                "k/v expected F16 dtypes, got {:?}/{:?}",
                 k_cache.dtype, v_cache.dtype
             ),
         });
@@ -1424,53 +1267,13 @@ pub fn encode_attn_decode_v4_main_only_f32(
         rows_per_partition: u32,
         scale: f32,
     }
-    let use_g8_bcast = k_cache.dtype == GgmlType::F16
-        && group == 8
-        && matches!(group_tile, 2 | 4)
-        && tile_c == 64
-        && attn_v4_g8_bcast_enabled();
-    let use_g8_vstage = !use_g8_bcast
-        && k_cache.dtype == GgmlType::F16
-        && group == 8
-        && group_tile == 4
-        && attn_v4_g8_vstage_c() == Some(tile_c);
-    // W1b: partition-packed main (opt-in; exact same per-simdgroup dataflow)
-    let use_pack4 = !use_g8_bcast
-        && !use_g8_vstage
-        && k_cache.dtype == GgmlType::F16
-        && group == 8
-        && group_tile == 4
-        && tile_c == 64
-        && attn_v4_pack() == 4;
-    let pipeline_name = if use_pack4 {
-        "kernel_attn_decode_v4_g8_t4_c64_pack4_f32"
-    } else if use_g8_bcast {
-        match group_tile {
-            2 => "kernel_attn_decode_v4_g8_t2_c64_bcast_f32",
-            4 => "kernel_attn_decode_v4_g8_t4_c64_bcast_f32",
-            _ => unreachable!(),
-        }
-    } else if use_g8_vstage {
-        match tile_c {
-            16 => "kernel_attn_decode_v4_g8_t4_c16_vstage_f32",
-            32 => "kernel_attn_decode_v4_g8_t4_c32_vstage_f32",
-            _ => {
-                return Err(MetalError::BadShape {
-                    kernel: "attn_decode_v4_main",
-                    detail: format!("vstage C={tile_c} unsupported; expected 16 or 32"),
-                });
-            }
-        }
-    } else if group_tile == group {
+    let pipeline_name = if group_tile == group {
         match (k_cache.dtype, group, tile_c) {
             (GgmlType::F16, 4, 16) => "kernel_attn_decode_v4_g4_c16_f32",
             (GgmlType::F16, 4, 32) => "kernel_attn_decode_v4_g4_f32",
             (GgmlType::F16, 4, 64) => "kernel_attn_decode_v4_g4_c64_f32",
             (GgmlType::F16, 4, 128) => "kernel_attn_decode_v4_g4_c128_f32",
-            (GgmlType::Q8_0, 6, 16) => "kernel_attn_decode_v4_q8_c16_f32",
-            (GgmlType::Q8_0, 6, 32) => "kernel_attn_decode_v4_q8_f32",
-            (GgmlType::Q8_0, 6, 64) => "kernel_attn_decode_v4_q8_c64_f32",
-            (GgmlType::Q8_0, 6, 128) => "kernel_attn_decode_v4_q8_c128_f32",
+
             (GgmlType::F16, 6, 16) => "kernel_attn_decode_v4_c16_f32",
             (GgmlType::F16, 6, 32) => "kernel_attn_decode_v4_f32",
             (GgmlType::F16, 6, 64) => "kernel_attn_decode_v4_c64_f32",
@@ -1479,22 +1282,12 @@ pub fn encode_attn_decode_v4_main_only_f32(
             (GgmlType::F16, 8, 32) => "kernel_attn_decode_v4_g8_f32",
             (GgmlType::F16, 8, 64) => "kernel_attn_decode_v4_g8_c64_f32",
             (GgmlType::F16, 8, 128) => "kernel_attn_decode_v4_g8_c128_f32",
-            (GgmlType::Q8_0, 8, 16) => "kernel_attn_decode_v4_q8_g8_c16_f32",
-            (GgmlType::Q8_0, 8, 32) => "kernel_attn_decode_v4_q8_g8_f32",
-            (GgmlType::Q8_0, 8, 64) => "kernel_attn_decode_v4_q8_g8_c64_f32",
-            (GgmlType::Q8_0, 8, 128) => "kernel_attn_decode_v4_q8_g8_c128_f32",
+
             (GgmlType::F16, 16, 16) => "kernel_attn_decode_v4_g16_c16_f32",
             (GgmlType::F16, 16, 32) => "kernel_attn_decode_v4_g16_f32",
             (GgmlType::F16, 16, 64) => "kernel_attn_decode_v4_g16_c64_f32",
             (GgmlType::F16, 16, 128) => "kernel_attn_decode_v4_g16_c128_f32",
-            (GgmlType::Q8_0, _, _) => {
-                return Err(MetalError::BadShape {
-                    kernel: "attn_decode_v4_main",
-                    detail: format!(
-                        "Q8_0 KV main kernels currently support only group=6/group=8; got group={group}, tile_c={tile_c}"
-                    ),
-                });
-            }
+
             _ => {
                 return Err(MetalError::BadShape {
                     kernel: "attn_decode_v4_main",
@@ -1514,14 +1307,7 @@ pub fn encode_attn_decode_v4_main_only_f32(
             (GgmlType::F16, 8, 2, 32) => "kernel_attn_decode_v4_g8_t2_f32",
             (GgmlType::F16, 8, 2, 64) => "kernel_attn_decode_v4_g8_t2_c64_f32",
             (GgmlType::F16, 8, 2, 128) => "kernel_attn_decode_v4_g8_t2_c128_f32",
-            (GgmlType::Q8_0, 8, 4, 16) => "kernel_attn_decode_v4_q8_g8_t4_c16_f32",
-            (GgmlType::Q8_0, 8, 4, 32) => "kernel_attn_decode_v4_q8_g8_t4_f32",
-            (GgmlType::Q8_0, 8, 4, 64) => "kernel_attn_decode_v4_q8_g8_t4_c64_f32",
-            (GgmlType::Q8_0, 8, 4, 128) => "kernel_attn_decode_v4_q8_g8_t4_c128_f32",
-            (GgmlType::Q8_0, 8, 2, 16) => "kernel_attn_decode_v4_q8_g8_t2_c16_f32",
-            (GgmlType::Q8_0, 8, 2, 32) => "kernel_attn_decode_v4_q8_g8_t2_f32",
-            (GgmlType::Q8_0, 8, 2, 64) => "kernel_attn_decode_v4_q8_g8_t2_c64_f32",
-            (GgmlType::Q8_0, 8, 2, 128) => "kernel_attn_decode_v4_q8_g8_t2_c128_f32",
+
             (GgmlType::F16, 16, 8, 16) => "kernel_attn_decode_v4_g16_t8_c16_f32",
             (GgmlType::F16, 16, 8, 32) => "kernel_attn_decode_v4_g16_t8_f32",
             (GgmlType::F16, 16, 8, 64) => "kernel_attn_decode_v4_g16_t8_c64_f32",
@@ -1530,14 +1316,7 @@ pub fn encode_attn_decode_v4_main_only_f32(
             (GgmlType::F16, 16, 4, 32) => "kernel_attn_decode_v4_g16_t4_f32",
             (GgmlType::F16, 16, 4, 64) => "kernel_attn_decode_v4_g16_t4_c64_f32",
             (GgmlType::F16, 16, 4, 128) => "kernel_attn_decode_v4_g16_t4_c128_f32",
-            (GgmlType::Q8_0, _, _, _) => {
-                return Err(MetalError::BadShape {
-                    kernel: "attn_decode_v4_main",
-                    detail: format!(
-                        "Q8_0 KV subgroup kernels currently support only group=8 tile2/tile4; got group={group}, group_tile={group_tile}, tile_c={tile_c}"
-                    ),
-                });
-            }
+
             _ => {
                 return Err(MetalError::BadShape {
                     kernel: "attn_decode_v4_main",
@@ -1568,72 +1347,24 @@ pub fn encode_attn_decode_v4_main_only_f32(
     enc.set_tensor(3, v_cache);
     enc.set_tensor(4, o_partial);
     enc.set_tensor(5, ml_partial);
-    if use_g8_bcast {
-        let sq_bytes = group_tile * DK * 2;
-        enc.set_threadgroup_memory(0, sq_bytes);
-        enc.dispatch(
-            MTLSize {
-                width: n_kv_heads,
-                height: group / group_tile,
-                depth: nwg,
-            },
-            MTLSize {
-                width: 32,
-                height: 1,
-                depth: 1,
-            },
-        );
-    } else if use_pack4 {
-        const PACK: usize = 4;
-        // sq is SHARED across the packed partitions; ss is per-simdgroup.
-        enc.set_threadgroup_memory(0, group_tile * DK * 2);
-        enc.set_threadgroup_memory(1, PACK * group_tile * tile_c * std::mem::size_of::<f32>());
-        enc.dispatch(
-            MTLSize {
-                width: n_kv_heads,
-                height: group / group_tile,
-                depth: nwg.div_ceil(PACK),
-            },
-            MTLSize {
-                width: 32 * PACK,
-                height: 1,
-                depth: 1,
-            },
-        );
-    } else if use_g8_vstage {
-        enc.set_threadgroup_memory(0, 2 * group_tile * DK * 2);
-        enc.set_threadgroup_memory(1, 2 * group_tile * tile_c * std::mem::size_of::<f32>());
-        enc.set_threadgroup_memory(2, tile_c * head_dim * 2);
-        enc.dispatch(
-            MTLSize {
-                width: n_kv_heads,
-                height: 1,
-                depth: nwg,
-            },
-            MTLSize {
-                width: 64,
-                height: 1,
-                depth: 1,
-            },
-        );
-    } else {
-        let sq_bytes = group_tile * DK * 2;
-        let ss_bytes = group_tile * tile_c * std::mem::size_of::<f32>();
-        enc.set_threadgroup_memory(0, sq_bytes);
-        enc.set_threadgroup_memory(1, ss_bytes);
-        enc.dispatch(
-            MTLSize {
-                width: n_kv_heads,
-                height: group / group_tile,
-                depth: nwg,
-            },
-            MTLSize {
-                width: 32,
-                height: 1,
-                depth: 1,
-            },
-        );
-    }
+
+    let sq_bytes = group_tile * DK * 2;
+    let ss_bytes = group_tile * tile_c * std::mem::size_of::<f32>();
+    enc.set_threadgroup_memory(0, sq_bytes);
+    enc.set_threadgroup_memory(1, ss_bytes);
+    enc.dispatch(
+        MTLSize {
+            width: n_kv_heads,
+            height: group / group_tile,
+            depth: nwg,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+
     Ok(())
 }
 
@@ -2462,135 +2193,6 @@ pub fn encode_attn_prefill_v4_g8_t2_q2_c64_f32(
     Ok(())
 }
 
-pub fn encode_attn_prefill_v4_g8_t2_q4_c64_main_only_f32(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    q_rows: &MetalTensor,
-    k_cache: &MetalTensor,
-    v_cache: &MetalTensor,
-    o_partial: &MetalTensor,
-    ml_partial: &MetalTensor,
-    n_rows: usize,
-    base_pos: usize,
-    nwg: usize,
-) -> Result<(), MetalError> {
-    const N_Q_HEADS: usize = 16;
-    const N_KV_HEADS: usize = 2;
-    const HEAD_DIM: usize = 256;
-    const GROUP: usize = 8;
-    const GROUP_TILE: usize = 2;
-    const QT: usize = 4;
-    const TILE_C: usize = 64;
-
-    if n_rows == 0 {
-        return Err(MetalError::BadShape {
-            kernel: "attn_prefill_v4_g8_t2_q4_c64",
-            detail: "n_rows must be > 0".into(),
-        });
-    }
-    if k_cache.dtype != GgmlType::F16 || v_cache.dtype != GgmlType::F16 {
-        return Err(MetalError::BadShape {
-            kernel: "attn_prefill_v4_g8_t2_q4_c64",
-            detail: format!(
-                "expected F16 KV cache, got {:?}/{:?}",
-                k_cache.dtype, v_cache.dtype
-            ),
-        });
-    }
-    if nwg == 0 || nwg > ATTN_V4_NWG_MAX {
-        return Err(MetalError::BadShape {
-            kernel: "attn_prefill_v4_g8_t2_q4_c64",
-            detail: format!("nwg={nwg} out of range [1, {ATTN_V4_NWG_MAX}]"),
-        });
-    }
-    let want_q = (n_rows * N_Q_HEADS * HEAD_DIM) as u64;
-    if q_rows.n_elements() != want_q {
-        return Err(MetalError::BadShape {
-            kernel: "attn_prefill_v4_g8_t2_q4_c64",
-            detail: format!("q expected {want_q} elements"),
-        });
-    }
-    let want_o_partial = (n_rows * N_KV_HEADS * nwg * GROUP * HEAD_DIM) as u64;
-    let want_ml_partial = (n_rows * N_KV_HEADS * nwg * GROUP * 2) as u64;
-    if o_partial.n_elements() < want_o_partial || ml_partial.n_elements() < want_ml_partial {
-        return Err(MetalError::BadShape {
-            kernel: "attn_prefill_v4_g8_t2_q4_c64",
-            detail: format!(
-                "partials too small: o have {} need >= {want_o_partial}, ml have {} need >= {want_ml_partial}",
-                o_partial.n_elements(),
-                ml_partial.n_elements()
-            ),
-        });
-    }
-
-    let n_pos = base_pos + n_rows;
-    let rows_per_partition = n_pos.div_ceil(nwg.max(1));
-    let kv_stride = N_KV_HEADS * HEAD_DIM;
-    let scale = (1.0f32 / (HEAD_DIM as f32).sqrt()) * std::f32::consts::LOG2_E;
-
-    let pso_main = ctx.pipeline("kernel_attn_prefill_v4_g8_t2_q4_c64_f32")?;
-    enc.set_pipeline(&pso_main);
-    enc.set_bytes(
-        0,
-        &AttnV4PrefillArgs {
-            n_rows: n_rows as u32,
-            n_q_heads: N_Q_HEADS as u32,
-            n_kv_heads: N_KV_HEADS as u32,
-            head_dim: HEAD_DIM as u32,
-            n_pos: n_pos as u32,
-            kv_stride: kv_stride as u32,
-            n_partitions: nwg as u32,
-            rows_per_partition: rows_per_partition as u32,
-            base_pos: base_pos as u32,
-            q_f32: 0,
-            scale,
-        },
-    );
-    enc.set_tensor(1, q_rows);
-    enc.set_tensor(2, k_cache);
-    enc.set_tensor(3, v_cache);
-    enc.set_tensor(4, o_partial);
-    enc.set_tensor(5, ml_partial);
-    enc.set_threadgroup_memory(0, QT * GROUP_TILE * HEAD_DIM * 2);
-    enc.set_threadgroup_memory(1, QT * GROUP_TILE * TILE_C * std::mem::size_of::<f32>());
-    enc.dispatch(
-        MTLSize {
-            width: N_KV_HEADS,
-            height: n_rows.div_ceil(QT) * (GROUP / GROUP_TILE),
-            depth: nwg,
-        },
-        MTLSize {
-            width: 32,
-            height: 1,
-            depth: 1,
-        },
-    );
-
-    Ok(())
-}
-
-pub fn encode_attn_prefill_v4_g8_t2_q4_c64_f32(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    q_rows: &MetalTensor,
-    k_cache: &MetalTensor,
-    v_cache: &MetalTensor,
-    o_partial: &MetalTensor,
-    ml_partial: &MetalTensor,
-    out: &MetalTensor,
-    n_rows: usize,
-    base_pos: usize,
-    nwg: usize,
-) -> Result<(), MetalError> {
-    encode_attn_prefill_v4_g8_t2_q4_c64_main_only_f32(
-        ctx, enc, q_rows, k_cache, v_cache, o_partial, ml_partial, n_rows, base_pos, nwg,
-    )?;
-    encode_attn_prefill_v4_g8_t2_q2_c64_reduce_only_f32(
-        ctx, enc, o_partial, ml_partial, out, n_rows, nwg,
-    )?;
-    Ok(())
-}
-
 pub fn encode_attn_prefill_v4_g16_t4_q2_c64_main_only_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2794,135 +2396,6 @@ pub fn encode_attn_prefill_v4_g16_t4_q2_c64_f32(
     nwg: usize,
 ) -> Result<(), MetalError> {
     encode_attn_prefill_v4_g16_t4_q2_c64_main_only_f32(
-        ctx, enc, q_rows, k_cache, v_cache, o_partial, ml_partial, n_rows, base_pos, nwg,
-    )?;
-    encode_attn_prefill_v4_g16_t4_q2_c64_reduce_only_f32(
-        ctx, enc, o_partial, ml_partial, out, n_rows, nwg,
-    )?;
-    Ok(())
-}
-
-pub fn encode_attn_prefill_v4_g16_t4_q4_c64_main_only_f32(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    q_rows: &MetalTensor,
-    k_cache: &MetalTensor,
-    v_cache: &MetalTensor,
-    o_partial: &MetalTensor,
-    ml_partial: &MetalTensor,
-    n_rows: usize,
-    base_pos: usize,
-    nwg: usize,
-) -> Result<(), MetalError> {
-    const N_Q_HEADS: usize = 32;
-    const N_KV_HEADS: usize = 2;
-    const HEAD_DIM: usize = 256;
-    const GROUP: usize = 16;
-    const GROUP_TILE: usize = 4;
-    const QT: usize = 4;
-    const TILE_C: usize = 64;
-
-    if n_rows == 0 {
-        return Err(MetalError::BadShape {
-            kernel: "attn_prefill_v4_g16_t4_q4_c64",
-            detail: "n_rows must be > 0".into(),
-        });
-    }
-    if k_cache.dtype != GgmlType::F16 || v_cache.dtype != GgmlType::F16 {
-        return Err(MetalError::BadShape {
-            kernel: "attn_prefill_v4_g16_t4_q4_c64",
-            detail: format!(
-                "expected F16 KV cache, got {:?}/{:?}",
-                k_cache.dtype, v_cache.dtype
-            ),
-        });
-    }
-    if nwg == 0 || nwg > ATTN_V4_NWG_MAX {
-        return Err(MetalError::BadShape {
-            kernel: "attn_prefill_v4_g16_t4_q4_c64",
-            detail: format!("nwg={nwg} out of range [1, {ATTN_V4_NWG_MAX}]"),
-        });
-    }
-    let want_q = (n_rows * N_Q_HEADS * HEAD_DIM) as u64;
-    if q_rows.n_elements() != want_q {
-        return Err(MetalError::BadShape {
-            kernel: "attn_prefill_v4_g16_t4_q4_c64",
-            detail: format!("q expected {want_q} elements"),
-        });
-    }
-    let want_o_partial = (n_rows * N_KV_HEADS * nwg * GROUP * HEAD_DIM) as u64;
-    let want_ml_partial = (n_rows * N_KV_HEADS * nwg * GROUP * 2) as u64;
-    if o_partial.n_elements() < want_o_partial || ml_partial.n_elements() < want_ml_partial {
-        return Err(MetalError::BadShape {
-            kernel: "attn_prefill_v4_g16_t4_q4_c64",
-            detail: format!(
-                "partials too small: o have {} need >= {want_o_partial}, ml have {} need >= {want_ml_partial}",
-                o_partial.n_elements(),
-                ml_partial.n_elements()
-            ),
-        });
-    }
-
-    let n_pos = base_pos + n_rows;
-    let rows_per_partition = n_pos.div_ceil(nwg.max(1));
-    let kv_stride = N_KV_HEADS * HEAD_DIM;
-    let scale = (1.0f32 / (HEAD_DIM as f32).sqrt()) * std::f32::consts::LOG2_E;
-
-    let pso_main = ctx.pipeline("kernel_attn_prefill_v4_g16_t4_q4_c64_f32")?;
-    enc.set_pipeline(&pso_main);
-    enc.set_bytes(
-        0,
-        &AttnV4PrefillArgs {
-            n_rows: n_rows as u32,
-            n_q_heads: N_Q_HEADS as u32,
-            n_kv_heads: N_KV_HEADS as u32,
-            head_dim: HEAD_DIM as u32,
-            n_pos: n_pos as u32,
-            kv_stride: kv_stride as u32,
-            n_partitions: nwg as u32,
-            rows_per_partition: rows_per_partition as u32,
-            base_pos: base_pos as u32,
-            q_f32: 0,
-            scale,
-        },
-    );
-    enc.set_tensor(1, q_rows);
-    enc.set_tensor(2, k_cache);
-    enc.set_tensor(3, v_cache);
-    enc.set_tensor(4, o_partial);
-    enc.set_tensor(5, ml_partial);
-    enc.set_threadgroup_memory(0, QT * GROUP_TILE * HEAD_DIM * 2);
-    enc.set_threadgroup_memory(1, QT * GROUP_TILE * TILE_C * std::mem::size_of::<f32>());
-    enc.dispatch(
-        MTLSize {
-            width: N_KV_HEADS,
-            height: n_rows.div_ceil(QT) * (GROUP / GROUP_TILE),
-            depth: nwg,
-        },
-        MTLSize {
-            width: 32,
-            height: 1,
-            depth: 1,
-        },
-    );
-
-    Ok(())
-}
-
-pub fn encode_attn_prefill_v4_g16_t4_q4_c64_f32(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    q_rows: &MetalTensor,
-    k_cache: &MetalTensor,
-    v_cache: &MetalTensor,
-    o_partial: &MetalTensor,
-    ml_partial: &MetalTensor,
-    out: &MetalTensor,
-    n_rows: usize,
-    base_pos: usize,
-    nwg: usize,
-) -> Result<(), MetalError> {
-    encode_attn_prefill_v4_g16_t4_q4_c64_main_only_f32(
         ctx, enc, q_rows, k_cache, v_cache, o_partial, ml_partial, n_rows, base_pos, nwg,
     )?;
     encode_attn_prefill_v4_g16_t4_q2_c64_reduce_only_f32(
@@ -3992,22 +3465,6 @@ mod tests {
         }
     }
     use crate::metal::test_support::*;
-
-    #[test]
-    fn attn_v4_q8_kv_close_to_f16_kv() {
-        run_attn_v4_q8_kv_compare("g6-main", 24, 4, 4096, 64, 32, None);
-    }
-
-    #[test]
-    fn attn_v4_q8_group8_main_close_to_f16_kv() {
-        run_attn_v4_q8_kv_compare("g8-main", 16, 2, 2048, 32, 32, Some(8));
-    }
-
-    #[test]
-    fn attn_v4_q8_group8_subgroup_close_to_f16_kv() {
-        run_attn_v4_q8_kv_compare("g8-t2", 16, 2, 8192, 64, 64, Some(2));
-        run_attn_v4_q8_kv_compare("g8-t4", 16, 2, 16384, 128, 64, Some(4));
-    }
 
     /// v0.433 triage repro for the `attn_v4_matches_naive_f16kv` load-flake:
     /// NaN-prime the o/ml partials scratch before dispatch at the exact
@@ -5920,7 +5377,7 @@ mod tests {
                 GgmlType::F16,
             )
             .unwrap();
-            for qt in [2, 4] {
+            for qt in [2] {
                 for nwg in [1, 4, 16] {
                     let o = MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * nwg * hd) as u64])
                         .unwrap();
@@ -5930,9 +5387,7 @@ mod tests {
                         MetalTensor::zeros_f32(&ctx, vec![(n_rows * n_q * hd) as u64]).unwrap();
                     let encode = match (group, qt) {
                         (8, 2) => encode_attn_prefill_v4_g8_t2_q2_c64_f32,
-                        (8, 4) => encode_attn_prefill_v4_g8_t2_q4_c64_f32,
                         (16, 2) => encode_attn_prefill_v4_g16_t4_q2_c64_f32,
-                        (16, 4) => encode_attn_prefill_v4_g16_t4_q4_c64_f32,
                         _ => unreachable!(),
                     };
                     one_shot(&ctx, |enc| {

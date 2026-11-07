@@ -201,10 +201,6 @@ fn roundtrip(ctx: &MetalContext, src: &[Section], gpu: bool, oracle: bool) -> Va
 #[test]
 #[ignore = "serial Metal, model-free immutable snapshot publication/restore"]
 fn snapshot_cpu_vs_gpu_publication_restore() {
-    assert!(
-        std::env::var_os("QWEN_KV_Q8").is_none(),
-        "this models F16 KV, not weight quantization"
-    );
     let ctx = MetalContext::new().unwrap();
     for prefix in [8840usize, 32752] {
         // Dense27 with F16 KV. Weight quantization is not KV-cache quantization.

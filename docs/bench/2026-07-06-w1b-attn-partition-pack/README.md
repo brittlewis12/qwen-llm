@@ -1,3 +1,5 @@
+> Historical experiment: Qwen Q8 KV, G8 attention sidecars and QT4 prefill were removed in the knob sweep. Commands below describe historical builds.
+
 # W1b: Partition-Packed Attention Decode Main
 
 Status: RUN, FALSIFIED at the pre-registered control row. Design signed

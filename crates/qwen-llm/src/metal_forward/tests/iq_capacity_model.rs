@@ -969,7 +969,6 @@ fn iq_capacity_model_packet() {
             ]
             .iter()
             .any(|prefix| name.starts_with(prefix))
-                || name == "QWEN_KV_Q8"
                 || name == "QWEN_NATIVE_QUANT_EMBED"
         })
         .collect();
@@ -992,7 +991,7 @@ fn iq_capacity_model_packet() {
         "cases":[{"stream":"prose","rows":129},{"stream":"code_review","rows":131}],"chunk_rows":CHUNK,"capacity":CAPACITY,
         "continuations":CONTINUATIONS,"trajectories":4,"weight_loads":1,
          "environment":environment,"gpu_timing_collected":false,
-         "environment_absence":"unlisted variables matching captured QWEN_PREFILL/DECODE/GGUF/DENSE_GDN/METAL_LEASE/MATVEC/MATMAT prefixes and QWEN_KV_Q8/QWEN_NATIVE_QUANT_EMBED are unset",
+         "environment_absence":"unlisted variables matching captured QWEN_PREFILL/DECODE/GGUF/DENSE_GDN/METAL_LEASE/MATVEC/MATMAT prefixes and QWEN_NATIVE_QUANT_EMBED are unset",
         "policy":"same native weights; reference serial tokens through ordinary GEMV, packed ordinary prefill; default decode concurrency remains enabled",
         "scope":"numerical and capacity qualification; not benchmark, not inflated-baseline A/B, not language-quality proof",
         "source_binding":source_binding}),

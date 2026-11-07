@@ -1473,9 +1473,6 @@ pub(crate) struct AttnPrefillMicroArgs {
     /// Split-K partitions.
     #[arg(long, default_value = "64")]
     pub(crate) nwg: usize,
-    /// Query rows processed per packed main-pass threadgroup.
-    #[arg(long, default_value = "2")]
-    pub(crate) qt: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -1502,9 +1499,6 @@ pub(crate) struct AttnLayerMicroArgs {
     /// Forced split-K partitions for both baseline and packed body.
     #[arg(long, default_value = "64")]
     pub(crate) nwg: usize,
-    /// Query rows processed per packed main-pass threadgroup.
-    #[arg(long, default_value = "2")]
-    pub(crate) qt: usize,
 }
 
 #[derive(Parser, Debug)]

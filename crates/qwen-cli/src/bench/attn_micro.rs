@@ -127,8 +127,8 @@ pub(crate) fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
         base_pos,
         rows,
         nwg,
-        qt,
     } = args;
+    let qt = 2;
     let ctx = MetalContext::new().context("init MetalContext")?;
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
     let m = Model::from_gguf(&g).context("parse model")?;
@@ -273,33 +273,7 @@ pub(crate) fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
                 base_pos,
                 nwg,
             )?,
-            (16, 2, 4) => encode_attn_prefill_v4_g8_t2_q4_c64_f32(
-                &ctx,
-                &enc,
-                &q_t,
-                &k_cache,
-                &v_cache,
-                &o_partial_packed,
-                &ml_partial_packed,
-                &out_packed,
-                rows,
-                base_pos,
-                nwg,
-            )?,
             (32, 2, 2) => encode_attn_prefill_v4_g16_t4_q2_c64_f32(
-                &ctx,
-                &enc,
-                &q_t,
-                &k_cache,
-                &v_cache,
-                &o_partial_packed,
-                &ml_partial_packed,
-                &out_packed,
-                rows,
-                base_pos,
-                nwg,
-            )?,
-            (32, 2, 4) => encode_attn_prefill_v4_g16_t4_q4_c64_f32(
                 &ctx,
                 &enc,
                 &q_t,
@@ -378,8 +352,8 @@ pub(crate) fn run_attn_layer_micro(args: AttnLayerMicroArgs) -> Result<()> {
         base_pos,
         rows,
         nwg,
-        qt,
     } = args;
+    let qt = 2;
     let ctx = MetalContext::new().context("init MetalContext")?;
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
     let m = Model::from_gguf(&g).context("parse model")?;
@@ -415,9 +389,7 @@ pub(crate) fn run_attn_layer_micro(args: AttnLayerMicroArgs) -> Result<()> {
             mm.arch.attn_head_dim
         );
     }
-    if !matches!(qt, 2 | 4) {
-        anyhow::bail!("attn-layer-micro only supports qt=2 or 4, got {qt}");
-    }
+
     let n_rot = (HD as f32 * mm.arch.partial_rotary_factor) as usize;
     let n_pos = base_pos + rows;
 
@@ -682,33 +654,7 @@ pub(crate) fn run_attn_layer_micro(args: AttnLayerMicroArgs) -> Result<()> {
                 base_pos,
                 nwg,
             )?,
-            (16, 2, 4) => encode_attn_prefill_v4_g8_t2_q4_c64_f32(
-                &ctx,
-                &enc,
-                &packed.q_normed,
-                &packed_k_cache,
-                &packed_v_cache,
-                &packed.o_partial,
-                &packed.ml_partial,
-                &packed.attn_o,
-                rows,
-                base_pos,
-                nwg,
-            )?,
             (32, 2, 2) => encode_attn_prefill_v4_g16_t4_q2_c64_f32(
-                &ctx,
-                &enc,
-                &packed.q_normed,
-                &packed_k_cache,
-                &packed_v_cache,
-                &packed.o_partial,
-                &packed.ml_partial,
-                &packed.attn_o,
-                rows,
-                base_pos,
-                nwg,
-            )?,
-            (32, 2, 4) => encode_attn_prefill_v4_g16_t4_q4_c64_f32(
                 &ctx,
                 &enc,
                 &packed.q_normed,
@@ -1101,16 +1047,6 @@ pub(crate) fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
             "kv scatter (fused)",
             &|enc| match s.kv_k[attn_idx_in_session].dtype {
                 GgmlType::F16 => Ok(encode_scatter_offset_f32_to_f16_kv(
-                    &mctx,
-                    enc,
-                    &s.attn_k_normed,
-                    &s.attn_v_now,
-                    &s.kv_k[attn_idx_in_session],
-                    &s.kv_v[attn_idx_in_session],
-                    (position as usize) * kv_dim,
-                    kv_dim,
-                )?),
-                GgmlType::Q8_0 => Ok(encode_scatter_offset_f32_to_q8_0_kv(
                     &mctx,
                     enc,
                     &s.attn_k_normed,

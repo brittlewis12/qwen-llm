@@ -1,3 +1,5 @@
+> Historical experiment: Qwen Q8 KV, G8 attention sidecars and QT4 prefill were removed in the knob sweep. Commands below describe historical builds.
+
 # A3B True-Long Decode Spot - v0.356
 
 Manual qwen-only spot after v0.355. Same machine, sequential runs, no concurrent

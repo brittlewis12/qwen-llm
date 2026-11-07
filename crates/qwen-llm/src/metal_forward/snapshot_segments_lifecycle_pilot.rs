@@ -242,7 +242,6 @@ fn cycle(
 #[test]
 #[ignore = "serial Metal, model-free incremental CPU snapshot lifecycle"]
 fn snapshot_segmented_publication_full_restore() {
-    assert!(std::env::var_os("QWEN_KV_Q8").is_none());
     let ctx = MetalContext::new().unwrap();
     for prefix in [8840usize, 32752] {
         let tail = 16;

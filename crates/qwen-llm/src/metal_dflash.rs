@@ -2526,17 +2526,6 @@ fn prefill_attn_packed_g8_rows() -> usize {
     })
 }
 
-fn prefill_attn_packed_g8_qt() -> usize {
-    static QT: OnceLock<usize> = OnceLock::new();
-    *QT.get_or_init(|| {
-        std::env::var("QWEN_PREFILL_ATTN_PACKED_G8_QT")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| matches!(n, 2 | 4))
-            .unwrap_or(2)
-    })
-}
-
 fn prefill_attn_packed_g8_nwg() -> usize {
     static NWG: OnceLock<usize> = OnceLock::new();
     *NWG.get_or_init(|| {
@@ -2556,17 +2545,6 @@ fn prefill_attn_packed_g16_rows() -> usize {
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| (1..=ATTN_PREFILL_V4_PACKED_ROWS).contains(&n))
             .unwrap_or(4)
-    })
-}
-
-fn prefill_attn_packed_g16_qt() -> usize {
-    static QT: OnceLock<usize> = OnceLock::new();
-    *QT.get_or_init(|| {
-        std::env::var("QWEN_PREFILL_ATTN_PACKED_G16_QT")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| matches!(n, 2 | 4))
-            .unwrap_or(2)
     })
 }
 
@@ -12772,9 +12750,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     1
                                 };
                                 let packed_qt = if use_packed_g8 {
-                                    prefill_attn_packed_g8_qt()
+                                    2
                                 } else if use_packed_g16 {
-                                    prefill_attn_packed_g16_qt()
+                                    2
                                 } else {
                                     1
                                 };
@@ -13436,8 +13414,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                                     ],
                                                 );
                                             if use_packed_g8 {
-                                                if packed_qt == 4 {
-                                                    crate::metal::encode_attn_prefill_v4_g8_t2_q4_c64_f32(
+                                                crate::metal::encode_attn_prefill_v4_g8_t2_q2_c64_f32(
                                                 base.ctx,
                                                 &enc,
                                                 &q_rows,
@@ -13450,24 +13427,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                                 chunk_start as usize + row_base,
                                                 nwg,
                                             )?;
-                                                } else {
-                                                    crate::metal::encode_attn_prefill_v4_g8_t2_q2_c64_f32(
-                                                base.ctx,
-                                                &enc,
-                                                &q_rows,
-                                                &target_session.kv_k[ai],
-                                                &target_session.kv_v[ai],
-                                                &o_partial_rows,
-                                                &ml_partial_rows,
-                                                &attn_o_rows,
-                                                rows_n,
-                                                chunk_start as usize + row_base,
-                                                nwg,
-                                            )?;
-                                                }
                                             } else {
-                                                if packed_qt == 4 {
-                                                    crate::metal::encode_attn_prefill_v4_g16_t4_q4_c64_f32(
+                                                crate::metal::encode_attn_prefill_v4_g16_t4_q2_c64_f32(
                                                 base.ctx,
                                                 &enc,
                                                 &q_rows,
@@ -13480,21 +13441,6 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                                 chunk_start as usize + row_base,
                                                 nwg,
                                             )?;
-                                                } else {
-                                                    crate::metal::encode_attn_prefill_v4_g16_t4_q2_c64_f32(
-                                                base.ctx,
-                                                &enc,
-                                                &q_rows,
-                                                &target_session.kv_k[ai],
-                                                &target_session.kv_v[ai],
-                                                &o_partial_rows,
-                                                &ml_partial_rows,
-                                                &attn_o_rows,
-                                                rows_n,
-                                                chunk_start as usize + row_base,
-                                                nwg,
-                                            )?;
-                                                }
                                             }
                                         }
                                     }
@@ -13714,9 +13660,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     0
                                 };
                                 let capture_packed_qt = if use_packed_g8 {
-                                    prefill_attn_packed_g8_qt()
+                                    2
                                 } else if use_packed_g16 {
-                                    prefill_attn_packed_g16_qt()
+                                    2
                                 } else {
                                     0
                                 };

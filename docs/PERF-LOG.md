@@ -6,6 +6,63 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - Tier-1 Serve Agents: 64K Continuations And Older-Message Forks
+
+- **Measurement only**, clean main **`dabb9702`**, M5 Ultra. Unmodified source
+  build; default serve cache/precision/idle policies, no drafter, greedy/seed 1,
+  context limit **98304**. Real Rust code in synthetic `read_file` call/result
+  history over `/v1/responses`, faithful reasoning/message replay. Four ~16K
+  buildup turns generate 64 tokens each; three 1–2K append turns and an older
+  question fork generate 200 each. Full per-turn data and source attribution:
+  [agent serve packet](bench/2026-11-07-tier1-serve-agents.md).
+- **26 serve turns**, all thermal **0 before/after**. Cooling gaps plus three
+  zero readings, build lock, nice 10 and canonical campaign Metal lease with
+  wait enabled. One model resident at a time. About **45 minutes** including
+  build, sessions, native controls and cooling. No server remains running;
+  the M5 scratch checkout/target and transfer bundle were removed.
+- A2 is the middle deep append. Native pp controls use its exact new-row count
+  and reused depth; tg200 uses its exact prompt depth. One fresh retained native
+  sample/cell, normal model setup and untimed real prefix, `--no-warmup`.
+  Inputs differ from served code/generated tokens, so these are descriptive
+  comparisons, not isolated transport overhead or rollout qualification.
+
+  | Artifact | A2 new / reused | Serve TTFT s | Native PP s | Serve / native decode tok/s | Fork TTFT s; new / reused |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | V4.1 GSQ-RCO IQ2_XS + IQ4_NL Engram | 1629 / 66312 | 3.234 | 1.522 | 73.44 / 71.68 | 15.116; 16158 / 32616 |
+  | GLM-5.3 UD-IQ3_XXS | 1596 / 66037 | 3.018 | 2.927 | 55.14 / 56.42 | 34.339; 33994 / 14573 |
+  | Flash-Next GSQ-RCO IQ3_S | 1630 / 66340 | 1.699 | 1.252 | 66.05 / 68.99 | 9.037; 16093 / 32712 |
+
+- V4.1 uses live reuse on extensions and RAM restore on fork. CED remains off;
+  append body + 2-row generation header are two Full calls, no loaded-prefill
+  or batched decode (single client). Native trace scheduling intervals total
+  **0.99–1.43 s** per warm turn; intervals overlap GPU/wait and are not an
+  additive budget. Run/bench P4 loading is not serve's default mapping.
+- GLM Fast/Half live reuse works, but **1084/1596/1852-row** append commands
+  miss the qualified power-of-two IQ tensor, attention, KDA and wide-Q6 row
+  gates. At the same **66037** depth, native **2048 rows take 2.090 s**, faster
+  than 1596 rows at 2.927 s. Source gates and this shape contrast motivate
+  arbitrary-suffix qualification. Only the cold first turn publishes a deep
+  checkpoint; subsequent live extensions publish none under current provenance
+  rules. The fork restores the first **14573-token** checkpoint.
+- Flash-Next restores snapshots into its reset workspace; A2 restore/capture
+  **37.6/98.7 ms**. Decode uses the shared optimized runtime. All three 200-token
+  deep append replies contain reasoning only, so TTFT is not first-answer time.
+- The combined return-from-fork/reasoning-omission controls cost **55.95 s GLM**
+  and **28.86 s Flash-Next**. They do not isolate client omission from branch
+  switching or establish the behavior of Britt's installed OpenCode build.
+  Per-kernel serve route counters are not exposed without instrumentation;
+  measured call/reuse counters are distinguished from source eligibility in
+  the packet. No code instrumentation was added.
+- Native 32K PERF-LOG decode references are **74.81–74.94 / 57.65 / 71.10
+  tok/s** for these artifacts; exact-depth controls above avoid attributing
+  the deeper context to serve. Ranked follow-ups in the packet: valid deep
+  checkpoint coverage, GLM partial-row routes, V4.1 driver/mapping behavior,
+  exact CED/cut integration, then Flash-Next live/tiny-header work.
+- Raw bodies, events, per-turn logs, native JSON/build identities, corpus hashes
+  and checksums: **`~/qwen-runs/2026-11-07-serve-agents/`** on both hosts.
+  Source/corpus/scripts retained; scratch removed. Documentation-only change;
+  no numerical policy or full GPU suite rerun is implied.
+
 ## 2026-11-07 - V4.1 Fresh Appends: Publication, Masked Reindex and Dense Tails
 
 - Measured from **`229ba082`**, final code **`cf1abc0d`** rebased onto

@@ -2,7 +2,7 @@ use super::*;
 use objc2_metal::{MTLComputePipelineState, MTLSize};
 
 crate::env_flag!(
-    /// Flash-Next one-token H2560/F640/E512/top10 combines router, shared gate/up and shared-scale projections in one dispatch. Q4_K/Q5_K/Q6_K/IQ4_XS shared pairs and F32 router only; reuses shared-output scratch until the shared down projection. Set 0 for the incumbent. Respects cooperative F32, Q6 r1, IQ4_XS fast and wide-scale rollbacks; unsupported PSOs/alignments retain the incumbent.
+    /// Flash-Next one-token H2560/F640/E512/top10 on the tensor-capable tier combines router, shared gate/up and shared-scale projections in one dispatch. Q4_K/Q5_K/Q6_K/IQ4_XS shared pairs and F32 router only; reuses shared-output scratch until the shared down projection. Set 0 for the incumbent. M4 retains its prior route. Respects cooperative F32, Q6 r1, IQ4_XS fast and wide-scale rollbacks; unsupported PSOs/alignments retain the incumbent.
     default_on enabled,
     "QWEN_FN_FFN_PROJECTIONS_FUSED"
 );
@@ -48,6 +48,7 @@ fn pipeline(
 ) -> Result<Option<(crate::metal::Pipeline, usize)>, MetalError> {
     let g = w.geometry;
     if !enabled()
+        || !ctx.tensor_ops_status().is_available()
         || (
             g.hidden_size,
             g.shared_intermediate_size,
@@ -141,3 +142,6 @@ pub(super) fn try_encode(
     );
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests;

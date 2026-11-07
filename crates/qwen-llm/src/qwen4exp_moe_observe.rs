@@ -285,7 +285,7 @@ fn stage(
 ) {
     let b = buffers(w);
     let result = match stage {
-        0 => encode_singleton_router(ctx, enc, &c.input, c.weights(), b),
+        0 => encode_singleton_router(ctx, enc, &c.input, c.weights(), b, false),
         1 => encode_singleton_gate_up(ctx, enc, &c.input, c.weights(), b),
         2 => encode_singleton_down(ctx, enc, c.weights(), b),
         3 => encode_singleton_shared_gate_up(ctx, enc, &c.input, c.weights(), b),

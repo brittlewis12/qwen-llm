@@ -1300,6 +1300,11 @@ impl MetalContext {
         Ok(pso)
     }
 
+    #[doc(hidden)]
+    pub fn roof6_tensor_pipeline(&self, name: &str) -> Result<Pipeline, MetalError> {
+        self.tensor_pipeline(name)
+    }
+
     /// Resolve a function from the research metallib, loading it on first use.
     fn research_function(
         &self,

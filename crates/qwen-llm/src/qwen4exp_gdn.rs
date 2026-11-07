@@ -23,6 +23,8 @@ use objc2_metal::{
 const REQUIRED_HEAD_DIM: usize = 128;
 const REQUIRED_CONV_KERNEL: usize = 4;
 
+mod controls;
+
 #[cfg(test)]
 pub(crate) mod frontier_capture;
 
@@ -621,32 +623,34 @@ pub fn encode_gated_delta_net<'a>(
         geometry.hidden_size,
         geometry.value_width(),
     )?;
-    encode_mat_vec_f32_sigmoid(
-        ctx,
-        enc,
-        weights.beta,
-        input,
-        &workspace.beta,
-        geometry.hidden_size,
-        geometry.value_heads,
-    )?;
-    encode_mat_vec_dispatch(
-        ctx,
-        enc,
-        weights.alpha,
-        input,
-        &workspace.alpha,
-        geometry.hidden_size,
-        geometry.value_heads,
-    )?;
-    encode_gdn_decay_chain_f32(
-        ctx,
-        enc,
-        &workspace.alpha,
-        weights.dt_bias,
-        weights.a,
-        &workspace.decay,
-    )?;
+    if !controls::try_encode(ctx, enc, input, weights, workspace)? {
+        encode_mat_vec_f32_sigmoid(
+            ctx,
+            enc,
+            weights.beta,
+            input,
+            &workspace.beta,
+            geometry.hidden_size,
+            geometry.value_heads,
+        )?;
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.alpha,
+            input,
+            &workspace.alpha,
+            geometry.hidden_size,
+            geometry.value_heads,
+        )?;
+        encode_gdn_decay_chain_f32(
+            ctx,
+            enc,
+            &workspace.alpha,
+            weights.dt_bias,
+            weights.a,
+            &workspace.decay,
+        )?;
+    }
     encode_ssm_conv_silu_f32(
         ctx,
         enc,
@@ -1580,6 +1584,7 @@ pub(crate) fn preflight(
     ctx: &MetalContext,
     weights: GatedDeltaNetMetalWeights<'_>,
 ) -> Result<(), Qwen4ExpGdnError> {
+    controls::preflight(ctx, weights.geometry)?;
     for dtype in [weights.qkv.dtype, weights.gate.dtype, weights.output.dtype] {
         preflight_projection(ctx, dtype)?;
     }

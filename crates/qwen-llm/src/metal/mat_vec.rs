@@ -8,6 +8,10 @@ crate::env_flag!(
     "QWEN_MATVEC_F32_LCPP_R2"
 );
 
+pub(crate) fn mat_vec_f32_cooperative_enabled() -> bool {
+    mat_vec_f32_lcpp_r2_enabled()
+}
+
 #[cfg(test)]
 pub(crate) fn mat_vec_f32_lcpp_r2_enabled_for_test() -> bool {
     mat_vec_f32_lcpp_r2_enabled()

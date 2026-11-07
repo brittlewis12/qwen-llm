@@ -6,6 +6,67 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - V4.1 Agent Appends: Engram Overlap Through 2048 Rows
+
+- Code **`efb75cad`**, base **`5735162d`**. **Default on** for logical
+  **513..2048-row Full chunks at depth 32K+**; existing **512 rows at 8K+**
+  retained. Same M5 Ultra H5120/F2304/E384/top-6/40-layer, Engram 1/14 cohort;
+  **`QWEN_V41_ENGRAM_OVERLAP=0`** rolls back to preparation before one GPU
+  command. Only eligibility changes: same layer bodies, reader policy,
+  buffers, cache/admission terms and one-pending-command ownership.
+- Production artifact: main four-shard
+  **DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS** plus **IQ4_NL Engram**, matching
+  the production roofline census's real mixed tensor types and all 384 experts.
+  The native planner selects a **4096-row ceiling in every timing arm**.
+  Appends of **512 / 1024 / 1300 / 2048 tokens each produce one chunk of
+  exactly that many logical rows** at both depths. In particular, 1300 stays
+  1300 for the overlap predicate; expert/tensor storage padding is separate.
+- Canonical native `qwen-bench suite --pp N --depth D --runs 1`, normal
+  model and row warmups, **32 fresh processes: ABBA four per cell**, one
+  retained fresh-state append/process. Rollback `=0` versus default/unset;
+  clean matching build/runtime identities, features/overrides empty. Prefix
+  filling is outside the append timer; full endpoint/logit copy is included.
+  No snapshot replay. Qualified source **`b1610098`**, archived at
+  `research/v41-overlap-rows`; rebasing onto unrelated Flash-Next work leaves
+  the entire V4.1 source tree identical.
+
+  | Append / chunk rows | 32K rollback → overlap ms | Ratio | 128K rollback → overlap ms | Ratio |
+  | --- | ---: | ---: | ---: | ---: |
+  | 512 | 723.004 → 623.811 | 1.15901x | 820.912 → 729.863 | 1.12475x |
+  | 1024 | 1184.579 → 1016.823 | 1.16498x | 1412.891 → 1253.340 | 1.12730x |
+  | 1300 | 1560.887 → 1367.718 | 1.14123x | 1827.749 → 1653.006 | 1.10571x |
+  | 2048 | 2090.262 → 1795.625 | 1.16409x | 2550.761 → 2259.836 | 1.12874x |
+
+  The 512-row cells repeat the already-enabled route. New 1024/1300/2048-row
+  cells gain **10.6-16.5% throughput**, saving **160-295 ms per append**.
+  Every new cell clears the predeclared active **1.02x / 10 ms** gate and
+  both chronological paired comparisons are positive. Rollout is based on
+  these active-cell gains; there is no inactive-path placebo-noise veto.
+- Native production-plan checks: 1024 at 32K/128K, 1300 at **32769/131072**,
+  2048 at **32768/131073**, alternating code/prose; **128 teacher-forced
+  targets/cell/policy**, complete **129280-word vectors**. All **768
+  predictions/policy bitwise equal**, finite, **dNLL = mean/max KL = 0**.
+  Same binding/load plans and chunk ceiling across each pair. Actual GPU
+  coverage is **1 rollback / 3 overlap submits**, covering 40 layers per
+  append with the requested logical row count.
+- Expanded append/following-decode test includes 512/1024/1300/2048 rows,
+  prefix offsets and exact float bits. All six focused safety/numeric cases
+  pass **Metal API + shader validation** in **99.74 s**; timestamp coverage
+  remains in the full release suite. On final rebased source `efb75cad`,
+  full `cargo test --offline --locked --release -p qwen-llm --lib`:
+  **2467 passed, 0 failed, 738 ignored**, **122.92 s**. CPU-only
+  **`scripts/check-contracts.sh` passes** on the same commit
+  (tree `45a8b80b358e95acd7160cd8e0a6ab96536f8a7c`).
+- Rebuilt ordinary default-on CLI: **38164 input + 4 output tokens**,
+  expected **`V41_OK`**, EOS. Native CLI telemetry confirms the final chunk
+  **[36864,38164)** is **1300 rows**, through the ordinary released chat
+  template and default-on execution path.
+- Build lock, nice 10, canonical Metal leases; thermal pressure **0 before,
+  throughout and after valid GPU packets**. Every arm, geometry/identity,
+  conditions, frozen probe sources/binary hashes, full-vocabulary vectors,
+  gates and final checks: `$HOME/qwen-runs/2026-11-07-v41-overlap-rows` on
+  metagross. Final series is implementation/tests plus this evidence commit.
+
 ## 2026-11-07 - Flash-Next M4 Prefill: Matrix Projections and Stable Bucketing
 
 - Measured base **`f6547e85`**, qualified measurement source **`ab682dcf`**,

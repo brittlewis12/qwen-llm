@@ -1252,7 +1252,6 @@ mod tests {
                         E,
                         TOPK,
                         m,
-                        false,
                         Some(48),
                         gate_tensor,
                     )

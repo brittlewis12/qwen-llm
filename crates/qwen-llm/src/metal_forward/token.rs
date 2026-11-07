@@ -2446,20 +2446,9 @@ impl<'a> MetalForward<'a> {
         norm: &MetalTensor,
         normalized: &MetalTensor,
     ) -> Result<(), MfError> {
-        if decode_fused_residual_rmsnorm_enabled() {
-            encode_residual_rms_norm_mul_f32(
-                self.ctx,
-                enc,
-                residual,
-                mixer_output,
-                norm,
-                normalized,
-                RMS_EPS,
-            )?;
-        } else {
-            encode_add_inplace_f32(self.ctx, enc, residual, mixer_output)?;
-            encode_rms_norm_mul_f32(self.ctx, enc, residual, norm, normalized, RMS_EPS)?;
-        }
+        encode_add_inplace_f32(self.ctx, enc, residual, mixer_output)?;
+        encode_rms_norm_mul_f32(self.ctx, enc, residual, norm, normalized, RMS_EPS)?;
+
         Ok(())
     }
 

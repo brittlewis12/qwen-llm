@@ -1,7 +1,6 @@
 use super::{
-    cosine_max_abs, ensure_comparison_metrics_finite, env_flag_default_on, env_flag_enabled,
-    f32_rms_delta, fresh_gdn_replay_sessions_with_capacity, fresh_prefill_scratch_for_prompt,
-    read_f32_tensor,
+    cosine_max_abs, ensure_comparison_metrics_finite, env_flag_default_on, f32_rms_delta,
+    fresh_gdn_replay_sessions_with_capacity, fresh_prefill_scratch_for_prompt, read_f32_tensor,
 };
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
@@ -721,7 +720,6 @@ pub fn run(args: DecodeDenseWholeBatchArgs) -> Result<()> {
         env_flag_default_on("QWEN_DECODE_DENSE_CONCURRENT_GDN"),
         "decode-dense-whole-batch requires the production concurrent-GDN baseline"
     );
-    let fused_post_norm = env_flag_enabled("QWEN_DECODE_FUSED_RESIDUAL_RMSNORM");
     let canonical_long_gate = !args.no_check
         && args.frontier_tokens == 16 * 1024
         && args.warmup_steps == 1
@@ -798,7 +796,7 @@ pub fn run(args: DecodeDenseWholeBatchArgs) -> Result<()> {
     );
 
     println!(
-        "[decode-dense-whole-batch] model={} batch={} warmup_steps={} measured_steps={} ramp_ms={} ramp_repetitions={} seed={} prefill_chunk={} build_commit={} build_dirty={} build_source_state={} qwen_environment_names={} baseline=production_concurrent_gdn candidate=layer_major_static_b8 frontier_tokens={} frontier_source={} frontier_prefill_ms={:.3} frontier_restore_setup_ms={:.3} snapshot_bytes={} snapshot_identity_scope=in_process_abi_only source_restore_exact={} frontier_session_allocation_bytes={} frontier_scratch_upper_bytes={} attention=causal_multikey lm_head=batched fused_post_norm={} checks_enforced={} evidence_scope={} independent_queue_gate=pending post_setup_metal_allocation_delta_bytes={}",
+        "[decode-dense-whole-batch] model={} batch={} warmup_steps={} measured_steps={} ramp_ms={} ramp_repetitions={} seed={} prefill_chunk={} build_commit={} build_dirty={} build_source_state={} qwen_environment_names={} baseline=production_concurrent_gdn candidate=layer_major_static_b8 frontier_tokens={} frontier_source={} frontier_prefill_ms={:.3} frontier_restore_setup_ms={:.3} snapshot_bytes={} snapshot_identity_scope=in_process_abi_only source_restore_exact={} frontier_session_allocation_bytes={} frontier_scratch_upper_bytes={} attention=causal_multikey lm_head=batched checks_enforced={} evidence_scope={} independent_queue_gate=pending post_setup_metal_allocation_delta_bytes={}",
         args.model.display(),
         BATCH,
         args.warmup_steps,
@@ -823,7 +821,6 @@ pub fn run(args: DecodeDenseWholeBatchArgs) -> Result<()> {
         args.frontier_tokens > 0,
         arms.session_allocation_bytes,
         arms.scratch_upper_bytes,
-        fused_post_norm,
         !args.no_check,
         evidence_scope,
         arms.allocation_delta_bytes,

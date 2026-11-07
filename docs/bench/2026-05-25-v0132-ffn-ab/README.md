@@ -1,3 +1,5 @@
+> Historical FFN experiment: rejected decode/prefill selectors and large-hidden Q4 fusion were removed. The small-dense Q4 fusion remains enabled with its off-switch. Commands below describe historical builds.
+
 # v0.132 Dense Fused-SwiGLU Same-Process A/B
 
 Status: dirty-code harness after `v0.131`, using a runtime override for

@@ -489,7 +489,6 @@ impl Expert<'_> {
                     256,
                     8,
                     self.m,
-                    false,
                     Some(48),
                     tensor,
                 )

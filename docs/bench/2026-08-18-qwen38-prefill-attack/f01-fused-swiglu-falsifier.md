@@ -1,3 +1,5 @@
+> Historical FFN experiment: rejected decode/prefill selectors and large-hidden Q4 fusion were removed. The small-dense Q4 fusion remains enabled with its off-switch. Commands below describe historical builds.
+
 # F01 — Fused gate+up+SwiGLU Q4_K on Qwen 27B: falsified
 
 Date: 2026-08-18. HEAD `1ecf208` (or later; env-var toggle, no code change).

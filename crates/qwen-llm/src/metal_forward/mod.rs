@@ -54,16 +54,15 @@ use crate::metal::{
     encode_moe_swiglu_iq3_xxs_f32_fast, encode_moe_swiglu_iq4_xs_f32, encode_moe_swiglu_q4_K_f32,
     encode_moe_swiglu_q6_K_f32, encode_moe_swiglu_q8_0_f32, encode_moe_weighted_sum_f32,
     encode_mul_f32, encode_post_block_intervention_f32,
-    encode_qk_rms_norm_rope_f32_packed_consecutive, encode_residual_rms_norm_mul_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32,
-    encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_rope_neox_pair_f32,
-    encode_scatter_offset_f32_to_f16_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
-    encode_sigmoid_mul_gate_strided_f32, encode_silu_mul_f32, encode_split_q_gate_f32,
-    encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
-    encode_topk_logits_softmax_dot_sigmoid_f32_status, encode_topk_logits_softmax_f32,
-    encode_topk_logits_softmax_f32_status, encode_topk_logits_softmax_parallel_f32,
-    encode_topk_logits_softmax_parallel_f32_status, evaluate_metal_memory_admission,
-    host_page_size_bytes, plan_retained_storage,
+    encode_qk_rms_norm_rope_f32_packed_consecutive, encode_rms_norm_batched_f32,
+    encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32, encode_rmsnorm_gated_f32,
+    encode_rope_neox_f32, encode_rope_neox_pair_f32, encode_scatter_offset_f32_to_f16_kv,
+    encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32, encode_sigmoid_mul_gate_strided_f32,
+    encode_silu_mul_f32, encode_split_q_gate_f32, encode_ssm_conv_silu_f32,
+    encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_dot_sigmoid_f32_status,
+    encode_topk_logits_softmax_f32, encode_topk_logits_softmax_f32_status,
+    encode_topk_logits_softmax_parallel_f32, encode_topk_logits_softmax_parallel_f32_status,
+    evaluate_metal_memory_admission, host_page_size_bytes, plan_retained_storage,
 };
 use crate::model::ArchKind;
 use crate::sampling::{BoundedTopKEvidence, GreedySelection, SampledToken, Sampler, SamplingError};
@@ -347,7 +346,6 @@ crate::env_flag!(default_off phase_gdn_tail_split_enabled, "QWEN_PHASE_GDN_TAIL_
 crate::env_flag!(default_off phase_moe_cpu_route_enabled, "QWEN_PHASE_MOE_CPU_ROUTE");
 crate::env_flag!(default_off phase_moe_route_replay_enabled, "QWEN_PHASE_MOE_ROUTE_REPLAY");
 crate::env_flag!(default_off phase_lm_argmax_enabled, "QWEN_PHASE_LM_ARGMAX");
-crate::env_flag!(default_off decode_fused_residual_rmsnorm_enabled, "QWEN_DECODE_FUSED_RESIDUAL_RMSNORM");
 crate::env_flag!(perf_ablation decode_moe_noop_route_enabled, "QWEN_DECODE_MOE_NOOP_ROUTE");
 crate::env_flag!(perf_ablation decode_moe_noop_routed_gateup_enabled, "QWEN_DECODE_MOE_NOOP_ROUTED_GATEUP");
 crate::env_flag!(perf_ablation decode_moe_noop_routed_down_enabled, "QWEN_DECODE_MOE_NOOP_ROUTED_DOWN");

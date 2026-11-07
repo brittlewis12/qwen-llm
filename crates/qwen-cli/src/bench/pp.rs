@@ -840,6 +840,10 @@ pub(crate) fn run_pp_ffn_ab(args: PpFfnAbArgs) -> Result<()> {
         return Err(anyhow!("pp-ffn-ab is a dense FFN harness; got MoE model"));
     }
     let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model weights")?;
+    anyhow::ensure!(
+        mm.arch.hidden_size <= 2048,
+        "pp-ffn-ab supports only the enabled small-dense fusion (hidden <= 2048)"
+    );
     let mf = MetalForward::new(&ctx, &mm);
     let ids = synthetic_prompt_ids(n_prompt, m.arch.vocab_size, seed);
     let prefill_chunk =

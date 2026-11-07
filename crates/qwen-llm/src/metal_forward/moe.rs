@@ -2112,20 +2112,10 @@ impl<'a> MetalForward<'a> {
                 }));
             }
         }
-        if decode_fused_residual_rmsnorm_enabled() {
-            encode_residual_rms_norm_mul_f32(
-                self.ctx,
-                enc,
-                &session.x,
-                &session.mixer_out,
-                post_norm,
-                &session.h,
-                RMS_EPS,
-            )?;
-        } else {
-            encode_add_inplace_f32(self.ctx, enc, &session.x, &session.mixer_out)?;
-            encode_rms_norm_mul_f32(self.ctx, enc, &session.x, post_norm, &session.h, RMS_EPS)?;
-        }
+
+        encode_add_inplace_f32(self.ctx, enc, &session.x, &session.mixer_out)?;
+        encode_rms_norm_mul_f32(self.ctx, enc, &session.x, post_norm, &session.h, RMS_EPS)?;
+
         Ok(())
     }
 

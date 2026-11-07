@@ -1,3 +1,5 @@
+> Historical FFN experiment: rejected decode/prefill selectors and large-hidden Q4 fusion were removed. The small-dense Q4 fusion remains enabled with its off-switch. Commands below describe historical builds.
+
 > Historical experiment: N16-v2 and reduced-smem runtime selectors were removed in the knob sweep. Commands below describe the recorded historical builds.
 
 # v0.129 Drift-Controlled Dense FFN Candidates

@@ -291,23 +291,46 @@ impl Tiny {
             TOP,
         )
         .unwrap();
-        encode_moe_swiglu_f32_grouped_slots_tensor(
-            ctx,
-            enc,
-            b.gate_bank,
-            b.up_bank,
-            b.input,
-            b.counts,
-            b.slots,
-            b.inner,
-            H,
-            F,
-            E,
-            TOP,
-            self.rows,
-            Some(limit),
-        )
-        .unwrap();
+        if lane == 4 {
+            let input = b.input.view_subrange(0, vec![(H * self.rows) as u64]);
+            let half = self.half.view_subrange(0, vec![(H * self.rows) as u64]);
+            encode_scatter_offset_f32_to_f16(ctx, enc, &input, &half, 0, H * self.rows).unwrap();
+            encode_moe_swiglu_adaptive_tensor(
+                ctx,
+                enc,
+                b.gate_bank,
+                b.up_bank,
+                &half,
+                b.counts,
+                b.slots,
+                b.inner,
+                H,
+                F,
+                E,
+                TOP,
+                self.rows,
+                limit,
+            )
+            .unwrap();
+        } else {
+            encode_moe_swiglu_f32_grouped_slots_tensor(
+                ctx,
+                enc,
+                b.gate_bank,
+                b.up_bank,
+                b.input,
+                b.counts,
+                b.slots,
+                b.inner,
+                H,
+                F,
+                E,
+                TOP,
+                self.rows,
+                Some(limit),
+            )
+            .unwrap();
+        }
         if matches!(
             self.policy(),
             GroupedDownPolicy::Q5KTensor | GroupedDownPolicy::Iq3STensor
@@ -377,7 +400,10 @@ impl Tiny {
         let half = |v: f32| half::f16::from_f32(v).to_f64();
         let mut samples: [Vec<(f64, f64, bool)>; 2] = std::array::from_fn(|_| Vec::new());
         let mut clamped = [false; 3];
-        for token in [0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, self.rows - 1] {
+        for token in [0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, self.rows - 1]
+            .into_iter()
+            .filter(|&token| token < self.rows)
+        {
             for lane in 0..TOP {
                 let slot = token * TOP + lane;
                 let expert = routes[slot] as usize;
@@ -752,4 +778,142 @@ fn m5_gate_up_whole_composition_preflight_failures() {
         }
         guards(t);
     }
+}
+
+#[test]
+fn m5_adaptive_panels_preserve_half_results_bucket_edges_and_guards() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    if !moe_grouped_tensor_selected(&ctx) {
+        return;
+    }
+    for dtype in [GgmlType::IQ2_S, GgmlType::IQ3_S] {
+        for rows in [33usize, 257, 513, 1024] {
+            objc2::rc::autoreleasepool(|_| {
+                let f = Tiny::new(&ctx, dtype, GgmlType::IQ3_S, rows);
+                let before: Vec<_> = f.tensors[..6].iter().map(fingerprint).collect();
+                for limit in [0.0001, 7.0] {
+                    let mut reference: Option<Vec<Vec<u32>>> = None;
+                    for lane in [1usize, 4] {
+                        for t in &f.tensors[6..] {
+                            poison(t);
+                        }
+                        poison(&f.half);
+                        let census = run(&ctx, |enc| f.encode(&ctx, enc, lane, limit));
+                        f.oracle(limit);
+                        let values: Vec<Vec<u32>> = f.tensors[8..]
+                            .iter()
+                            .map(|t| {
+                                read(t)
+                                    .iter()
+                                    .map(|v| {
+                                        assert!(v.is_finite());
+                                        v.to_bits()
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+                        if lane == 1 {
+                            reference = Some(values);
+                        } else {
+                            assert_eq!(reference.as_ref().unwrap(), &values);
+                            let panels: Vec<_> = census
+                                .iter()
+                                .filter(|r| {
+                                    r.kernel.contains("grouped_slots_tensor")
+                                        || r.kernel.contains("wide_probe")
+                                })
+                                .collect();
+                            assert_eq!(panels.len(), 5); // four gate/up passes, incumbent down
+                            assert_eq!(panels[0].grid_width, 1);
+                            assert_eq!(panels[1].grid_width, rows.div_ceil(64) as u64);
+                            assert_eq!(panels[2].grid_width, 1);
+                            assert_eq!(panels[3].grid_width, rows.div_ceil(64) as u64);
+                        }
+                        for t in &f.tensors {
+                            guards(t);
+                        }
+                        guards(&f.half);
+                        guards(&f.status);
+                        assert_eq!(
+                            before,
+                            f.tensors[..6].iter().map(fingerprint).collect::<Vec<_>>()
+                        );
+                    }
+                }
+            });
+        }
+    }
+}
+
+#[test]
+fn m5_adaptive_panels_refuse_f32_before_changing_encoder() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    if !moe_grouped_tensor_selected(&ctx) {
+        return;
+    }
+    let f = Tiny::new(&ctx, GgmlType::IQ2_S, GgmlType::IQ3_S, 33);
+    let a = guarded(
+        &ctx,
+        bytemuck::cast_slice(&[2f32; 4]),
+        vec![4],
+        GgmlType::F32,
+    );
+    let b = guarded(
+        &ctx,
+        bytemuck::cast_slice(&[3f32; 4]),
+        vec![4],
+        GgmlType::F32,
+    );
+    let out = guarded(
+        &ctx,
+        bytemuck::cast_slice(&[0f32; 4]),
+        vec![4],
+        GgmlType::F32,
+    );
+    run(&ctx, |enc| {
+        let p = ctx.pipeline("kernel_add_f32").unwrap();
+        enc.set_pipeline(&p);
+        enc.set_bytes(0, &4u32);
+        enc.set_tensor(1, &a);
+        enc.set_tensor(2, &b);
+        enc.set_tensor(3, &out);
+        let bind = Tiny::bindings(&f.tensors, &f.status);
+        assert!(
+            encode_moe_swiglu_adaptive_tensor(
+                &ctx,
+                enc,
+                bind.gate_bank,
+                bind.up_bank,
+                bind.input,
+                bind.counts,
+                bind.slots,
+                bind.inner,
+                H,
+                F,
+                E,
+                TOP,
+                33,
+                7.0
+            )
+            .is_err()
+        );
+        enc.dispatch(
+            objc2_metal::MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            objc2_metal::MTLSize {
+                width: 32,
+                height: 1,
+                depth: 1,
+            },
+        );
+    });
+    assert_eq!(read(&out), vec![5f32; 4]);
+    guards(&out);
 }

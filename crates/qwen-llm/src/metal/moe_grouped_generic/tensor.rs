@@ -945,3 +945,157 @@ mod wide_policy_tests {
         }
     }
 }
+
+/// Explicit Half-input tensor gate/up with N32 panels for buckets up to 32
+/// slots and N64 panels for larger buckets. The two disjoint count ranges
+/// preserve every slot's operands, clamp and K reduction. No buffer allocation.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_moe_swiglu_adaptive_tensor(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w_gate: &MetalTensor,
+    w_up: &MetalTensor,
+    x_pack: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    inner: &MetalTensor,
+    n_hidden: usize,
+    n_ffn: usize,
+    n_expert: usize,
+    topk: usize,
+    n_tokens: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "moe_swiglu_adaptive_tensor";
+    crate::metal::expert_tensor_down::check_encoder(ctx, enc)?;
+    require_wide_half(KERNEL, x_pack.dtype)?;
+    for t in [w_gate, w_up, x_pack, counts, ids, inner] {
+        if t.buffer.device().registryID() != ctx.device.registryID() {
+            return Err(crate::metal::checks::bad_shape(
+                KERNEL,
+                "binding belongs to another device",
+            ));
+        }
+    }
+
+    if !clamp.is_finite() || clamp <= 0.0 {
+        return Err(crate::metal::checks::bad_shape(
+            KERNEL,
+            "clamp must be finite and positive",
+        ));
+    }
+    let gate_args = generic_mm_args(
+        KERNEL, w_gate, x_pack, counts, ids, inner, n_hidden, n_ffn, n_expert, n_tokens, topk, 0,
+        32,
+    )?;
+    let gate_wide_args = generic_mm_args(
+        KERNEL,
+        w_gate,
+        x_pack,
+        counts,
+        ids,
+        inner,
+        n_hidden,
+        n_ffn,
+        n_expert,
+        n_tokens,
+        topk,
+        33,
+        i32::MAX as u32,
+    )?;
+    let up_args = generic_mm_args(
+        KERNEL, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn, n_expert, n_tokens, topk, 0, 32,
+    )?;
+    let up_wide_args = generic_mm_args(
+        KERNEL,
+        w_up,
+        x_pack,
+        counts,
+        ids,
+        inner,
+        n_hidden,
+        n_ffn,
+        n_expert,
+        n_tokens,
+        topk,
+        33,
+        i32::MAX as u32,
+    )?;
+    let gate_name = moe_grouped_tensor_pipeline_name(
+        MoeGroupedTensorRole::Down,
+        w_gate.dtype,
+        TensorActivation::F16,
+    )
+    .expect("validated gate layout");
+    let up_name = moe_grouped_tensor_pipeline_name(
+        MoeGroupedTensorRole::UpClamped,
+        w_up.dtype,
+        TensorActivation::F16,
+    )
+    .expect("validated up layout");
+    let wide_gate_name = wide_probe_pipeline_name(w_gate.dtype).expect("validated gate layout");
+    let wide_up_name = wide_probe_pipeline_name(w_up.dtype).expect("validated up layout");
+    let psos = [
+        ctx.tensor_pipeline(&gate_name)?,
+        ctx.tensor_pipeline(&wide_gate_name)?,
+        ctx.tensor_pipeline(&up_name)?,
+        ctx.tensor_pipeline(&wide_up_name)?,
+    ];
+    let passes = [
+        (&gate_args, w_gate, 0i32, false),
+        (&gate_wide_args, w_gate, 0, true),
+        (&up_args, w_up, 2, false),
+        (&up_wide_args, w_up, 2, true),
+    ];
+    // Resolve and check every pass before the first encoder mutation.
+    for (p, &(_, _, _, wide)) in psos.iter().zip(&passes) {
+        let bytes = if wide {
+            TENSOR_THREADGROUP_BYTES_WIDE
+        } else {
+            TENSOR_THREADGROUP_BYTES
+        };
+        if p.threadExecutionWidth() != 32
+            || p.maxTotalThreadsPerThreadgroup() < 128
+            || p.staticThreadgroupMemoryLength()
+                .checked_add(bytes)
+                .is_none_or(|n| n > ctx.device.maxThreadgroupMemoryLength())
+        {
+            return Err(crate::metal::checks::bad_shape(
+                KERNEL,
+                "unsupported tensor panel capacity",
+            ));
+        }
+    }
+    for (p, &(args, weight, epi, wide)) in psos.iter().zip(&passes) {
+        enc.set_pipeline(p);
+        enc.set_bytes(0, args);
+        for (slot, t) in [(1, weight), (2, x_pack), (3, counts), (4, ids), (5, inner)] {
+            enc.set_tensor(slot, t);
+        }
+        enc.set_bytes(6, &clamp);
+        if wide {
+            enc.set_bytes(7, &epi);
+        }
+        enc.set_threadgroup_memory(
+            0,
+            if wide {
+                TENSOR_THREADGROUP_BYTES_WIDE
+            } else {
+                TENSOR_THREADGROUP_BYTES
+            },
+        );
+        enc.dispatch(
+            MTLSize {
+                width: if wide { n_tokens.div_ceil(64) } else { 1 },
+                height: n_ffn.div_ceil(64),
+                depth: n_expert,
+            },
+            MTLSize {
+                width: 128,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
+    Ok(())
+}

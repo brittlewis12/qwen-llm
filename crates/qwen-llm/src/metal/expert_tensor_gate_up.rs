@@ -1,4 +1,5 @@
-//! Prepared N32 gate/up composition. Half input, unweighted F32 inner,
+//! Prepared tensor gate/up composition. Eligible GLM IQ buckets select N32/N64
+//! panels by count. Half input, unweighted F32 inner,
 //! incumbent F32-input down, then post-down routing weights. No encoder mutation
 //! until every binding and pipeline in the composition has passed preflight.
 
@@ -8,6 +9,12 @@ use super::expert_tensor_down::{bank_bytes, check_encoder, check_extent};
 use super::*;
 
 const K: &str = "expert_tensor_gate_up";
+
+crate::env_flag!(
+    /// Default-on M5 GLM Fast/Half IQ gate/up panel selection at 1024/2048 rows. Buckets through 32 slots retain N32; larger buckets use N64. Zero restores all-N32 panels. Existing tensor, family and precision gates remain mandatory. No added GPU buffer or operand/reduction change.
+    default_on adaptive_requested,
+    "QWEN_GLM53_PREFILL_PANELS"
+);
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
@@ -91,6 +98,7 @@ pub(crate) struct Prepared<'a> {
     half: MetalTensor,
     dims: [usize; 5],
     clamp: f32,
+    adaptive: bool,
     tensor_down: Option<super::expert_tensor_down::PreparedDown<'a>>,
 }
 
@@ -107,6 +115,7 @@ impl Prepared<'_> {
             half,
             dims: [h, f, e, top, rows],
             clamp,
+            adaptive,
             tensor_down,
         } = self;
         // normed is rewritten by FFN normalization after KDA. Always recopy.
@@ -122,22 +131,41 @@ impl Prepared<'_> {
             rows,
             top,
         )?;
-        encode_moe_swiglu_f32_grouped_slots_tensor(
-            ctx,
-            enc,
-            b.gate_bank,
-            b.up_bank,
-            &flat(&half),
-            b.counts,
-            b.slots,
-            &flat(b.inner),
-            h,
-            f,
-            e,
-            top,
-            rows,
-            Some(clamp),
-        )?;
+        if adaptive {
+            encode_moe_swiglu_adaptive_tensor(
+                ctx,
+                enc,
+                b.gate_bank,
+                b.up_bank,
+                &flat(&half),
+                b.counts,
+                b.slots,
+                &flat(b.inner),
+                h,
+                f,
+                e,
+                top,
+                rows,
+                clamp,
+            )?;
+        } else {
+            encode_moe_swiglu_f32_grouped_slots_tensor(
+                ctx,
+                enc,
+                b.gate_bank,
+                b.up_bank,
+                &flat(&half),
+                b.counts,
+                b.slots,
+                &flat(b.inner),
+                h,
+                f,
+                e,
+                top,
+                rows,
+                Some(clamp),
+            )?;
+        }
         if let Some(down) = tensor_down {
             down.encode()?;
         } else if b.down_bank.dtype == GgmlType::IQ4_XS {
@@ -372,6 +400,25 @@ pub(crate) fn prepare<'a>(
             supported = false;
         }
     }
+    let adaptive = if (h, f, e, top) == (4096, 2048, 288, 8)
+        && matches!(rows, 1024 | 2048)
+        && matches!(b.gate_bank.dtype, GgmlType::IQ2_S | GgmlType::IQ3_S)
+        && ctx.device_facts().gpu_families.apple10
+        && adaptive_requested()
+    {
+        let name = wide_probe_pipeline_name(b.gate_bank.dtype).unwrap();
+        let p = ctx.tensor_pipeline(&name)?;
+        capacity(
+            p.threadExecutionWidth(),
+            p.maxTotalThreadsPerThreadgroup(),
+            p.staticThreadgroupMemoryLength(),
+            16384,
+            ctx.device.maxThreadgroupMemoryLength(),
+            128,
+        )
+    } else {
+        false
+    };
     let tensor_down = if down_tensor {
         let prepared = super::expert_tensor_down::prepare(
             ctx,
@@ -402,6 +449,7 @@ pub(crate) fn prepare<'a>(
         half,
         dims: [h, f, e, top, rows],
         clamp,
+        adaptive,
         tensor_down,
     }))
 }

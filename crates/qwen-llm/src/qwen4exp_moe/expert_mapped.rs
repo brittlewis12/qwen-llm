@@ -4,6 +4,11 @@ crate::env_flag!(
     default_on enabled,
     "QWEN_FN_M4_EXPERT_TILE32"
 );
+crate::env_flag!(
+    /// Extend Flash-Next M4 compact N32 experts to IQ3_XXS at the same H2560/F640/E512/top10, M2048 geometry. Original half operands and F32 K order, reusing the existing bounded map and dead scratch. Set 0 for the specialized N16 IQ3_XXS incumbent while keeping IQ2_S/IQ3_S N32; QWEN_FN_M4_EXPERT_TILE32=0 disables all formats. Apple10 devices retain their existing routes.
+    default_on xxs_enabled,
+    "QWEN_FN_M4_EXPERT_IQ3XXS32"
+);
 pub(super) fn try_encode(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -18,6 +23,7 @@ pub(super) fn try_encode(
     tokens: usize,
 ) -> Result<bool, MetalError> {
     if !enabled()
+        || (gate.dtype == GgmlType::IQ3_XXS && !xxs_enabled())
         || ctx.tensor_ops_status().is_available()
         || ctx
             .device
@@ -30,7 +36,10 @@ pub(super) fn try_encode(
             tokens,
         ) != (2560, 640, 512, 10, 2048)
         || gate.dtype != up.dtype
-        || !matches!(gate.dtype, GgmlType::IQ2_S | GgmlType::IQ3_S)
+        || !matches!(
+            gate.dtype,
+            GgmlType::IQ2_S | GgmlType::IQ3_S | GgmlType::IQ3_XXS
+        )
     {
         return Ok(false);
     }

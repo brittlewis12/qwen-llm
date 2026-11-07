@@ -23,6 +23,7 @@ pub(crate) fn try_encode_moe_swiglu_mapped32(
     const TILE_ROWS: usize = 32;
     let name = match gate.dtype {
         GgmlType::IQ2_S => "kernel_qwen4exp_expert_iq2_s_mapped32",
+        GgmlType::IQ3_XXS => "kernel_qwen4exp_expert_iq3_xxs_mapped32",
         GgmlType::IQ3_S => "kernel_qwen4exp_expert_iq3_s_mapped32",
         _ => return Ok(false),
     };
@@ -185,7 +186,11 @@ mod tests {
             return;
         };
         let (h, f, e, t, top) = (256usize, 80usize, 512usize, 33usize, 3usize);
-        for (dtype, bsize) in [(GgmlType::IQ2_S, 82), (GgmlType::IQ3_S, 110)] {
+        for (dtype, bsize) in [
+            (GgmlType::IQ2_S, 82),
+            (GgmlType::IQ3_S, 110),
+            (GgmlType::IQ3_XXS, 98),
+        ] {
             let bank = |salt: usize| {
                 let mut bytes: Vec<u8> = (0..f * e * bsize)
                     .map(|i| (i * 71 + i / 17 + salt) as u8)

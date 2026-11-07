@@ -243,3 +243,5 @@ typedef decltype(kernel_qwen4exp_expert_mapped32<QT_IQ2_S_BYTES, QT_IQ2_S_NL, qt
 
 template [[host_name("kernel_qwen4exp_expert_iq2_s_mapped32")]] kernel fn32_swiglu_t kernel_qwen4exp_expert_mapped32<QT_IQ2_S_BYTES, QT_IQ2_S_NL, qt_dequantize_iq2_s>;
 template [[host_name("kernel_qwen4exp_expert_iq3_s_mapped32")]] kernel fn32_swiglu_t kernel_qwen4exp_expert_mapped32<QT_IQ3_S_BYTES, QT_IQ3_S_NL, qt_dequantize_iq3_s>;
+
+template [[host_name("kernel_qwen4exp_expert_iq3_xxs_mapped32")]] kernel fn32_swiglu_t kernel_qwen4exp_expert_mapped32<QT_IQ3_XXS_BYTES, QT_IQ3_XXS_NL, qt_dequantize_iq3_xxs>;

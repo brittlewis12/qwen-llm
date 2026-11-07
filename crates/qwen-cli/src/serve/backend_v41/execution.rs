@@ -168,6 +168,7 @@ impl Settings {
             "V4.1",
         )?;
         let mut checkpoint_cuts = Vec::new();
+        let mut shared_cut = None;
         if let Some(boundaries) = boundaries {
             for (name, offset) in [
                 ("shared_prefix", boundaries.shared_prefix_end),
@@ -183,6 +184,9 @@ impl Settings {
                 if let Some(prefix) = prefix.filter(|prefix| {
                     !prefix.is_empty() && prefix.len() < ids.len() && ids.starts_with(prefix)
                 }) {
+                    if name == "shared_prefix" {
+                        shared_cut = Some(prefix.len());
+                    }
                     checkpoint_cuts.push(prefix.len());
                 } else {
                     tracing::warn!(
@@ -259,6 +263,10 @@ impl Settings {
             position: matched,
             ids,
             checkpoint_cuts,
+            shared_cut,
+            conversation: super::super::checkpoint_ladder::conversation(request),
+            ladder_attempted: false,
+            ladder_capture_ms: 0.0,
             maximum,
             required,
             reserve,
@@ -326,8 +334,36 @@ impl Settings {
         run.prefill_ranges
             .extend(report.chunk_ranges().map(|range| [range.start, range.end]));
         run.position = endpoint;
+        let segment_end = run
+            .checkpoint_cuts
+            .iter()
+            .copied()
+            .find(|&cut| cut > position)
+            .unwrap_or(ids.len());
+        if !run.ladder_attempted
+            && reuse.ladder_enabled()
+            && ladder_candidate(position, endpoint, segment_end, max_rows)
+            && let Some(conversation) = run.conversation
+        {
+            // A successful, already-existing call committed this prefix. No
+            // extra split/head, including while the scheduler changes width.
+            run.ladder_attempted = true;
+            let start = engine.now();
+            reuse.ladder_checkpoint(conversation, &run.state, &ids[..endpoint], run.reserve);
+            run.ladder_capture_ms += (engine.now() - start).as_secs_f64() * 1e3;
+        }
         if run.checkpoint_cuts.contains(&endpoint) {
-            reuse.checkpoint(&run.state, &ids[..endpoint], &[], run.reserve);
+            if Some(endpoint) == run.shared_cut {
+                reuse.checkpoint(&run.state, &ids[..endpoint], &[], run.reserve);
+            } else {
+                reuse.conversation_checkpoint(
+                    run.conversation,
+                    &run.state,
+                    &ids[..endpoint],
+                    &[],
+                    run.reserve,
+                );
+            }
         }
         Ok(())
     }
@@ -341,12 +377,19 @@ impl Settings {
         reuse: &mut impl reuse::Reuse<S>,
     ) -> std::result::Result<(), BackendFailure> {
         check(sink, cancel_of(&run.flag))?;
-        run.prefill_ms = (engine.now() - run.prefill_start).as_secs_f64() * 1e3;
+        run.prefill_ms =
+            (engine.now() - run.prefill_start).as_secs_f64() * 1e3 - run.ladder_capture_ms;
         if run.logits.len() != run.vocab || !run.logits.iter().all(|v| v.is_finite()) {
             return Err(ServeError::server_error("V4.1 returned malformed logits").into());
         }
         if run.checkpoint_cuts.is_empty() {
-            reuse.checkpoint(&run.state, &run.ids, &run.logits, run.reserve);
+            reuse.conversation_checkpoint(
+                run.conversation,
+                &run.state,
+                &run.ids,
+                &run.logits,
+                run.reserve,
+            );
         }
         run.consumed = run.ids.clone();
         Ok(())
@@ -367,6 +410,7 @@ impl Settings {
             reuse_source,
             restore_ms,
             prefill_ms,
+            ladder_capture_ms,
             prefill_rows,
             prefill_chunks,
             prefill_calls,
@@ -387,10 +431,10 @@ impl Settings {
             crate::family_options::V41_PREFILL_MODE
         };
         tracing::info!(target: "qwen_diag",
-            "serve phases: family=deepseek_v41 prefill_ms={prefill_ms:.3} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.3} prefill_tokens={} prefill_mode={prefill_mode} prefill_rows={prefill_rows} prefill_chunks={prefill_chunks} prefill_calls={prefill_calls} prefill_selected_rows={selected_rows:?} prefill_rows_max={} decode_ms={:.3} required_forwards={required} capacity={} transitions={transitions} transition_ms={transition_ms:.3} ced=false",
+            "serve phases: family=deepseek_v41 prefill_ms={prefill_ms:.3} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.3} prefill_tokens={} prefill_mode={prefill_mode} prefill_rows={prefill_rows} prefill_chunks={prefill_chunks} prefill_calls={prefill_calls} prefill_selected_rows={selected_rows:?} prefill_rows_max={} decode_ms={:.3} required_forwards={required} capacity={} transitions={transitions} transition_ms={transition_ms:.3} ced=false ladder_capture_ms={ladder_capture_ms:.3}",
             ids.len() - matched, crate::family_options::V41_PREFILL_ROWS, generation.wall_ms, capacity);
         let mut phases = serde_json::json!({
-            "family":"deepseek_v41", "prefill_ms":prefill_ms, "prefill_tokens":ids.len() - matched,
+            "family":"deepseek_v41", "prefill_ms":prefill_ms, "ladder_capture_ms":ladder_capture_ms, "prefill_tokens":ids.len() - matched,
             "prefill_mode":prefill_mode, "prefill_rows":prefill_rows, "prefill_chunks":prefill_chunks,
             "prefill_rows_max":crate::family_options::V41_PREFILL_ROWS,
             "prefill_selected_rows":selected_rows, "prefill_calls":prefill_calls,
@@ -502,6 +546,10 @@ where
 pub(super) struct Run<S> {
     pub(super) ids: Vec<u32>,
     checkpoint_cuts: Vec<usize>,
+    shared_cut: Option<usize>,
+    conversation: Option<super::super::checkpoint_ladder::Conversation>,
+    ladder_attempted: bool,
+    ladder_capture_ms: f64,
     pub(super) maximum: usize,
     required: usize,
     pub(super) reserve: u64,
@@ -638,5 +686,36 @@ impl<A: FnMut() -> Result<(), ServeError>> GenerationSink for BudgetedSink<'_, A
             return Err(interrupted());
         }
         self.sink.tick()
+    }
+}
+
+/// Last existing full call strictly before this segment's terminal boundary.
+/// Using the actual call width also works when the scheduler interleaves 512
+/// rows with another request's decode. No hypothetical grid authorizes capture.
+fn ladder_candidate(start: usize, end: usize, segment_end: usize, rows: usize) -> bool {
+    rows > 0
+        && end.checked_sub(start) == Some(rows)
+        && end < segment_end
+        && segment_end - end <= rows
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::ladder_candidate;
+    #[test]
+    fn last_committed_full_call_excludes_tip_and_small_appends() {
+        assert!(ladder_candidate(100, 4196, 5000, 4096));
+        assert!(!ladder_candidate(100, 4196, 9000, 4096));
+        assert!(!ladder_candidate(100, 1100, 1102, 4096));
+        assert!(!ladder_candidate(100, 4196, 4196, 4096));
+        assert!(
+            ladder_candidate(100, 4196, 8292, 4096),
+            "aligned tip uses preceding full call"
+        );
+        assert!(
+            ladder_candidate(66000, 66512, 67000, 512),
+            "actual interleaved width"
+        );
+        assert!(!ladder_candidate(5, 4, 10, 512));
     }
 }

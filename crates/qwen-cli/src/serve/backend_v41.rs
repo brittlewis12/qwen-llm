@@ -84,6 +84,7 @@ fn positive_env(name: &str) -> Result<Option<usize>> {
 
 pub(super) struct Prepared {
     settings: Settings,
+    checkpoint_ladder: super::checkpoint_ladder::Config,
     snapshot_mib: Option<u64>,
     snapshot_policy: qwen_llm::snapshot_policy::SnapshotPolicyConfig,
     live_states: usize,
@@ -120,6 +121,7 @@ impl Prepared {
             .transpose()?;
         let max_active = positive_env(MAX_ACTIVE_ENV)?.unwrap_or(DEFAULT_MAX_ACTIVE);
         Ok(Self {
+            checkpoint_ladder: super::checkpoint_ladder::Config::from_env()?,
             live_states: positive_env(LIVE_STATES_ENV)?.unwrap_or(DEFAULT_LIVE_STATES),
             max_active,
             sample_workers: non_negative_env(SAMPLE_WORKERS_ENV)?.unwrap_or(max_active - 1),
@@ -175,6 +177,7 @@ pub(super) fn start(
         )
     );
     backend.reuse = reuse::Store::new(plan.bytes, plan.policy)
+        .with_checkpoint_ladder(prepared.checkpoint_ladder)
         .with_live_budget(prepared.live_states, prepared.live_state_bytes);
     if prepared.max_active > 1 {
         let scheduler = scheduler::Scheduler::new(prepared.max_active)

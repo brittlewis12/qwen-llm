@@ -224,6 +224,27 @@ impl reuse::Reuse<Vec<u32>> for Recorded {
             SnapshotCache::<Vec<u32>>::entry_bytes(ids.len(), (state.len() * 4) as u64).unwrap();
         self.cache.insert_strict(ids.to_vec(), state.clone(), bytes);
     }
+    fn ladder_enabled(&self) -> bool {
+        self.cache.ladder_enabled()
+    }
+    fn ladder_checkpoint(
+        &mut self,
+        key: super::super::checkpoint_ladder::Conversation,
+        state: &Vec<u32>,
+        ids: &[u32],
+        _: u64,
+    ) {
+        assert_eq!(state, ids, "committed actual state, not a planned extent");
+        if let Some(bytes) =
+            self.cache
+                .ladder_eligibility_in(key, &(), ids, (state.len() * 4) as u64)
+        {
+            assert!(
+                self.cache
+                    .insert_ladder_in(key, (), ids.to_vec(), state.clone(), bytes)
+            );
+        }
+    }
     fn commit(&mut self, live: reuse::Live<Vec<u32>>) {
         self.live = Some(live);
     }
@@ -1333,4 +1354,97 @@ fn headless_and_final_prefill_memory_refusals_stay_typed() {
             assert!(recorded.checkpoint.is_none());
         }
     }
+}
+
+#[test]
+fn ladder_publishes_live_extensions_without_changing_calls_and_restores_a_fork() {
+    #[derive(Default)]
+    struct Sink;
+    impl GenerationSink for Sink {
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut settings = Settings::new(
+        tokenizer(),
+        100000,
+        1,
+        SamplingConfig::default(),
+        tokenizer_fixture::EOS,
+        "fixture".into(),
+    )
+    .unwrap();
+    settings.headroom = || finite_headroom(1 << 30);
+    let request = settings
+        .profile()
+        .parse(&json!({"model":"fixture","input":"same conversation root","max_output_tokens":1}))
+        .unwrap();
+    let mut observations = Vec::new();
+    for enabled in [false, true] {
+        let mut reuse = Recorded {
+            restore_checkpoint: true,
+            ..Default::default()
+        };
+        if enabled {
+            reuse.cache = reuse
+                .cache
+                .with_checkpoint_ladder(super::super::checkpoint_ladder::Config::testing(500000));
+        }
+        let mut calls = Vec::new();
+        let run = |reuse: &mut Recorded, prompt: &str, calls: &mut Vec<Vec<u32>>| {
+            settings
+                .execute(
+                    &request,
+                    prompt,
+                    None,
+                    &mut Sink,
+                    |_, _, _| Ok(()),
+                    |_| Ok(vec![]),
+                    reuse,
+                    |state, ids, _, head| {
+                        state.extend_from_slice(ids);
+                        calls.push(ids.to_vec());
+                        let mut logits = vec![0.; 257];
+                        if head {
+                            logits[256] = 100.;
+                        }
+                        Ok(logits)
+                    },
+                    |_, _, _| panic!("EOS has no forward"),
+                    || Duration::ZERO,
+                )
+                .unwrap()
+        };
+        let first = "a".repeat(16000);
+        let second = format!("{first}{}?", "b".repeat(16000));
+        assert_eq!(run(&mut reuse, &first, &mut calls).usage.cached_tokens, 0);
+        assert_eq!(
+            run(&mut reuse, &second, &mut calls).usage.cached_tokens,
+            16000
+        );
+        assert_eq!(
+            reuse.cache.ladder_status().0,
+            if enabled { 2 } else { 0 },
+            "live extension publishes"
+        );
+        let build_calls = calls.clone();
+        let fork = format!("{first}{}!", "b".repeat(16000));
+        let fork_result = run(&mut reuse, &fork, &mut calls);
+        assert_eq!(
+            fork_result.usage.cached_tokens,
+            if enabled { 28288 } else { 16000 }
+        );
+        assert_eq!(
+            reuse.live.as_ref().unwrap().state,
+            fork.bytes().map(u32::from).collect::<Vec<_>>()
+        );
+        observations.push(build_calls);
+    }
+    assert_eq!(
+        observations[0], observations[1],
+        "capture never adds a prefill cut"
+    );
 }

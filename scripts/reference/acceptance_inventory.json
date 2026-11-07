@@ -5647,5 +5647,19 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::execution::ladder_tests::last_committed_full_call_excludes_tip_and_small_appends",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::ladder_publishes_live_extensions_without_changing_calls_and_restores_a_fork",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
   }
 ]

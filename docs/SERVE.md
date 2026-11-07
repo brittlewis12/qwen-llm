@@ -218,6 +218,13 @@ the first-token path. Its `ladder_tip_capture_ms` reports that completion cost. 
 budget) restores the previous capture and lookup paths. Drafting paths continue
 to skip snapshot publication and reuse.
 
+DeepSeek V4.1 also retains ready FullForward checkpoints at existing scheduler
+call boundaries, including live extensions and 512-row calls under load.
+Already-captured transcript tips advance the ladder through short appends
+without another payload copy. Superseded tips are pruned where covered; a
+budget too small for coverage preserves the legacy fallback. CED-origin and
+poisoned states remain ineligible.
+
 ### Idle residency (no-copy families)
 
 Metal wires no-copy weights only while commands use them, and unwires them

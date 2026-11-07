@@ -119,9 +119,32 @@ pub(super) fn restore_candidate<S, V>(
     Ok(Some((state, hit)))
 }
 
+#[cfg(test)]
 pub(super) fn capture_checkpoint<V>(
     cache: &mut SnapshotCache<V>,
     ids: &[u32],
+    logits_bytes: u64,
+    reserve: u64,
+    signals: impl Fn() -> MetalMemorySignals,
+    measure: impl FnOnce() -> Result<usize, StateError>,
+    capture: impl FnOnce(usize) -> Result<V, StateError>,
+) {
+    capture_checkpoint_with_ladder(
+        cache,
+        ids,
+        None,
+        logits_bytes,
+        reserve,
+        signals,
+        measure,
+        capture,
+    )
+}
+
+pub(super) fn capture_checkpoint_with_ladder<V>(
+    cache: &mut SnapshotCache<V>,
+    ids: &[u32],
+    conversation: Option<super::super::super::checkpoint_ladder::Conversation>,
     logits_bytes: u64,
     reserve: u64,
     signals: impl Fn() -> MetalMemorySignals,
@@ -142,7 +165,10 @@ pub(super) fn capture_checkpoint<V>(
     let Some(value_bytes) = (payload_bytes as u64).checked_add(logits_bytes) else {
         return;
     };
-    let Some(entry_bytes) = cache.strict_eligibility(ids, value_bytes) else {
+    let Some(entry_bytes) = (match conversation {
+        Some(key) => cache.ladder_eligibility_in(key, &(), ids, value_bytes),
+        None => cache.strict_eligibility(ids, value_bytes),
+    }) else {
         return;
     };
     let Some(required) = entry_bytes.checked_add(reserve) else {
@@ -161,9 +187,14 @@ pub(super) fn capture_checkpoint<V>(
         return;
     }
     match capture(payload_bytes) {
-        Ok(checkpoint) => {
-            cache.insert_strict(ids.to_vec(), checkpoint, entry_bytes);
-        }
+        Ok(checkpoint) => match conversation {
+            Some(key) => {
+                cache.insert_ladder_in(key, (), ids.to_vec(), checkpoint, entry_bytes);
+            }
+            None => {
+                cache.insert_strict(ids.to_vec(), checkpoint, entry_bytes);
+            }
+        },
         Err(error) => tracing::debug!("V4.1 checkpoint skipped: {error}"),
     }
 }

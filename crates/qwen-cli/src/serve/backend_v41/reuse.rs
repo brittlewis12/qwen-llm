@@ -48,6 +48,28 @@ pub(super) trait Reuse<S> {
         }
     }
     fn checkpoint(&mut self, state: &S, ids: &[u32], logits: &[f32], reserve: u64);
+    fn conversation_checkpoint(
+        &mut self,
+        _: Option<super::super::checkpoint_ladder::Conversation>,
+        state: &S,
+        ids: &[u32],
+        logits: &[f32],
+        reserve: u64,
+    ) {
+        self.checkpoint(state, ids, logits, reserve);
+    }
+    fn ladder_enabled(&self) -> bool {
+        false
+    }
+    fn ladder_checkpoint(
+        &mut self,
+        _: super::super::checkpoint_ladder::Conversation,
+        _: &S,
+        _: &[u32],
+        _: u64,
+    ) {
+    }
+
     fn commit(&mut self, live: Live<S>);
     fn capacity(&self, state: &S, required: usize) -> usize;
 }
@@ -69,6 +91,14 @@ impl Store {
             live: operations::LivePool::new(1, None),
             cache: SnapshotCache::new(bytes, policy),
         }
+    }
+
+    pub fn with_checkpoint_ladder(
+        mut self,
+        config: super::super::checkpoint_ladder::Config,
+    ) -> Self {
+        self.cache = self.cache.with_checkpoint_ladder(config);
+        self
     }
 
     /// Keep up to `states` idle live states within an optional byte budget.
@@ -175,6 +205,34 @@ impl Reuse<State> for Session<'_, '_> {
         self.capture_checkpoint(state, ids, logits, reserve);
     }
 
+    fn conversation_checkpoint(
+        &mut self,
+        key: Option<super::super::checkpoint_ladder::Conversation>,
+        state: &State,
+        ids: &[u32],
+        logits: &[f32],
+        reserve: u64,
+    ) {
+        self.capture_checkpoint(state, ids, logits, reserve);
+        self.store.cache.record_tip(key, &(), ids);
+    }
+
+    fn ladder_enabled(&self) -> bool {
+        self.store.cache.ladder_enabled()
+    }
+
+    fn ladder_checkpoint(
+        &mut self,
+        conversation: super::super::checkpoint_ladder::Conversation,
+        state: &State,
+        ids: &[u32],
+        reserve: u64,
+    ) {
+        self.capture_checkpoint_impl(state, ids, &[], reserve, Some(conversation));
+        tracing::info!(target: "qwen_diag", "serve checkpoint: family=deepseek_v41 position={} retained={} ladder={:?}",
+            ids.len(), self.store.cache.entry_for(ids).is_some(), self.store.cache.ladder_status());
+    }
+
     /// Only ready FullForward states are retained (never CED-origin or
     /// poisoned ones); the pool's budgets then apply.
     fn commit(&mut self, live: Live<State>) {
@@ -232,15 +290,27 @@ impl Session<'_, '_> {
     }
 
     fn capture_checkpoint(&mut self, state: &State, ids: &[u32], logits: &[f32], reserve: u64) {
+        self.capture_checkpoint_impl(state, ids, logits, reserve, None);
+    }
+
+    fn capture_checkpoint_impl(
+        &mut self,
+        state: &State,
+        ids: &[u32],
+        logits: &[f32],
+        reserve: u64,
+        conversation: Option<super::super::checkpoint_ladder::Conversation>,
+    ) {
         if !reuse_eligible(state.is_ready(), state.prefill_origin()) {
             return;
         }
         let Some(logits_bytes) = (logits.len() as u64).checked_mul(size_of::<f32>() as u64) else {
             return;
         };
-        operations::capture_checkpoint(
+        operations::capture_checkpoint_with_ladder(
             &mut self.store.cache,
             ids,
+            conversation,
             logits_bytes,
             reserve,
             || self.ctx.memory_signals(),

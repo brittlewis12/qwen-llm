@@ -6,6 +6,73 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - V4.1 Bounded-Window Replay: Not Promoted
+
+- **Shrinking CED remains the default.** The approximate bounded-window policy
+  missed the predeclared per-text/per-length NLL budget on the **32K Rust**
+  continuation: **dNLL +0.00695176 nats/token**, above **0.005**. Its mean
+  **KL(exact || bounded) 0.00327569** passed the **0.01** limit. No default
+  promotion or accepted cold-prefill speedup is claimed.
+- Candidate **`ac1871c0`**, from main **`156e7779`**, ports Aven **V41-4W8W**'s
+  `ed25cccb` implementation and `38650277` absent-buffer pricing fix onto current
+  publication, lineage and encoder-pipeline code. All encoder/publication rows
+  remain; each decoder keeps the last metadata window W, with a fixed raw-history
+  floor and no pre-floor seeds. Released geometry executes **128 x 20 = 2560**
+  decoder outputs, versus exact shrinking's **24150 outputs + 2540 seeds** at
+  pp4096. The explicit experimental value is `bounded_window_ced`; serving
+  continues to exclude its origin from prefix reuse.
+- **M5 Ultra**, same **GSQ-RCO IQ2_XS + IQ4_NL Engram** artifact. Off is the
+  accepted exact shrinking policy; on is bounded replay. Both use the same
+  resident import, **P4 mapping**, selected **4096-row** width and ordinary
+  arithmetic, with one fresh state at a time and no drafting. Frozen main prose
+  and Rust sources supply **256 true next-token targets/cohort**. F64 NLL and
+  full-vocabulary KL use identical teacher-forced IDs; argmax differences do not
+  gate acceptance. Budgets apply to every cohort, rather than pooling away a
+  regression in one prompt class.
+
+  | Prompt tokens | Text | dNLL nats/token | Mean KL(exact || bounded) | Budget |
+  | ---: | --- | ---: | ---: | --- |
+  | 4096 | Prose | +0.00133370 | 0.00109317 | Pass |
+  | 4096 | Rust | +0.00071826 | 0.00028671 | Pass |
+  | 8192 | Prose | +0.00145107 | 0.00017623 | Pass |
+  | 8192 | Rust | +0.00016785 | 0.00005928 | Pass |
+  | 32768 | Prose | +0.00251362 | 0.00038227 | Pass |
+  | 32768 | Rust | **+0.00695176** | 0.00327569 | **NLL fail** |
+  | 65536 | Prose | +0.00163508 | 0.00320769 | Pass |
+
+  **1792 scored targets/policy**, 14 argmax differences. Pooled dNLL is
+  **+0.00211019**, pooled mean KL **0.00121158**; these do not override the
+  predeclared cohort gate. This is a focused screen, not a general model-quality
+  equivalence claim.
+- At **32768 tokens**, three access-code records planted near **5% / 50% / 90%**
+  of a real-text background were all retrieved by both policies (**3/3 each**),
+  with identical answers. Official nonthinking chat rendering; chat-control
+  examples in the background are escaped. **No recall loss was observed in this
+  check.** The 64K retrieval check did not run.
+- Every completed cohort/recall arm passed thermal-pressure-zero checks before
+  and after execution. The subsequent **64K Rust reference arm** hit pressure
+  **1** and aborted; it supplies no completed comparison. The confirmation
+  process is incomplete. No retry, 64K retrieval or conditional ABBA timing was
+  launched after that stop; incidental prefill durations are not accepted timing
+  evidence. Build lock, `nice -n 10`, canonical campaign Metal lease and wait
+  enabled throughout owned M5 work; campaigns alternated with the roofline lane.
+- Local M4 validation: **7 focused CPU contracts**, **4 explicit GPU fixtures**
+  under Metal validation (independent bounded reference/poison/tails, snapshot/
+  growth/continuation, failed completion/cancellation and publication reuse),
+  **9 serial frontend + 6 bench tests**, analytic NLL/KL checks and **14 source
+  oracles** pass. Full optimized library suite on `69cdca43` (same execution
+  code): **2474 passed, 0 failed, 737 ignored**, 119.46 s, thermal zero around
+  its lease. An unchanged boundary-ID fixture overflow was repaired with explicit
+  wrapping arithmetic, preserving release vectors. Initial failures are retained.
+  Mixed Full/bounded benchmark repetitions now report the correct variant.
+- Driver: `crates/qwen-cli/examples/v41_bounded_quality.rs`. Raw JSONL for every
+  target, complete 32K recall answers, terminal thermal error, source/corpus hashes,
+  build identity and validation receipts:
+  **`~/qwen-runs/2026-11-07-v41-bounded/`** on both hosts. `screen.jsonl` is
+  complete; `confirm.jsonl` is partial. `evaluation-summary.json` records the
+  rejection and unrun cells. The measured execution files are unchanged in the
+  subsequent diagnostic/test/documentation commits.
+
 ## 2026-11-07 - V4.1: Make Qualified Cold Shrinking CED The Default
 
 - Code **`36da39a3`**, based on main **`e44e7dc4`**. Unset

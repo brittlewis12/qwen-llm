@@ -486,7 +486,6 @@ pub(super) fn validate_model_family(args: &Args, model_family: Option<ModelFamil
         args.temperature,
         model_family,
         configured_greedy_gpu_argmax_mode(),
-        qwen_llm::env_flag::read_default_off("QWEN_DSV4_RESIDENCY_SET"),
     )
 }
 
@@ -495,7 +494,6 @@ fn validate_model_family_with_modes(
     temperature: f32,
     model_family: Option<ModelFamily>,
     greedy_gpu_mode: GreedyGpuArgmaxMode,
-    deepseek_residency_set: bool,
 ) -> Result<()> {
     if concurrency.is_none() {
         return Ok(());
@@ -508,13 +506,7 @@ fn validate_model_family_with_modes(
             );
             validate_greedy_gpu_mode(greedy_gpu_mode)
         }
-        Some(ModelFamily::DeepSeek4) => {
-            ensure!(
-                !deepseek_residency_set,
-                "--concurrency requires QWEN_DSV4_RESIDENCY_SET=0 because DeepSeek residency sets are command-queue scoped"
-            );
-            Ok(())
-        }
+        Some(ModelFamily::DeepSeek4) => Ok(()),
         Some(ModelFamily::Qwen4Exp) => {
             bail!("--concurrency is not yet supported for Qwen3.8-Flash-Next")
         }
@@ -3791,7 +3783,6 @@ mod tests {
             0.0,
             Some(ModelFamily::Qwen35),
             GreedyGpuArgmaxMode::DefaultOff,
-            false,
         )
         .unwrap();
         validate_model_family_with_modes(
@@ -3799,7 +3790,6 @@ mod tests {
             0.0,
             Some(ModelFamily::Qwen35Moe),
             GreedyGpuArgmaxMode::DefaultOff,
-            false,
         )
         .unwrap();
         validate_model_family_with_modes(
@@ -3807,7 +3797,6 @@ mod tests {
             0.7,
             Some(ModelFamily::DeepSeek4),
             GreedyGpuArgmaxMode::ExplicitRollback,
-            false,
         )
         .unwrap();
         assert!(
@@ -3816,7 +3805,6 @@ mod tests {
                 0.0,
                 Some(ModelFamily::Qwen4Exp),
                 GreedyGpuArgmaxMode::DefaultOff,
-                false,
             )
             .is_err()
         );
@@ -3826,17 +3814,6 @@ mod tests {
                 0.0,
                 Some(ModelFamily::Qwen35),
                 GreedyGpuArgmaxMode::ExplicitRollback,
-                false,
-            )
-            .is_err()
-        );
-        assert!(
-            validate_model_family_with_modes(
-                args.concurrency,
-                0.0,
-                Some(ModelFamily::DeepSeek4),
-                GreedyGpuArgmaxMode::DefaultOff,
-                true,
             )
             .is_err()
         );
@@ -3854,7 +3831,6 @@ mod tests {
             invalid.temperature,
             Some(ModelFamily::Qwen35),
             GreedyGpuArgmaxMode::DefaultOff,
-            false,
         )
         .unwrap_err();
         assert!(error.to_string().contains("greedy decoding"));

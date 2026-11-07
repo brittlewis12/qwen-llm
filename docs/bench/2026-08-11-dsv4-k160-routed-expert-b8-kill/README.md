@@ -1,3 +1,5 @@
+> Historical residency control: the DS4 explicit residency-set path and its environment selector were removed. Current DS4 execution uses ordinary pageable weights.
+
 # DeepSeek K160 routed-expert B=8 floor
 
 ## Question

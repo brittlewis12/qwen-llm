@@ -590,7 +590,6 @@ def child_environment() -> tuple[dict[str, str], dict[str, Any]]:
     environment.update(
         {
             "QWEN_DSV4_PREFETCH": "off",
-            "QWEN_DSV4_RESIDENCY_SET": "0",
             # `warn` for tracing generally, but keep the `qwen_diag`
             # bare-body load diagnostics (`[metal-load-ledger]` etc.) at
             # `info` so failure-artifact stderr tails still capture them.
@@ -598,14 +597,11 @@ def child_environment() -> tuple[dict[str, str], dict[str, Any]]:
         }
     )
     qwen_controls = sorted(key for key in environment if key.startswith("QWEN_"))
-    if qwen_controls != ["QWEN_DSV4_PREFETCH", "QWEN_DSV4_RESIDENCY_SET"]:
+    if qwen_controls != ["QWEN_DSV4_PREFETCH"]:
         raise RuntimeError(f"unsafe QWEN child controls: {qwen_controls!r}")
-    if (
-        environment["QWEN_DSV4_PREFETCH"] != "off"
-        or environment["QWEN_DSV4_RESIDENCY_SET"] != "0"
-    ):
+    if environment["QWEN_DSV4_PREFETCH"] != "off":
         raise RuntimeError(
-            "DeepSeek V4 prefetch and whole-model residency must remain disabled"
+            "DeepSeek V4 prefetch must remain disabled"
         )
     record = {
         "policy": "allowlisted base environment plus fixed overlays",
@@ -618,7 +614,6 @@ def child_environment() -> tuple[dict[str, str], dict[str, Any]]:
         ),
         "overlay": {
             "QWEN_DSV4_PREFETCH": "off",
-            "QWEN_DSV4_RESIDENCY_SET": "0",
             "RUST_LOG": "warn,qwen_diag=info",
         },
     }
@@ -1269,7 +1264,6 @@ def check_contract() -> None:
     )
     environment, _ = child_environment()
     assert environment["QWEN_DSV4_PREFETCH"] == "off"
-    assert environment["QWEN_DSV4_RESIDENCY_SET"] == "0"
 
 
 def build_parser() -> argparse.ArgumentParser:

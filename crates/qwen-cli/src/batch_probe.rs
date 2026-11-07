@@ -1131,10 +1131,6 @@ fn run_deepseek(
     gguf: &GgufFile,
     args: &QueueOverlapProbeArgs,
 ) -> Result<(Vec<ProbeRow>, u64)> {
-    ensure!(
-        !super::env_flag_enabled("QWEN_DSV4_RESIDENCY_SET"),
-        "queue-overlap probe uses multiple queues; unset QWEN_DSV4_RESIDENCY_SET"
-    );
     let max_clients = args.clients.iter().copied().max().unwrap_or(1);
     let mut contexts = Vec::with_capacity(max_clients);
     for _ in 0..max_clients {

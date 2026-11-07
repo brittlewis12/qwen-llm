@@ -84,7 +84,6 @@ pub(super) struct DeepSeekSelectionInput {
     pub mode: Option<ExecutionModeArg>,
     pub request_count: usize,
     pub stdin: bool,
-    pub residency_set: bool,
     pub two_session_memory_admitted: bool,
 }
 
@@ -380,9 +379,7 @@ pub(super) fn select_deepseek(input: DeepSeekSelectionInput) -> ExecutionSelecti
     if input.request_count < 2 {
         return serial("no_ready_parallel_work", "deepseek_v4", None);
     }
-    if input.residency_set {
-        return serial("queue_scoped_residency", "deepseek_v4", None);
-    }
+
     if !input.two_session_memory_admitted {
         return serial("two_session_memory_denied", "deepseek_v4", None);
     }
@@ -653,7 +650,6 @@ mod tests {
             mode: Some(ExecutionModeArg::Auto),
             request_count: 2,
             stdin: false,
-            residency_set: false,
             two_session_memory_admitted: true,
         });
         let deepseek = serde_json::to_value(ExecutionSelectionRecord::new(
@@ -687,7 +683,6 @@ mod tests {
             mode: Some(ExecutionModeArg::Auto),
             request_count: 3,
             stdin: false,
-            residency_set: false,
             two_session_memory_admitted: true,
         };
         assert_eq!(

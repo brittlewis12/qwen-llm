@@ -1155,7 +1155,6 @@ def child_environment() -> tuple[dict[str, str], dict[str, Any]]:
     environment.update(
         {
             "QWEN_DSV4_PREFETCH": "off",
-            "QWEN_DSV4_RESIDENCY_SET": "0",
             # `warn` for tracing generally, but keep the `qwen_diag`
             # bare-body load diagnostics (`[metal-load-ledger]` etc.) at
             # `info` so failure-artifact stderr tails still capture them.
@@ -1163,7 +1162,7 @@ def child_environment() -> tuple[dict[str, str], dict[str, Any]]:
         }
     )
     qwen_controls = sorted(key for key in environment if key.startswith("QWEN_"))
-    if qwen_controls != ["QWEN_DSV4_PREFETCH", "QWEN_DSV4_RESIDENCY_SET"]:
+    if qwen_controls != ["QWEN_DSV4_PREFETCH"]:
         raise RuntimeError(f"unsafe QWEN child controls: {qwen_controls!r}")
     record = {
         "policy": "allowlisted base environment plus fixed safety overlays",
@@ -1172,7 +1171,6 @@ def child_environment() -> tuple[dict[str, str], dict[str, Any]]:
         ),
         "overlay": {
             "QWEN_DSV4_PREFETCH": "off",
-            "QWEN_DSV4_RESIDENCY_SET": "0",
             "RUST_LOG": "warn,qwen_diag=info",
         },
     }

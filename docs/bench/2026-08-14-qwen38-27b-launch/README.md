@@ -1,3 +1,5 @@
+> Historical residency control: the DS4 explicit residency-set path and its environment selector were removed. Current DS4 execution uses ordinary pageable weights.
+
 # Qwen3.8 27B Text Launch Gate
 
 Status: the pinned Unsloth Qwen3.8-27B Q4_K_M asset is usable through the

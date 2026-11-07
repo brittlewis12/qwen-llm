@@ -689,22 +689,8 @@ fn decoded_text_closed_reasoning(
 }
 
 impl DeepSeekV4Backend {
-    /// Keep the no-copy weights wired for `window` after each request. An
-    /// opt-in `MTLResidencySet` (`QWEN_DSV4_RESIDENCY_SET`) already keeps
-    /// them resident, so the keep-alive stays off then.
+    /// Keep no-copy weights active for the configured idle window.
     pub(super) fn set_idle_residency(&mut self, window: std::time::Duration) {
-        let window = if self
-            .residency
-            .as_ref()
-            .is_some_and(|residency| residency.has_residency_set())
-        {
-            if !window.is_zero() {
-                tracing::info!(target: "qwen_diag", "serve idle residency: family=deepseek_v4 off: the residency set keeps the weights resident");
-            }
-            std::time::Duration::ZERO
-        } else {
-            window
-        };
         self.idle_residency = super::idle_residency::IdleResidency::new("deepseek_v4", window);
     }
 }

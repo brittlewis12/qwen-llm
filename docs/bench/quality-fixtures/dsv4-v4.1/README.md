@@ -44,7 +44,7 @@ serially. This avoids 48 model reloads without adding a server or a general
 evaluation framework.
 
 The runner removes every ambient `QWEN_*` variable, then fixes
-`QWEN_DSV4_RESIDENCY_SET=0` and `QWEN_DSV4_PREFETCH=off`. It never requests a
+`QWEN_DSV4_PREFETCH=off`; explicit whole-model residency is no longer supported. It never requests a
 Metal residency set, prefetches or pre-wires model pages, or selects the
 residency-coupled pread path. A long-lived loaded process is not authorization
 for whole-model residency work.

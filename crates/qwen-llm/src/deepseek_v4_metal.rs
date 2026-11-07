@@ -67,8 +67,7 @@ use objc2_foundation::{NSError, NSString};
 #[cfg(feature = "dsv4-diagnostics")]
 use objc2_metal::MTLCommandBufferStatus;
 use objc2_metal::{
-    MTLAllocation, MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState,
-    MTLDevice, MTLResidencySet, MTLResidencySetDescriptor, MTLSize,
+    MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState, MTLDevice, MTLSize,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
@@ -184,11 +183,6 @@ impl DeepSeekV4RealizedLoad {
         (self.residency, self.admission, self.after_residency_bytes)
     }
 }
-
-crate::env_flag!(
-    default_off deepseek_v4_residency_set_enabled,
-    "QWEN_DSV4_RESIDENCY_SET"
-);
 
 const DEEPSEEK_V4_HIDDEN_SIZE: usize = 4_096;
 const DEEPSEEK_V4_VOCAB_SIZE: usize = 129_280;

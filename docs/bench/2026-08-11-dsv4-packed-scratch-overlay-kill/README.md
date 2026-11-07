@@ -1,3 +1,5 @@
+> Historical residency control: the DS4 explicit residency-set path and its environment selector were removed. Current DS4 execution uses ordinary pageable weights.
+
 # DeepSeek Packed Scratch Overlay KILL
 
 Date: 2026-08-11

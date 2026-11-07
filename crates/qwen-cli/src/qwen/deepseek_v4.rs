@@ -2422,7 +2422,7 @@ pub(crate) fn run_deepseek_v4_requests_jsonl(
                 mode: args.execution_mode,
                 request_count,
                 stdin: stdin_mode,
-                residency_set: qwen_llm::env_flag::read_default_off("QWEN_DSV4_RESIDENCY_SET"),
+
                 two_session_memory_admitted,
             });
         eprintln!(

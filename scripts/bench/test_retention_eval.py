@@ -140,22 +140,22 @@ class RetentionContractTests(unittest.TestCase):
                 {"first": first, "second": second},
             )
 
-    def test_child_environment_forces_residency_off(self) -> None:
+    def test_child_environment_removes_inherited_qwen_controls(self) -> None:
         inherited = {
             "PATH": "/usr/bin",
-            "QWEN_DSV4_RESIDENCY_SET": "1",
+            "QWEN_DSV4_PREFILL_CHUNK_TOKENS": "1",
             "QWEN_GGUF_PARALLEL_COPY": "pread",
             "SECRET": "not-forwarded",
         }
         with mock.patch.dict(os.environ, inherited, clear=True):
             environment, record = retention_eval.child_environment()
         self.assertEqual(environment["QWEN_DSV4_PREFETCH"], "off")
-        self.assertEqual(environment["QWEN_DSV4_RESIDENCY_SET"], "0")
+        self.assertNotIn("QWEN_DSV4_PREFILL_CHUNK_TOKENS", environment)
         self.assertNotIn("QWEN_GGUF_PARALLEL_COPY", environment)
         self.assertNotIn("SECRET", environment)
         self.assertEqual(
             record["removed_qwen_keys"],
-            ["QWEN_DSV4_RESIDENCY_SET", "QWEN_GGUF_PARALLEL_COPY"],
+            ["QWEN_DSV4_PREFILL_CHUNK_TOKENS", "QWEN_GGUF_PARALLEL_COPY"],
         )
 
     def test_interrupted_child_uses_cooperative_reap_without_kill(self) -> None:

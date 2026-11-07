@@ -625,7 +625,6 @@ pub struct DeepSeekV4MetalResidency {
     pub(super) config: DeepSeekV4Config,
     pub(super) session_capacity: DeepSeekV4SessionCapacity,
     session_priced_upper_bytes: u64,
-    pub(super) _residency_set: Option<DeepSeekV4ResidencySetGuard>,
     pub(super) tensors: BTreeMap<String, MetalTensor>,
     pub(super) report: DeepSeekV4ResidencyReport,
     dtype_census: Vec<RoleDtype>,
@@ -652,62 +651,6 @@ pub(super) fn check_session_memory_admission(
 unsafe impl Send for DeepSeekV4MetalResidency {}
 unsafe impl Sync for DeepSeekV4MetalResidency {}
 
-pub(crate) struct DeepSeekV4ResidencySetGuard {
-    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    set: Retained<ProtocolObject<dyn MTLResidencySet>>,
-}
-
-impl Drop for DeepSeekV4ResidencySetGuard {
-    fn drop(&mut self) {
-        let started = std::time::Instant::now();
-        let allocations = self.set.allocationCount();
-        let committed_allocation_bytes = self.set.allocatedSize();
-        self.queue.removeResidencySet(&self.set);
-        self.set.endResidency();
-        let _ = std::io::Write::write_fmt(
-            &mut std::io::stderr().lock(),
-            format_args!(
-                "deepseek_v4: model residency set API teardown returned allocations={allocations} committed_allocation_bytes={committed_allocation_bytes} elapsed_ms={:.3}\n",
-                started.elapsed().as_secs_f64() * 1e3,
-            ),
-        );
-    }
-}
-
-pub(super) fn buffer_as_allocation(
-    buffer: &ProtocolObject<dyn MTLBuffer>,
-) -> &ProtocolObject<dyn MTLAllocation> {
-    ProtocolObject::from_ref(buffer)
-}
-
-pub(super) fn deepseek_v4_residency_set_scope_qualified(
-    enabled: bool,
-    facts: &crate::metal::DeviceFacts,
-    admission: MetalMemoryAdmission,
-) -> bool {
-    enabled && facts.supports_metal_residency_sets() && admission.is_admitted()
-}
-
-pub(super) fn deepseek_v4_residency_set_memory_admission(
-    report: &DeepSeekV4ResidencyReport,
-    session_priced_upper_bytes: u64,
-    signals: MetalMemorySignals,
-) -> MetalMemoryAdmission {
-    // The realized weights are already present in the device's current
-    // allocation signal. Use the larger observation so the explicit residency
-    // report still protects devices whose allocator telemetry lags realization.
-    let signals = MetalMemorySignals {
-        current_allocated_bytes: signals.current_allocated_bytes.max(report.resident_bytes),
-        ..signals
-    };
-    evaluate_metal_memory_admission(
-        session_priced_upper_bytes,
-        DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES,
-        signals,
-        true,
-    )
-}
-
 /// Report that numerical dtype admission is evaluated at each fast-path gate.
 fn log_deepseek_v4_fast_path_qualification(ctx: &MetalContext, config: &DeepSeekV4Config) {
     let facts = ctx.device_facts();
@@ -725,83 +668,6 @@ fn log_deepseek_v4_fast_path_qualification(ctx: &MetalContext, config: &DeepSeek
     );
 }
 
-pub(super) fn create_deepseek_v4_residency_set(
-    ctx: &MetalContext,
-    tensors: &BTreeMap<String, MetalTensor>,
-    report: &DeepSeekV4ResidencyReport,
-    session_priced_upper_bytes: u64,
-) -> Option<DeepSeekV4ResidencySetGuard> {
-    if !ctx.device_facts().supports_metal_residency_sets() {
-        return None;
-    }
-    let admission = deepseek_v4_residency_set_memory_admission(
-        report,
-        session_priced_upper_bytes,
-        ctx.memory_signals(),
-    );
-    if !deepseek_v4_residency_set_scope_qualified(
-        deepseek_v4_residency_set_enabled(),
-        ctx.device_facts(),
-        admission,
-    ) {
-        if deepseek_v4_residency_set_enabled() && !admission.is_admitted() {
-            eprintln!(
-                "deepseek_v4: residency set declined reason=working_set_budget required_bytes={:?} resident_weight_bytes={} session_estimate_bytes={} working_set_headroom_bytes={:?} process_remaining_bytes={:?}",
-                admission.required_bytes,
-                report.resident_bytes,
-                session_priced_upper_bytes,
-                admission.working_set_headroom_bytes,
-                admission.signals.process_limit_remaining_bytes,
-            );
-        }
-        return None;
-    }
-    let mut seen = HashSet::new();
-    let mut buffers = Vec::new();
-    for tensor in tensors.values() {
-        let ptr = Retained::as_ptr(&tensor.buffer) as *const _ as usize;
-        if seen.insert(ptr) {
-            buffers.push(&*tensor.buffer);
-        }
-    }
-    if buffers.is_empty() {
-        eprintln!("deepseek_v4: model residency set skipped because no buffers were realized");
-        return None;
-    }
-
-    let descriptor = MTLResidencySetDescriptor::new();
-    descriptor.setLabel(Some(&NSString::from_str("qwen-dsv4-model-weights")));
-    // SAFETY: initialCapacity is advisory and equals the unique allocation count.
-    unsafe { descriptor.setInitialCapacity(buffers.len()) };
-    let set = match ctx.device.newResidencySetWithDescriptor_error(&descriptor) {
-        Ok(set) => set,
-        Err(error) => {
-            let error: Retained<NSError> = error;
-            eprintln!(
-                "deepseek_v4: model residency set unavailable; continuing without it: {}",
-                error.localizedDescription()
-            );
-            return None;
-        }
-    };
-    for buffer in buffers {
-        set.addAllocation(buffer_as_allocation(buffer));
-    }
-    set.commit();
-    set.requestResidency();
-    ctx.queue.addResidencySet(&set);
-    eprintln!(
-        "deepseek_v4: model residency set active allocations={} committed_allocation_bytes={} device_registry_id={} opt_in=QWEN_DSV4_RESIDENCY_SET=1 warning=forced_termination_may_strand_wired_memory",
-        set.allocationCount(),
-        set.allocatedSize(),
-        ctx.device.registryID(),
-    );
-    Some(DeepSeekV4ResidencySetGuard {
-        queue: ctx.queue.clone(),
-        set,
-    })
-}
-
 impl DeepSeekV4MetalResidency {
     pub(super) fn validate_context(&self, ctx: &MetalContext) -> Result<(), DeepSeekV4MetalError> {
         if self.device_registry_id != ctx.device.registryID() {
@@ -811,15 +677,7 @@ impl DeepSeekV4MetalResidency {
                 ctx.device.registryID()
             ));
         }
-        if let Some(guard) = &self._residency_set {
-            let required_queue = Retained::as_ptr(&guard.queue).cast::<()>() as usize;
-            let context_queue = Retained::as_ptr(&ctx.queue).cast::<()>() as usize;
-            if required_queue != context_queue {
-                return invalid(
-                    "DeepSeek V4 residency set is attached to a different Metal command queue",
-                );
-            }
-        }
+
         Ok(())
     }
 
@@ -910,14 +768,7 @@ impl DeepSeekV4MetalResidency {
         {
             return invalid("DeepSeek V4 memory plan changed before realization");
         }
-        if deepseek_v4_residency_set_enabled()
-            && !ctx.device_facts().supports_metal_residency_sets()
-        {
-            eprintln!(
-                "deepseek_v4: residency set declined reason=macos_15_or_newer_required os_version={:?}; continuing without residency set",
-                ctx.device_facts().os_version,
-            );
-        }
+
         let _allocation_transaction = ctx.begin_allocation_transaction();
         let refreshed_admission = plan
             .memory
@@ -934,15 +785,8 @@ impl DeepSeekV4MetalResidency {
         let windows = realize_windows(ctx, gguf, &plan.retained)?;
         let tensors = realize_tensors(ctx, gguf, &plan.retained, &windows)?;
         validate_realization(gguf, &tensors, &plan.report)?;
-        let residency_set = {
-            log_deepseek_v4_fast_path_qualification(ctx, &plan.config);
-            create_deepseek_v4_residency_set(
-                ctx,
-                &tensors,
-                &plan.report,
-                plan.memory.session_priced_upper_bytes(),
-            )
-        };
+        log_deepseek_v4_fast_path_qualification(ctx, &plan.config);
+
         let after_residency_bytes = ctx.current_allocated_size();
         plan.memory.reconcile_residency(
             refreshed_admission.signals.current_allocated_bytes,
@@ -954,7 +798,6 @@ impl DeepSeekV4MetalResidency {
                 config: plan.config,
                 session_capacity: plan.session_capacity,
                 session_priced_upper_bytes: plan.memory.session_priced_upper_bytes,
-                _residency_set: residency_set,
                 tensors,
                 report: plan.report,
                 dtype_census,
@@ -1010,11 +853,6 @@ impl DeepSeekV4MetalResidency {
     /// The retained no-copy weight buffers (for idle residency keep-alive).
     pub fn retained_buffers(&self) -> Vec<&crate::metal::Buffer> {
         crate::metal::retained_gguf_buffers(self.tensors.values())
-    }
-
-    /// Whether an opt-in `MTLResidencySet` already keeps the weights resident.
-    pub fn has_residency_set(&self) -> bool {
-        self._residency_set.is_some()
     }
 
     pub fn len(&self) -> usize {

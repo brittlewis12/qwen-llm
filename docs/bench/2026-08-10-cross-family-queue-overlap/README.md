@@ -1,3 +1,5 @@
+> Historical residency control: the DS4 explicit residency-set path and its environment selector were removed. Current DS4 execution uses ordinary pageable weights.
+
 # Cross-family queue-overlap baseline
 
 Update (2026-08-11): seekable Qwen files now choose B=2 partners by bounded

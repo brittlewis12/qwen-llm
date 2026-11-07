@@ -182,11 +182,6 @@ impl DeepSeekV4Session {
         residency: Arc<DeepSeekV4MetalResidency>,
         model_content_id: Option<DeepSeekV4ModelContentId>,
     ) -> Result<Self, DeepSeekV4MetalError> {
-        if residency._residency_set.is_some() {
-            return invalid(
-                "shared DeepSeek V4 sessions require QWEN_DSV4_RESIDENCY_SET=0 because residency sets are command-queue scoped",
-            );
-        }
         Self::new_inner(ctx, residency, model_content_id)
     }
 

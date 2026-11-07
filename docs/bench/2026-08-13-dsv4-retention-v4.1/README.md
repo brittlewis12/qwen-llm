@@ -1,3 +1,5 @@
+> Historical residency control: the DS4 explicit residency-set path and its environment selector were removed. Current DS4 execution uses ordinary pageable weights.
+
 # DeepSeek V4 Injected-Label Retention v4.1
 
 Status: maintained non-resident quality rows for FRESH, REAP K216, and REAP

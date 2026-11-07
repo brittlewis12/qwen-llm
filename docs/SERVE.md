@@ -259,8 +259,6 @@ is not a residency set.
     Metal-allocated F16 preweight caches are intentionally excluded, like other
     copied weights. Idle-window expiry stops GGUF pulsing; it does not free
     those model-owned caches or change their allocation policy.
-  - DeepSeek V4 turns the keep-alive off when its opt-in
-    `QWEN_DSV4_RESIDENCY_SET` already holds the weights.
 - **Refused.** Ordinary Qwen with copied weights still refuses a nonzero
   value because its Metal allocations stay wired anyway. With mapped weights,
   the backend pulses the retained GGUF buffers through the same idle lifecycle.

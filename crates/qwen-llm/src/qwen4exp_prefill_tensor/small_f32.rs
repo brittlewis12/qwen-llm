@@ -28,13 +28,17 @@ pub(crate) fn try_encode(
     m: usize,
 ) -> Result<bool, MfError> {
     if !enabled()
-        || !ctx.tensor_ops_status().is_available()
         || w.dtype != GgmlType::F32
         || !(512..=2048).contains(&m)
-        || (m == 2048 && !small_tiles_enabled())
         || !m.is_multiple_of(128)
         || !matches!((k, n), (10240, 4) | (2560, 48))
     {
+        return Ok(false);
+    }
+    if small_tiles_enabled() && super::small_f32_mma::try_encode(ctx, enc, w, x, y, k, n, m)? {
+        return Ok(true);
+    }
+    if !ctx.tensor_ops_status().is_available() || (m == 2048 && !small_tiles_enabled()) {
         return Ok(false);
     }
     let name = if n == 4 {

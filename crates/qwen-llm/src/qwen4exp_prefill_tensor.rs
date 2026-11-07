@@ -1,6 +1,7 @@
 //! Additional screened row cohorts for the Flash-Next prompt routes.
 
 pub(crate) mod small_f32;
+mod small_f32_mma;
 
 crate::env_flag!(
     /// Extend Flash-Next tensor dense and routed gate/up projections and parallel bucketing to 512..2047-row appends, plus BF16 HC at multiples of 128 rows, default on when their existing controls and hardware gates allow them. Set to 0 to restore the 2048-row-only qualification. No new operand precision or allocated buffers; routed down, wide expert gate/up and the tensor router retain their 2048-row qualification.

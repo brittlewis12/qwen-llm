@@ -921,51 +921,6 @@ pub fn encode_ssm_conv_silu_split_packed_vjp_f32(
     Ok(())
 }
 
-crate::env_flag!(
-    default_off configured_prefill_gdn_prep_parallel_enabled,
-    "QWEN_PREFILL_GDN_PREP_PARALLEL"
-);
-
-#[cfg(test)]
-thread_local! {
-    static PREFILL_GDN_PREP_PARALLEL_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
-}
-
-#[cfg(test)]
-pub(crate) fn with_prefill_gdn_prep_parallel_override<R>(
-    enabled: bool,
-    f: impl FnOnce() -> R,
-) -> R {
-    struct RestoreOverride(Option<bool>);
-
-    impl Drop for RestoreOverride {
-        fn drop(&mut self) {
-            PREFILL_GDN_PREP_PARALLEL_OVERRIDE.with(|slot| slot.set(self.0));
-        }
-    }
-
-    let previous = PREFILL_GDN_PREP_PARALLEL_OVERRIDE.with(|slot| {
-        let previous = slot.get();
-        slot.set(Some(enabled));
-        previous
-    });
-    let _restore = RestoreOverride(previous);
-    f()
-}
-
-pub(crate) fn prefill_gdn_prep_parallel_enabled() -> bool {
-    #[cfg(test)]
-    if let Some(enabled) = PREFILL_GDN_PREP_PARALLEL_OVERRIDE.with(|slot| slot.get()) {
-        return enabled;
-    }
-    configured_prefill_gdn_prep_parallel_enabled()
-}
-
-#[cfg(test)]
-pub(crate) fn prefill_gdn_prep_parallel_enabled_for_test() -> bool {
-    prefill_gdn_prep_parallel_enabled()
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn encode_gdn_prep_packed_f32(
     ctx: &MetalContext,
@@ -980,49 +935,6 @@ pub fn encode_gdn_prep_packed_f32(
     n_k_heads: usize,
     n_v_heads: usize,
     head_dim: usize,
-) -> Result<(), MetalError> {
-    encode_gdn_prep_packed_f32_inner(
-        ctx, enc, qkv_pack, conv_buf, conv_w, q_pack, k_pack, v_pack, n_tokens, n_k_heads,
-        n_v_heads, head_dim, true,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn encode_gdn_prep_packed_serial_f32(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    qkv_pack: &MetalTensor,
-    conv_buf: &MetalTensor,
-    conv_w: &MetalTensor,
-    q_pack: &MetalTensor,
-    k_pack: &MetalTensor,
-    v_pack: &MetalTensor,
-    n_tokens: usize,
-    n_k_heads: usize,
-    n_v_heads: usize,
-    head_dim: usize,
-) -> Result<(), MetalError> {
-    encode_gdn_prep_packed_f32_inner(
-        ctx, enc, qkv_pack, conv_buf, conv_w, q_pack, k_pack, v_pack, n_tokens, n_k_heads,
-        n_v_heads, head_dim, false,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn encode_gdn_prep_packed_f32_inner(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    qkv_pack: &MetalTensor,
-    conv_buf: &MetalTensor,
-    conv_w: &MetalTensor,
-    q_pack: &MetalTensor,
-    k_pack: &MetalTensor,
-    v_pack: &MetalTensor,
-    n_tokens: usize,
-    n_k_heads: usize,
-    n_v_heads: usize,
-    head_dim: usize,
-    allow_parallel: bool,
 ) -> Result<(), MetalError> {
     let qk_dim = n_k_heads * head_dim;
     let v_dim = n_v_heads * head_dim;
@@ -1068,62 +980,6 @@ pub(crate) fn encode_gdn_prep_packed_f32_inner(
         n_v_heads: u32,
         head_dim: u32,
         conv_dim: u32,
-    }
-    let use_parallel = allow_parallel && prefill_gdn_prep_parallel_enabled();
-    if use_parallel && n_tokens >= 3 {
-        let args = Args {
-            n_tokens: n_tokens as u32,
-            n_k_heads: n_k_heads as u32,
-            n_v_heads: n_v_heads as u32,
-            head_dim: head_dim as u32,
-            conv_dim: conv_dim as u32,
-        };
-        let pso = ctx.pipeline("kernel_gdn_prep_parallel_f32")?;
-        enc.set_pipeline(&pso);
-        enc.set_bytes(0, &args);
-        enc.set_tensor(1, qkv_pack);
-        enc.set_tensor(2, conv_buf);
-        enc.set_tensor(3, conv_w);
-        enc.set_tensor(4, q_pack);
-        enc.set_tensor(5, k_pack);
-        enc.set_tensor(6, v_pack);
-        let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(256);
-        let total = n_tokens * conv_dim;
-        let n_tg = total.div_ceil(tg_threads);
-        enc.dispatch(
-            MTLSize {
-                width: n_tg,
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: tg_threads,
-                height: 1,
-                depth: 1,
-            },
-        );
-
-        let pso = ctx.pipeline("kernel_gdn_prep_parallel_state_f32")?;
-        enc.set_pipeline(&pso);
-        enc.set_bytes(0, &args);
-        enc.set_tensor(1, qkv_pack);
-        enc.set_tensor(2, conv_buf);
-        let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(256);
-        let total = 3 * conv_dim;
-        let n_tg = total.div_ceil(tg_threads);
-        enc.dispatch(
-            MTLSize {
-                width: n_tg,
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width: tg_threads,
-                height: 1,
-                depth: 1,
-            },
-        );
-        return Ok(());
     }
     let pso = ctx.pipeline("kernel_gdn_prep_packed_f32")?;
     enc.set_pipeline(&pso);

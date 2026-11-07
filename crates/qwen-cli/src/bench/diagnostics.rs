@@ -34,7 +34,6 @@ pub(crate) const HOT_DECODE_PIPELINE_AUDIT: &[&str] = &[
     "kernel_attn_decode_v4_g16_t4_c128_f32",
     "kernel_attn_decode_v4_reduce_h2_g8_f32",
     "kernel_attn_decode_v4_reduce_h2_g16_f32",
-    "kernel_gdn_prep_parallel_state_f32",
     "kernel_gdn_decay_chain_f32",
     "kernel_l2_norm_pair_hd128_r4_f32",
     "kernel_gdn_step_decay_f32",

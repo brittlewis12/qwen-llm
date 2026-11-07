@@ -3,7 +3,7 @@
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     encode_copy_offset_f32, encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
-    encode_gdn_prep_packed_serial_f32, encode_gdn_step_decay_f32,
+    encode_gdn_prep_packed_f32, encode_gdn_step_decay_f32,
     encode_gdn_step_decay_packed_prefill_f32, encode_l2_norm_pair_batched_f32,
     encode_mat_vec_f32_sigmoid, encode_sigmoid_f32, encode_ssm_conv_silu_f32,
 };
@@ -1025,7 +1025,7 @@ unsafe fn encode_gated_delta_net_packed_inner(
         enc,
         Qwen4ExpPackedProfileLabel::detail("gdn.prep", layer, MixerKind::GatedDeltaNet),
     )?;
-    encode_gdn_prep_packed_serial_f32(
+    encode_gdn_prep_packed_f32(
         ctx,
         enc,
         &qkv,
@@ -2965,21 +2965,18 @@ mod tests {
             let command = ctx.queue.commandBuffer().unwrap();
             let encoder = KernelEncoder::begin(&command);
             crate::metal::dispatch_census_begin();
-            let packed_output = crate::metal::with_prefill_gdn_prep_parallel_override(true, || {
-                assert!(crate::metal::prefill_gdn_prep_parallel_enabled_for_test());
-                unsafe {
-                    encode_gated_delta_net_packed(
-                        &ctx,
-                        &encoder,
-                        &input,
-                        weights,
-                        &conv_state,
-                        &delta_state,
-                        &scratch,
-                        tokens,
-                    )
-                }
-            })
+            let packed_output = unsafe {
+                encode_gated_delta_net_packed(
+                    &ctx,
+                    &encoder,
+                    &input,
+                    weights,
+                    &conv_state,
+                    &delta_state,
+                    &scratch,
+                    tokens,
+                )
+            }
             .unwrap();
             let census = crate::metal::dispatch_census_take();
             let q8_matvec = if crate::metal::mat_vec_q8_0_lcpp_enabled() {

@@ -6,6 +6,77 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - V4.1 Masked Reindex: Native Gate Miss; Cold Engram Attribution
+
+- Base `a28026ef`, M5 Ultra, main four-shard
+  **DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS** plus **IQ4_NL Engram**,
+  full 384 experts/top-6 and real mixed tensor types. No production change
+  admitted. Prototypes `ca82e9d5`/`bef8933a`, flag, kernel, test and temporary
+  rollout restriction removed; engine/kernel sources match the base exactly.
+- Candidate: later index layers 24/28/32/36 skip eight-key panels excluded by
+  layer 20's existing candidate mask, retaining the incumbent F32 MMA and
+  ordered head sum for allowed keys. No extra buffers or dispatches (8665 at
+  pp512/128K). Settled operator blocks: **2.03x / 2.65x** at 64K/128K.
+  Full-prefix snapshot ABBA then BAAB, one excluded warm + two retained calls
+  per arm: pp512/64K **632.881 -> 612.650 ms (1.03302x)** misses the 1.04x gate;
+  pp512/128K **714.933 -> 664.816 (1.07539x)** passes the 1.06x replay gate.
+- Fresh native `qwen-bench suite --pp 512 --depth 131072 --runs 1`, normal
+  model and row warmups, separate rollback/default processes, clean matching
+  build/runtime identities: **811.077 -> 797.895 ms**, **631.259 -> 641.688
+  tok/s (1.01652x)**. One retained sample/policy is a confirmation rather than
+  dispersion evidence; it misses the predeclared **1.04x** confirmation gate.
+  The replay gain is not promoted. Ineligible pp512/8K/32K and cold pp4096
+  ABBA/BAAB controls differ by at most **0.07%**, with no masked calls.
+- Correctness passed before removal: code/prose at 64K, prose at 128K and code
+  at 128K+1, 128 teacher-forced targets/cell/policy, complete 129280-word
+  vectors. All **512 targets/policy** bitwise equal, every cell **dNLL =
+  mean/max KL = 0**, finite. Coverage is 0 masked calls at 64K and 36 per
+  enabled 128K append. Offset/tail/empty-mask/256K regression passes Metal API
+  and GPU validation. Prototype full release lib: **2452 passed, 738 ignored**;
+  stock CLI smoke: 8432 input + 64 output tokens, expected token-limit finish.
+- One diagnostic cold/replay profile on the unchanged production graph:
+  **854.451 / 712.657 ms**. First call reads **375,832,576 disk bytes**;
+  Engram preparation **115.335 / 17.337 ms**, scratch allocation **0.312 /
+  0.254 ms**, CPU encode **4.522 / 4.453**, GPU **673.750 / 667.524**.
+  Driver scheduling metric **52.457 / 16.308 ms** is potentially overlapping,
+  not an additive wall attribution. Replay2 is 714.390 ms with zero disk
+  reads. Sampled stages independently show attention serial **162.213 ->
+  113.063 ms**, total GPU **667.995 -> 618.780**, FFN **308.419 / 308.794**.
+  These diagnostic samples do not replace canonical native timing. Scratch
+  is allocated on every append; repeated-state replay does not prove retention.
+- Bigger move to weigh: async Engram preparation plus command boundaries
+  around consumers at layers 1 and 14, so layer 0 and layers 1..13 can run
+  while their future Engram inputs arrive. The observed cold preparation
+  delta gives a ceiling near 98 ms; **50-90 ms (6-11% of the fresh append)**
+  is an estimate, not a measured gain. Cost: **1-2 days**, including admitted
+  buffer lifetimes, cancellation/poisoning and draining submitted GPU work,
+  distribution and native qualification. Single-token decode and speculation
+  remain outside this experiment.
+- Build lock, nice 10, canonical Metal lease; thermal pressure **0 throughout
+  valid GPU packets**. Raw frozen sources/binary hashes, plans, per-arm data,
+  conditions and `cold-profile.json`: `$HOME/qwen-runs/2026-11-06-v41-roofline5`
+  on metagross. Final branch contains evidence only.
+
+## 2026-11-06 - V4.1 Short-Append Gate/Up Fusion: Killed
+
+- Base `a28026ef`, M5 Ultra, main four-shard GSQ-RCO IQ2_XS artifact and
+  IQ4_NL Engram companion. Captured the actual layer-39 routed gate/up operands
+  from a Full 512-token append after an 8K prefix: 384 experts, top-6,
+  154 active experts, 3072 routes, maximum expert count 381. No synthetic route
+  substitution. Both designs reuse the same K32 half operands and F32 sums.
+- Sharing activation staging across two 32x64 tensor accumulators gave
+  **1.081x / 1.097x**; a single concatenated 32x128 accumulator gave
+  **1.117x / 1.130x**. Each design ran ABBA then BAAB, one excluded warm dispatch
+  and two retained dispatches per arm. Both missed the predeclared **1.15x in
+  each block** operator gate; no whole-model speedup is claimed. Both match all
+  **7,077,888** incumbent/model output bits, preserve operand hashes and output
+  guards. Shared staging removes barriers but the wider accumulator doubles
+  output scratch to 16 KiB; the observed gain does not justify qualification.
+- Prototypes `04ccd946` and `719973c8` removed, including capture hooks and env
+  flag. Build lock + Metal lease; thermal pressure 0 throughout. Raw sources,
+  binary/source hashes, real fixture, per-arm timings and decisions remain in
+  `$HOME/qwen-runs/2026-11-06-v41-roofline5` on metagross. No default change.
+
 ## 2026-11-07 - GLM M5 Prefill: Adaptive Expert Panels, +2.67% pp4096
 
 - Code **`73156314`**, base **`9187dd74`**, unchanged M5 Ultra UD-IQ3_XXS

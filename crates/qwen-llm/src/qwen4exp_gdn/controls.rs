@@ -1,4 +1,5 @@
 use super::*;
+use objc2_metal::MTLComputePipelineState;
 
 crate::env_flag!(
     /// Flash-Next one-token H2560/48-head GDN combines independent F32 alpha/beta projections and the decay epilogue. Reuses existing scratch and reduction orders. Set 0 for separate dispatches. Unsupported geometry, alignment or PSOs, and QWEN_MATVEC_F32_LCPP_R2=0, retain the incumbent.
@@ -17,8 +18,7 @@ fn eligible(g: GatedDeltaNetMetalGeometry) -> bool {
 fn pipeline(
     ctx: &MetalContext,
     g: GatedDeltaNetMetalGeometry,
-) -> Result<Option<Retained<ProtocolObject<dyn objc2_metal::MTLComputePipelineState>>>, MetalError>
-{
+) -> Result<Option<crate::metal::Pipeline>, MetalError> {
     if !eligible(g) {
         return Ok(None);
     }

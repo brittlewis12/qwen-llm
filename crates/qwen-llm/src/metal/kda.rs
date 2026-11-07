@@ -453,7 +453,7 @@ mod tests {
         }
         const HEADS: usize = 2;
         let width = HEADS * KDA_HEAD_DIM;
-        for rows in [1usize, 7, 37, 1024, 2048] {
+        for rows in [1usize, 7, 37, 129, 511, 513, 1596, 1852, 2048, 2049, 4096] {
             let shape = vec![width as u64, rows as u64];
             let q = tensor(&ctx, &series(width * rows, 1, 0.05), shape.clone());
             let k = tensor(&ctx, &series(width * rows, 2, 0.2), shape.clone());

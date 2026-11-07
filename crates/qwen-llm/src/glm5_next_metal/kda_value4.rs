@@ -2,7 +2,7 @@
 use super::packed::{Arith, FastPrecision, PackedLineage};
 
 crate::env_flag!(
-    /// Default-on M5 Fast/Half KDA prefill recurrence with four independent values per SIMD group at 64 heads and 1024/2048 rows. No new state format or scratch. Zero restores the incumbent recurrence; Exact and F32 modes retain it.
+    /// Default-on M5 Fast/Half KDA prefill recurrence with four independent values per SIMD group at 64 heads and 512/1024/2048 command rows, extended to 128..=4096 by PREFILL_ANY_ROWS. No new state format or scratch. Zero restores the incumbent recurrence; Exact and F32 modes retain it.
     default_on enabled,
     "QWEN_GLM53_KDA_VALUE4"
 );
@@ -12,7 +12,10 @@ pub(super) fn selected(arith: Arith, heads: usize, rows: usize) -> bool {
         && arith.lineage == PackedLineage::Fast
         && arith.precision == FastPrecision::Half
         && heads == 64
-        && (matches!(rows, 1024 | 2048) || (rows == 512 && super::short_prefill::enabled()))
+        && (matches!(rows, 1024 | 2048)
+            || (rows == 512 && super::short_prefill::enabled())
+            || (super::row_policy::expanded(rows)
+                && (rows >= 1024 || super::short_prefill::enabled())))
 }
 
 #[cfg(test)]
@@ -20,6 +23,7 @@ mod tests {
     use super::*;
     #[test]
     fn protects_exact_f32_and_untested_geometry() {
+        let _legacy_rows = crate::glm5_next_metal::row_policy::Scope::new(false);
         let half = Arith {
             lineage: PackedLineage::Fast,
             precision: FastPrecision::Half,

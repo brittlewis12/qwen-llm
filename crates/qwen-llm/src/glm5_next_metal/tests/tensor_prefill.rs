@@ -24,6 +24,7 @@ const HALF: Arith = Arith {
 
 #[test]
 fn cpu_short_q6_wide_is_explicit_and_keeps_shared_q8_capability() {
+    let _legacy_rows = crate::glm5_next_metal::row_policy::Scope::new(false);
     for activation in [metal::TensorActivation::F32, metal::TensorActivation::F16] {
         assert!(metal::mat_mat_tensor_wide_pipeline_name(GgmlType::Q6_K, activation).is_none());
         assert!(metal::mat_mat_tensor_q6_wide_pipeline_name(GgmlType::Q8_0, activation).is_none());
@@ -50,7 +51,34 @@ fn cpu_short_q6_wide_is_explicit_and_keeps_shared_q8_capability() {
 }
 
 #[test]
+fn cpu_arbitrary_large_rows_respect_q6_rollback() {
+    let _rows = crate::glm5_next_metal::row_policy::Scope::new(true);
+    for wide in [false, true] {
+        let _wide = Q6WideScope::new(wide);
+        for rows in [1025, 1084, 1596, 1852, 2047, 2049, 4095, 4096] {
+            assert_eq!(
+                Tile::selected_for_rows(GgmlType::Q6_K, rows),
+                if wide { Tile::Q6Wide } else { Tile::Narrow }
+            );
+            assert_eq!(
+                eligible(HALF, StageMode::Fast, GgmlType::Q6_K, 4096, 8192, rows).unwrap(),
+                super::enabled()
+            );
+        }
+        for rows in [128, 129, 511, 513, 1023] {
+            assert_eq!(Tile::selected_for_rows(GgmlType::Q6_K, rows), Tile::Narrow);
+            assert!(!eligible(HALF, StageMode::Fast, GgmlType::Q6_K, 4096, 8192, rows).unwrap());
+        }
+    }
+    let _off = Scope::new(false);
+    for rows in [128, 513, 1596, 4095] {
+        assert!(!eligible(HALF, StageMode::Fast, GgmlType::Q6_K, 4096, 8192, rows).unwrap());
+    }
+}
+
+#[test]
 fn cpu_large_q6_wide_is_bounded_and_rolls_back_independently() {
+    let _legacy_rows = crate::glm5_next_metal::row_policy::Scope::new(false);
     for enabled in [false, true] {
         let _scope = Q6WideScope::new(enabled);
         assert_eq!(
@@ -654,9 +682,7 @@ fn m5_glm_shapes_baseline_vs_tensor_and_f64_oracles() {
                 f.poison_output();
                 let candidate = run(&ctx, |enc| f.encode(&ctx, enc, true));
                 assert_eq!(candidate.len(), 1);
-                let wide = dtype == GgmlType::Q6_K
-                    && matches!(n, 512 | 1024)
-                    && crate::glm5_next_metal::short_prefill::enabled();
+                let wide = Tile::selected_for_rows(dtype, n) == Tile::Q6Wide;
                 let expected = if wide {
                     "kernel_mat_mat_q6_K_f32_tensor_wide".to_owned()
                 } else {
@@ -701,6 +727,39 @@ fn m5_glm_shapes_baseline_vs_tensor_and_f64_oracles() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn m5_q6_wide_irregular_rows_preserve_narrow_bits_and_guards() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    if !metal::moe_grouped_tensor_selected(&ctx) {
+        return;
+    }
+    for rows in [128, 129, 511, 513, 1084, 1596, 1852, 2049, 4095, 4096] {
+        let f = Fixture::new(&ctx, GgmlType::Q6_K, 256, 65, rows);
+        run(&ctx, |enc| {
+            metal::encode_mat_mat_tensor_f32_narrow(&ctx, enc, &f.w, &f.x, &f.y, f.k, f.m, f.n)
+                .unwrap()
+        });
+        let narrow = read(&f.y);
+        f.poison_output();
+        run(&ctx, |enc| {
+            metal::encode_mat_mat_tensor_f32_q6_wide(&ctx, enc, &f.w, &f.x, &f.y, f.k, f.m, f.n)
+                .unwrap()
+        });
+        let wide = read(&f.y);
+        f.validate(&wide, &f.half, 2e-3);
+        assert_eq!(
+            narrow.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            wide.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "rows {rows}"
+        );
+        for t in [&f.w, &f.x, &f.y] {
+            assert_guards(t);
         }
     }
 }

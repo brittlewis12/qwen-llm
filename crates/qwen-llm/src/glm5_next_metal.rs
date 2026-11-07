@@ -2470,6 +2470,7 @@ mod lens;
 mod packed;
 mod prefill_attention;
 pub mod prefill_plan;
+pub(crate) mod row_policy;
 mod short_prefill;
 pub(crate) mod tensor_down;
 mod tensor_gate_up;

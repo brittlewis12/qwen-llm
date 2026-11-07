@@ -15,7 +15,7 @@ const KERNEL: &str = "glm5_dense_tensor_prefill";
 const MIN_ROWS: usize = 1024;
 
 crate::env_flag!(
-    /// Default-on wide Q6_K tile at exactly 2048 GLM prefill rows. Zero restores the narrow tile there; the independent 512/1024 short-prefill policy is unchanged. Enclosing Fast/Half, tensor-tier, binding and capacity guards remain mandatory.
+    /// Default-on wide Q6_K tile at 2048 GLM prefill rows (1025..=4096 with PREFILL_ANY_ROWS). Zero restores the narrow tile there; the independent 512/1024 short-prefill policy is unchanged. Enclosing Fast/Half, tensor-tier, binding and capacity guards remain mandatory.
     default_on large_q6_wide_requested,
     "QWEN_GLM53_DENSE_Q6_WIDE"
 );
@@ -106,7 +106,8 @@ impl Tile {
     fn selected_for_rows(dtype: GgmlType, rows: usize) -> Self {
         if dtype == GgmlType::Q6_K
             && ((matches!(rows, 512 | 1024) && super::short_prefill::enabled())
-                || (rows == 2048 && large_q6_wide_enabled()))
+                || (rows == 2048 && large_q6_wide_enabled())
+                || (rows > 1024 && super::row_policy::expanded(rows) && large_q6_wide_enabled()))
         {
             Self::Q6Wide
         } else {

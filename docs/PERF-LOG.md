@@ -6,6 +6,117 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - Flash-Next Narrow F32 Prefill: M5/M4
+
+- Base **`5db4cb0b`**, qualified production/ENV tree **`c0c87c2c`**.
+  Same **GSQ-RCO IQ3_S** on both machines (M5 model-search root; M4 external
+  weights archive). Default-on, independent rollbacks:
+  **`QWEN_FN_PREFILL_HC_DOT=0`** restores the M5 HC injection tensor tile;
+  **`QWEN_FN_PREFILL_F32_MMA=0`** restores the M4 scalar F32 projections.
+  Both respect `QWEN_FN_SHORT_SMALL_F32=0` and
+  `QWEN_FN_SMALL_F32_TILES=0`. Scope is 128-aligned **M512..2048**,
+  **HC K10240/N4**, and, on M4, **GDN controls K2560/N48**.
+  Optional PSO/capability/alignment checks retain the incumbent on refusal.
+  No operand narrowing, new GPU buffers, weight repacking or admission change.
+- M5 HC splits K across SIMD lanes, coalesces input/weight reads, and reuses
+  each input for four outputs. F32 reduction order changes. M4 uses full-F32
+  SIMD matrix operations with a shared 4 KiB weight panel; the dead panel
+  holds output before scatter. M4 checked operator and model output bits match.
+- Fresh diagnostic prefill profiles, outside native timings: pp4096 Q6_K
+  dense **309.741 ms**, selected logits **187.799**, direct value **147.247**,
+  IQ4_NL down **142.214**, vector value **133.616**, HC injection **67.001**;
+  pp512@32K Q6_K **40.761**, IQ4_NL down **38.807**, vector value **35.016**,
+  logits **30.803**, HC injection **28.976**. Zero missing pairs/overflow.
+  Isolated dispatch spans rank candidates; they are not an additive wall budget.
+- Operator screens: M5 HC dot **2.3-2.4x** faster than its tensor tile, with
+  sampled F64 max error below **1e-6**. M4 matrix tiles give **2.8-3.6x** HC
+  and **8-15x** GDN-control gains, all 54 whole-output comparisons bitwise.
+  Reject smaller HC tensor tiles and M5 HC SIMD matrix tiles: both lose to
+  the incumbent. M16 GDN tensor tiles win **1.33x** in isolation but are not
+  promoted: the inferred whole-call budget is below 1%; no e2e gain claimed.
+  The previously rejected Q6_K K64 tile is not repeated.
+- Whole-call kill tests: separate-process **ABBA**, production prefill plus
+  full endpoint copy, reset/snapshot restore outside timing, one excluded warm
+  call and two retained calls/arm. Prespecified >=1% whole-primary gain and
+  positive pair directions; PP4096 control for the append-focused M5 route.
+
+  | Stage / primary | Off ms | On ms | Speedup | Pair ratios |
+  | --- | ---: | ---: | ---: | --- |
+  | M5 HC, pp512@32K | 362.503000 | 348.647406 | 1.039741x | 1.042081 / 1.037409 |
+  | M5 HC, pp4096@0 | 1877.363688 | 1846.777854 | 1.016562x | 1.017237 / 1.015886 |
+  | M4 F32 matrix, pp4096@0 | 7938.437052 | 7795.302344 | 1.018362x | 1.026157 / 1.010530 |
+
+- Final ordinary release CLI, off/default, `suite --pp ... --depth ... --runs 2
+  --seed 1`: model/row warmups, fresh untimed prefixes and full endpoint
+  copies. M5 128K uses the native production call with one real prefix, snapshot
+  restoration outside timing, one excluded warm append and two retained calls.
+  Final M4 cold standing is a second, reverse **BAAB** CLI campaign with
+  **60 seconds stable thermal zero before each process**, four kept samples
+  per policy. M4 32K uses one real prefix and native snapshots, **60 seconds
+  stable zero after the prefix**, one excluded warm append and two kept calls,
+  matching the prior M4 CPP/native reference protocol. All timing campaigns
+  hold build lock + canonical Metal lease, nice 10; thermal pressure
+  **0 before/after every arm**. CLI build/runtime
+  identities match clean `c0c87c2c`. CPP is the unchanged same-artifact
+  **v0.9.0 `cd959bae99ff`** reference from prior roofline/depth entries;
+  not rerun here.
+
+  | Device / work / depth | Off tok/s | Default tok/s | On/off | CPP tok/s | On/CPP | % compute ceiling |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | M5 pp4096 / 0 | 2183.856 | 2219.386 | 1.01627x | 2067.455 | 1.07349x | 21.09% |
+  | M5 pp512 / 32768 | 1407.127 | 1467.623 | 1.04299x | 1347.590 | 1.08907x | 14.22% |
+  | M5 pp512 / 131072 | 1326.910 | 1368.014 | 1.03098x | 1228.450 | 1.11361x | — |
+  | M4 pp4096 / 0 | 484.238 | 523.005 | 1.08006x | 624.071 | 0.83805x | 41.69% |
+  | M4 pp512 / 32768 | 427.688 | 461.464 | 1.07897x | 528.972 | 0.87238x | 37.52% |
+
+  M4 cold confirmation process means, off **463.713 / 504.763**, on
+  **524.925 / 521.086 tok/s**; pair ratios **1.13200 / 1.03234**. Gain
+  magnitude varies with input/protocol: native kill uses seed 13, CLI seed 1;
+  both campaigns have positive pair directions. Initial short-settle M4
+  controls (**424.512 / 479.281** cold, **338.270 / 391.203** append tok/s)
+  remain in the receipts; the table uses the reference's 60-second protocol.
+
+  Compute percentages reuse **12.51159 / 12.76135 GFLOP/token** at pp4096/0
+  and pp512/32K and measured **131.676 / 15.695 TFLOP/s** M5 tensor/M4 SIMD
+  MMA peaks. This optimistic useful-matmul ceiling excludes dequantization,
+  padding, nonlinearities, recurrence and launch work.
+- Distribution: frozen code/prose from the base, independent complete
+  prefixes, full-vocabulary F64 NLL/KL(off||on), **2048 targets/document at 0
+  and 512/document at 32K**, **5120 pairs/device**. Token hashes match and all
+  logits are finite. M5 pooled **dNLL +0.000848122**, mean KL **0.001641134**;
+  every cell passes unchanged |dNLL| <=0.005 and mean KL <=0.01:
+
+  | M5 document / depth / rows | dNLL | Mean KL |
+  | --- | ---: | ---: |
+  | Code / 0 / 2048 | -0.000763852 | 0.002709382 |
+  | Prose / 0 / 2048 | +0.003090905 | 0.000990398 |
+  | Code / 32768 / 512 | +0.000088831 | 0.000550321 |
+  | Prose / 32768 / 512 | -0.000915825 | 0.001061901 |
+
+  M5 census witnesses **96** HC dot calls per on cell, zero off.
+  M4 all **5120** full-vocabulary vectors are bitwise equal: **dNLL = KL = 0**;
+  census witnesses **168** matrix calls per on cell, zero off. The combined M4
+  helper hit host-memory admission allocating its second row-logits bank at
+  32K, after code passed. The remaining prose case passed in a fresh process
+  with banks allocated outside the document loop, against the same saved off
+  vectors. No admission override or production change.
+- Full `cargo test --release -p qwen-llm --lib` on the qualified tree:
+  **2455 passed, 0 failed, 738 ignored** on **each machine** (M5 **115.46 s**,
+  M4 **96.42 s**). Operator checks cover F64 accuracy, poisoned outputs,
+  offsets/guards and refusal before dispatch for aliases, short views,
+  unaligned/unsupported cohorts and concurrent encoders. Two focused tests
+  per device also pass with **Metal API and GPU validation enabled**.
+  CPU-only **`scripts/check-contracts.sh` passes on `c0c87c2c`**, tree
+  **`c4463676e23aa8e10662204d80f74915bade6501`**; this final PERF-only
+  addition is path/whitespace checked.
+- Raw arms/profiles, frozen data, helper sources, failed screening/admission
+  receipts, build/validation logs and reconstruction patches:
+  **`2026-11-07-fn-roofline6-raw.tar.gz`**, SHA256
+  **`355324932195068ef28d918592c895ddf7466731832bf4b07bb05410d789255f`**, under
+  `~/qwen-runs/2026-11-07-fn-roofline6/` on both machines.
+  Temporary example sources/binaries removed; branch unmerged, no owned work
+  left running.
+
 ## 2026-11-07 - V4.1 Masked Reindex: Native Gate Miss; Cold Engram Attribution
 
 - Base `a28026ef`, M5 Ultra, main four-shard

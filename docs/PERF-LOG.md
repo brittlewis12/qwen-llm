@@ -6,6 +6,102 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - V4.1 M5 Decode Census: Structural Gap, Stop Before Redesign
+
+- **Report only; no runtime change.** Frozen **`9573228d`**, M5 Ultra,
+  SDK 27.0. Same full **GSQ-RCO IQ2_XS** four-shard artifact and companion
+  **DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf**, 384 experts/top-6. Tensor types
+  and active bytes come from its header census, revalidated shard stamps and
+  actual dispatch bindings; the filename covers mixed IQ2_XXS/XS/S and IQ3_XXS.
+  Decode reads the quantized sources, with no transfer of prefill F16 rates.
+- Clean native family harness, tg64, ordinary model/row warmups and fresh
+  prefix fills, two retained samples/cell:
+
+  | Depth | Retained tok/s | ms/token | One-read floor at 1 TB/s | % bandwidth reference |
+  | ---: | --- | ---: | ---: | ---: |
+  | 0 | 80.80516,80.98136 | 12.362 | 7.952 ms | 64.3% |
+  | 8192 | 75.55970,75.72986 | 13.220 | 8.111 ms | 61.4% |
+  | 32768 | 74.81490,74.94461 | 13.355 | 8.193 ms | 61.3% |
+
+  Same nominal decimal **1.0 TB/s** reference as the standing. Fresh streaming
+  median is **1.106 TB/s**; sixteen independent F32 FMA chains measure
+  **24.10 TFLOP/s**. The older single-chain FMA probe is dependency-limited
+  (~5.99 TFLOP/s), so it is not used as the SIMD ceiling. The 130-TFLOP/s
+  half-operand tensor roof does not describe these F32 decode kernels.
+- **Measurement:** timestamps on the original **123 encoders / three command
+  buffers**, preserving scheduling; representative dispatches **831/888/900**
+  (odd compressor positions add six). Original-encoder sampling changes
+  normal latency by <0.5%. A sparse diagnostic samples one dispatch at a
+  time; its GPU duration stays within ~0.2%, but individual intervals include
+  waits/overlap and empty-prefix timestamps can be zero. Those intervals
+  are not summed into a production budget.
+- For kernel service, capture actual PSOs, bindings and dispatch shapes;
+  replay each pipeline family with frozen completed-step writable scratch,
+  a 768-MB cache sweep and **five retained GPU-command samples**. This is a
+  matched-shape service estimate, including the dispatches within that family;
+  it is not physical DRAM traffic or an exact causal partition of overlapping
+  GPU work. Whole-graph replay with the original encoder boundaries matches
+  normal GPU time within **0.50%** at every depth. Family totals **12.199 /
+  12.785 / 12.959 ms** versus matched ordinary step wall **12.177 / 12.936 /
+  13.001 ms**. Fresh native harness differences stay in the net remainder.
+
+  | Kernel family | ms/token 0 / 8K / 32K | 32K effective GB/s | % of 1-TB/s reference | Share of native 32K gap |
+  | --- | --- | ---: | ---: | ---: |
+  | Q5_K dense projections, shared expert, Engram, head | 5.671 / 5.676 / 5.674 | 859 | 85.9% | 15.5% |
+  | Routed IQ2/3 dequant + dot | 3.475 / 3.471 / 3.484 | 669 | 66.9% | 22.4% |
+  | Q8_0 rank pair + BF16 projections | .843 / .963 / .964 | 695 | 69.5% | 5.7% |
+  | HC, routing, norms and other small kernels | 1.726 / 1.639 / 1.642 | 97 | 9.7% | 28.7% |
+  | Attention QK/PV + combine | .468 / .807 / .807 | 62 | 6.2% | 14.7% |
+  | Index scoring + selection/sort | .016 / .230 / .388 | 281 | 28.1% | 5.4% |
+  | Net overlap/cache, host and protocol remainder | .163 / .435 / .396 | — | — | 7.7% |
+
+  Gap share is `(family service - family one-read byte floor) / (native
+  wall - total one-read floor)`, an accounting estimate; no proportional
+  rescaling of kernels. Logical bytes include weights and KV/index state,
+  excluding extra activation passes/cacheline traffic. The 32K denominator
+  is **5.162 ms**; shortfall from the bandwidth reference is 100 minus the
+  utilization column. Full per-pipeline counts, times and work are in raw JSON.
+- Routed detail at 32K (gate/up plus down): **IQ2_XXS 2.046 ms**, IQ2_XS
+  **.845**, IQ2_S **.542**, IQ3_XXS **.052**. The routed family performs
+  **16.99 useful GFLOP/token**, **4.88 useful TFLOP/s** (~20% of the pure-FMA
+  ceiling); dequantization also uses integer operations, table lookups and
+  activation loads. A weighted cache-hot same-shape reference is **3.221 ms**
+  (~5.27 useful TFLOP/s), only **8.2%** faster than the service estimate.
+  Dominant XXS gate/up and down gain only **2-4%** from hot weights. This is
+  mixed-instruction cost, not a free 33% bandwidth win. It agrees with the
+  historical V41-VY3X in-stream load-only ceiling (+9.4% whole, below its
+  redesign bar); no new routed micro-tuning is promoted.
+- Small-kernel detail: HC pre **.429 ms**, attention/FFN HC post **.189 /
+  .261**, route **.427**, rank norms/RoPE **.123 / .101**. Attention QK/PV
+  credits ~**3.22 GFLOP/token**, about **4.0 TFLOP/s**; small query geometry
+  and repeated data movement limit useful throughput. Index scoring itself
+  is **.147 ms**; selection/sort adds **.241**. These families together
+  explain ~**49%** of the nominal gap. Host encode **.60-.65 ms** remains
+  hidden and command-buffer gaps are ~**1.3 us**. Coalescing the graph into
+  one encoder is **13.428 vs 12.685 ms GPU (+5.9% latency)**: the existing
+  shared/routed overlap pays, so deleting boundaries alone is not a win.
+- **Bigger move to weigh:** a four-position speculative verification path
+  (one pending target token + three drafts), amortizing ~**6.64 ms** of
+  dense projection service and tiny dispatches. Sizing target: verification
+  <=28 ms and drafting <=2 ms/round. At conditional acceptance 70-80%,
+  `E[tokens] = 1+p+p^2+p^3 = 2.533-2.952`, predicting **+13-31%** over
+  current 32K decode. This is a conditional engineering estimate, not measured
+  speculative throughput. Budget **1-2 engineering weeks once a compatible
+  drafter exists**, for causal multi-position verification/all-position
+  vocabulary readout, bounded KV/Engram rollback and distribution/e2e
+  qualification. Drafter acquisition/training is outside that estimate. The main
+  artifact's header has no separately named MTP tensors; drafter feasibility
+  is a prerequisite (existing V41-4JAW). **Stop here for the user's decision.**
+- All timing holds build lock, nice 10 and canonical Metal lease, thermal
+  **0 throughout** under two-second supervision. Instrumented/base hashes
+  match; all **5238** sparse vectors agree with their fixed-prefix controls.
+  Diagnostic code is removed locally and on M5; the clean base benchmark is
+  restored. No merge, no model/GPU jobs left running. Source, private patches,
+  binaries, all samples, rejected preflight/compile attempts and reproducible
+  analysis: **`2026-11-06-v41-roofline4-raw.tar`**, SHA256
+  **`1f2fc0a313f42765e504045c9b4f5ea64891ed89edc4439588d0ca7692d1f35d`**,
+  beside `metagross:~/qwen-runs/2026-11-06-v41-roofline4/`.
+
 ## 2026-11-06 - V4.1 Long Owner Publication: Warm Win, Native Kill
 
 - **Not shipped.** Prototype **`229eb204`**, scoped default-on candidate

@@ -1831,3 +1831,6 @@ mod clamped_tests {
         }
     }
 }
+
+mod mapped;
+pub(crate) use mapped::try_encode_moe_swiglu_mapped32;

@@ -48,6 +48,7 @@ use objc2_metal::{
 #[path = "metal/qwen4exp_expert_compat.rs"]
 mod qwen4exp_expert_compat;
 
+mod expert_mapped;
 mod expert_wide;
 mod router_tensor;
 
@@ -2095,6 +2096,22 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
             enc,
             Qwen4ExpPackedProfileLabel::detail("moe.routed_gate_up", layer, mixer),
         )?;
+        if expert_mapped::try_encode(
+            ctx,
+            enc,
+            self.weights.routed_gate,
+            self.weights.routed_up,
+            self.input,
+            &self.views.route_counts,
+            &self.views.route_slots,
+            &self.views.routed_inner,
+            &self.views.routed_expert_output,
+            g,
+            self.tokens,
+        )? {
+            end_optional(&mut profile, enc, marker)?;
+            return Ok(());
+        }
         match self.weights.routed_gate.dtype {
             dtype
                 if dtype == self.weights.routed_up.dtype

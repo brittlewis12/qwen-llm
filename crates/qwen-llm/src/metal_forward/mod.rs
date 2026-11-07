@@ -113,6 +113,7 @@ crate::env_flag!(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NativeQuantEmbeddingMode {
     Auto,
+    #[cfg(test)]
     Forced,
     Disabled,
     Invalid,
@@ -121,6 +122,7 @@ enum NativeQuantEmbeddingMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NativeQuantEmbeddingSelection {
     AutoPromoted,
+    #[cfg(test)]
     Forced,
     AutoUnpromoted,
     RollbackDisabled,
@@ -130,12 +132,18 @@ enum NativeQuantEmbeddingSelection {
 
 impl NativeQuantEmbeddingSelection {
     fn uses_native(self) -> bool {
-        matches!(self, Self::AutoPromoted | Self::Forced)
+        match self {
+            Self::AutoPromoted => true,
+            #[cfg(test)]
+            Self::Forced => true,
+            _ => false,
+        }
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::AutoPromoted => "auto-promoted",
+            #[cfg(test)]
             Self::Forced => "forced",
             Self::AutoUnpromoted => "auto-unpromoted",
             Self::RollbackDisabled => "rollback-disabled",
@@ -296,7 +304,6 @@ pub fn resolve_gguf_storage_load_configuration() -> Result<GgufStorageLoadConfig
     // Forced parallel population plans realize copied weight buffers.
     let parallel_copy = storage_environment_value("QWEN_GGUF_PARALLEL_COPY")?;
     let prefault = storage_environment_value("QWEN_GGUF_NO_COPY_PREFAULT")?;
-    let native_embedding_present = std::env::var_os("QWEN_NATIVE_QUANT_EMBED").is_some();
     let native_embedding_mode = match std::env::var("QWEN_NATIVE_QUANT_EMBED") {
         Ok(value) => parse_native_quant_embedding_mode(Some(&value)),
         Err(std::env::VarError::NotPresent) => NativeQuantEmbeddingMode::Auto,
@@ -306,7 +313,7 @@ pub fn resolve_gguf_storage_load_configuration() -> Result<GgufStorageLoadConfig
         no_copy.as_deref(),
         parallel_copy.as_deref(),
         prefault.as_deref(),
-        native_embedding_present,
+        native_embedding_mode != NativeQuantEmbeddingMode::Auto,
         native_embedding_mode,
     )
 }
@@ -1692,7 +1699,8 @@ impl MetalModel {
     /// (e.g. norms, ssm_a, dt_bias — they need F32 for the elementwise
     /// kernels), we dequant via the codec at load time. The big tensors
     /// (mat_vec inputs and lm_head) keep their native dtype. Q4_K/Q6_K/Q8_0
-    /// embeddings can opt into native residency once their row kernels apply.
+    /// embeddings stay native automatically on qualified untied geometries;
+    /// QWEN_NATIVE_QUANT_EMBED=0 restores converted embeddings.
     pub fn load(ctx: &MetalContext, gguf: &GgufFile, model: &Model<'_>) -> Result<Self, MfError> {
         Self::load_with_options(ctx, gguf, model, MetalModelLoadOptions::default())
     }
@@ -1734,14 +1742,19 @@ impl MetalModel {
         let parallel_mode = storage_configuration.parallel_mode;
         let prefault_mode = storage_configuration.prefault_mode;
         let prefault_enabled = prefault_mode != GgufNoCopyPrefaultMode::Disabled;
-        let explicit_override_present =
-            auto_parallel_copy_override_present(|name| std::env::var_os(name).is_some());
+        let embedding_mode = native_quant_embedding_mode();
+        let explicit_override_present = auto_parallel_copy_override_present(|name| {
+            if name == "QWEN_NATIVE_QUANT_EMBED" {
+                embedding_mode != NativeQuantEmbeddingMode::Auto
+            } else {
+                std::env::var_os(name).is_some()
+            }
+        });
         let auto_parallel_copy = auto_parallel_copy_enabled(
             options.auto_parallel_copy,
             parallel_mode,
             explicit_override_present,
         );
-        let embedding_mode = native_quant_embedding_mode();
         let embedding_selection = resolve_native_quant_embedding(
             embedding_mode,
             native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),

@@ -57,7 +57,7 @@ pub(crate) fn checked_u64_div_exact(
 pub(super) fn parse_native_quant_embedding_mode(value: Option<&str>) -> NativeQuantEmbeddingMode {
     match value {
         None => NativeQuantEmbeddingMode::Auto,
-        Some(value) if crate::env_flag::env_value_truthy(value) => NativeQuantEmbeddingMode::Forced,
+        Some(value) if crate::env_flag::env_value_truthy(value) => NativeQuantEmbeddingMode::Auto,
         Some(value) if crate::env_flag::env_value_falsy(value) => {
             NativeQuantEmbeddingMode::Disabled
         }
@@ -65,10 +65,15 @@ pub(super) fn parse_native_quant_embedding_mode(value: Option<&str>) -> NativeQu
     }
 }
 
+/// Native quantized embeddings for qualified untied dense 27B Q4_K/Q6_K/IQ1_M/Q8_0
+/// and A3B Q8_0 geometries. Enabled automatically; 0/false/no disables. Positive
+/// values retain automatic qualification rather than forcing other shapes or tied embeddings.
+const NATIVE_QUANT_EMBED_ENV: &str = "QWEN_NATIVE_QUANT_EMBED";
+
 pub(super) fn native_quant_embedding_mode() -> NativeQuantEmbeddingMode {
     static MODE: std::sync::OnceLock<NativeQuantEmbeddingMode> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| {
-        let mode = match std::env::var("QWEN_NATIVE_QUANT_EMBED") {
+        let mode = match std::env::var(NATIVE_QUANT_EMBED_ENV) {
             Ok(value) => parse_native_quant_embedding_mode(Some(&value)),
             Err(std::env::VarError::NotPresent) => NativeQuantEmbeddingMode::Auto,
             Err(std::env::VarError::NotUnicode(_)) => NativeQuantEmbeddingMode::Invalid,
@@ -117,8 +122,10 @@ pub(super) fn native_quant_embedding_default_promoted(
         && arch.gdn_head_dim == 128
         && arch.gdn_conv_kernel == 4;
     common
-        && ((matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::IQ1_M)
-            && arch.kind == ArchKind::Dense
+        && ((matches!(
+            dtype,
+            GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::IQ1_M | GgmlType::Q8_0
+        ) && arch.kind == ArchKind::Dense
             && arch.n_layer == 64
             && arch.hidden_size == 5120
             && arch.intermediate_size == 17408
@@ -153,6 +160,7 @@ pub(super) fn resolve_native_quant_embedding(
     }
     match mode {
         NativeQuantEmbeddingMode::Auto if promoted => NativeQuantEmbeddingSelection::AutoPromoted,
+        #[cfg(test)]
         NativeQuantEmbeddingMode::Forced => NativeQuantEmbeddingSelection::Forced,
         NativeQuantEmbeddingMode::Auto => NativeQuantEmbeddingSelection::AutoUnpromoted,
         NativeQuantEmbeddingMode::Disabled => NativeQuantEmbeddingSelection::RollbackDisabled,

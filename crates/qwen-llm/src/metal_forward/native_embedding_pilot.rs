@@ -77,7 +77,7 @@ fn dense_q8_embedding_residency_and_state_witness() {
     let model = Model::from_gguf(&gguf).unwrap();
     let metadata = metadata(&model);
     let expected_native = match native_quant_embedding_mode() {
-        NativeQuantEmbeddingMode::Forced => true,
+        NativeQuantEmbeddingMode::Auto => true,
         NativeQuantEmbeddingMode::Disabled => false,
         _ => panic!("explicit QWEN_NATIVE_QUANT_EMBED=0 or 1 required"),
     };

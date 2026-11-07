@@ -1986,7 +1986,7 @@ fn native_quant_embedding_mode_is_strict_and_tri_state() {
     for value in ["1", "true", "TRUE", "yes", "YES"] {
         assert_eq!(
             parse_native_quant_embedding_mode(Some(value)),
-            NativeQuantEmbeddingMode::Forced
+            NativeQuantEmbeddingMode::Auto
         );
     }
     for value in ["0", "false", "FALSE", "no", "NO"] {
@@ -2057,7 +2057,7 @@ fn native_quant_embedding_defaults_only_on_promoted_fingerprints() {
         GgmlType::Q4_K,
         &[5120, 248_320],
     ));
-    assert!(!native_quant_embedding_default_promoted(
+    assert!(native_quant_embedding_default_promoted(
         &dense,
         false,
         GgmlType::Q8_0,

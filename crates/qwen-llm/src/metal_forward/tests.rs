@@ -357,17 +357,6 @@ fn snapshot_validation_rejects_section_length_overflow() {
 
 #[test]
 fn gguf_no_copy_mode_is_strict_and_default_off() {
-    assert!(parse_gguf_owned_arena_mode(None).is_ok());
-    for value in ["1", "true", "TRUE", "yes", "YES"] {
-        let error = parse_gguf_owned_arena_mode(Some(value)).unwrap_err();
-        assert!(error.to_string().contains("was archived"));
-    }
-    for value in ["0", "false", "FALSE", "no", "NO"] {
-        assert!(parse_gguf_owned_arena_mode(Some(value)).is_ok());
-    }
-    assert!(parse_gguf_owned_arena_mode(Some("enabled")).is_err());
-    assert!(parse_gguf_owned_arena_mode(Some("")).is_err());
-
     assert_eq!(parse_gguf_no_copy_mode(None).unwrap(), GgufNoCopyMode::Auto);
     for value in ["1", "true", "TRUE", "yes", "YES"] {
         assert_eq!(
@@ -420,25 +409,6 @@ fn automatic_no_copy_choice_uses_working_set_headroom_and_margin() {
     assert_eq!(m4.working_set_bytes, 110 * GB);
 
     assert!(!choose_gguf_no_copy_mode(2 * GB, Some(128 * 1024 * 1024), 110 * GB, 0).map_weights);
-}
-
-#[test]
-fn owned_arena_environment_is_archived() {
-    let error = resolve_gguf_storage_load_configuration_from_values(
-        None,
-        Some("1"),
-        None,
-        None,
-        false,
-        NativeQuantEmbeddingMode::Auto,
-        None,
-    )
-    .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("QWEN_GGUF_OWNED_ARENA was archived")
-    );
 }
 
 #[test]
@@ -564,14 +534,7 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
         parse_gguf_parallel_copy_mode(Some("PREAD")).unwrap(),
         GgufParallelCopyMode::ForcedPread
     );
-    assert_eq!(
-        parse_gguf_parallel_copy_mode(Some("page-rounded-copy")).unwrap(),
-        GgufParallelCopyMode::ForcedPageRoundedCopy
-    );
-    assert_eq!(
-        parse_gguf_parallel_copy_mode(Some("PAGE-ROUNDED-COPY")).unwrap(),
-        GgufParallelCopyMode::ForcedPageRoundedCopy
-    );
+
     for value in ["0", "false", "FALSE", "no", "NO"] {
         assert_eq!(
             parse_gguf_parallel_copy_mode(Some(value)).unwrap(),
@@ -595,16 +558,7 @@ fn parallel_copy_policy_is_strict_and_conflict_complete() {
     assert!(valid(Some("false")).is_ok());
     assert!(valid(Some("1")).is_err());
     assert!(valid(Some("invalid")).is_err());
-    assert!(
-        validate_parallel_copy_policy(
-            GgufParallelCopyMode::ForcedPageRoundedCopy,
-            GgufNoCopyMode::Disabled,
-            false,
-            false,
-            None,
-        )
-        .is_ok()
-    );
+
     assert!(
         validate_parallel_copy_policy(
             GgufParallelCopyMode::ForcedPread,
@@ -689,11 +643,7 @@ fn parallel_copy_auto_requires_scope_and_yields_to_overrides() {
         GgufParallelCopyMode::ForcedCopy,
         false,
     ));
-    assert!(!auto_parallel_copy_enabled(
-        true,
-        GgufParallelCopyMode::ForcedPageRoundedCopy,
-        false,
-    ));
+
     assert!(!auto_parallel_copy_enabled(
         true,
         GgufParallelCopyMode::Auto,
@@ -1291,7 +1241,7 @@ fn load_plan_matches_previous_schedules_when_fixtures_are_present() {
     ];
     let page_size = host_page_size_bytes().expect("host page size");
     let ctx = metal_test_context();
-    for (fixture, old_cuts, old_tasks, old_worker_bytes, old_page_padding) in cases {
+    for (fixture, old_cuts, old_tasks, old_worker_bytes, _old_page_padding) in cases {
         let Some(path) = fixture.path_or_skip() else {
             continue;
         };
@@ -1380,17 +1330,6 @@ fn load_plan_matches_previous_schedules_when_fixtures_are_present() {
             old_spread,
             new_spread
         );
-        let (page_bytes, padded) = parallel_destination_accounting(
-            &identities,
-            ParallelDestinationLength::PageRounded,
-            page_size,
-            usize::MAX,
-        )
-        .expect("page-rounded allocation plan");
-        if let Some((old_padding, old_padded)) = old_page_padding {
-            assert_eq!(page_bytes - total, old_padding);
-            assert_eq!(padded, old_padded);
-        }
     }
 }
 

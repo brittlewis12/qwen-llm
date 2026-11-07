@@ -182,29 +182,12 @@ pub(crate) fn dense_iq_native_storage_comparison_plans<'a>(
     Ok([old, native])
 }
 
-pub(super) fn parse_gguf_owned_arena_mode(value: Option<&str>) -> Result<(), MfError> {
-    match value {
-        None => Ok(()),
-        Some(value) if crate::env_flag::env_value_truthy(value) => Err(MfError::LoadPolicy(
-            "QWEN_GGUF_OWNED_ARENA was archived after the v0.598 loaded-performance result"
-                .to_string(),
-        )),
-        Some(value) if crate::env_flag::env_value_falsy(value) => Ok(()),
-        Some(value) => Err(MfError::LoadPolicy(format!(
-            "invalid QWEN_GGUF_OWNED_ARENA value {value:?}"
-        ))),
-    }
-}
-
 pub(super) fn parse_gguf_parallel_copy_mode(
     value: Option<&str>,
 ) -> Result<GgufParallelCopyMode, MfError> {
     match value {
         None => Ok(GgufParallelCopyMode::Auto),
         Some(value) if value.eq_ignore_ascii_case("pread") => Ok(GgufParallelCopyMode::ForcedPread),
-        Some(value) if value.eq_ignore_ascii_case("page-rounded-copy") => {
-            Ok(GgufParallelCopyMode::ForcedPageRoundedCopy)
-        }
         Some(value) if crate::env_flag::env_value_truthy(value) => {
             Ok(GgufParallelCopyMode::ForcedCopy)
         }
@@ -948,9 +931,7 @@ pub(super) fn validate_parallel_copied_topology(
     }
     let (expected_resource_bytes, padded_resources) =
         parallel_destination_accounting(expected, destination_length, plan.page_size, usize::MAX)?;
-    let accounting_matches = expected_resource_bytes >= plan.source_bytes
-        && (destination_length == ParallelDestinationLength::PageRounded
-            || (expected_resource_bytes == plan.source_bytes && padded_resources == 0));
+    let accounting_matches = expected_resource_bytes == plan.source_bytes && padded_resources == 0;
     if resource_bytes != expected_resource_bytes || !accounting_matches {
         return Err(MfError::LoadPolicy(format!(
             "parallel-copy resource accounting drifted: actual={resource_bytes} expected={expected_resource_bytes} padded={padded_resources}"
@@ -1015,7 +996,6 @@ pub(super) fn prepare_parallel_copy_plan(
     population: ParallelPopulationMethod,
     destination_length: ParallelDestinationLength,
 ) -> Result<PreparedParallelCopyPlan, MfError> {
-    validate_parallel_destination_length(&plan, population, destination_length)?;
     let expected_identities = expected
         .iter()
         .map(expected_model_weight_identity)
@@ -1156,9 +1136,8 @@ pub(super) fn realize_parallel_copy_plan(
         plan.page_size,
         ctx.max_buffer_length(),
     )?;
-    let destination_accounting_matches = expected_destination_bytes >= plan.source_bytes
-        && (destination_length == ParallelDestinationLength::PageRounded
-            || (expected_destination_bytes == plan.source_bytes && padded_resources == 0));
+    let destination_accounting_matches =
+        expected_destination_bytes == plan.source_bytes && padded_resources == 0;
     if destination_bytes != expected_destination_bytes || !destination_accounting_matches {
         return Err(MfError::LoadPolicy(format!(
             "parallel-copy destination accounting drifted: actual={destination_bytes} expected={expected_destination_bytes} padded={padded_resources}"

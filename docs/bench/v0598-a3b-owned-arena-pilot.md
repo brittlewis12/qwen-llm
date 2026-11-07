@@ -1,3 +1,5 @@
+> Historical loader experiment: owned-arena and page-rounded-copy selectors were removed. Commands below target the archived builds; ordinary copy/pread policies remain available.
+
 # v0.598 A3B Force-Only Owned-Arena Loader Pilot
 
 Status: completed at p2 source `41ef09c`; **KILL**. Correctness and both fresh

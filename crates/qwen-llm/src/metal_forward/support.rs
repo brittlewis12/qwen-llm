@@ -333,33 +333,10 @@ pub(super) fn finish_parallel_copy_accounting(
     })
 }
 
-pub(super) fn validate_parallel_population(
-    _plan: &ParallelCopyLoadPlan,
-    _population: ParallelPopulationMethod,
-) -> Result<(), MfError> {
-    Ok(())
-}
-
-pub(super) fn validate_parallel_destination_length(
-    plan: &ParallelCopyLoadPlan,
-    population: ParallelPopulationMethod,
-    destination_length: ParallelDestinationLength,
-) -> Result<(), MfError> {
-    validate_parallel_population(plan, population)?;
-    if destination_length == ParallelDestinationLength::PageRounded
-        && population != ParallelPopulationMethod::MmapCopy
-    {
-        return Err(MfError::LoadPolicy(
-            "page-rounded destinations require mmap-copy population".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 pub(super) fn parallel_destination_resource_length(
     logical_bytes: u64,
-    destination_length: ParallelDestinationLength,
-    page_size: usize,
+    _destination_length: ParallelDestinationLength,
+    _page_size: usize,
     max_buffer_length: usize,
 ) -> Result<usize, MfError> {
     let logical = usize::try_from(logical_bytes).map_err(|_| {
@@ -370,20 +347,7 @@ pub(super) fn parallel_destination_resource_length(
             "parallel-copy resource length is zero".to_string(),
         ));
     }
-    let allocated = match destination_length {
-        ParallelDestinationLength::LogicalExact => logical,
-        ParallelDestinationLength::PageRounded => {
-            if page_size == 0 {
-                return Err(MfError::LoadPolicy("host page size is zero".to_string()));
-            }
-            logical
-                .checked_add(page_size - 1)
-                .map(|value| value / page_size * page_size)
-                .ok_or_else(|| {
-                    MfError::LoadPolicy("page-rounded resource length overflow".to_string())
-                })?
-        }
-    };
+    let allocated = logical;
     if allocated > max_buffer_length {
         return Err(MfError::LoadPolicy(format!(
             "parallel-copy resource length {allocated} exceeds max buffer {max_buffer_length}"
@@ -428,14 +392,6 @@ pub(super) fn parallel_copy_marker_label(
         }
         (ParallelPopulationMethod::Pread, ParallelDestinationLength::LogicalExact) => {
             "[metal-gguf-parallel-pread]"
-        }
-        (ParallelPopulationMethod::MmapCopy, ParallelDestinationLength::PageRounded) => {
-            "[metal-gguf-parallel-page-rounded]"
-        }
-        (ParallelPopulationMethod::Pread, ParallelDestinationLength::PageRounded) => {
-            return Err(MfError::LoadPolicy(
-                "page-rounded pread is not supported".to_string(),
-            ));
         }
     })
 }

@@ -188,15 +188,11 @@ enum GgufParallelCopyMode {
     Disabled,
     ForcedCopy,
     ForcedPread,
-    ForcedPageRoundedCopy,
 }
 
 impl GgufParallelCopyMode {
     fn is_forced(self) -> bool {
-        matches!(
-            self,
-            Self::ForcedCopy | Self::ForcedPread | Self::ForcedPageRoundedCopy
-        )
+        matches!(self, Self::ForcedCopy | Self::ForcedPread)
     }
 
     fn forced_configuration(self) -> Option<(ParallelPopulationMethod, ParallelDestinationLength)> {
@@ -208,10 +204,6 @@ impl GgufParallelCopyMode {
             Self::ForcedPread => Some((
                 ParallelPopulationMethod::Pread,
                 ParallelDestinationLength::LogicalExact,
-            )),
-            Self::ForcedPageRoundedCopy => Some((
-                ParallelPopulationMethod::MmapCopy,
-                ParallelDestinationLength::PageRounded,
             )),
             Self::Auto | Self::Disabled => None,
         }
@@ -270,7 +262,6 @@ fn storage_environment_value(name: &str) -> Result<Option<String>, MfError> {
 
 fn resolve_gguf_storage_load_configuration_from_values(
     no_copy: Option<&str>,
-    owned_arena: Option<&str>,
     parallel_copy: Option<&str>,
     prefault: Option<&str>,
     native_embedding_present: bool,
@@ -278,7 +269,6 @@ fn resolve_gguf_storage_load_configuration_from_values(
     router_f16: Option<&str>,
 ) -> Result<GgufStorageLoadConfiguration, MfError> {
     let no_copy_mode = parse_gguf_no_copy_mode(no_copy)?;
-    parse_gguf_owned_arena_mode(owned_arena)?;
     let parallel_mode = parse_gguf_parallel_copy_mode(parallel_copy)?;
     let prefault_mode = parse_gguf_no_copy_prefault(prefault)?;
     validate_parallel_copy_policy(
@@ -308,8 +298,6 @@ fn resolve_gguf_storage_load_configuration_from_values(
 pub fn resolve_gguf_storage_load_configuration() -> Result<GgufStorageLoadConfiguration, MfError> {
     // Unset uses a storage-performance heuristic fitted to measurements, not a memory-admission guarantee: copy needs 15% working-set headroom plus a 256 MiB session reserve; 76% copied decoded faster, while 97% copied loaded 4–6x slower with heavy paging. 1 maps weights and 0 forces copies.
     let no_copy = storage_environment_value("QWEN_GGUF_NO_COPY")?;
-    // Owned arena selects copied weight storage for ordinary Qwen.
-    let owned_arena = storage_environment_value("QWEN_GGUF_OWNED_ARENA")?;
     // Forced parallel population plans realize copied weight buffers.
     let parallel_copy = storage_environment_value("QWEN_GGUF_PARALLEL_COPY")?;
     let prefault = storage_environment_value("QWEN_GGUF_NO_COPY_PREFAULT")?;
@@ -335,7 +323,6 @@ pub fn resolve_gguf_storage_load_configuration() -> Result<GgufStorageLoadConfig
     };
     resolve_gguf_storage_load_configuration_from_values(
         no_copy.as_deref(),
-        owned_arena.as_deref(),
         parallel_copy.as_deref(),
         prefault.as_deref(),
         native_embedding_present,
@@ -1231,7 +1218,6 @@ enum ParallelPopulationMethod {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ParallelDestinationLength {
     LogicalExact,
-    PageRounded,
 }
 
 struct ParallelPreadTask<'a> {

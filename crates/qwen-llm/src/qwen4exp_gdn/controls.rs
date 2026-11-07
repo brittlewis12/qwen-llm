@@ -2,7 +2,7 @@ use super::*;
 use objc2_metal::MTLComputePipelineState;
 
 crate::env_flag!(
-    /// Flash-Next one-token H2560/48-head GDN combines independent F32 alpha/beta projections and the decay epilogue. Reuses existing scratch and reduction orders. Set 0 for separate dispatches. Unsupported geometry, alignment or PSOs, and QWEN_MATVEC_F32_LCPP_R2=0, retain the incumbent.
+    /// Flash-Next one-token H2560/48-head GDN on the Metal tensor-capable tier combines independent F32 alpha/beta projections and the decay epilogue. Reuses existing scratch and reduction orders. Set 0 for separate dispatches. M4 and unsupported geometry, alignment or PSOs, and QWEN_MATVEC_F32_LCPP_R2=0, retain the incumbent.
     default_on enabled,
     "QWEN_FN_GDN_CONTROLS_FUSED"
 );
@@ -19,7 +19,7 @@ fn pipeline(
     ctx: &MetalContext,
     g: GatedDeltaNetMetalGeometry,
 ) -> Result<Option<crate::metal::Pipeline>, MetalError> {
-    if !eligible(g) {
+    if !eligible(g) || !ctx.tensor_ops_status().is_available() {
         return Ok(None);
     }
     match ctx.pipeline(KERNEL) {

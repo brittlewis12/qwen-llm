@@ -40,7 +40,7 @@ fn fused_controls_match_separate_projections_and_decay_with_offsets_and_guards()
         return;
     };
     let g = GatedDeltaNetMetalGeometry::new(2560, 16, 48, 128, 4, 1e-6).unwrap();
-    if !eligible(g) {
+    if pipeline(&ctx, g).unwrap().is_none() {
         return;
     }
     let mut seed = 0x673fe8ab12456u64;

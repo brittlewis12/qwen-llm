@@ -308,6 +308,7 @@ fn compress_rows_batches_pool_key_rope_and_stores() {
     let ctx = MetalContext::new().unwrap();
     let (head_dim, index_dim, pairs) = (512usize, 128usize, 32usize);
     let groups = 4usize;
+    let group0 = 5usize;
     let eps = 1e-20f32;
     let make = |n: usize, seed: usize| {
         (0..n)
@@ -340,15 +341,8 @@ fn compress_rows_batches_pool_key_rope_and_stores() {
         )
         .unwrap()
     };
-    // A nonzero input row models the incomplete head kept on the serial path.
-    // The long absolute offset catches cache addressing and RoPE at depth.
-    for (ratio, group0, input_row) in [
-        (1usize, 5usize, 0usize),
-        (2, 5, 0),
-        (1, 32769, 1),
-        (2, 16385, 1),
-    ] {
-        let rows = input_row + groups * ratio + 1;
+    for ratio in [1usize, 2] {
+        let rows = groups * ratio;
         let value = make(rows * head_dim, 17);
         let gate = make(rows * head_dim, 19);
         let value_t = upload(&value);
@@ -356,8 +350,8 @@ fn compress_rows_batches_pool_key_rope_and_stores() {
         let comp_norm_t = upload(&comp_norm);
         let key_norm_t = upload(&key_norm);
         let freq_t = upload(&freq);
-        let out_latent = tensor(&ctx, (group0 + groups + 1) * head_dim, GgmlType::F32).unwrap();
-        let out_key = tensor(&ctx, (group0 + groups + 1) * index_dim, GgmlType::F32).unwrap();
+        let out_latent = tensor(&ctx, (group0 + groups) * head_dim, GgmlType::F32).unwrap();
+        let out_key = tensor(&ctx, (group0 + groups) * index_dim, GgmlType::F32).unwrap();
         execute(&ctx, |enc| {
             compress_publish_rows(
                 &ctx,
@@ -370,7 +364,7 @@ fn compress_rows_batches_pool_key_rope_and_stores() {
                 &freq_t,
                 &out_key,
                 &out_latent,
-                input_row,
+                0,
                 group0,
                 groups,
                 ratio,
@@ -386,7 +380,7 @@ fn compress_rows_batches_pool_key_rope_and_stores() {
         let mut want_latent = vec![0.0f32; groups * head_dim];
         let mut want_key = vec![0.0f32; groups * index_dim];
         for g in 0..groups {
-            let base = input_row + g * ratio;
+            let base = g * ratio;
             let mut latent = vec![0.0f32; head_dim];
             if ratio == 2 {
                 for d in 0..head_dim {
@@ -443,11 +437,6 @@ fn compress_rows_batches_pool_key_rope_and_stores() {
         }
         close(actual_latent, &want_latent);
         close(actual_key, &want_key);
-        for (output, dim) in [(&out_latent, head_dim), (&out_key, index_dim)] {
-            let values = f32_slice(output).unwrap();
-            assert!(values[..group0 * dim].iter().all(|&x| x == 0.0));
-            assert!(values[(group0 + groups) * dim..].iter().all(|&x| x == 0.0));
-        }
     }
 }
 

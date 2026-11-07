@@ -311,15 +311,6 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    /// On M5 Ultra batches of 512-4096 rows, reuse complete-group owner
-    /// publication when rows already qualify for batched radix selection.
-    /// Existing compressor, Ordinary-mode, ownership and head/tail guards
-    /// still apply. Set to 0 to restore the long per-row publication chain.
-    default_on compress_long_rows_enabled,
-    "QWEN_V41_COMPRESS_LONG_ROWS"
-);
-
-crate::env_flag!(
     /// Routes wide index-score rows through the Metal 4 tensor tile; disabling restores the scalar/simd index kernel for a same-binary A/B.
     default_on index_tensor_enabled,
     "QWEN_V41_INDEX_TENSOR"
@@ -876,13 +867,9 @@ impl Workspace {
         // ReusePublished replays against a completed authoritative cache; the
         // per-row path already suppresses its publication for that mode, and
         // the batch must match it. The split owner itself is an ordinary
-        // producer during the encoder phase only. Publication precedes the
-        // whole batch's selection in both cases.
-        let long_owner_batch = long_batch
-            && (512..=4096).contains(&rows.rows)
-            && ctx.device_facts().name == "Apple M5 Ultra"
-            && compress_long_rows_enabled();
-        let owner_batch = (unpruned_batch || long_owner_batch)
+        // producer during the encoder phase only. Long batches keep the
+        // per-row publication chain.
+        let owner_batch = unpruned_batch
             && mode == GlobalKvMode::Ordinary
             && self.schedule.owns_kv(id)
             && compress_rows_enabled();

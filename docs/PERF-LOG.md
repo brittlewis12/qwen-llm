@@ -6,6 +6,158 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 - Flash-Next Decode Census: Structural Gap, No New Rollout
+
+- Base **`9573228d`**, M5 Ultra and M4 Max, same **GSQ-RCO IQ3_S** artifact
+  (real mixed tensor types, not a uniform three-bit byte estimate). No production
+  optimization shipped. Temporary capture/replay instrumentation and examples
+  were removed; library and kernel sources match the base exactly.
+- Representative **8K** census: 8192 fixed random input IDs, 64 excluded native
+  warm decode steps, then 32 measured known-input steps, full-vocabulary copies,
+  no sampling. First retained position **8256**. Clean, uninstrumented main:
+  three repeats from the same entry snapshot, **96 tokens/device**, all finite
+  with identical repeated-stream fingerprints. This diagnostic stream is not a
+  replacement for the prior canonical CLI depth sweep or a llama.cpp comparison.
+  Build lock + Metal lease, including the whole M4 timing campaign; thermal
+  pressure **0 before/after every successful arm**.
+- Live tensor metadata and used-binding reflection give **5.310443 GB weights +
+  0.292798 GB persistent state = 5.603241 GB/token**, **47 kernel variants,
+  1604 dispatches, one encoder and one command buffer**. Includes ten selected
+  experts/layer, actual Q6/K/IQ/BF16/F32 types, gathered embedding/PLE rows,
+  GDN/conv read-write state and selected QSA KV/index payload at this position.
+  This is useful logical payload, not a hardware DRAM counter: repeated input,
+  cacheline and scratch traffic are omitted, so its roof is optimistic.
+  Warm checked streaming reads measured **1184.33 / 506.09 GB/s (M5 / M4)**;
+  cold-start bandwidth calibrations are discarded. Register FP32 FMA ceilings
+  measured **29.14 / 14.07 TFLOP/s**, not the FP16 tensor-tier peak.
+
+  | Device | Native wall / GPU / CPU encode ms | Logical BW floor ms | Excess ms | % BW ceiling |
+  | --- | ---: | ---: | ---: | ---: |
+  | M5 | 14.629 / 13.241 / 0.856 | 4.731 | 9.898 | 32.34% |
+  | M4 | 23.589 / 21.880 / 0.898 | 11.072 | 12.517 | 46.94% |
+
+- Attribution method: capture the actual graph, bindings, route IDs and mutable
+  entry state; replay in an ordinary single encoder. Native/full-graph logits
+  match bitwise. Replacing a cohort with copies of its recorded outputs preserves
+  downstream inputs and dispatch count; a second copy-to-minimal-dispatch phase
+  charges copy cost back. Ten cohorts, eight random orders plus their reverses,
+  **122 masks/phase, three repetitions/mask**. All **366 original/copy mixed
+  graphs per device** match native full-vocabulary bits. Order-averaged marginal
+  allocations below reconcile to native GPU time within **0.024 / 0.197 ms**.
+  These are model allocations, not exclusive hardware timestamps: cache, DVFS,
+  occupancy and serialization interact, and individual allocations vary by order
+  by roughly 0.1-0.5 ms. Gap share is `(allocated work - payload/BW) /
+  (native wall - total payload/BW)`, not a promised recoverable speedup.
+
+  | Cohort (calls/token) | Weight + state MB | Work above command floor ms, M5 / M4 | Share of BW gap, M5 / M4 |
+  | --- | ---: | ---: | ---: |
+  | F32 BF16 auxiliaries (194) | 392.4 | 0.91 / 1.40 | 5.8% / 5.0% |
+  | GDN recurrence prep (180) | 241.3 | 0.30 / 1.06 | 1.0% / 4.7% |
+  | HC BF16 projections (194) | 1287.1 | 1.72 / 3.78 | 6.4% / 9.9% |
+  | Norm routing glue (495) | 5.0 | 0.20 / 0.75 | 2.0% / 5.9% |
+  | Other dense quant (K + IQ) (172) | 760.6 | 1.38 / 2.67 | 7.5% / 9.3% |
+  | QSA (144) | 56.8 | 1.46 / 1.95 | 14.3% / 14.7% |
+  | Routed down (48) | 400.9 | 0.76 / 1.58 | 4.2% / 6.3% |
+  | Routed gate up (48) | 581.4 | 1.08 / 2.27 | 5.9% / 8.9% |
+  | Q6 projections + head (129) | 1877.8 | 1.78 / 4.53 | 2.0% / 6.5% |
+  | Command/control baseline | — | 3.63 / 1.70 | 36.7% / 13.6% |
+  | Host encode, submission/completion, logits copy | — | 1.39 / 1.71 | 14.0% / 13.7% |
+  | Reconciliation | — | 0.02 / 0.20 | 0.2% / 1.6% |
+
+- The command/control allocation is especially model-sensitive. A separate
+  matched **ABBA** control with 1604 one-threadgroup dispatches, nonzero output
+  checked, gives **2.711 / 1.579 ms prebound**, **2.678 / 1.657 ms rebinding**
+  (M5 / M4, eight samples/arm). **Kill binding elision**: no M5 GPU win; M4's
+  difference is only 0.078 ms, about 0.3% of a token. Across controls, common
+  command cost explains roughly **20-37% of the M5 bandwidth gap**, not a fixed
+  irreducible constant. CPU encode is only **0.856 / 0.898 ms**, bounding the
+  benefit of preencoding alone to roughly **6% / 4%** even with perfect hiding.
+  Completion wait overlaps GPU execution and must not be added again.
+- Per-kernel screen below: warmed GPU, cold-cache, actual mixed shapes and call
+  counts, median of five same-family graph replays. **Do not add these times**:
+  regrouping changes cache reuse and command startup. Use the reconciled cohort
+  budget above for whole-token value. GB/s counts only useful weight/persistent
+  state payload; dash means tiny/no such payload, not zero memory traffic.
+  TFLOP/s counts useful matmul FMAs only, excluding unpack, lookup, SFU and other
+  integer instructions; it is not literal ALU utilization. Dominant IQ2_S,
+  IQ3_XXS and IQ3_S gate/up reach **2.57-3.15 TFLOP/s on M5, 1.30-1.51 on M4**,
+  about **9-11%**
+  of the measured register-FMA roof. Representative cache-hot replays improve
+  only about **1-15%**, pointing to format/instruction/dependency/occupancy cost
+  beyond weight streaming. No claim of a measured integer-instruction roof.
+
+  | Kernel family (omit `kernel_`) | Calls/token | Isolated ms/token, M5 / M4 | Payload GB/s, M5 / M4 | % streaming roof, M5 / M4 | Useful matmul TFLOP/s, M5 / M4 |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | `get_rows_iq4_xs_f32` | 1 | 0.005 / 0.005 | — | — | — |
+  | `copy_offset_f32` | 103 | 0.190 / 0.147 | — | — | — |
+  | `qwen4exp_hc_rms_norm_f32` | 100 | 0.381 / 0.352 | 11 / 12 | 1% / 2% | — |
+  | `qwen4exp_hc_down_silu_inject_bf16` | 96 | 0.952 / 1.669 | 677 / 386 | 57% / 76% | 0.67 / 0.38 |
+  | `qwen4exp_hc_up_mix_bf16_k320` | 97 | 1.035 / 1.901 | 614 / 334 | 52% / 66% | 0.61 / 0.33 |
+  | `mat_vec_q6_K_f32_r1` | 128 | 1.708 / 3.527 | 794 / 385 | 67% / 76% | 1.94 / 0.94 |
+  | `mat_vec_q4_K_f32` | 47 | 0.438 / 0.661 | 454 / 301 | 38% / 59% | 1.61 / 1.07 |
+  | `mat_vec_f32_f32_sigmoid` | 36 | 0.332 / 0.293 | 53 / 60 | 4% / 12% | 0.03 / 0.03 |
+  | `mat_vec_f32_f32_lcpp_r2` | 84 | 0.578 / 0.828 | 466 / 325 | 39% / 64% | 0.23 / 0.16 |
+  | `gdn_decay_chain_f32` | 36 | 0.090 / 0.064 | — | — | — |
+  | `ssm_conv_silu_f32` | 36 | 0.092 / 0.111 | 161 / 133 | 14% / 26% | — |
+  | `l2_norm_pair_hd128_r4_f32` | 36 | 0.109 / 0.103 | — | — | — |
+  | `gdn_step_decay_f32` | 36 | 0.243 / 0.621 | 931 / 365 | 79% / 72% | — |
+  | `qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32` | 36 | 0.150 / 0.138 | — | — | — |
+  | `qwen4exp_hc_inject_f32` | 96 | 0.186 / 0.155 | — | — | — |
+  | `qwen4exp_topk_guarded_simd_f32` | 48 | 0.337 / 0.331 | — | — | — |
+  | `dot_sigmoid_tg_f32` | 48 | 0.149 / 0.109 | — | — | 0.00 / 0.00 |
+  | `moe_swiglu_iq3_xxs_f32_fast` | 17 | 0.405 / 0.740 | 526 / 288 | 44% / 57% | 2.75 / 1.51 |
+  | `moe_down_iq4_nl_f32_fast` | 39 | 0.596 / 1.247 | 603 / 288 | 51% / 57% | 2.14 / 1.03 |
+  | `moe_weighted_sum_f32` | 48 | 0.233 / 0.216 | — | — | — |
+  | `mat_vec_iq4_xs_f32_fast` | 42 | 0.396 / 0.588 | 429 / 289 | 36% / 57% | 1.62 / 1.09 |
+  | `silu_mul_f32` | 48 | 0.110 / 0.078 | — | — | — |
+  | `mat_vec_iq4_nl_f32_fast` | 47 | 0.220 / 0.266 | 197 / 163 | 17% / 32% | 0.70 / 0.58 |
+  | `axpy_scalar_f32` | 48 | 0.118 / 0.097 | — | — | — |
+  | `get_rows_iq4_nl_f32` | 1 | 0.005 / 0.004 | — | — | — |
+  | `mat_vec_bf16_f32_tg` | 26 | 0.165 / 0.264 | 637 / 397 | 54% / 79% | 0.64 / 0.40 |
+  | `qwen4exp_ple_gate_f32` | 1 | 0.011 / 0.008 | — | — | — |
+  | `qwen4exp_ple_conv_epilogue_f32` | 1 | 0.006 / 0.006 | — | — | — |
+  | `mat_vec_q5_K_f32` | 35 | 0.449 / 1.137 | 773 / 305 | 65% / 60% | 2.25 / 0.89 |
+  | `qwen4exp_expert_compat_iq2_s_swiglu_f32` | 20 | 0.416 / 0.973 | 504 / 216 | 43% / 43% | 3.15 / 1.35 |
+  | `moe_down_q2_0_f32` | 9 | 0.270 / 0.575 | 153 / 72 | 13% / 14% | 1.09 / 0.51 |
+  | `qwen4exp_qsa_norm_rope_f32` | 24 | 0.291 / 0.338 | — | — | — |
+  | `qwen4exp_qsa_write_pending_f32` | 12 | 0.029 / 0.023 | — | — | — |
+  | `qwen4exp_qsa_index_scores_4x128_f16` | 12 | 0.086 / 0.084 | 74 / 75 | 6% / 15% | 0.30 / 0.30 |
+  | `deepseek_v4_select_top_k_radix4_ids_f32` | 12 | 0.465 / 0.616 | — | — | — |
+  | `qwen4exp_qsa_expand_ids_par_i32` | 12 | 0.069 / 0.078 | — | — | — |
+  | `qwen4exp_qsa_qgate_norm_rope_f32` | 12 | 0.178 / 0.241 | — | — | — |
+  | `qwen4exp_qsa_publish_kv_f16` | 12 | 0.033 / 0.028 | — | — | — |
+  | `qwen4exp_qsa_decode_logits_reuse_f32` | 12 | 0.123 / 0.228 | 204 / 110 | 17% / 22% | 2.45 / 1.32 |
+  | `qwen4exp_qsa_split_softmax_f32` | 12 | 0.065 / 0.062 | — | — | — |
+  | `qwen4exp_qsa_split_f16` | 12 | 0.219 / 0.268 | 115 / 94 | 10% / 19% | 1.38 / 1.13 |
+  | `qwen4exp_qsa_split_merge_f32` | 12 | 0.342 / 0.342 | — | — | — |
+  | `moe_swiglu_iq3_s_f32_fast` | 10 | 0.255 / 0.503 | 553 / 280 | 47% / 55% | 2.57 / 1.30 |
+  | `moe_swiglu_iq4_xs_f32` | 1 | 0.065 / 0.149 | 269 / 117 | 23% / 23% | 1.01 / 0.44 |
+  | `mat_vec_q8_0_f32_lcpp` | 1 | 0.007 / 0.012 | 247 / 145 | 21% / 29% | 0.47 / 0.27 |
+  | `qwen4exp_hc_down_silu_bf16` | 1 | 0.011 / 0.016 | 610 / 404 | 51% / 80% | 0.61 / 0.40 |
+  | `mat_vec_q6_K_f32` | 1 | 0.458 / 1.037 | 1138 / 503 | 96% / 99% | 2.77 / 1.23 |
+
+- **Stop for design choice.** Q6 head is already **96% / 99%** of measured
+  streaming bandwidth, Q6 body **67% / 76%**, GDN state **79% / 72%**. M5's
+  remaining excess is mostly command/control, QSA (**14%** of the gap), host
+  (**14%**), and distributed small projections/quant work; M4 has a broader HC,
+  quant and sparse-attention budget. This census found no dominant isolated
+  kernel fix, and the tested binding hypothesis failed.
+- Proposed larger move: combine independent GDN qkv/gate/alpha/beta projections
+  and shared-expert/router projections into mixed-format multi-output dispatches;
+  fuse HC injection/next-normalization boundaries and GDN epilogues/direct QKV
+  views. Target **400-500 fewer dispatches/token**, less scratch traffic and
+  better occupancy. Engineering estimate, **not a measured gain**: **5-10%
+  whole decode on M5, 2-5% on M4**, roughly **1-2 weeks** for argument/scratch
+  ABI, mixed-format kernels, custody/fallbacks and full distribution/e2e/tests.
+  Preencoding/ICB alone leaves GPU dispatch granularity intact; it cannot close
+  a threefold roofline gap. No numerical change or distribution qualification
+  this round; full library tests were not rerun for this documentation-only tree.
+- Raw captures, all 47-family samples, calibration, controls, clean-main runs,
+  capture patch, helper sources and arithmetic: **`2026-11-06-fn-roofline4-raw.tar.gz`**,
+  SHA256 **`dada834c7f0854cb706deba4f12590373ce17eef1c1eabdf52a866f674203610`**,
+  under `~/qwen-runs/2026-11-06-fn-roofline4/` on both machines. No merge;
+  temporary runners and binaries removed, no owned work left running.
+
 ## 2026-11-06 - GLM Decode Census: Structural Gap, Verifier Proposal
 
 - Base **`9573228d`**, branch **`perf/glm-roofline4`**, M5 Ultra / M4 Max.

@@ -6,6 +6,84 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - Flash-Next M4 pp4096: Compact N32 Expert Tiles
+
+- Base **`5735162d`**, measured code **`74a47743`**, retained at
+  **`evidence/fn-m4b-qualified`**. Shipped code **`0958092f`** rebases onto
+  main **`229ba082`**. Only V4.1-specific runtime files changed across the
+  rebase; every Flash-Next and shared Metal file is identical. Same
+  **GSQ-RCO IQ3_S** artifact under the M4 external weights archive;
+  CPP **v0.9.0 `cd959bae99ff`**, F16 KV, batch/ubatch **2048/2048**.
+- Per-stage pp4096 comparison, milliseconds:
+
+  | Operator family | Native | CPP |
+  | --- | ---: | ---: |
+  | Dense GEMMs including HC/router/index | 2992.5 | 2509.3 |
+  | Routed expert GEMMs | 2543.8 | 1915.1 |
+  | Attention QK/softmax/PV | 1136.7 | 737.1 |
+  | GDN recurrent core | 444.6 | 449.5 |
+  | Classic Q4_K/Q5_K/Q6_K subset of dense | 1833.2 | 1682.9 |
+
+  Diagnostic spans, **not an additive wall-time budget**: one native trace,
+  **12,920 dispatches, zero overflow**, versus two complete CPP graph calls
+  normalized by two. CPP samples fused graph nodes; native gate/up includes
+  SwiGLU, which CPP dispatches separately. Dense operand precision also
+  differs for F32 controls/router. Native IQ2_S/IQ3_S gate/up alone:
+  **1061.9 ms**, versus **818.4 ms** of CPP matrix nodes. Expert formats and
+  indexed fused flash attention remain targets; GDN's core is comparable.
+- CPP M4 `mul_mm`: **64 outputs x 32 queries x 32 K, 128 threads**,
+  ordinary dense threshold **K >=64, query rows >8**, plus type-dependent
+  few-row MMA routes. `mul_mm_id`: same tile from **32 global input rows**,
+  K >=64, E <=1024, compact expert/tile map, upper-half MMA skipped for
+  <=16-row buckets. Our classic K-quants use 64-query tiles here and routed
+  gate/up used fused **64x16x32** tiles. Both engines engage matrix routes.
+- Kept: compact **64x32x32** fused IQ2_S/IQ3_S gate/up at exactly
+  **H2560/F640/E512/top10, M2048**, non-tensor/pre-Apple10 devices. One
+  bounded map dispatch borrows dead routed-down storage; **no new buffers
+  or repacking**. Upper-half MMA skipped for <=16-row buckets. Original
+  half operands, F32 K order, SwiGLU and scatter. Default on; rollback
+  **`QWEN_FN_M4_EXPERT_TILE32=0`**. Physical Apple10 devices keep existing
+  routes even with tensor operations disabled; M512 append kernels unchanged.
+- Whole native prefill: **7102.36 -> 6929.86 ms**, **1.02489x**, ABBA,
+  excluded full warm/census then 60 seconds stable thermal zero, two retained
+  calls/process; pair ratios **1.01925 / 1.03054**, identical endpoint hashes.
+  Clean ordinary release CLI, unset defaults versus rollback:
+
+  | M4 case | Off tok/s | Default tok/s | On/off | Fresh CPP tok/s | On/CPP | % prior measured SIMD ceiling |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | pp4096 / depth 0 | 566.111 | 588.591 | 1.03971x | 627.935 | 0.93734x | 46.92% |
+
+  CLI **BAAB**, two independent single-repetition processes/policy; pairs
+  **1.05857 / 1.02047**. CPP: two independent single-repetition processes,
+  **627.825 / 628.045 tok/s**. Build/runtime identities match clean
+  `74a47743`. Build lock plus Metal lease throughout timing, thermal zero
+  and no foreign compilers around retained arms. Longer CLI attempt failed
+  its post-arm environment check and is discarded. Earlier **0.865x** used
+  longer processes; attribute **+3.97% on/off**, not all movement in the
+  absolute CPP ratio, to this change.
+- Distribution: **5120 target vectors**, code/prose, **2048 at depth 0**
+  and **512 after independent complete 32K prefixes**, full vocabulary,
+  F64 NLL/KL. All finite and **bitwise identical, dNLL=KL=0**. Repeated on
+  the simplified single-knob code: complete-logit hashes reproduce the
+  prototype. Separate 512/32K timing smoke: identical endpoints and complete
+  kernel counts, no new route calls. Individual times **1.113..1.675 s**;
+  no append gain attributed.
+- Rejected: compact N16 map alone **0.94660x** whole-prefill; disabling all
+  three classic K-quant N64 tiles **1.00874x**, reverse pair **0.98500x**,
+  failing the >=1%/both-pairs-positive bar. Neither experiment is shipped.
+- Rebased validation: **`cargo test --release -p qwen-llm --lib --
+  --test-threads=1`**, **2468 passed, 738 ignored**; contracts passed tree
+  **`129046df0985df1d32d9c204f097b0d23ba34dec`**. Sparse/hot/tail/empty
+  differential, offsets/canaries, scratch/alias refusal before dispatch and
+  concurrent refusal pass with **Metal API/GPU validation**. First parallel
+  full run had two existing process/filesystem-sensitive failures
+  (`pid_metrics` write-counter delta; checkpoint child-ready file).
+  Complete serial suites passed on both measured and rebased code.
+- Raw sources, binaries (including CPP profiler dylibs), traces, all timing
+  arms, distribution receipts, invalid attempts and checks on both hosts:
+  **`~/qwen-runs/2026-11-07-fn-m4b/2026-11-07-fn-m4b-qualified-raw.tar.gz`**,
+  SHA-256 **`0103c8ad7e4583a77dce762ec19166d0f7655a474af40b7a6f5de62b666e930b`**.
+
 ## 2026-11-07 - V4.1 Agent Appends: Engram Overlap Through 2048 Rows
 
 - Code **`efb75cad`**, base **`5735162d`**. **Default on** for logical

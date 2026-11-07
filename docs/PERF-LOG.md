@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-06 — Flash-Next prefill: shallow vector values and smaller F32 tensor tiles
+
+- Same GSQ-RCO IQ3_S/M5 Ultra as the preceding roofline and HC entries. Default-on **`QWEN_FN_QSA_SHALLOW_VALUE_VECTOR`** extends the existing split8 F32 vector value leaf to full selected N32 bands from start 2051 on the tensor tier. M4 retains its 32768 boundary. No precision, slot/reduction order, static storage or tensor allocation changes. Set **`QWEN_FN_QSA_SHALLOW_VALUE_VECTOR=0`** for the prior boundary; the existing value-vector and split-value rollbacks still apply.
+- Default-on **`QWEN_FN_SMALL_F32_TILES`** uses M32 instead of M128 for HC injection K10240/N4 and GDN alpha/beta K2560/N48, and includes the previously excluded **M2048** chunk. Scope remains 128-aligned M512..2048 on the tensor tier, original F32 operands/sums, safe math, no relaxed precision or added buffers. Unsupported PSOs retain the prior route. Set **`QWEN_FN_SMALL_F32_TILES=0`** for M128 below 2048 and scalar-ordered M2048; `QWEN_FN_SHORT_SMALL_F32=0` disables both.
+- Whole-call kill tests: production prefill plus full endpoint copy, reset/snapshot restore outside timing, one excluded warm call and two retained calls/arm, build lock + canonical lease, all thermal boundaries 0. QSA screen frozen `2b9fd88d`; F32 screen `d252a46f`, with shallow QSA held on. Every retained endpoint hash matches within each on/off cell.
+
+  | Independent screen | Off ms | On ms | Throughput gain |
+  | --- | ---: | ---: | ---: |
+  | Shallow vector, pp4096 / 0 | 2094.878896 | 1993.852542 | 5.07% |
+  | Shallow vector, pp512 / 8192 | 421.675375 | 396.827042 | 6.26% |
+  | Small F32, pp4096 / 0 | 1992.289271 | 1884.132104 | 5.74% |
+  | Small F32, pp512 / 32768 | 378.624979 | 366.059646 | 3.43% |
+
+- F32 tile screen: 16 rotating finite input banks/shape, original F32 precision, forward/reverse policy order, 12 retained GPU samples/policy. M32 beats M64 and M128 at both widths. Median 16-bank HC injection M512 **4.91654 -> 4.14377 ms** versus incumbent M128; M2048 **10.34729 -> 4.64746** versus scalar. GDN M512 **3.80313 -> 1.44875**; M2048 **7.04344 -> 1.63015**. All checked output bits match the scalar reference. Only M32 is added; M128 remains for rollback/fallback.
+- Distribution: shallow vector alone has **4096 targets**, code/prose at depths 2051/8192. Both prefill flags together have **10,240 targets**: 4096/document in two M2048 cold commands and 1024/document in two M512 appends after a real 32768-token prefix. Frozen `d252a46f`, HC fusion held on; subsequent source changes only repair test witnesses. Identical token hashes, finite full-vocabulary logits, F64 log-softmax and explicit KL(off||on) against saved baseline vectors. Every document/cell: **dNLL = 0, mean/max KL = 0**, full-logit hashes match. Pass unchanged |dNLL| <=.005 and mean KL <=.01; baseline vector files removed after comparison. Census proves 768 vector-value calls per shallow quality cell/arm-on; the F32 whole-prefill profiles prove 192/144 new injection/GDN calls at pp4096 and 96/72 at pp512.
+- Final ordinary CLI suite, frozen `29dfae63`, seed 1, normal model/row warmups, both new prefill flags 0 / 1. Cold A/B has two retained samples/policy; pp512@32K uses separate-process ABBA, four/policy. Build lock + canonical lease, nice 10, thermal 0 at every arm boundary; all 12 samples retained, clean matching build/runtime identities. Same-artifact llama.cpp v0.9.0 references and useful-work compute ceiling (131.676 TFLOP/s) are from the preceding roofline entry.
+
+  | M5 work / depth | Off tok/s | Default tok/s | On / off | llama.cpp tok/s | On / cpp | % compute ceiling |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | pp4096 / 0 | 1954.089 | 2182.688 | 1.11699x | 2067.455 | 1.05574x | 20.74% |
+  | pp512 / 32768 | 1349.515 | 1404.392 | 1.04066x | 1347.590 | 1.04215x | 13.61% |
+
+  Retained wall ms: cold off **2095.967459 / 2096.267333**, on **1877.796000 / 1875.375250**; append off **379.289749 / 380.142916 / 378.440208 / 379.713459**, on **364.205749 / 364.008375 / 364.310583 / 365.762500**. Mean wall is **2096.117396 -> 1876.585625 ms** cold and **379.396583 -> 364.571802 ms** at depth. Binary SHA256 `709b4a060ef0449502cf72e63d610abcd358fc8956809b23c32151d522ed151d`.
+- Post-change diagnostic isolated spans: pp4096 Q6_K dense **307.116 ms**, selected logits **187.834**, dense value **144.596**, routed IQ4_NL down **142.176**, vector value **133.508** (old split8 **246.074**). At pp512@32K: Q6_K **41.317**, IQ4_NL down **38.829**, vector value **35.202**, reused logits **31.279**, small F32 injection **29.064** and GDN **8.343**. Profiles have 13,568 / 3,832 dispatches, zero missing pairs/overflow; serialized isolated spans are diagnostic and are not an additive wall decomposition. Quantized projections, attention and dispatch dependencies remain the larger costs.
+- Validation on final code `29dfae63`: M5 full `cargo test --release -p qwen-llm --lib` **2441 passed, 738 ignored**, 113.59 s, including F64/guard checks through M2048, HC bitwise/offset/fallback checks and the shallow packet witness. CPU-only `scripts/check-contracts.sh` passes for tree `787c87c95d4483742933735880ea54a41a03b3b0`.
+- Temporary harness sources/binaries removed from both worktrees; raw baseline vectors deleted after scoring. This final follow-up changes the log only. Branch unmerged, with no lane-owned build, benchmark or watcher processes left running.
+
 ## 2026-11-06 — Flash-Next HC read fusion: M5 decode +2.9–3.5%, bitwise outputs
 
 - Main `11a92f50`, branch `perf/fn-roofline2`, unchanged GSQ-RCO IQ3_S on both machines. Default-on **`QWEN_FN_HC_READ_FUSED`** fuses BF16 HC down + SiLU and prepares the independent F32 injection before the block. The injection emulates the incumbent 1024 logical lanes with 128 physical threads, retaining each lane's loop and reduction order. Released branches4/H2560/rank320, aligned operands and supported PSOs only; other cases keep the incumbent. No tensor allocations/admission changes. Set **`QWEN_FN_HC_READ_FUSED=0`** to roll back; `QWEN_MAT_VEC_BF16_TG=0` and the old narrow-combine override remain effective.

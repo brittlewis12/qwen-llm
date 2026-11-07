@@ -43,7 +43,11 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Independent CPU-sort/guard tests cover capacities 513..32768, top-k
   1/17/512, closely spaced keys, ties, signed zeros/subnormals, nonfinite
   scores, per-query all-visible selection and invalid visibility.
-  Full release-library and contract qualification are pending below.
+  On **`e4c97162`**, full M5 release library with Metal validation and required
+  GPU tests: **2452 passed, 0 failed, 738 ignored**, 127.74 s, including the
+  new independent-sort/guard witness. `scripts/check-contracts.sh` passes
+  on tree **`54b1e18182be8ebf19e3da6ff81031f688599a5c`**. This receipt
+  changes documentation only; library/kernel sources remain identical.
 - mHC kill: a cooperative SIMD Sinkhorn finish saves **7.352 -> 6.855 us**
   per call, only about **0.045 ms/token / 0.3%** at 90 calls. Combination
   coefficients change by up to 2.98e-8 in the bounded fixture. Removed the
@@ -58,7 +62,8 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw samples, source patch, probes, input protocol and rejected mHC screen:
   **`2026-11-06-glm-roof5-selector-raw.tar.gz`**, SHA256
   **`1ce9053b12bf7e53a6426058ccc35300942a62c15f9cc330fe60d335190b1b2c`**,
-  retained beside `metagross:~/qwen-runs/2026-11-06-glm-roofline5/`.
+  retained in `metagross:~/qwen-runs/2026-11-06-glm-roofline5/`.
+  Full-library and contract receipts are beside the archive.
 
 ## 2026-11-07 - Flash-Next Dispatch Reduction: M5 Decode +7.0-7.5%
 

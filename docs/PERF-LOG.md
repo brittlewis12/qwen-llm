@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - Knob Sweep: Dense 27B Q8 Native Embeddings
+
+- Qualified untied dense 27B Q8_0 embeddings are automatic; `QWEN_NATIVE_QUANT_EMBED=0` rolls back. Positive values retain qualification.
+- M4 Max: tensor storage **5,085,593,600 → 1,350,860,800 B**, saving **3,734,732,800 B**. Thirteen gathered rows, prefill, 64 greedy logits/token steps and complete final KV/GDN state are bitwise equal; ordinary CLI arms match.
+- [Code, resource witnesses and verification](bench/2026-11-07-knob-sweep/README.md).
+
+## 2026-11-07 - Knob Sweep: Qualified A3B MTP Native Banks
+
+- Block-40 Q4_K/Q4_K/Q5_K K512 banks are automatic; unsupported tuples retain F32. `QWEN_MTP_MOE_NATIVE_BANKS=0` is the F32 rollback.
+- M4 Max bank storage **3,221,225,472 → 486,539,264 B (-84.9%)**. Three-position composed logits: cosine **1.000000**, maximum delta **4e-6**, matching argmax.
+- D7/N8 emits the same 128 target tokens and identical state-audit metrics on main, F32 rollback and native banks. Its terminal-resume audit already fails on main; this packet makes no new decoder-throughput claim. [Evidence and baseline comparison](bench/2026-11-07-knob-sweep/README.md).
+
+## 2026-11-07 - Knob Sweep: A3B GPU Greedy Default
+
+- Eligible A3B serial requests select exact GPU greedy automatically; `QWEN_GREEDY_GPU_ARGMAX=0` rolls back. Positive values retain model/request qualification.
+- M4 Max, two complete cooled ABBA campaigns, 128 tokens/process: mean generation **1395.336 → 1287.184 ms (1.08402×)**. All token hashes/stdout match; JSONL rollback/positive-alias pair matches too. Pair-level variation is retained.
+- Build lock and Metal lease held together; every accepted arm has normal thermal pressure and no sampled compiler overlap. [Raw values, exact-state witnesses and checks](bench/2026-11-07-knob-sweep/README.md).
+
 ## 2026-11-07 - Tier-1 Serve Agents: 64K Continuations And Older-Message Forks
 
 - **Measurement only**, clean main **`dabb9702`**, M5 Ultra. Unmodified source

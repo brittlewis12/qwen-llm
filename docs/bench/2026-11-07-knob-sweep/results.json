@@ -1,0 +1,575 @@
+{
+  "measured_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+  "machine": {
+    "cpu": "Apple M4 Max",
+    "ram_bytes": 137438953472,
+    "macos": "15.7.9"
+  },
+  "binaries_sha256": {
+    "qwen": "9ccaddf7ff7d738d2196110b3a2bb8711471ac61683b27636553a270ca381cd6",
+    "qwen-bench": "254b32967ca3fe70a4daca03f4cac38847f78781877d0b633a03623bafc8d13a",
+    "qwen_llm-60655e5b0ca7422c": "e86236b4ee7557f62c2af9b2cc8c898371fc87500675bd4510d3ca5a4d204434"
+  },
+  "protocol": {
+    "prompt_file": "docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt",
+    "prompt_sha256": "e265de9742d1b22e566fc108ae26331ccf46166c6f071e73f211e0a1a7e8b474",
+    "build_lock": "~/.cache/qwen-llm/locks/build.lock",
+    "metal_lease": "scripts/bench/with-metal-lease",
+    "greedy_order": [
+      "off",
+      "on",
+      "on",
+      "off",
+      "off",
+      "on",
+      "on",
+      "off"
+    ],
+    "off_value": "0",
+    "on_value": "unset",
+    "stable_normal_thermal_seconds": 30,
+    "niceness": 10,
+    "scored_runs": [
+      {
+        "name": "greedy-0-off",
+        "thermal_before": 0,
+        "thermal_after": 0,
+        "compiler_overlap_pids": [],
+        "exit_code": 0,
+        "process_ms": 3319.072207901627
+      },
+      {
+        "name": "greedy-1-on",
+        "thermal_before": 0,
+        "thermal_after": 0,
+        "compiler_overlap_pids": [],
+        "exit_code": 0,
+        "process_ms": 3066.120041999966
+      },
+      {
+        "name": "greedy-2-on",
+        "thermal_before": 0,
+        "thermal_after": 0,
+        "compiler_overlap_pids": [],
+        "exit_code": 0,
+        "process_ms": 3321.161209139973
+      },
+      {
+        "name": "greedy-3-off",
+        "thermal_before": 0,
+        "thermal_after": 0,
+        "compiler_overlap_pids": [],
+        "exit_code": 0,
+        "process_ms": 2984.827374573797
+      },
+      {
+        "name": "greedy-0-off",
+        "thermal_before": 0,
+        "thermal_after": 0,
+        "compiler_overlap_pids": [],
+        "exit_code": 0,
+        "process_ms": 5412.865874823183
+      },
+      {
+        "name": "greedy-1-on",
+        "thermal_before": 0,
+        "thermal_after": 0,
+        "compiler_overlap_pids": [],
+        "exit_code": 0,
+        "process_ms": 2361.8217082694173
+      },
+      {
+        "name": "greedy-2-on",
+        "thermal_before": 0,
+        "thermal_after": 0,
+        "compiler_overlap_pids": [],
+        "exit_code": 0,
+        "process_ms": 2393.075916916132
+      },
+      {
+        "name": "greedy-3-off",
+        "thermal_before": 0,
+        "thermal_after": 0,
+        "compiler_overlap_pids": [],
+        "exit_code": 0,
+        "process_ms": 2505.377458874136
+      }
+    ]
+  },
+  "native_embedding": {
+    "saved_embedding_bytes": 3734732800,
+    "saved_model_bytes": 3734732800,
+    "model_allocated_bytes": [
+      32321110016,
+      28586377216
+    ],
+    "embedding_bytes": [
+      5085593600,
+      1350860800
+    ],
+    "generated": 64,
+    "complete_state_and_logits_equal": true,
+    "ordinary_cli": [
+      {
+        "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+        "build_dirty": false,
+        "prompt_tokens": 419,
+        "generated_tokens": 16,
+        "generated_token_sha256": "8dece3a51c1f288c51f4ce69102eb55f60ce5af0044d2d42c79e6877a317b58e",
+        "stop_reason": "token_limit",
+        "stdout_sha256": "ee6205bf5549dfbdc686a72ad99a165a35ffc25e35676979cb8b6bbe825b3efe"
+      },
+      {
+        "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+        "build_dirty": false,
+        "prompt_tokens": 419,
+        "generated_tokens": 16,
+        "generated_token_sha256": "8dece3a51c1f288c51f4ce69102eb55f60ce5af0044d2d42c79e6877a317b58e",
+        "stop_reason": "token_limit",
+        "stdout_sha256": "ee6205bf5549dfbdc686a72ad99a165a35ffc25e35676979cb8b6bbe825b3efe"
+      }
+    ],
+    "allocation_observations": [
+      {
+        "receipt": "correctness-20261107-174513",
+        "embedding_bytes": [
+          5085593600,
+          1350860800
+        ],
+        "post_load_metal_bytes": [
+          33670381568,
+          28586377216
+        ],
+        "all_state_logits_and_tokens_equal": true
+      },
+      {
+        "receipt": "correctness-20261107-175242",
+        "embedding_bytes": [
+          5085593600,
+          1350860800
+        ],
+        "post_load_metal_bytes": [
+          32321110016,
+          28586377216
+        ],
+        "all_state_logits_and_tokens_equal": true
+      }
+    ]
+  },
+  "mtp_native_banks": {
+    "saved_bank_bytes": 2734686208,
+    "composed_logit_oracle": [
+      "[mtp-moe-native-oracle] step=0 cos=1.000000 max_abs=0.000003 margin=0.598509 argmax=220/220",
+      "[mtp-moe-native-oracle] step=1 cos=1.000000 max_abs=0.000004 margin=0.237617 argmax=709/709",
+      "[mtp-moe-native-oracle] step=2 cos=1.000000 max_abs=0.000004 margin=1.093309 argmax=1510/1510"
+    ],
+    "n8_probes": [
+      {
+        "case": "main-f32",
+        "exit_code": 1,
+        "build": {
+          "schema_version": 4,
+          "features": [],
+          "metallib_compiler_identity": "Apple metal version 32023.864 (metalfe-32023.864)",
+          "metallib_sdk_version": "26.2",
+          "build_commit": "eb02cb0b7494710e092761bbe235d8aac13be887",
+          "build_commit_short": "eb02cb0b7",
+          "build_dirty": false,
+          "build_source_state": "git-source-sha256-v2:e02a5719d1b18999b9c7c9a42f0f0a7a431a612a36d863828339411b0e1bd21f",
+          "stamp_source": "git",
+          "stamp_error": null,
+          "runtime_commit": "eb02cb0b7494710e092761bbe235d8aac13be887",
+          "runtime_dirty": false,
+          "runtime_source_state": "git-source-sha256-v2:e02a5719d1b18999b9c7c9a42f0f0a7a431a612a36d863828339411b0e1bd21f",
+          "status": "match",
+          "problems": [],
+          "overrides": []
+        },
+        "banks": {
+          "policy": "F32",
+          "gate_dtype": "F32",
+          "up_dtype": "F32",
+          "down_dtype": "F32",
+          "bytes": 3221225472
+        },
+        "target_tokens_equal": true,
+        "target_token_sha256": "0a8957324c9e0a2634a60f3c4e5d56d7509434efcc857853af297dcdaf3efc60",
+        "target_state_audit": {
+          "continuation_steps": 16,
+          "resume_audit_pass": false,
+          "kv_position_equal": true,
+          "kv_payload_exact": false,
+          "kv_payload_max_abs": 3.1330566,
+          "kv_payload_cosine": 0.9994419856148666,
+          "reference_final_position": 561,
+          "candidate_final_position": 561,
+          "gdn_state_max_abs": 0.14891389,
+          "gdn_conv_max_abs": 0.99748886,
+          "continuation_argmax_equal": true,
+          "continuation_logits_max_abs": 1.9951305,
+          "continuation_logits_cosine": 0.9988788769954676
+        }
+      },
+      {
+        "case": "sweep-f32",
+        "exit_code": 1,
+        "build": {
+          "schema_version": 4,
+          "features": [],
+          "metallib_compiler_identity": "Apple metal version 32023.864 (metalfe-32023.864)",
+          "metallib_sdk_version": "26.2",
+          "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+          "build_commit_short": "314461981",
+          "build_dirty": false,
+          "build_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+          "stamp_source": "git",
+          "stamp_error": null,
+          "runtime_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+          "runtime_dirty": false,
+          "runtime_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+          "status": "match",
+          "problems": [],
+          "overrides": []
+        },
+        "banks": {
+          "policy": "F32",
+          "gate_dtype": "F32",
+          "up_dtype": "F32",
+          "down_dtype": "F32",
+          "bytes": 3221225472
+        },
+        "target_tokens_equal": true,
+        "target_token_sha256": "0a8957324c9e0a2634a60f3c4e5d56d7509434efcc857853af297dcdaf3efc60",
+        "target_state_audit": {
+          "continuation_steps": 16,
+          "resume_audit_pass": false,
+          "kv_position_equal": true,
+          "kv_payload_exact": false,
+          "kv_payload_max_abs": 3.1330566,
+          "kv_payload_cosine": 0.9994419856148666,
+          "reference_final_position": 561,
+          "candidate_final_position": 561,
+          "gdn_state_max_abs": 0.14891389,
+          "gdn_conv_max_abs": 0.99748886,
+          "continuation_argmax_equal": true,
+          "continuation_logits_max_abs": 1.9951305,
+          "continuation_logits_cosine": 0.9988788769954676
+        }
+      },
+      {
+        "case": "sweep-native",
+        "exit_code": 1,
+        "build": {
+          "schema_version": 4,
+          "features": [],
+          "metallib_compiler_identity": "Apple metal version 32023.864 (metalfe-32023.864)",
+          "metallib_sdk_version": "26.2",
+          "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+          "build_commit_short": "314461981",
+          "build_dirty": false,
+          "build_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+          "stamp_source": "git",
+          "stamp_error": null,
+          "runtime_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+          "runtime_dirty": false,
+          "runtime_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+          "status": "match",
+          "problems": [],
+          "overrides": []
+        },
+        "banks": {
+          "policy": "All",
+          "gate_dtype": "Q4_K",
+          "up_dtype": "Q4_K",
+          "down_dtype": "Q5_K",
+          "bytes": 486539264
+        },
+        "target_tokens_equal": true,
+        "target_token_sha256": "0a8957324c9e0a2634a60f3c4e5d56d7509434efcc857853af297dcdaf3efc60",
+        "target_state_audit": {
+          "continuation_steps": 16,
+          "resume_audit_pass": false,
+          "kv_position_equal": true,
+          "kv_payload_exact": false,
+          "kv_payload_max_abs": 3.1330566,
+          "kv_payload_cosine": 0.9994419856148666,
+          "reference_final_position": 561,
+          "candidate_final_position": 561,
+          "gdn_state_max_abs": 0.14891389,
+          "gdn_conv_max_abs": 0.99748886,
+          "continuation_argmax_equal": true,
+          "continuation_logits_max_abs": 1.9951305,
+          "continuation_logits_cosine": 0.9988788769954676
+        }
+      }
+    ],
+    "main_and_sweep_audits_identical": true,
+    "throughput_claim": null
+  },
+  "gpu_greedy": {
+    "metric": "generation_ms",
+    "off_mean_ms": 1395.33628125,
+    "on_mean_ms": 1287.18440625,
+    "speedup": 1.0840220519102486,
+    "campaign_speedups": [
+      1.0307107509555102,
+      1.1514262130669652
+    ],
+    "chronological_pair_speedups": [
+      1.1655785535713585,
+      0.9182946350240254,
+      1.2280820077654688,
+      1.0749933167152383
+    ],
+    "samples": [
+      {
+        "arm": "off",
+        "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+        "build_dirty": "0",
+        "build_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+        "prompt_tokens": 419,
+        "generated_tokens": 128,
+        "generated_token_sha256": "ef4a517b0def5d5750c218ce97964a68439819a4641cbfd04713ca5e2fe98b5e",
+        "stop_reason": "token_limit",
+        "decode_policy": "greedy_argmax",
+        "greedy_gpu_selection_reason": "disabled_by_explicit_rollback",
+        "terminal_token_target_transition_consumed": false,
+        "generation_ms": 1523.346917,
+        "transition_ms": 1343.544081,
+        "stdout_sha256": "49c32498da6cac4b72cbe09d43402dfa893f66cadb86ae8c4c4afeffcfabefc0"
+      },
+      {
+        "arm": "on",
+        "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+        "build_dirty": "0",
+        "build_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+        "prompt_tokens": 419,
+        "generated_tokens": 128,
+        "generated_token_sha256": "ef4a517b0def5d5750c218ce97964a68439819a4641cbfd04713ca5e2fe98b5e",
+        "stop_reason": "token_limit",
+        "decode_policy": "greedy_gpu_argmax",
+        "greedy_gpu_selection_reason": "auto_a3b",
+        "terminal_token_target_transition_consumed": false,
+        "generation_ms": 1306.9448750000001,
+        "transition_ms": 1297.8608319999994,
+        "stdout_sha256": "49c32498da6cac4b72cbe09d43402dfa893f66cadb86ae8c4c4afeffcfabefc0"
+      },
+      {
+        "arm": "on",
+        "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+        "build_dirty": "0",
+        "build_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+        "prompt_tokens": 419,
+        "generated_tokens": 128,
+        "generated_token_sha256": "ef4a517b0def5d5750c218ce97964a68439819a4641cbfd04713ca5e2fe98b5e",
+        "stop_reason": "token_limit",
+        "decode_policy": "greedy_gpu_argmax",
+        "greedy_gpu_selection_reason": "auto_a3b",
+        "terminal_token_target_transition_consumed": false,
+        "generation_ms": 1567.967208,
+        "transition_ms": 1541.3773329999995,
+        "stdout_sha256": "49c32498da6cac4b72cbe09d43402dfa893f66cadb86ae8c4c4afeffcfabefc0"
+      },
+      {
+        "arm": "off",
+        "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+        "build_dirty": "0",
+        "build_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+        "prompt_tokens": 419,
+        "generated_tokens": 128,
+        "generated_token_sha256": "ef4a517b0def5d5750c218ce97964a68439819a4641cbfd04713ca5e2fe98b5e",
+        "stop_reason": "token_limit",
+        "decode_policy": "greedy_argmax",
+        "greedy_gpu_selection_reason": "disabled_by_explicit_rollback",
+        "terminal_token_target_transition_consumed": false,
+        "generation_ms": 1439.8558750000002,
+        "transition_ms": 1272.2086619999998,
+        "stdout_sha256": "49c32498da6cac4b72cbe09d43402dfa893f66cadb86ae8c4c4afeffcfabefc0"
+      },
+      {
+        "arm": "off",
+        "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+        "build_dirty": "0",
+        "build_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+        "prompt_tokens": 419,
+        "generated_tokens": 128,
+        "generated_token_sha256": "ef4a517b0def5d5750c218ce97964a68439819a4641cbfd04713ca5e2fe98b5e",
+        "stop_reason": "token_limit",
+        "decode_policy": "greedy_argmax",
+        "greedy_gpu_selection_reason": "disabled_by_explicit_rollback",
+        "terminal_token_target_transition_consumed": false,
+        "generation_ms": 1394.189208,
+        "transition_ms": 1215.428836,
+        "stdout_sha256": "49c32498da6cac4b72cbe09d43402dfa893f66cadb86ae8c4c4afeffcfabefc0"
+      },
+      {
+        "arm": "on",
+        "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+        "build_dirty": "0",
+        "build_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+        "prompt_tokens": 419,
+        "generated_tokens": 128,
+        "generated_token_sha256": "ef4a517b0def5d5750c218ce97964a68439819a4641cbfd04713ca5e2fe98b5e",
+        "stop_reason": "token_limit",
+        "decode_policy": "greedy_gpu_argmax",
+        "greedy_gpu_selection_reason": "auto_a3b",
+        "terminal_token_target_transition_consumed": false,
+        "generation_ms": 1135.257417,
+        "transition_ms": 1132.935415,
+        "stdout_sha256": "49c32498da6cac4b72cbe09d43402dfa893f66cadb86ae8c4c4afeffcfabefc0"
+      },
+      {
+        "arm": "on",
+        "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+        "build_dirty": "0",
+        "build_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+        "prompt_tokens": 419,
+        "generated_tokens": 128,
+        "generated_token_sha256": "ef4a517b0def5d5750c218ce97964a68439819a4641cbfd04713ca5e2fe98b5e",
+        "stop_reason": "token_limit",
+        "decode_policy": "greedy_gpu_argmax",
+        "greedy_gpu_selection_reason": "auto_a3b",
+        "terminal_token_target_transition_consumed": false,
+        "generation_ms": 1138.568125,
+        "transition_ms": 1133.6641320000003,
+        "stdout_sha256": "49c32498da6cac4b72cbe09d43402dfa893f66cadb86ae8c4c4afeffcfabefc0"
+      },
+      {
+        "arm": "off",
+        "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+        "build_dirty": "0",
+        "build_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+        "prompt_tokens": 419,
+        "generated_tokens": 128,
+        "generated_token_sha256": "ef4a517b0def5d5750c218ce97964a68439819a4641cbfd04713ca5e2fe98b5e",
+        "stop_reason": "token_limit",
+        "decode_policy": "greedy_argmax",
+        "greedy_gpu_selection_reason": "disabled_by_explicit_rollback",
+        "terminal_token_target_transition_consumed": false,
+        "generation_ms": 1223.953125,
+        "transition_ms": 1109.4582969999997,
+        "stdout_sha256": "49c32498da6cac4b72cbe09d43402dfa893f66cadb86ae8c4c4afeffcfabefc0"
+      }
+    ],
+    "jsonl": {
+      "identical": true,
+      "matches_one_shot": true,
+      "samples": [
+        {
+          "arm": "off",
+          "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+          "build_dirty": false,
+          "build_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+          "prompt_tokens": 419,
+          "generated_tokens": 128,
+          "generated_token_sha256": "ef4a517b0def5d5750c218ce97964a68439819a4641cbfd04713ca5e2fe98b5e",
+          "stop_reason": "token_limit",
+          "decode_policy": "greedy_argmax",
+          "greedy_gpu_selection_reason": "disabled_by_explicit_rollback",
+          "terminal_token_target_transition_consumed": false,
+          "transition_ms": 1131.237752000001
+        },
+        {
+          "arm": "on",
+          "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+          "build_dirty": false,
+          "build_source_state": "git-source-sha256-v2:69b875db7c843e0a48049cfee8e2ef519f0f9f78030212fdd72fa830d7bad250",
+          "prompt_tokens": 419,
+          "generated_tokens": 128,
+          "generated_token_sha256": "ef4a517b0def5d5750c218ce97964a68439819a4641cbfd04713ca5e2fe98b5e",
+          "stop_reason": "token_limit",
+          "decode_policy": "greedy_gpu_argmax",
+          "greedy_gpu_selection_reason": "auto_a3b",
+          "terminal_token_target_transition_consumed": false,
+          "transition_ms": 1193.19787
+        }
+      ]
+    }
+  },
+  "greedy_smokes": {
+    "qwen-small": {
+      "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+      "build_dirty": false,
+      "prompt_tokens": 419,
+      "generated_tokens": 4,
+      "generated_token_sha256": "82de8e71c4c96f0636f1371756234ef6b7f9966981ba2a9d34a84b683bb20c7e",
+      "stop_reason": "token_limit"
+    },
+    "flash-next": {
+      "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+      "build_dirty": false,
+      "prompt_tokens": 419,
+      "generated_tokens": 4,
+      "generated_token_sha256": "00daa58423d9ff1b440a7fc683e52ac64f8650f9e989d60afd8c4de8c8987ca6",
+      "stop_reason": "token_limit"
+    },
+    "muse": {
+      "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+      "build_dirty": false,
+      "prompt_tokens": 417,
+      "generated_tokens": 4,
+      "generated_token_sha256": "5c051cedfa12284f552e27251b0665c99f8b1bc90213972bb655d03d4a67eec3",
+      "stop_reason": "token_limit"
+    },
+    "k2": {
+      "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+      "build_dirty": false,
+      "prompt_tokens": 409,
+      "generated_tokens": 4,
+      "generated_token_sha256": "98c0e536d5205fd88770e2d0a73001a6780c6aa5d1889488a1c4850c0bac59ad",
+      "stop_reason": "token_limit"
+    },
+    "glm": {
+      "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+      "build_dirty": false,
+      "prompt_tokens": 418,
+      "generated_tokens": 4,
+      "generated_token_sha256": "70dd2e859e3adab7626b5c89630c27531c0b5c1918f3eea742e0b9f685907567",
+      "stop_reason": "token_limit"
+    },
+    "ds4": {
+      "build_commit": "314461981eea1423ec25d529deba1f0310f39bad",
+      "build_dirty": false,
+      "prompt_tokens": 419,
+      "generated_tokens": 4,
+      "generated_token_sha256": "f9452a17bd32bf538df83563c3a1150b90cc1325f59a6b25a174e543c1ec4a6d",
+      "stop_reason": "token_limit"
+    }
+  },
+  "dflash_smokes": {
+    "tokens": 8,
+    "default_online_attention_equivalent": true,
+    "online_attention_rollback_equivalent": true
+  },
+  "skipped": {
+    "v41": "No target artifact in model directory or mounted archive."
+  },
+  "validation": {
+    "release_library_tests": {
+      "passed": 2457,
+      "failed": 0,
+      "ignored": 739
+    },
+    "release_workspace_no_run": true,
+    "contracts_at_code_commit": true,
+    "diagnostic_inventory_test": true,
+    "greedy_policy_test": true,
+    "evaluation_environment_tests": 13,
+    "preexisting_text_capability_digest": {
+      "main": "dabb97021e65f192a15057b3f226281cbe1ad81f",
+      "expected": "1bf6f2a1da79314688368b340d00ede6f6bc3447b40494394b94abb74d21193e",
+      "actual_main": "c89f7bb60f9a9ce798a8a206cb428228f0630afb7fc95aff16a84ef385f7e848",
+      "actual_branch": "c89f7bb60f9a9ce798a8a206cb428228f0630afb7fc95aff16a84ef385f7e848",
+      "packet_unchanged": true
+    }
+  },
+  "local_receipts": {
+    "correctness": "bench/results/knob-sweep/correctness-20261107-175242",
+    "greedy": [
+      "bench/results/knob-sweep/timing-20261107-180246",
+      "bench/results/knob-sweep/greedy-20261107-184136"
+    ],
+    "smokes": "bench/results/knob-sweep/smoke-only-20261107-182814",
+    "ds4": "bench/results/knob-sweep/ds4-20261107-184522"
+  }
+}

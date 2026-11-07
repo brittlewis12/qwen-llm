@@ -1,3 +1,5 @@
+> Historical qualification packet: eligible A3B serial GPU greedy is now automatic, with `QWEN_GREEDY_GPU_ARGMAX=0` rollback. Positive values retain qualification. Commands and dispositions below describe the recorded builds.
+
 # v0.645 Exact GPU Greedy Product Admission
 
 Status: preregistration. No v0.645 scored observation exists. The unscored

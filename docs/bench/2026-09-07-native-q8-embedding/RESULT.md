@@ -1,3 +1,5 @@
+> Historical qualification packet: qualified dense 27B Q8 embeddings are now automatic, with `QWEN_NATIVE_QUANT_EMBED=0` rollback. Positive values retain qualification. Commands and dispositions below describe the recorded builds.
+
 # Dense Q8 native embedding: resource and bitwise oracle PASS
 
 ## Result

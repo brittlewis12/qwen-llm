@@ -2620,14 +2620,7 @@ fn current_asset_packed_gpu_route_kill_packet() {
         .unwrap_or_else(|| PathBuf::from(crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required()));
     assert!(model_path.exists(), "missing current DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
-    if let Some(reason) =
-        crate::metal::DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION.decline_reason(ctx.device_facts())
-    {
-        eprintln!(
-            "skipped: M4 Max packed GPU route characterization qualification does not hold: {reason:?}"
-        );
-        return;
-    }
+
     let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
     let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
         .expect("plan packed GPU route session");
@@ -5315,14 +5308,14 @@ fn session_memory_inventory_is_complete_and_unique() {
         0
     };
     let packed_route_allocations = if cfg!(feature = "dsv4-diagnostics") {
-        8
+        7
     } else {
-        4
+        0
     };
     let packed_route_logical = if cfg!(feature = "dsv4-diagnostics") {
-        2_115_648
+        2_115_616
     } else {
-        17_440
+        0
     };
     assert_eq!(
         requests.len(),

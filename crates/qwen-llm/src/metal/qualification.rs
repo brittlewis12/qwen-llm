@@ -430,33 +430,6 @@ const MEASUREMENTS_DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY: &[DeviceMeasurement] = &
     ),
 ];
 
-const MEASUREMENTS_DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION: &[DeviceMeasurement] = &[
-    device_measurement(
-        "Apple M4 Max",
-        MeasurementResult::Passed,
-        MeasurementResult::Failed,
-        "2026-10-14",
-        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
-        None,
-    ),
-    device_measurement(
-        "Apple M1 Pro",
-        MeasurementResult::Passed,
-        MeasurementResult::NotApplicable,
-        "2026-10-14",
-        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
-        None,
-    ),
-    device_measurement(
-        "Apple M5 Ultra",
-        MeasurementResult::Passed,
-        MeasurementResult::NotApplicable,
-        "2026-10-17",
-        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
-        None,
-    ),
-];
-
 const MEASUREMENTS_DEEPSEEK_V4_PACKED_MXFP4_MATRIX: &[DeviceMeasurement] = &[
     device_measurement(
         "Apple M4 Max",
@@ -802,26 +775,7 @@ pub static DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY: Qualification = Qualification {
     correctness_characterized_device: None,
     performance_characterized_device: Some("Apple M4 Max"),
 };
-pub static DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION: Qualification = Qualification {
-    path: "deepseek_v4.packed_gpu_route_compaction",
-    measurements: MEASUREMENTS_DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION,
-    excluded: NO_EXCLUSIONS,
-    capability_gate: QualifiedDevices::AppleFamily7,
-    requires_unified_memory: false,
-    minimum_os_version: None,
-    memory: QualifiedMemory::Any,
-    host_page_size_bytes: None,
-    max_buffer_length_bytes: None,
-    required_headroom_bytes: None,
-    required_headroom_scope: None,
-    evidence: "878d0d49",
-    correctness: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::packed_gpu_route_compaction_matches_cpu_at_capacity_boundaries -- --exact",
-    correctness_kind: QualificationWitnessKind::Replay,
-    performance: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_packed_gpu_route_kill_packet -- --ignored --exact --nocapture",
-    performance_kind: QualificationWitnessKind::M4CharacterizationSkip,
-    correctness_characterized_device: None,
-    performance_characterized_device: Some("Apple M4 Max"),
-};
+
 pub static DEEPSEEK_V4_PACKED_MXFP4_MATRIX: Qualification = Qualification {
     path: "deepseek_v4.packed_mxfp4_matrix",
     measurements: MEASUREMENTS_DEEPSEEK_V4_PACKED_MXFP4_MATRIX,
@@ -1008,7 +962,6 @@ pub static QUALIFICATIONS: &[&Qualification] = &[
     &DEEPSEEK_V4_GROUPED_LONG_HCA,
     &DEEPSEEK_V4_SPLITK_HCA,
     &DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY,
-    &DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION,
     &DEEPSEEK_V4_PACKED_MXFP4_MATRIX,
     &DEEPSEEK_V4_PACKED_E8P32_ROUTER,
     &DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX,
@@ -1026,7 +979,6 @@ pub static DEEPSEEK_V4_QUALIFICATIONS: &[&Qualification] = &[
     &DEEPSEEK_V4_GROUPED_LONG_HCA,
     &DEEPSEEK_V4_SPLITK_HCA,
     &DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY,
-    &DEEPSEEK_V4_PACKED_GPU_ROUTE_COMPACTION,
     &DEEPSEEK_V4_PACKED_MXFP4_MATRIX,
     &DEEPSEEK_V4_PACKED_E8P32_ROUTER,
     &DEEPSEEK_V4_PACKED_QA_RAW_KV_MATRIX,

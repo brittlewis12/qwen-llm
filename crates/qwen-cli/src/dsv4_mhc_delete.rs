@@ -785,7 +785,6 @@ fn command_kind(kind: DeepSeekV4MhcCommandKind) -> &'static str {
         DeepSeekV4MhcCommandKind::PreExpert => "pre_expert",
         DeepSeekV4MhcCommandKind::Expert => "expert",
         DeepSeekV4MhcCommandKind::SharedOverlap => "shared_overlap",
-        DeepSeekV4MhcCommandKind::MergedPreExpert => "merged_pre_expert",
     }
 }
 

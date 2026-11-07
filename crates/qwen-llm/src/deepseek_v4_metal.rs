@@ -63,14 +63,13 @@ use crate::tensor::{GgmlType, ggml_type_layout};
 use dtype_census::{QualifiedRoleDtypes, RoleDtype, path_role_dtypes_qualified, role_dtype_census};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::{NSError, NSString};
 #[cfg(feature = "dsv4-diagnostics")]
 use objc2_metal::MTLCommandBufferStatus;
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState, MTLDevice, MTLSize,
 };
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;

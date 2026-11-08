@@ -257,3 +257,84 @@ fn whole_cold_plan_yields_without_snapshots_then_preserves_shared_interior_and_b
         }
     }
 }
+
+fn extension_case(
+    live: bool,
+    cold: bool,
+    new_rows: usize,
+    decline: bool,
+) -> (Cache, Probe, GenerationOutcome) {
+    let matched = 65536;
+    let mut settings = Settings::new(
+        tokenizer_fixture::tokenizer(None),
+        131072,
+        1,
+        SamplingConfig::default(),
+        tokenizer_fixture::EOS,
+        "test".into(),
+    )
+    .unwrap();
+    settings.headroom = || finite_headroom(1 << 40);
+    settings.cold_ced = cold;
+    settings.live_ced = live;
+    let request = settings
+        .profile()
+        .parse(&json!({"model":"test","input":"root","max_output_tokens":1}))
+        .unwrap();
+    let prompt = "p".repeat(matched + new_rows);
+    let bounds = Some(super::super::http::PromptBoundaries {
+        shared_prefix_end: Some(343),
+        generation_header_start: Some(prompt.len() - 2),
+    });
+    let ceiling = super::super::output_memory::OutputByteCeiling::from_tokens_and_piece(
+        1,
+        settings.limits.max_piece_bytes,
+    )
+    .unwrap();
+    let mut probe = Probe {
+        decline,
+        ..Probe::default()
+    };
+    let mut cache = Cache {
+        matched,
+        ..Cache::default()
+    };
+    let result = settings
+        .execute_with_engine(
+            ceiling, &request, &prompt, bounds, &mut Sink, &mut probe, &mut cache,
+        )
+        .unwrap();
+    assert!(cache.committed);
+    (cache, probe, result)
+}
+
+#[test]
+fn live_ced_keeps_full_ladder_cuts_and_small_header_folding_with_independent_rollback() {
+    for new_rows in [512, 1300, 2048, 8191, 8192, 8193, 16384, 32768] {
+        let (old, full, _) = extension_case(false, true, new_rows, false);
+        assert_eq!(full.cold_calls, 0);
+        for cold in [false, true] {
+            let (new, ced, _) = extension_case(true, cold, new_rows, false);
+            assert_eq!(new.cuts, old.cuts, "terminal cuts at {new_rows}");
+            assert_eq!(new.interior, old.interior, "ladder cut at {new_rows}");
+            if new_rows < 8192 {
+                assert_eq!(ced.cold_calls, 0);
+                assert_eq!(ced.full_calls, full.full_calls);
+            } else {
+                assert!(ced.cold_calls > 0, "large live extension at {new_rows}");
+                assert!(ced.full_calls.len() < full.full_calls.len());
+                assert_eq!(ced.full_calls.last(), Some(&2));
+            }
+        }
+    }
+}
+
+#[test]
+fn live_ced_optional_refusal_preserves_full_calls_and_checkpoint_keys() {
+    let (old, full, _) = extension_case(false, true, 16384, false);
+    let (new, declined, _) = extension_case(true, false, 16384, true);
+    assert_eq!(declined.cold_calls, 0);
+    assert_eq!(declined.full_calls, full.full_calls);
+    assert_eq!(new.cuts, old.cuts);
+    assert_eq!(new.interior, old.interior);
+}

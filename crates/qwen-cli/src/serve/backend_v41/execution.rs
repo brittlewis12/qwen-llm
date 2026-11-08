@@ -277,6 +277,14 @@ impl Settings {
         };
         let capacity = reuse.capacity(&state, required);
         let prefill_start = engine.now();
+        // A shared-prelude hit still starts a cold body. History reuse can use
+        // the same Ready-prefix engine, with its own threshold and rollback.
+        let ced_live = matched > 0 && Some(matched) != shared_cut;
+        let ced_enabled = if ced_live {
+            self.live_ced && ids.len() - matched >= 2 * crate::family_options::V41_PREFILL_ROWS
+        } else {
+            self.cold_ced
+        };
         Ok(Run {
             position: matched,
             ids,
@@ -284,9 +292,8 @@ impl Settings {
             generation_cut,
             fuse_header,
             header_fused: false,
-            // Reusing only the shared prelude still leaves a cold request
-            // body. Its Ready prefix is the same input as the first cold cut.
-            cold_ced: self.cold_ced && (matched == 0 || Some(matched) == shared_cut),
+            ced_enabled,
+            ced_live,
             ced_ranges: Vec::new(),
             ced_target: None,
             ced_active: false,
@@ -335,11 +342,11 @@ impl Settings {
         let position = run.position;
         check(sink, cancel)?;
         admit_output(reuse, run.reserve, self.headroom)?;
-        if run.ced_target.is_none() && run.cold_ced {
+        if run.ced_target.is_none() && run.ced_enabled {
             // A request admitted under load keeps the existing small Full
             // path. Active CED episodes also accept loaded encoder quanta.
             if max_rows != crate::family_options::V41_PREFILL_ROWS {
-                run.cold_ced = false;
+                run.ced_enabled = false;
             } else {
                 let segment_end = run
                     .checkpoint_cuts
@@ -347,7 +354,7 @@ impl Settings {
                     .copied()
                     .find(|&cut| cut > position)
                     .unwrap_or(ids.len());
-                run.ced_target = cold_episode_end(
+                run.ced_target = ced_episode_end(
                     position,
                     segment_end,
                     max_rows,
@@ -355,6 +362,7 @@ impl Settings {
                         && reuse.ladder_enabled()
                         && run.conversation.is_some()
                         && segment_end == run.generation_cut.unwrap_or(ids.len()),
+                    run.ced_live,
                 );
             }
         }
@@ -390,7 +398,7 @@ impl Settings {
                 }
                 None => {
                     run.ced_target = None;
-                    run.cold_ced = false;
+                    run.ced_enabled = false;
                 }
             }
         }
@@ -678,7 +686,8 @@ pub(super) struct Run<S> {
     generation_cut: Option<usize>,
     fuse_header: bool,
     header_fused: bool,
-    cold_ced: bool,
+    ced_enabled: bool,
+    ced_live: bool,
     ced_ranges: Vec<[usize; 2]>,
     ced_target: Option<usize>,
     pub(super) ced_active: bool,
@@ -835,16 +844,25 @@ impl<A: FnMut() -> Result<(), ServeError>> GenerationSink for BudgetedSink<'_, A
     }
 }
 
-/// One cold request plan: preserve mandatory cuts, and reconstruct at the
-/// last existing full body boundary when the ladder will retain an interior.
-/// Amortize the dependency halo over at least two idle encoder chunks.
-fn cold_episode_end(start: usize, end: usize, rows: usize, ladder: bool) -> Option<usize> {
+/// Preserve mandatory cuts and the last existing Full body boundary retained
+/// by the ladder. Cold planning amortizes over two chunks. A live request has
+/// already passed the whole-extension 8K gate: retain its 4K interior even
+/// when the header leaves the body just below 8K. The native planner separately
+/// refuses any episode whose decoder halo reaches into the committed prefix.
+fn ced_episode_end(
+    start: usize,
+    end: usize,
+    rows: usize,
+    ladder: bool,
+    live: bool,
+) -> Option<usize> {
     let target = if ladder {
         start.checked_add((end.checked_sub(start + 1)? / rows) * rows)?
     } else {
         end
     };
-    (target.checked_sub(start)? >= 2 * crate::family_options::V41_PREFILL_ROWS).then_some(target)
+    let minimum = if live { 1 } else { 2 } * crate::family_options::V41_PREFILL_ROWS;
+    (target.checked_sub(start)? >= minimum).then_some(target)
 }
 
 /// Last existing full call strictly before this segment's terminal boundary.
@@ -859,16 +877,16 @@ fn ladder_candidate(start: usize, end: usize, segment_end: usize, rows: usize) -
 
 #[cfg(test)]
 mod ladder_tests {
-    use super::{cold_episode_end, ladder_candidate};
+    use super::{ced_episode_end, ladder_candidate};
     #[test]
     fn cold_episodes_retain_real_ladder_boundaries_and_amortize_reconstruction() {
-        assert_eq!(cold_episode_end(343, 64930, 4096, true), Some(61783));
-        assert_eq!(cold_episode_end(343, 12631, 4096, true), Some(8535));
-        assert_eq!(cold_episode_end(343, 16671, 4096, false), Some(16671));
-        assert_eq!(cold_episode_end(0, 343, 4096, false), None);
-        assert_eq!(cold_episode_end(61783, 64930, 4096, true), None);
-        assert_eq!(cold_episode_end(0, 8192, 4096, false), Some(8192));
-        assert_eq!(cold_episode_end(0, 8192, 4096, true), None);
+        assert_eq!(ced_episode_end(343, 64930, 4096, true, false), Some(61783));
+        assert_eq!(ced_episode_end(343, 12631, 4096, true, false), Some(8535));
+        assert_eq!(ced_episode_end(343, 16671, 4096, false, false), Some(16671));
+        assert_eq!(ced_episode_end(0, 343, 4096, false, false), None);
+        assert_eq!(ced_episode_end(61783, 64930, 4096, true, false), None);
+        assert_eq!(ced_episode_end(0, 8192, 4096, false, false), Some(8192));
+        assert_eq!(ced_episode_end(0, 8192, 4096, true, false), None);
     }
 
     #[test]

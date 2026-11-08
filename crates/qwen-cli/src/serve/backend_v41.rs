@@ -55,9 +55,15 @@ const PREFILL_TIMING_ENV: &str = "QWEN_SERVE_V41_PREFILL_TIMING";
 /// Read once when preparing the server.
 const FUSE_HEADER_ENV: &str = "QWEN_SERVE_V41_FUSE_HEADER";
 /// Plan exact shrinking CED across a cold serve request's retained cuts.
-/// Default on; 0 restores Full for cold requests. Warm requests remain Full.
+/// Default on; 0 restores Full for cold requests. Live extensions have a separate control.
 /// Read once when preparing the server.
 const COLD_CED_ENV: &str = "QWEN_SERVE_V41_COLD_CED";
+/// Plan exact shrinking CED for reused serve extensions of at least 8192
+/// new tokens. Keep retained cuts and Ready-only publication. Starts under
+/// load retain Full; active episodes can yield in loaded 512-row quanta.
+/// Default on; 0 restores Full for live extensions independently of cold CED.
+/// Read once when preparing the server.
+const LIVE_CED_ENV: &str = "QWEN_SERVE_V41_LIVE_CED";
 
 /// Agent workloads keep about three conversations busy at once. M5 Ultra, GSQ
 /// IQ2_XS, three agents x three turns (greedy, 128 tokens per turn, fresh
@@ -296,6 +302,7 @@ pub(crate) struct Settings {
     headroom: fn() -> Option<HostMemoryHeadroom>,
     fuse_header: bool,
     cold_ced: bool,
+    live_ced: bool,
 }
 
 impl Settings {
@@ -331,6 +338,7 @@ impl Settings {
             headroom: qwen_llm::metal::host_memory_headroom,
             fuse_header: qwen_llm::env_flag::read_default_on(FUSE_HEADER_ENV),
             cold_ced: qwen_llm::env_flag::read_default_on(COLD_CED_ENV),
+            live_ced: qwen_llm::env_flag::read_default_on(LIVE_CED_ENV),
         })
     }
 

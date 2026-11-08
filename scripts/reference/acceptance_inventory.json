@@ -5801,5 +5801,19 @@
     "class": "gpu",
     "ignored": true,
     "reason": "Self-leased M5 Metal binding refusal and canary witness; excluded from CPU acceptance."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::cold_tests::live_ced_keeps_full_ladder_cuts_and_small_header_folding_with_independent_rollback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure served-extension planner with fake Ready state; no Metal context, model, allocation or GPU dispatch."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::cold_tests::live_ced_optional_refusal_preserves_full_calls_and_checkpoint_keys",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure served-extension planner with fake Ready state; no Metal context, model, allocation or GPU dispatch."
   }
 ]

@@ -563,15 +563,6 @@ pub(super) fn build_dense_preweight_cache(
     Ok(cache)
 }
 
-crate::env_flag!(
-    /// Routes Q5_K dense rows through the dedicated 64x64 mat_mat tensor tile and its
-    /// n16/n64 simdgroup variants; `QWEN_V41_Q5K_MATMAT=1` opts in. The dedicated path
-    /// is cosine-gated (>= 0.999), not bitwise-equal to the generic dense tensor tile,
-    /// so it cannot be the default while the Full/CED pair requires a bitwise endpoint.
-    default_off q5k_matmat_enabled,
-    "QWEN_V41_Q5K_MATMAT"
-);
-
 impl Linear<'_> {
     fn dense_wide_selected(&self, rows: usize) -> bool {
         dense_wide_enabled()
@@ -594,7 +585,6 @@ impl Linear<'_> {
         mma && metal::moe_grouped_tensor_selected(self.ctx)
             && metal::moe_grouped_generic_layout(self.tensor.dtype)
                 .is_some_and(|l| self.input.is_multiple_of(l.block_elems))
-            && !(self.tensor.dtype == GgmlType::Q5_K && q5k_matmat_enabled())
     }
 
     pub(super) fn encode_rows(

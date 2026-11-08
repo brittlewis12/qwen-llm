@@ -119,7 +119,11 @@ fn cpu_gate_up_selection_protects_modes_dtypes_rows_and_production_geometry() {
                                     && (matches!(gate, GgmlType::Q4_K | GgmlType::Q5_K)
                                         || (iq_tensor_gate_up_enabled()
                                             && matches!(gate, GgmlType::IQ2_S | GgmlType::IQ3_S)))
-                                    && matches!(rows, 1024 | 2048)
+                                    && (matches!(rows, 1024 | 2048)
+                                        || (matches!(gate, GgmlType::IQ2_S | GgmlType::IQ3_S)
+                                            && crate::glm5_next_metal::row_policy::iq_expanded(
+                                                rows
+                                            )))
                             );
                         }
                     }

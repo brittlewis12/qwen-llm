@@ -72,7 +72,8 @@ fn cpu_down_policy_protects_all_arithmetic_modes_types_and_actual_rows() {
                             && dtype == GgmlType::IQ3_S
                             && (matches!(rows, 1024 | 2048)
                                 || (rows == 512
-                                    && crate::glm5_next_metal::short_prefill::enabled()));
+                                    && crate::glm5_next_metal::short_prefill::enabled())
+                                || crate::glm5_next_metal::row_policy::iq_expanded(rows));
                         assert_eq!(
                             selected(arith, mode, dtype, rows),
                             expected,

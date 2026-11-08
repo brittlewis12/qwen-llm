@@ -11,7 +11,7 @@ use super::*;
 const K: &str = "expert_tensor_gate_up";
 
 crate::env_flag!(
-    /// Default-on M5 GLM Fast/Half IQ gate/up panel selection at 1024/2048 rows. Buckets through 32 slots retain N32; larger buckets use N64. Zero restores all-N32 panels. Existing tensor, family and precision gates remain mandatory. No added GPU buffer or operand/reduction change.
+    /// Default-on M5 GLM Fast/Half IQ gate/up panel selection at 1024/2048 rows, extended to arbitrary 1024..=4096 with PREFILL_IQ_ANY_ROWS. Buckets through 32 slots retain N32; larger buckets use N64. Zero restores all-N32 panels. Existing tensor, family and precision gates remain mandatory. No added GPU buffer or operand/reduction change.
     default_on adaptive_requested,
     "QWEN_GLM53_PREFILL_PANELS"
 );
@@ -401,7 +401,7 @@ pub(crate) fn prepare<'a>(
         }
     }
     let adaptive = if (h, f, e, top) == (4096, 2048, 288, 8)
-        && matches!(rows, 1024 | 2048)
+        && (matches!(rows, 1024 | 2048) || crate::glm5_next_metal::row_policy::iq_expanded(rows))
         && matches!(b.gate_bank.dtype, GgmlType::IQ2_S | GgmlType::IQ3_S)
         && ctx.device_facts().gpu_families.apple10
         && adaptive_requested()

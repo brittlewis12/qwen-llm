@@ -50,7 +50,9 @@ pub(super) fn selected(arith: Arith, mode: StageMode, dtype: GgmlType, rows: usi
         && arith.precision == FastPrecision::Half
         && mode == StageMode::Fast
         && dtype == GgmlType::IQ3_S
-        && (matches!(rows, 1024 | 2048) || (rows == 512 && super::short_prefill::enabled()))
+        && (matches!(rows, 1024 | 2048)
+            || (rows == 512 && super::short_prefill::enabled())
+            || super::row_policy::iq_expanded(rows))
 }
 
 #[cfg(test)]

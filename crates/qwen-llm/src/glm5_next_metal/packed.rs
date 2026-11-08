@@ -2799,59 +2799,67 @@ mod down_policy_tests {
 
     #[test]
     fn iq3_s_down_policy_uses_actual_command_width_and_fast_lineage() {
-        for rows in 0..=2048 {
-            let expected = if rows == 512 && super::super::short_prefill::enabled() {
-                GroupedDownPolicy::Iq3STensorOrSmallCounts
-            } else if matches!(rows, 1024 | 2048) {
-                GroupedDownPolicy::Iq3STensor
-            } else if (32..=512).contains(&rows) {
-                GroupedDownPolicy::Iq3SSmallCounts
-            } else {
-                GroupedDownPolicy::Incumbent
-            };
-            assert_eq!(
-                grouped_down_policy(
-                    half(PackedLineage::Fast),
-                    StageMode::Fast,
-                    GgmlType::IQ3_S,
-                    2048,
-                    4096,
-                    288,
-                    8,
-                    rows
-                ),
-                expected,
-                "rows={rows}"
-            );
-            assert_eq!(
-                grouped_down_policy(
-                    half(PackedLineage::Exact),
-                    StageMode::Exact,
-                    GgmlType::IQ3_S,
-                    2048,
-                    4096,
-                    288,
-                    8,
-                    rows
-                ),
-                GroupedDownPolicy::Incumbent,
-                "Exact rows={rows}"
-            );
-        }
-        for rows in [4096, usize::MAX] {
-            assert_eq!(
-                grouped_down_policy(
-                    half(PackedLineage::Fast),
-                    StageMode::Fast,
-                    GgmlType::IQ3_S,
-                    2048,
-                    4096,
-                    288,
-                    8,
-                    rows
-                ),
-                GroupedDownPolicy::Incumbent
-            );
+        use super::super::{row_policy, tensor_down};
+        let _down = tensor_down::Scope::new(true);
+        for (any_rows, iq_rows) in [(true, true), (true, false), (false, true)] {
+            let _rows = row_policy::Scope::new(any_rows);
+            let _iq = row_policy::IqScope::new(iq_rows);
+            for rows in 0..=4096 {
+                let expected = if rows == 512 && super::super::short_prefill::enabled() {
+                    GroupedDownPolicy::Iq3STensorOrSmallCounts
+                } else if matches!(rows, 1024 | 2048)
+                    || (any_rows && iq_rows && (1024..=4096).contains(&rows))
+                {
+                    GroupedDownPolicy::Iq3STensor
+                } else if (32..=512).contains(&rows) {
+                    GroupedDownPolicy::Iq3SSmallCounts
+                } else {
+                    GroupedDownPolicy::Incumbent
+                };
+                assert_eq!(
+                    grouped_down_policy(
+                        half(PackedLineage::Fast),
+                        StageMode::Fast,
+                        GgmlType::IQ3_S,
+                        2048,
+                        4096,
+                        288,
+                        8,
+                        rows
+                    ),
+                    expected,
+                    "rows={rows}, any_rows={any_rows}, iq_rows={iq_rows}"
+                );
+                assert_eq!(
+                    grouped_down_policy(
+                        half(PackedLineage::Exact),
+                        StageMode::Exact,
+                        GgmlType::IQ3_S,
+                        2048,
+                        4096,
+                        288,
+                        8,
+                        rows
+                    ),
+                    GroupedDownPolicy::Incumbent,
+                    "Exact rows={rows}"
+                );
+            }
+            for rows in [4097, usize::MAX] {
+                assert_eq!(
+                    grouped_down_policy(
+                        half(PackedLineage::Fast),
+                        StageMode::Fast,
+                        GgmlType::IQ3_S,
+                        2048,
+                        4096,
+                        288,
+                        8,
+                        rows
+                    ),
+                    GroupedDownPolicy::Incumbent
+                );
+            }
         }
     }
 

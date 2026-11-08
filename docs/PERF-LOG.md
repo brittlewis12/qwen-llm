@@ -6,6 +6,85 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - Flash-Next Decode: Exact QSA Publication And Selection
+
+- Base **`e8df177f`**, M5 Ultra, unchanged two-shard **GSQ-RCO IQ3_S**.
+  Start from **FN-5M7T**, including dispatch-profile follow-ups, and the Nov 6
+  census/Nov 7 reduction receipts. Do not repeat binding elision, Q6-r2 fallback,
+  duplicated HC norms or the failed injection/next-norm fusion. This round ships
+  two independent defaults; **M4 and packed prefill retain their existing routes**:
+  **`QWEN_FN_QSA_POOL_PAR=0`** restores scalar publication;
+  **`QWEN_FN_QSA_DECODE_SELECT=0`** restores the old singleton radix selector.
+- Fresh main profile: `QWEN_FN_DECODE_DISPATCHES=1`, eight decode tokens at
+  depth 8192, including two complete publication periods. **1316 ordinary /
+  1328 fourth-token dispatches**, one encoder/command buffer. Twelve one-thread
+  pool publishers cost **1.163 ms/publication token**, **0.291 ms/token amortized**;
+  twelve selectors cost **0.499 ms/token**. Instrumented spans rank work and
+  are **not an additive wall-time allocation**. Retained timing disables them.
+- Publication (**`516ecc96`**): keep the literal serial norm/FMA order and F16
+  average rounding, then publish the 128 independent RoPE/output lanes together.
+  Selection (**`0a2cade7`**): reuse the existing Flash-Next prefill exact
+  radix-prefix/stable SIMD-compaction kernel for M5 singleton top-512. The same
+  algorithm already paid in the GLM Nov 6 receipt. No new score arithmetic,
+  weight format, device buffer, admission term or dispatch is introduced.
+  Optional PSO checks retain the incumbent on unsupported devices/pipelines.
+- Separate-process **ABBA** kill packets, each on top of the preceding retained
+  stage: 64 excluded warm steps after an 8192-token prefix, then 32 fixed-input
+  steps x four restored-entry repeats/arm. Timer includes ordinary native
+  `forward_token` and full logits copy. Prespecified **>=1.01x whole decode**,
+  both pair directions positive, finite outputs and all sixteen stream hashes
+  equal. Both stages pass without rerunning or discarding timing samples.
+
+  | Stage | Off / on mean ms/token | Whole-decode ratio | Pair ratios |
+  | --- | ---: | ---: | ---: |
+  | Pool publication | 13.7085 / 13.5179 | **1.01410x** | 1.01176 / 1.01645 |
+  | Exact singleton selection, pool on | 13.5207 / 13.2956 | **1.01693x** | 1.01780 / 1.01606 |
+
+- Same-binary ordinary CLI confirmation, both off/default, source identity
+  **match**, two reps/cell: `suite --tg 64 --depth 0,8192,32768 --runs 2 --seed 1`.
+  Normal model/row warmups; prefix work is outside the decode timer.
+
+  | Depth | Off tok/s | Default tok/s | Ratio |
+  | --- | ---: | ---: | ---: |
+  | 0 | 77.879 | **78.590** | **1.00913x** |
+  | 8192 | 72.698 | **75.002** | **1.03169x** |
+  | 32768 | 71.302 | **73.295** | **1.02796x** |
+
+  Selection is inactive at depth 0. Using the Nov 6 census's unchanged useful
+  logical bytes and measured streaming reference, the 8K cell reaches about
+  **35.5%**, versus **34.4%** off, of that optimistic bandwidth ceiling.
+  This is a native decode comparison, not a new llama.cpp or agent-session run.
+- Cumulative numerical qualification: frozen code/prose, 128 sequential
+  teacher-forced targets/document at depths **0/8192/32768**, both flags off/on.
+  **768 paired full-vocabulary vectors are finite and bitwise identical**:
+  **delta NLL = 0 nats/token, mean/max KL = 0, argmax 768/768**. Per-document
+  stream/token hashes and publication/selector dispatch assertions are retained.
+  New model-free GPU witnesses compare 60 publication cases and 200 selector
+  cases to the incumbents: F16 bits, long positions, ties/signed zeros/subnormals,
+  invalid/nonfinite status, shifted bindings, immutable inputs and output guards.
+- Re-profile: publication **0.138 ms/token amortized**, selection **0.268**;
+  dispatch count is unchanged. Largest isolated families are Q6-r1
+  **102 calls / 2.581 ms**, HC up/down **193 / 2.469 ms**, followed by mixed IQ/K
+  matvecs/experts. These spans include profiling effects; use the Nov 6 census
+  for recoverable gap shares. Stop here: another few-dozen-call projection join
+  is roughly **0.05-0.10 ms (<1% whole-token)** by the recorded command-floor
+  range. Larger command reuse or native-quant layout work needs a separate
+  resource/lifetime and format qualification effort. CPU encode remains about
+  **0.9 ms/token**, bounding perfect encode hiding near **7%**; a practical
+  **2-4%** command-reuse gain and several days of implementation/qualification
+  are estimates, not measured results. HC fusion's
+  recorded negative result still stands; speculation remains out of scope.
+- Validation: full M5 `cargo test --release -p qwen-llm --lib`, serial tests,
+  `MTL_DEBUG_LAYER=1` and required Metal tests: **2467 passed, 0 failed,
+  745 ignored**, **134.06 s**. CPU `scripts/check-contracts.sh`
+  passes on **`22209646`**, tree **`95bc666bb2a8c7448573bb13c2ce295a66904cb5`**;
+  this receipt adds documentation only. Release test typechecking also passes.
+  Build lock, nice 10, canonical GPU leases and cooling gaps; thermal pressure
+  **0 in all 746 retained performance/numerical thermal samples**. Frozen helpers,
+  plans, binaries/hashes, all native/e2e/profile samples, numerical banks and
+  test/contract logs: **`$HOME/qwen-runs/2026-11-08-fn-decode-next/`** on metagross;
+  raw logs/sources mirrored locally. No merge or owned worker left running.
+
 ## 2026-11-08 - Real OpenCode Agent Sessions On Tier-1 Serve
 
 - Clean M5 **`a41e20b0`**, installed laptop OpenCode run implementation

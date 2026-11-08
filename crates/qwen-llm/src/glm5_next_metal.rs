@@ -2491,6 +2491,7 @@ pub use interventions::{
 };
 mod snapshot;
 pub use lens::Glm5NextCapture;
+pub use packed::batch::{GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch};
 pub use packed::{FastPrecision, PackedLineage};
 pub use snapshot::{Glm5NextSnapshot, SNAPSHOT_POLICY_VERSION, snapshot_bytes};
 

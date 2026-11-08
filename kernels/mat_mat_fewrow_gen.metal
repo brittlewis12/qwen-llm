@@ -371,7 +371,7 @@ struct fewrow_gen_iq2_xxs {
 // Few-row mat-mat for any type with a 16-weight dequantizer: a lane
 // dequantizes 16 consecutive weights of a 64-weight chunk once for all
 // activation rows.
-template <typename Q, short NT, short RT, short NSG>
+template <typename Q, short NT, short RT, short NSG, typename W = half>
 kernel void kernel_mat_mat_fewrow_gen_f32(
     constant mat_mat_fewrow_gen_args & args [[buffer(0)]],
     device const uchar * weight [[buffer(1)]],
@@ -435,9 +435,9 @@ kernel void kernel_mat_mat_fewrow_gen_f32(
             Q::dequant(xr[t] + ulong(ci / Q::nl) * Q::block_bytes, ci % Q::nl, w);
 
             FOR_UNROLL (short s = 0; s < 8; ++s) {
-                simdgroup_half8x8 ma;
-                ma.thread_elements()[0] = half(w[s / 4][s % 4]);
-                ma.thread_elements()[1] = half(w[s / 4 + 2][s % 4]);
+                simdgroup_matrix<W, 8, 8> ma;
+                ma.thread_elements()[0] = W(w[s / 4][s % 4]);
+                ma.thread_elements()[1] = W(w[s / 4 + 2][s % 4]);
 
                 FOR_UNROLL (short rt = 0; rt < RT; ++rt) {
                     simdgroup_multiply_accumulate(mc[rt][t], ma, mb[rt][s], mc[rt][t]);
@@ -509,3 +509,15 @@ FEWROW_GEN_TYPE(iq3_xxs, fewrow_gen_iq3_xxs)
 FEWROW_GEN_TYPE(iq3_s, fewrow_gen_iq3_s)
 FEWROW_GEN_TYPE(iq4_nl, fewrow_gen_iq4_nl)
 FEWROW_GEN_TYPE(iq4_xs, fewrow_gen_iq4_xs)
+
+// GLM independent decode batches keep dequantized coefficients in F32.
+// The original instantiations above still use W=half and retain their ABI.
+#define FEWROW_F32W(NAME, Q, NT, NSG) \
+    template [[host_name("kernel_mat_mat_" #NAME "_fewrow_gen_f32w_nt" #NT "_rt1_nsg" #NSG "_f32")]] \
+    kernel mat_mat_fewrow_gen_t kernel_mat_mat_fewrow_gen_f32<Q, NT, 1, NSG, float>;
+#define FEWROW_F32W_TYPE(NAME, Q) \
+    FEWROW_F32W(NAME,Q,1,8) FEWROW_F32W(NAME,Q,2,8) FEWROW_F32W(NAME,Q,4,8) \
+    FEWROW_F32W(NAME,Q,1,16) FEWROW_F32W(NAME,Q,2,16) FEWROW_F32W(NAME,Q,4,16) \
+    FEWROW_F32W(NAME,Q,1,32) FEWROW_F32W(NAME,Q,2,32) FEWROW_F32W(NAME,Q,4,32)
+FEWROW_F32W_TYPE(q6_K, fewrow_gen_q6_K)
+FEWROW_F32W_TYPE(q8_0, fewrow_gen_q8_0)

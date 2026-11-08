@@ -5864,5 +5864,40 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed scripted engine, synthetic service clock and in-memory sinks; no Metal context, real model or timing measurement."
+  },
+  {
+    "target": "lib",
+    "name": "glm5_next_metal::packed::batch::tests::independent_batch_mode_never_substitutes_exact_or_f32_operands",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure independent-batch format/geometry and Exact/F32 mode eligibility; no device or model."
+  },
+  {
+    "target": "lib",
+    "name": "glm5_next_metal::packed::batch::tests::independent_batch_projection_checks_format_and_inner_tile_width",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure independent-batch format/geometry and Exact/F32 mode eligibility; no device or model."
+  },
+  {
+    "target": "lib",
+    "name": "glm5_next_metal::packed::batch::tests::model::m5_independent_likelihood_32k",
+    "class": "model",
+    "ignored": true,
+    "reason": "Actual M5 UD-IQ3_XXS likelihood, mode and noninterference witness; GLM53_GGUF, validation and internal production lease required."
+  },
+  {
+    "target": "lib",
+    "name": "glm5_next_metal::packed::batch::tests::model::m5_independent_likelihood_8k",
+    "class": "model",
+    "ignored": true,
+    "reason": "Actual M5 UD-IQ3_XXS likelihood, mode and noninterference witness; GLM53_GGUF, validation and internal production lease required."
+  },
+  {
+    "target": "lib",
+    "name": "metal::mat_mat::tests::fewrow_f32_weights_match_f64_and_reduce_rounding_error",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal Q6/Q8 few-row kernels, odd output tails and offset tensors against an F64 dot; requires a Metal device."
   }
 ]

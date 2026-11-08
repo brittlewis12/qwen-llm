@@ -3140,3 +3140,6 @@ mod absorb_tail_policy_tests {
         assert_eq!(ABSORB_TAIL.with(|s| s.get()), (None, 0));
     }
 }
+
+#[path = "batch.rs"]
+pub(super) mod batch;

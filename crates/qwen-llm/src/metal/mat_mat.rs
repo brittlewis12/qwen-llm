@@ -2106,6 +2106,51 @@ pub fn try_encode_mat_mat_fewrow_gen_f32(
     n_out: usize,
     n_cols: usize,
 ) -> Result<bool, MetalError> {
+    try_encode_mat_mat_fewrow_gen_weights(ctx, enc, weight, x, y, n_in, n_out, n_cols, false)
+}
+
+/// Few-row Q6/Q8 MMA with F32 dequantized weights and activations. Changes
+/// reduction order (E1) but introduces no Half operand rounding. Explicit
+/// caller entrypoint, independent of Qwen DFlash's generic Half-weight route.
+/// Qualified widths are 1..=4; no global dispatch policy is widened.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_mat_mat_fewrow_gen_f32_weights(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_cols: usize,
+) -> Result<(), MetalError> {
+    if !matches!(weight.dtype, GgmlType::Q6_K | GgmlType::Q8_0) || !(1..=4).contains(&n_cols) {
+        return Err(super::checks::bad_shape(
+            "mat_mat_fewrow_gen_f32_weights",
+            "Q6/Q8 and 1..=4 columns required",
+        ));
+    }
+    if try_encode_mat_mat_fewrow_gen_weights(ctx, enc, weight, x, y, n_in, n_out, n_cols, true)? {
+        return Ok(());
+    }
+    Err(super::checks::bad_shape(
+        "mat_mat_fewrow_gen_f32_weights",
+        "unsupported pipeline capacity",
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_encode_mat_mat_fewrow_gen_weights(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_cols: usize,
+    float_weights: bool,
+) -> Result<bool, MetalError> {
     use super::checks::{bad_shape, check_disjoint};
     use super::moe::{checked_moe_product, validate_moe_decode_tensor};
     use objc2_metal::MTLComputePipelineState as _;
@@ -2136,9 +2181,14 @@ pub fn try_encode_mat_mat_fewrow_gen_f32(
         ));
     }
     let (nt, rt, mut nsg) = fewrow_gen_tiling(n_in, n_out, n_cols);
+    let flavor = if float_weights {
+        "fewrow_gen_f32w"
+    } else {
+        "fewrow_gen"
+    };
     let pso_name = |ty: FewrowGenType, nt: usize, rt: usize, nsg: usize| {
         format!(
-            "kernel_mat_mat_{}_fewrow_gen_nt{nt}_rt{rt}_nsg{nsg}_f32",
+            "kernel_mat_mat_{}_{flavor}_nt{nt}_rt{rt}_nsg{nsg}_f32",
             ty.tag()
         )
     };
@@ -4329,6 +4379,100 @@ mod tests {
             );
             eprintln!(
                 "[fewrow-gen] {dtype:?} n_in={n_in} n_out={n_out} n_cols={n_cols} max_abs={max_abs:.3e} max_rel={max_rel:.3e} rms_rel={rms_rel:.3e}"
+            );
+        }
+    }
+
+    #[test]
+    fn fewrow_f32_weights_match_f64_and_reduce_rounding_error() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        for (case, (dtype, k, m, b)) in [
+            (GgmlType::Q6_K, 256, 17, 2),
+            (GgmlType::Q6_K, 4096, 65, 3),
+            (GgmlType::Q6_K, 4096, 2048, 4),
+            (GgmlType::Q8_0, 64, 9, 4),
+            (GgmlType::Q8_0, 128, 8192, 2),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ty = FewrowGenType::from_dtype(dtype).unwrap();
+            let mut seed = 0xAE31_771Du32 ^ case as u32;
+            let mut bytes = Vec::new();
+            for _ in 0..m * k / ty.block_weights() {
+                bytes.extend(fewrow_gen_random_block(dtype, &mut seed));
+            }
+            let desc = TensorDesc {
+                name: "fewrow-f32-weights".into(),
+                shape: vec![k as u64, m as u64],
+                dtype,
+                shard_idx: 0,
+                data_offset: 0,
+                n_bytes: bytes.len() as u64,
+            };
+            let wf = crate::codec::dequant_to_f32(&desc, &bytes).unwrap();
+            let x: Vec<f32> = (0..b * k)
+                .map(|i| ((i * 37 + 11) % 97) as f32 * 0.01 - 0.48)
+                .collect();
+            let w = offset_tensor(&ctx, 32, &bytes, 6, desc.shape.clone(), dtype);
+            let xt = offset_tensor(
+                &ctx,
+                16,
+                bytemuck::cast_slice(&x),
+                6,
+                vec![k as u64, b as u64],
+                GgmlType::F32,
+            );
+            let expected: Vec<f64> = (0..b)
+                .flat_map(|c| (0..m).map(move |r| (c, r)))
+                .map(|(c, r)| {
+                    (0..k)
+                        .map(|j| wf[r * k + j] as f64 * x[c * k + j] as f64)
+                        .sum()
+                })
+                .collect();
+            let mut mse = [0.0; 2];
+            for (full_precision, error) in [false, true].into_iter().zip(&mut mse) {
+                let y = offset_tensor(
+                    &ctx,
+                    16,
+                    bytemuck::cast_slice(&vec![f32::NAN; b * m]),
+                    6,
+                    vec![m as u64, b as u64],
+                    GgmlType::F32,
+                );
+                one_shot(&ctx, |enc| {
+                    if full_precision {
+                        encode_mat_mat_fewrow_gen_f32_weights(&ctx, enc, &w, &xt, &y, k, m, b)
+                    } else {
+                        encode_mat_mat_fewrow_gen_f32(&ctx, enc, &w, &xt, &y, k, m, b)
+                    }
+                })
+                .unwrap();
+                let got = unsafe {
+                    std::slice::from_raw_parts(
+                        y.buffer
+                            .contents()
+                            .as_ptr()
+                            .cast::<u8>()
+                            .add(y.offset as usize)
+                            .cast::<f32>(),
+                        b * m,
+                    )
+                };
+                assert!(got.iter().all(|v| v.is_finite()));
+                *error = got
+                    .iter()
+                    .zip(&expected)
+                    .map(|(a, e)| (*a as f64 - e).powi(2))
+                    .sum::<f64>();
+            }
+            let reference_energy = expected.iter().map(|v| v * v).sum::<f64>();
+            assert!(
+                mse[1] <= mse[0] * 0.02 + reference_energy * 1e-14,
+                "{dtype:?} {k}x{m} B={b}: half/F32 errors {mse:?}"
             );
         }
     }

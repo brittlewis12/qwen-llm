@@ -6,6 +6,75 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - GLM IQ Any-Row Diagnosis: Reduction and Operand Rounding
+
+- Base **`896ece2f`**, M5 Ultra, unchanged four-shard **UD-IQ3_XXS**,
+  Fast/Half. **No route widening ships.** The observed distribution failures
+  reproduce, but the controlled replays find genuine numerical differences
+  rather than a row-stride, partial-tile or unwritten-scratch failure.
+- Temporary instrumentation captures all **45 block outputs**, with isolated
+  IQ gate/up, IQ3_S down, sparse attention and combined substitutions at
+  **1596 and 2048 rows**, each against its native-kernel incumbent. Each
+  depth (**8192 / 65536**) uses one common default prefix snapshot and frozen,
+  disjoint Rust-prefix/prose-continuation inputs from the previous campaign.
+  Ordinary capacity **98304**, workspace **2048**; no padding in model execution.
+  Every candidate has **128 sequential teacher-forced targets/cell** with
+  full-vocabulary F64 NLL and KL(native || candidate).
+- First changed block is **3**, the first MoE/MLA block, for each substitution;
+  blocks 0-2 match. At 64K, first-block body relative L2 is **1.44e-5** for
+  gate/up, **4.39e-7** for down and **2.99e-4** for attention. These changes
+  already affect complete tiles. For each fixed route policy, the common first
+  **1536 rows are bitwise equal across both shapes through all 45 blocks**.
+  NaN-poisoning reusable scratch leaves every captured layer bitwise unchanged.
+- Same-input leaf replays compare physical **1596 / 2048** layouts: **26,148,864
+  gate/up**, **52,297,728 down** and **1,966,080 attention** outputs match
+  bitwise within each implementation. Attention raw scores/probabilities also
+  match between **60 / 64-query** batches. Expert canaries cover real IQ2_S and
+  IQ3_S banks, native/N32/adaptive tensor tiles, partial expert buckets, and
+  both fixed buckets and buckets enlarged by the extra 452 rows. The IQ3_S
+  bank uses the same captured block-3 inputs/routes. Outputs are
+  poisoned before replay. No shape-dependent leaf error appears.
+- **Cause:** IQ incumbents and tensor kernels both stage Half operands, but
+  use different F32 accumulation orders. Sampled independent F64 references
+  from real dequantized GGUF rows favor the tensor reduction: at 8K, maximum
+  staged-reference error for IQ2_S gate/up is **3.17e-6 native / 8.69e-7 tensor**
+  (IQ3_S: **2.57e-6 / 7.37e-7**); at 64K, down is **2.34e-6 / 1.69e-6**.
+  These errors are identical across the replay shapes. Sparse tensor attention
+  explicitly rounds **queries and probabilities to Half**. At 64K, sampled
+  QK error drops from **6.55e-4** against full-query F64 to **2.41e-6** against
+  Half-query F64; tensor PV error drops from **6.33e-5** against full-operand
+  F64 to **3.50e-7** when the reference uses the actual Half probabilities.
+  Small initial changes alter later expert selections and amplify across layers.
+- The incumbent has its own small shape-dependent tail: existing Q8_0 MLA
+  absorption/expansion dispatches full 128-row groups and per-row GEMVs for the
+  remainder, with different F32 reductions. At the first MLA, common selected
+  IDs/counts, visibility and latent-cache bits match; tail query max delta is
+  **7.15e-6**. This is separate from the tensor substitutions, whose body errors
+  reproduce exactly at both append sizes.
+- Matched **64K** distribution deltas below; each cell is **dNLL / mean KL**,
+  nats/token. Limits remain **|dNLL| <=0.005**, **mean KL <=0.01**.
+
+  | Substitution | 1596 rows | 2048 rows |
+  | --- | ---: | ---: |
+  | IQ gate/up | -0.006072 / 0.007149 | +0.018106 / 0.011440 |
+  | IQ3_S down | -0.004378 / 0.007731 | -0.008029 / 0.010584 |
+  | Sparse attention | -0.037098 / 0.009713 | -0.000750 / 0.008590 |
+  | Combined | -0.015130 / 0.008489 | -0.001558 / 0.009031 |
+
+- **2048 is cohort-specific, not a universal accuracy boundary.** The combined
+  64K cell passes, while 8K fails at **both** sizes: 1596 **-0.003587 / 0.011715**,
+  2048 **-0.019553 / 0.013023**. The prior ANY_ROWS rollback's bitwise 2048
+  control selected the same legacy routes in both arms; it was not a comparison
+  of tensor kernels with native kernels. Earlier qualified cohorts stay recorded.
+- Stop at diagnosis as requested: existing IQ/attention gates, KDA/Q6 defaults
+  and Exact/F32 contracts are unchanged. No new speed claim or e2e timing;
+  numerical-only campaigns held the canonical Metal lease, with cooling gaps
+  and thermal **0 throughout** under two-second monitoring. All temporary source
+  instrumentation/examples are removed. This is a documentation-only increment;
+  the full lib suite was not rerun. Sources, executable, raw layer/leaf/teacher
+  metrics, thermal logs, corpus hashes and analysis are archived at
+  **`~/qwen-runs/2026-11-07-glm-iq-rows/`** on metagross, mirrored locally.
+
 ## 2026-11-07 - V4.1 Serve: Header Folding With The Checkpoint Ladder
 
 - Integrates the serve append change with main **`97488b35`**. Implementation **`a45c0791`**; fixture refresh **`73bf94c1`**. Same M5 Ultra production **GSQ-RCO IQ2_XS + IQ4_NL Engram**, all 384 experts/top-6, ordinary Full with 4096-row ceiling.

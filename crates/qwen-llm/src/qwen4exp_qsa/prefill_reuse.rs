@@ -22,6 +22,21 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
+    /// Default-on M5 singleton QSA top-512 selector using the existing exact radix-prefix and stable SIMD-compaction kernel. Same scores, IDs, ties, status, scratch and dispatch count. Packed callers retain their existing gates. Set 0 for the incumbent decode selector.
+    default_on decode_selector_enabled,
+    "QWEN_FN_QSA_DECODE_SELECT"
+);
+
+pub(super) fn decode_selector_shape(
+    singleton: bool,
+    capacity: usize,
+    budget: usize,
+    count: usize,
+) -> bool {
+    singleton && count == 1 && capacity > 512 && budget == 512
+}
+
+crate::env_flag!(
     /// Flash-Next selected QSA logits at N32 and depth >=32768: reuse original F32 query vectors across eight selected keys, preserving the incumbent dimension and SIMD reduction order. No operand narrowing or new device buffers. Set 0 for the incumbent.
     default_on logits_reuse_enabled,
     "QWEN_FN_QSA_LOGITS_REUSE"
@@ -60,13 +75,18 @@ pub(super) fn selector_pipeline(
     budget: usize,
     count: usize,
     threads: usize,
+    singleton: bool,
 ) -> Result<Option<Pipeline>, MetalError> {
-    if !compact_selector_enabled()
-        || !simd_available(ctx)
-        || count != 32
-        || capacity < 8192
-        || budget != 512
-    {
+    let decode = decode_selector_shape(singleton, capacity, budget, count)
+        && ctx.tensor_ops_status().is_available()
+        && decode_selector_enabled();
+    let packed = !singleton
+        && compact_selector_enabled()
+        && simd_available(ctx)
+        && count == 32
+        && capacity >= 8192
+        && budget == 512;
+    if !decode && !packed {
         return Ok(None);
     }
     optional(

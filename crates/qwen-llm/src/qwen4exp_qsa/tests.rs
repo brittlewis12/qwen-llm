@@ -1356,6 +1356,7 @@ fn selected_index_primitives_match_repeated_scalar_kernels() {
             geometry.block_capacity(),
             geometry.block_budget(),
             1,
+            false,
         )
         .unwrap();
         let id_offset = query * geometry.output_width();
@@ -1458,6 +1459,7 @@ fn selected_index_selector_ties_and_failures_expand_deterministically() {
         geometry.block_capacity(),
         geometry.block_budget(),
         QUERIES,
+        false,
     )
     .unwrap();
     encode_expand_ids_packed(

@@ -3337,6 +3337,7 @@ fn encode_selected_index_primitives(
         g.block_capacity(),
         g.block_budget(),
         query_count,
+        false,
     )?;
     encode_expand_ids_packed(
         ctx,
@@ -5267,6 +5268,7 @@ fn encode_select_blocks(
         g.block_capacity(),
         g.block_budget(),
         1,
+        true,
     )
 }
 
@@ -5282,6 +5284,7 @@ fn encode_select_blocks_tensors(
     block_capacity: usize,
     block_budget: usize,
     query_count: usize,
+    singleton: bool,
 ) -> Result<(), MetalError> {
     let threads = index_reuse::selector_threads(ctx, block_capacity, query_count);
     #[repr(C)]
@@ -5298,6 +5301,7 @@ fn encode_select_blocks_tensors(
         block_budget,
         query_count,
         threads,
+        singleton,
     )? {
         Some(p) => p,
         None => ctx.pipeline("kernel_deepseek_v4_select_top_k_radix4_ids_f32")?,

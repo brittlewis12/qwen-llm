@@ -152,6 +152,8 @@ struct Recorded {
     cache: SnapshotCache<Vec<u32>>,
     restore_checkpoint: bool,
     selected_rows: usize,
+    decoded: Option<std::sync::Arc<AtomicBool>>,
+    retained_tips: Vec<usize>,
 }
 
 impl Default for Recorded {
@@ -164,6 +166,8 @@ impl Default for Recorded {
             cache: SnapshotCache::new(1 << 20, Default::default()),
             restore_checkpoint: false,
             selected_rows: 4096,
+            decoded: None,
+            retained_tips: Vec::new(),
         }
     }
 }
@@ -244,6 +248,20 @@ impl reuse::Reuse<Vec<u32>> for Recorded {
                     .insert_ladder_in(key, (), ids.to_vec(), state.clone(), bytes)
             );
         }
+    }
+    fn retain_tip(
+        &mut self,
+        key: Option<super::super::checkpoint_ladder::Conversation>,
+        ids: &[u32],
+    ) {
+        if let Some(decoded) = &self.decoded {
+            assert!(
+                decoded.load(Ordering::SeqCst),
+                "retention must follow emitted decode"
+            );
+        }
+        self.retained_tips.push(ids.len());
+        self.cache.record_tip(key, &(), ids);
     }
     fn commit(&mut self, live: reuse::Live<Vec<u32>>) {
         self.live = Some(live);
@@ -1456,6 +1474,18 @@ fn ladder_publishes_live_extensions_without_changing_calls_and_restores_a_fork()
     reuse.cache = reuse
         .cache
         .with_checkpoint_ladder(super::super::checkpoint_ladder::Config::testing(500000));
+    struct DecodedSink(std::sync::Arc<AtomicBool>);
+    impl GenerationSink for DecodedSink {
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            self.0.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    let decoded = std::sync::Arc::new(AtomicBool::new(false));
+    reuse.decoded = Some(decoded.clone());
     let prompt = format!("{}{}hh", "s".repeat(12000), "u".repeat(16000));
     let boundaries = PromptBoundaries {
         shared_prefix_end: Some(12000),
@@ -1466,7 +1496,7 @@ fn ladder_publishes_live_extensions_without_changing_calls_and_restores_a_fork()
             &request,
             &prompt,
             Some(boundaries),
-            &mut Sink,
+            &mut DecodedSink(decoded.clone()),
             |_, _, _| Ok(()),
             |_| Ok(vec![]),
             &mut reuse,
@@ -1474,7 +1504,7 @@ fn ladder_publishes_live_extensions_without_changing_calls_and_restores_a_fork()
                 state.extend_from_slice(ids);
                 let mut logits = vec![0.; 257];
                 if head {
-                    logits[256] = 100.;
+                    logits[97] = 100.;
                 }
                 Ok(logits)
             },
@@ -1496,4 +1526,5 @@ fn ladder_publishes_live_extensions_without_changing_calls_and_restores_a_fork()
         "existing shared snapshot preserved"
     );
     assert_eq!(reuse.cache.ladder_status().0, 1);
+    assert_eq!(reuse.retained_tips, [28000]);
 }

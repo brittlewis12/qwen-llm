@@ -168,7 +168,6 @@ impl Settings {
             "V4.1",
         )?;
         let mut checkpoint_cuts = Vec::new();
-        let mut shared_cut = None;
         let mut generation_cut = None;
         if let Some(boundaries) = boundaries {
             for (name, offset) in [
@@ -185,9 +184,6 @@ impl Settings {
                 if let Some(prefix) = prefix.filter(|prefix| {
                     !prefix.is_empty() && prefix.len() < ids.len() && ids.starts_with(prefix)
                 }) {
-                    if name == "shared_prefix" {
-                        shared_cut = Some(prefix.len());
-                    }
                     if name == "generation_header" {
                         generation_cut = Some(prefix.len());
                     }
@@ -267,7 +263,6 @@ impl Settings {
             position: matched,
             ids,
             checkpoint_cuts,
-            shared_cut,
             generation_cut,
             conversation: super::super::checkpoint_ladder::conversation(request),
             ladder_attempted: false,
@@ -359,17 +354,7 @@ impl Settings {
             run.ladder_capture_ms += (engine.now() - start).as_secs_f64() * 1e3;
         }
         if run.checkpoint_cuts.contains(&endpoint) {
-            if Some(endpoint) == run.shared_cut {
-                reuse.checkpoint(&run.state, &ids[..endpoint], &[], run.reserve);
-            } else {
-                reuse.conversation_checkpoint(
-                    run.conversation,
-                    &run.state,
-                    &ids[..endpoint],
-                    &[],
-                    run.reserve,
-                );
-            }
+            reuse.checkpoint(&run.state, &ids[..endpoint], &[], run.reserve);
         }
         Ok(())
     }
@@ -389,13 +374,7 @@ impl Settings {
             return Err(ServeError::server_error("V4.1 returned malformed logits").into());
         }
         if run.checkpoint_cuts.is_empty() {
-            reuse.conversation_checkpoint(
-                run.conversation,
-                &run.state,
-                &run.ids,
-                &run.logits,
-                run.reserve,
-            );
+            reuse.checkpoint(&run.state, &run.ids, &run.logits, run.reserve);
         }
         run.consumed = run.ids.clone();
         Ok(())
@@ -417,6 +396,9 @@ impl Settings {
             restore_ms,
             prefill_ms,
             ladder_capture_ms,
+            conversation,
+            generation_cut,
+            checkpoint_cuts,
             prefill_rows,
             prefill_chunks,
             prefill_calls,
@@ -429,6 +411,13 @@ impl Settings {
             logits,
             ..
         } = run;
+        let retention_start = Instant::now();
+        if let Some(tip) =
+            generation_cut.or_else(|| checkpoint_cuts.is_empty().then_some(ids.len()))
+        {
+            reuse.retain_tip(conversation, &ids[..tip]);
+        }
+        let retention_ms = retention_start.elapsed().as_secs_f64() * 1e3;
         let transitions = generation.transitions;
         let transition_ms = generation.transition_ms;
         let prefill_mode = if prefill_chunks == 0 {
@@ -437,10 +426,10 @@ impl Settings {
             crate::family_options::V41_PREFILL_MODE
         };
         tracing::info!(target: "qwen_diag",
-            "serve phases: family=deepseek_v41 prefill_ms={prefill_ms:.3} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.3} prefill_tokens={} prefill_mode={prefill_mode} prefill_rows={prefill_rows} prefill_chunks={prefill_chunks} prefill_calls={prefill_calls} prefill_selected_rows={selected_rows:?} prefill_rows_max={} decode_ms={:.3} required_forwards={required} capacity={} transitions={transitions} transition_ms={transition_ms:.3} ced=false ladder_capture_ms={ladder_capture_ms:.3}",
+            "serve phases: family=deepseek_v41 prefill_ms={prefill_ms:.3} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.3} prefill_tokens={} prefill_mode={prefill_mode} prefill_rows={prefill_rows} prefill_chunks={prefill_chunks} prefill_calls={prefill_calls} prefill_selected_rows={selected_rows:?} prefill_rows_max={} decode_ms={:.3} required_forwards={required} capacity={} transitions={transitions} transition_ms={transition_ms:.3} ced=false ladder_capture_ms={ladder_capture_ms:.3} retention_ms={retention_ms:.3}",
             ids.len() - matched, crate::family_options::V41_PREFILL_ROWS, generation.wall_ms, capacity);
         let mut phases = serde_json::json!({
-            "family":"deepseek_v41", "prefill_ms":prefill_ms, "ladder_capture_ms":ladder_capture_ms, "prefill_tokens":ids.len() - matched,
+            "family":"deepseek_v41", "prefill_ms":prefill_ms, "ladder_capture_ms":ladder_capture_ms, "retention_ms":retention_ms, "prefill_tokens":ids.len() - matched,
             "prefill_mode":prefill_mode, "prefill_rows":prefill_rows, "prefill_chunks":prefill_chunks,
             "prefill_rows_max":crate::family_options::V41_PREFILL_ROWS,
             "prefill_selected_rows":selected_rows, "prefill_calls":prefill_calls,
@@ -552,7 +541,6 @@ where
 pub(super) struct Run<S> {
     pub(super) ids: Vec<u32>,
     checkpoint_cuts: Vec<usize>,
-    shared_cut: Option<usize>,
     generation_cut: Option<usize>,
     conversation: Option<super::super::checkpoint_ladder::Conversation>,
     ladder_attempted: bool,

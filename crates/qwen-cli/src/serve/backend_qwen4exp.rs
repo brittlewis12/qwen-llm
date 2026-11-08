@@ -523,8 +523,6 @@ impl GenerationBackend for FlashNextBackend {
                 ) {
                     transcript_entry = self.cache.entry_for(&prompt_ids[..boundary]);
                 }
-                self.cache
-                    .record_tip(conversation, &(), &prompt_ids[..boundary]);
                 capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
             }
             let start = transcript_split.unwrap_or(matched_tokens);
@@ -555,10 +553,15 @@ impl GenerationBackend for FlashNextBackend {
                     "prompt",
                     self.control_cpu_reserve,
                 );
-                self.cache.record_tip(conversation, &(), &prompt_ids);
                 capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
             }
 
+            let tip_end = if transcript_entry.is_some() {
+                transcript_at.expect("transcript entry boundary")
+            } else {
+                prompt_ids.len()
+            };
+            let mut retention_ms = 0.0;
             let generation = decode_loop::decode_serial(
                 decode_loop::DecodeRequest {
                     family: FAMILY,
@@ -600,7 +603,11 @@ impl GenerationBackend for FlashNextBackend {
                         "completed",
                         self.control_cpu_reserve,
                     );
+                    let retention_start = Instant::now();
+                    self.cache
+                        .record_tip(conversation, &(), &prompt_ids[..tip_end]);
                     self.cache.record_tip(conversation, &(), &consumed);
+                    retention_ms += retention_start.elapsed().as_secs_f64() * 1e3;
                     if let Some(entry) = pinned {
                         self.cache.unpin(entry);
                     }
@@ -622,7 +629,7 @@ impl GenerationBackend for FlashNextBackend {
             };
             tracing::info!(
                 target: "qwen_diag",
-                "serve phases: family=qwen4exp tokenize_ms={tokenize_ms:.1} restore_ms={restore_ms:.1} matched_tokens={matched_tokens} prefill_ms={prefill_ms:.1} prefill_tokens={} snapshot_capture_ms={capture_ms:.1}{transcript_phase} decode_ms={:.1} required_forwards={required} forward_limit={} transitions={} snapshot_cache_bytes={} ladder={:?}",
+                "serve phases: family=qwen4exp tokenize_ms={tokenize_ms:.1} restore_ms={restore_ms:.1} matched_tokens={matched_tokens} prefill_ms={prefill_ms:.1} prefill_tokens={} snapshot_capture_ms={capture_ms:.1}{transcript_phase} decode_ms={:.1} required_forwards={required} forward_limit={} transitions={} snapshot_cache_bytes={} ladder={:?} retention_ms={retention_ms:.3}",
                 prompt_ids.len() - matched_tokens,
                 generation.wall_ms,
                 self.forward_limit,

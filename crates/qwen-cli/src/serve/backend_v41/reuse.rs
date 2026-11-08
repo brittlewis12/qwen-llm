@@ -48,16 +48,8 @@ pub(super) trait Reuse<S> {
         }
     }
     fn checkpoint(&mut self, state: &S, ids: &[u32], logits: &[f32], reserve: u64);
-    fn conversation_checkpoint(
-        &mut self,
-        _: Option<super::super::checkpoint_ladder::Conversation>,
-        state: &S,
-        ids: &[u32],
-        logits: &[f32],
-        reserve: u64,
-    ) {
-        self.checkpoint(state, ids, logits, reserve);
-    }
+    /// Retention may free large arenas; run only after decode, outside TTFT.
+    fn retain_tip(&mut self, _: Option<super::super::checkpoint_ladder::Conversation>, _: &[u32]) {}
     fn ladder_enabled(&self) -> bool {
         false
     }
@@ -205,15 +197,11 @@ impl Reuse<State> for Session<'_, '_> {
         self.capture_checkpoint(state, ids, logits, reserve);
     }
 
-    fn conversation_checkpoint(
+    fn retain_tip(
         &mut self,
         key: Option<super::super::checkpoint_ladder::Conversation>,
-        state: &State,
         ids: &[u32],
-        logits: &[f32],
-        reserve: u64,
     ) {
-        self.capture_checkpoint(state, ids, logits, reserve);
         self.store.cache.record_tip(key, &(), ids);
     }
 

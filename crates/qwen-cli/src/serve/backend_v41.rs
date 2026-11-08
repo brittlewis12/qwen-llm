@@ -20,9 +20,10 @@ use qwen_llm::tokenizer::NativeTokenizer;
 /// (default `DEFAULT_MAX_ACTIVE`; 1 is one request at a time, exactly the
 /// serial path). Above 1, every decoding request advances one token per
 /// `Forward::step_batch` step (plain `step` when only one decodes), and a new
-/// request's prefill interleaves with their decode in 512-row calls (full
-/// chunks when nobody else decodes), which changes that prompt's prefill
-/// partition and so F32 rounding. The acceptor's `QWEN_SERVE_QUEUE_DEPTH`
+/// request's prefill keeps the serial chunk geometry with decode-time
+/// sharing. `QWEN_SERVE_V41_PREFILL_FAIR=0` restores loaded 512-row calls,
+/// whose different prefill partition can change F32 rounding.
+/// The acceptor's `QWEN_SERVE_QUEUE_DEPTH`
 /// still bounds active plus waiting connections. Positive integer; read at
 /// startup.
 const MAX_ACTIVE_ENV: &str = "QWEN_SERVE_V41_MAX_ACTIVE";
@@ -43,6 +44,16 @@ const LIVE_STATE_MIB_ENV: &str = "QWEN_SERVE_V41_LIVE_STATE_MIB";
 /// streams, errors and publication order are unchanged. 0 samples every
 /// member serially on the owner. Non-negative integer; read at startup.
 const SAMPLE_WORKERS_ENV: &str = "QWEN_SERVE_V41_SAMPLE_WORKERS";
+/// Keep the normal 4096-row prefill quantum under decode load so cold/live
+/// CED planning and warm-header folding remain eligible. Between prefill
+/// quanta, give runnable decoders a wall-time budget. Default on; 0 restores
+/// alternating 512-row Full calls and single decode steps. Read at startup.
+const PREFILL_FAIR_ENV: &str = "QWEN_SERVE_V41_PREFILL_FAIR";
+/// Decode's target percentage of mixed prefill/decode service time with
+/// fair prefilling (default 10; integer 1..=90). Each prefill quantum earns
+/// at most one second of decode service; idle service earns no credit.
+/// Does not preempt a native prefill call. Read at startup.
+const DECODE_PERCENT_ENV: &str = "QWEN_SERVE_V41_DECODE_PERCENT";
 /// Default off. Log per-call native V4.1 serve prefill wall time and unsplit
 /// forward timings to stderr as JSON; no stage or per-dispatch profiling.
 /// Driver scheduling can overlap GPU and commit/wait; wait minus GPU is not
@@ -60,15 +71,14 @@ const FUSE_HEADER_ENV: &str = "QWEN_SERVE_V41_FUSE_HEADER";
 const COLD_CED_ENV: &str = "QWEN_SERVE_V41_COLD_CED";
 /// Plan exact shrinking CED for reused serve extensions of at least 8192
 /// new tokens. Keep retained cuts and Ready-only publication. Starts under
-/// load retain Full; active episodes can yield in loaded 512-row quanta.
+/// load remain eligible with fair prefilling; rollback keeps loaded starts
+/// on Full and active episodes can yield in loaded 512-row quanta.
 /// Default on; 0 restores Full for live extensions independently of cold CED.
 /// Read once when preparing the server.
 const LIVE_CED_ENV: &str = "QWEN_SERVE_V41_LIVE_CED";
 
-/// Agent workloads keep about three conversations busy at once. M5 Ultra, GSQ
-/// IQ2_XS, three agents x three turns (greedy, 128 tokens per turn, fresh
-/// server): 26.9 s with one request in flight and one live session, 21.6 s
-/// with four of each (1.25x); three concurrent single requests 1.18x.
+/// Keep up to four conversations in flight. Cohort throughput depends on
+/// the mixed prefill/decode policy, not just on decode batch width.
 const DEFAULT_MAX_ACTIVE: usize = 4;
 const DEFAULT_LIVE_STATES: usize = 4;
 
@@ -200,9 +210,11 @@ pub(super) fn start(
             .with_sample_workers(prepared.sample_workers)
             .context("start V4.1 sampling workers")?;
         tracing::info!(
-            "serve: V4.1 continuous batching: up to {} requests in flight (prefill {} rows per call while others decode; {} sampling workers)",
+            "serve: V4.1 continuous batching: up to {} requests in flight (loaded prefill {} rows; fair time sharing {}; decode target {}%; {} sampling workers)",
             prepared.max_active,
-            scheduler::LOADED_PREFILL_ROWS,
+            scheduler::loaded_prefill_rows(&backend.settings),
+            backend.settings.prefill_fair,
+            backend.settings.decode_percent,
             scheduler.sample_workers()
         );
         backend.scheduler = Some(scheduler);
@@ -303,6 +315,8 @@ pub(crate) struct Settings {
     fuse_header: bool,
     cold_ced: bool,
     live_ced: bool,
+    prefill_fair: bool,
+    decode_percent: usize,
 }
 
 impl Settings {
@@ -325,6 +339,11 @@ impl Settings {
         );
         ensure!(eos <= i32::MAX as u32, "EOS ID exceeds server token range");
         let max_piece_bytes = tokenizer.max_decoded_piece_bytes();
+        let decode_percent = positive_env(DECODE_PERCENT_ENV)?.unwrap_or(10);
+        ensure!(
+            decode_percent <= 90,
+            "{DECODE_PERCENT_ENV} must be in 1..=90"
+        );
         Ok(Self {
             tokenizer,
             context,
@@ -339,6 +358,8 @@ impl Settings {
             fuse_header: qwen_llm::env_flag::read_default_on(FUSE_HEADER_ENV),
             cold_ced: qwen_llm::env_flag::read_default_on(COLD_CED_ENV),
             live_ced: qwen_llm::env_flag::read_default_on(LIVE_CED_ENV),
+            prefill_fair: qwen_llm::env_flag::read_default_on(PREFILL_FAIR_ENV),
+            decode_percent,
         })
     }
 

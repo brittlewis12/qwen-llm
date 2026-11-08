@@ -4,15 +4,19 @@
 //! deliver output to parked clients, admit at most one waiting request, then
 //! either one prefill call for the oldest prefilling request or one decode
 //! step over every unparked decoding request (`Forward::step_batch`, plain
-//! `step` when only one decodes). The two alternate while both kinds wait.
+//! `step` when only one decodes). Under mixed load, normal prefill quanta
+//! earn a bounded wall-time budget for decoding. The rollback alternates
+//! single steps with small prefill calls.
 //!
 //! Each request runs the serial path's phases ([`Settings::begin`],
 //! [`Settings::prefill_slice`], [`Settings::finish_prefill`],
 //! [`DecodeCursor`], [`Settings::finish`]); only scheduling differs:
-//! - Prefill takes `V41_PREFILL_ROWS` per call when no other request decodes
-//!   and [`LOADED_PREFILL_ROWS`] while others do, so a long prompt cannot
-//!   stall their decode for a full chunk. That changes the prefill partition
-//!   (and so F32 rounding) of a prompt admitted under load.
+//! - Fair prefilling retains serial's `V41_PREFILL_ROWS` geometry, CED
+//!   eligibility and header folding. The requested decode-time share earns
+//!   at most one second per prefill quantum; single-kind service earns no
+//!   credit. Rollback uses [`LOADED_PREFILL_ROWS`] while others decode,
+//!   changing that prompt's partition and possibly its F32 rounding.
+//!   Neither policy preempts a native call already in progress.
 //! - A batched step never receives a request's cancellation flag, only the
 //!   process-shutdown flag: one disconnect must not poison the others. Each
 //!   request's own cancellation is observed between steps and drops it alone.
@@ -40,8 +44,16 @@ use super::*;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-/// Prompt rows per prefill call while other requests are decoding.
+/// Rollback prompt rows per call while other requests are decoding.
 pub(super) const LOADED_PREFILL_ROWS: usize = 512;
+
+pub(super) fn loaded_prefill_rows(settings: &Settings) -> usize {
+    if settings.prefill_fair {
+        crate::family_options::V41_PREFILL_ROWS
+    } else {
+        LOADED_PREFILL_ROWS.min(crate::family_options::V41_PREFILL_ROWS)
+    }
+}
 /// A parked request whose client drains nothing for this long is aborted
 /// (the HTTP socket write timeout).
 pub(super) const PARK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -115,6 +127,9 @@ pub(super) struct Scheduler<S> {
     pending: VecDeque<Pending>,
     active: Vec<Active<S>>,
     prefer_prefill: bool,
+    /// Decode service earned by the preceding mixed-load prefill quantum.
+    /// Never carried across idle or single-kind service.
+    decode_budget: Duration,
     /// 5xx completions since the last pump, for the owner's failure hook.
     server_failures: usize,
     /// Samples a multi-member step's members in parallel; None samples each
@@ -221,6 +236,7 @@ impl<S> Scheduler<S> {
             pending: VecDeque::new(),
             active: Vec::new(),
             prefer_prefill: false,
+            decode_budget: Duration::ZERO,
             server_failures: 0,
             sample_pool: None,
             #[cfg(test)]
@@ -366,19 +382,33 @@ impl<S> Scheduler<S> {
         let decoders: Vec<usize> = (0..self.active.len())
             .filter(|&i| self.active[i].next.is_some() && !self.active[i].parked())
             .collect();
+        let mixed = prefilling.is_some() && !decoders.is_empty();
+        if !mixed {
+            self.decode_budget = Duration::ZERO;
+        }
         let prefill_turn = match (prefilling, decoders.is_empty()) {
             (Some(_), true) => true,
+            (Some(_), false) if settings.prefill_fair => self.decode_budget.is_zero(),
             (Some(_), false) => {
                 self.prefer_prefill = !self.prefer_prefill;
                 !self.prefer_prefill
             }
             (None, _) => false,
         };
+        let started = engine.now();
         if prefill_turn {
             self.prefill(prefilling.expect("prefill turn"), settings, engine, reuse);
+            if settings.prefill_fair && mixed {
+                self.decode_budget = (engine.now() - started)
+                    .mul_f64(
+                        settings.decode_percent as f64 / (100 - settings.decode_percent) as f64,
+                    )
+                    .min(Duration::from_secs(1));
+            }
             progressed = true;
         } else if !decoders.is_empty() {
             self.decode(decoders, settings, engine, reuse);
+            self.decode_budget = self.decode_budget.saturating_sub(engine.now() - started);
             progressed = true;
         }
         progressed
@@ -533,7 +563,7 @@ impl<S> Scheduler<S> {
             .enumerate()
             .any(|(other, active)| other != index && active.decoding());
         let rows = if loaded {
-            LOADED_PREFILL_ROWS.min(crate::family_options::V41_PREFILL_ROWS)
+            loaded_prefill_rows(settings)
         } else {
             crate::family_options::V41_PREFILL_ROWS
         };
@@ -648,8 +678,10 @@ impl<S> Scheduler<S> {
             "width_max": active.width_max,
             "width_mean": (active.stepped > 0).then(|| active.width_sum as f64 / active.stepped as f64),
             "batched_transitions": active.batched_transitions,
-            "prefill_loaded_rows": LOADED_PREFILL_ROWS,
+            "prefill_loaded_rows": loaded_prefill_rows(settings),
             "prefill_loaded_calls": active.loaded_prefill_calls,
+            "prefill_fair": settings.prefill_fair,
+            "decode_percent": settings.prefill_fair.then_some(settings.decode_percent),
         });
         let mut outcome = settings.finish(run, &generation, reuse, Some(batch));
         if let (Some(token_io), Some(prefill_io)) = (&active.token_io, &active.prefill_io) {

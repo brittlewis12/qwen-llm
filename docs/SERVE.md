@@ -198,7 +198,10 @@ This job directory is separate from reusable model snapshots.
 GLM-5.3 Fast, DeepSeek V4.1 and Flash-Next retain checkpoints of long live
 conversation extensions. The default-on ladder observes an existing committed
 full chunk/call strictly before a long segment's endpoint; it never adds
-execution splits. V4.1 accepts only ready FullForward states (never CED), and
+execution splits. V4.1 accepts ready FullForward and exact shrinking-CED
+states; provisional CED yields cannot publish snapshots. Its whole-request
+planner finishes at the retained Ready ladder cut before continuing the body
+and generation header.
 Flash-Next uses its existing runtime snapshot identity. For GLM, exact
 token-prefix keys and a separate `fast_trajectory_checkpoint_v1` namespace
 (shared cut, workspace rows, operand precision and lineage) authorize restore.
@@ -221,7 +224,7 @@ half the existing snapshot-cache budget. These are entries in that cache, not
 additional memory entitlement. Expiry, process-memory admission, pinning and
 pressure eviction still apply; denied copies leave the execution schedule
 unchanged. Small extensions do not add interior copies (V4.1 uses the
-scheduler's actual call width, including 512-row calls under load). At least
+scheduler's actual call width, including the rollback's 512-row calls). At least
 4096 matching-prefix tokens separate optional retained points. V4.1 and
 Flash-Next promote already captured turn tips as history advances, with no
 second payload copy. Tip promotion/pruning runs after decode; `retention_ms`
@@ -672,17 +675,26 @@ batched throwaway decode step at startup, so the batched kernels' pipelines
   stopped, delivers queued output to parked clients, starts at most one waiting
   request (arrival order), then runs either one prefill call for the oldest
   prefilling request or one decode step over every unparked decoding request,
-  alternating while both wait. Every decoding request advances one token per
+  sharing service time while both wait. Every decoding request advances one token per
   `Forward::step_batch` call (plain `step`, with the request's own
   cancellation, when only one decodes). Requests run the serial phases
   unchanged (tokenize, cuts, admission, live/snapshot/cold take, prefill,
   the `decode_serial` token lifecycle via a per-token cursor, phases, commit
   only after success). Connections beyond N wait in the
   `QWEN_SERVE_QUEUE_DEPTH` queue, which still bounds active plus waiting.
-- **Prefill under load.** A prompt prefills in `V41_PREFILL_ROWS` calls when
-  no other request decodes and in 512-row calls while others do, so a long
-  prompt costs decoding requests at most one 512-row call between their
-  steps. Checkpoint cuts are unchanged.
+- **Prefill under load.** `QWEN_SERVE_V41_PREFILL_FAIR` defaults on. Keep
+  serial's `V41_PREFILL_ROWS` ceiling (4096), cold and large-live CED planning,
+  mandatory checkpoint cuts and short-append header folding while other
+  requests decode. One native call remains nonpreemptible. After a mixed-load
+  prefill quantum, runnable decoders receive a service-time budget measured
+  against the prefill's elapsed time. `QWEN_SERVE_V41_DECODE_PERCENT` sets the
+  decode target (default 10%, integer 1..=90); at target `p`, a prefill costing
+  `t` earns `t * p / (100-p)` of decode service, capped at one second. Decode
+  steps run until that budget is spent, then prefill resumes. Single-kind
+  service earns no credit. This is a throughput/latency balance, not a token
+  deadline or preemption guarantee. `QWEN_SERVE_V41_PREFILL_FAIR=0` restores
+  the previous alternation of one decode step with a 512-row loaded Full
+  call, including its CED-start restriction and prefill partition.
 - **Arithmetic.** `step_batch` runs each layer's dense projections once over
   all sequences: the FFN shared expert, the q_a/kv rank pair, q_b, output_a
   and output_b, the Engram projections and the head (skinny Q5_K/Q8_0
@@ -690,7 +702,7 @@ batched throwaway decode step at startup, so the batched kernels' pipelines
   also run once over all sequences, bitwise per sequence.
   `QWEN_V41_BATCH_SHARED=0` with `QWEN_V41_BATCH_ATTN=0`,
   `QWEN_V41_BATCH_HEAD=0` and `QWEN_V41_BATCH_ENGRAM=0` restores bitwise
-  per-sequence steps. A prompt
+  per-sequence steps. Under the scheduling rollback a prompt
   prefilled under load is split into different calls than it would be alone,
   which can change its rounding and therefore the generated text at
   temperature 0; its stats report `prefill_loaded_calls > 0`. Determinism is
@@ -712,8 +724,9 @@ batched throwaway decode step at startup, so the batched kernels' pipelines
   memory signals that include the other requests' resident states, and its
   caller reserve is increased by the reserves of requests already in flight.
   The engine admits each batch's scratch before touching any state. A
-  prefill call's scratch is admitted per call, and under load the call is
-  at most 512 rows. N live states plus idle ones (below) must fit: pair N with
+  prefill call's scratch is admitted for its actual rows, up to the normal
+  4096-row ceiling (512 under rollback). Optional CED may decline before
+  mutation and retain Full. N live states plus idle ones (below) must fit: pair N with
   `--max-context-tokens` and the snapshot budget accordingly; refusal is the
   usual typed 503.
 - **Idle live sessions.** `QWEN_SERVE_V41_LIVE_STATES` (default 4; 1 is the
@@ -721,16 +734,23 @@ batched throwaway decode step at startup, so the batched kernels' pipelines
   least recently used released first; `QWEN_SERVE_V41_LIVE_STATE_MIB`
   optionally caps their estimated bytes. A request takes the compatible idle
   state with the longest exact prefix; in-flight states are never pooled;
-  only ready full-forward states of successful requests are kept. Memory
+  only ready Full or exact CED states of successful requests are kept. Memory
   relief releases snapshots first, then idle states the admitting request
   could not take. With one state, relief stays snapshots-only as before.
 - **Stats.** With N > 1, `x_qwen.phases.batch` adds `max_active`, `queue_ms`
   (owner submission to start), `parked_ms`, `stepped_transitions`,
   `width_max`, `width_mean`, `batched_transitions` (steps shared with at least
   one other request), `prefill_loaded_rows` and `prefill_loaded_calls`.
+  `prefill_fair` and `decode_percent` identify the service policy (the latter
+  is null under rollback). `prefill_loaded_calls` counts reduced calls, so
+  fair prefilling reports zero even while decode work is interleaved.
   `transition_ms` counts each shared step's wall time; `prefill_ms` and
   `decode_ms` are wall clock and include other requests' interleaved work.
   Existing fields are unchanged.
+
+Historical measurements below use the October 28 scheduler and smaller
+roots. The November 8 concurrency standing and subsequent policy measurements
+are in [PERF-LOG](PERF-LOG.md).
 
 Measured (M5 Ultra, GSQ IQ2_XS, snapshots off, greedy, 2026-10-28): three
 concurrent requests (two 320-token, one 200-token streamed, short prompts)

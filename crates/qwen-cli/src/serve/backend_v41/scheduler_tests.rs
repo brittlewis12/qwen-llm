@@ -83,6 +83,8 @@ struct StubEngine {
     nan_prompt: Option<usize>,
     cold: bool,
     cold_encoded: usize,
+    /// Synthetic service time for a decode quantum (default 1 ms).
+    step_ms: u64,
 }
 
 impl StubEngine {
@@ -172,7 +174,7 @@ impl execution::Engine<Seq> for StubEngine {
     ) -> std::result::Result<Vec<f32>, String> {
         self.log.borrow_mut().steps.push(1);
         self.log.borrow_mut().events.push("step 1".into());
-        self.clock += Duration::from_millis(1);
+        self.clock += Duration::from_millis(self.step_ms.max(1));
         if state.unready || state.poisoned {
             return Err("sequence is provisional or poisoned by partial execution".into());
         }
@@ -198,7 +200,7 @@ impl BatchEngine<Seq> for StubEngine {
             log.batch_flags_are_shutdown
                 .push(std::ptr::eq(cancel, crate::shutdown::cancellation_flag()));
         }
-        self.clock += Duration::from_millis(1);
+        self.clock += Duration::from_millis(self.step_ms.max(1));
         if states.iter().any(|state| state.unready || state.poisoned) {
             return Err("sequence is provisional or poisoned by partial execution".into());
         }
@@ -354,6 +356,8 @@ fn settings() -> Settings {
     )
     .unwrap();
     settings.headroom = || finite_headroom(1 << 30);
+    // Keep the original small-quantum lifecycle witnesses as rollback checks.
+    settings.prefill_fair = false;
     settings
 }
 
@@ -1136,4 +1140,131 @@ fn cold_ced_yields_then_uses_loaded_quanta_while_another_request_decodes() {
             .iter()
             .any(|r| r[1].as_u64().unwrap() - r[0].as_u64().unwrap() == 512)
     );
+}
+
+#[test]
+fn fair_prefill_starts_ced_under_load_and_keeps_decoding_between_quanta() {
+    let mut settings = settings();
+    settings.prefill_fair = true;
+    let mut scheduler = Scheduler::new(2);
+    let mut engine = StubEngine {
+        cold: true,
+        ..StubEngine::default()
+    };
+    let mut reuse = Recording {
+        ready_short: true,
+        ..Recording::default()
+    };
+    let short = submit(&mut scheduler, prepared(&settings, "hi", true));
+    scheduler.pump(&settings, &mut engine, &mut reuse);
+    let mut request = prepared(&settings, &"x".repeat(12000), true);
+    Arc::get_mut(&mut request).unwrap().boundaries = None;
+    let cold = submit(&mut scheduler, request);
+    drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+    assert!(matches!(short.terminal(), Some(Ok(_))));
+    let Some(Ok((_, _, phases))) = cold.terminal() else {
+        panic!("{:?}", cold.terminal());
+    };
+    assert_eq!(phases["ced_episodes"], 1);
+    assert_eq!(phases["batch"]["prefill_loaded_calls"], 0);
+    assert_eq!(phases["batch"]["prefill_loaded_rows"], 4096);
+    let log = engine.log.borrow();
+    let first = log
+        .events
+        .iter()
+        .position(|e| e.starts_with("ced"))
+        .unwrap();
+    let last = log
+        .events
+        .iter()
+        .rposition(|e| e.starts_with("ced"))
+        .unwrap();
+    assert!(
+        log.events[first..last]
+            .iter()
+            .any(|e| e.starts_with("step"))
+    );
+    assert!(!log.events.iter().any(|e| e == "ced 512"));
+}
+
+#[test]
+fn fair_decode_service_tracks_elapsed_time_with_a_bounded_burst() {
+    // Each 4096-row prefill costs 4096 ms, each decode step costs 200 ms.
+    // 1% earns 41 ms (one step), 10% earns 455 ms (three steps); 90%
+    // reaches the one-second cap (five steps), then prefill resumes.
+    for (percent, expected) in [(1, 1), (10, 3), (90, 5)] {
+        let mut settings = settings();
+        settings.prefill_fair = true;
+        settings.decode_percent = percent;
+        let mut scheduler = Scheduler::new(2);
+        let mut engine = StubEngine {
+            cold: true,
+            step_ms: 200,
+            ..StubEngine::default()
+        };
+        let mut reuse = Recording {
+            ready_short: true,
+            ..Recording::default()
+        };
+        // Seven generated tokens, so even the longest burst leaves work.
+        let short = (1..=5)
+            .map(|n| prepared(&settings, &"hi".repeat(n), true))
+            .find(|request| {
+                settings
+                    .tokenizer
+                    .encode(&request.prompt, false)
+                    .unwrap()
+                    .len()
+                    % 5
+                    == 4
+            })
+            .unwrap();
+        let short = submit(&mut scheduler, short);
+        scheduler.pump(&settings, &mut engine, &mut reuse);
+        let mut request = prepared(&settings, &"x".repeat(12000), true);
+        Arc::get_mut(&mut request).unwrap().boundaries = None;
+        let cold = submit(&mut scheduler, request);
+        drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+        assert!(matches!(short.terminal(), Some(Ok(_))));
+        assert!(matches!(cold.terminal(), Some(Ok(_))));
+        let log = engine.log.borrow();
+        let ced: Vec<_> = log
+            .events
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| e.starts_with("ced").then_some(i))
+            .collect();
+        let steps = log.events[ced[0] + 1..ced[1]]
+            .iter()
+            .filter(|e| e.starts_with("step"))
+            .count();
+        assert_eq!(steps, expected, "decode {percent}%: {:?}", log.events);
+    }
+}
+
+#[test]
+fn fair_cancelled_ced_discards_provisional_state_and_preserves_other_decoders() {
+    let mut settings = settings();
+    settings.prefill_fair = true;
+    let mut scheduler = Scheduler::new(2);
+    let mut engine = StubEngine {
+        cold: true,
+        ..StubEngine::default()
+    };
+    let mut reuse = Recording {
+        ready_short: true,
+        ..Recording::default()
+    };
+    let short = submit(&mut scheduler, prepared(&settings, "hi", true));
+    scheduler.pump(&settings, &mut engine, &mut reuse);
+    let mut request = prepared(&settings, &"x".repeat(12000), true);
+    Arc::get_mut(&mut request).unwrap().boundaries = None;
+    let cold = submit(&mut scheduler, request);
+    scheduler.pump(&settings, &mut engine, &mut reuse);
+    assert_eq!(engine.cold_encoded, 4096);
+    cold.cancel.store(true, Ordering::Release);
+    drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+    assert!(matches!(cold.terminal(), Some(Err((true, _, _)))));
+    assert!(matches!(short.terminal(), Some(Ok(_))));
+    assert_eq!(reuse.commits.len(), 1, "provisional CED was not committed");
 }

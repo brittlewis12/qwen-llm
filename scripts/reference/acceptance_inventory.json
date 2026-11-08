@@ -5843,5 +5843,26 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Self-leased model-free Metal differential: exact ordered IDs, ties, nonfinite/visibility status, shifted buffers and guards against incumbent radix selection."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::fair_cancelled_ced_discards_provisional_state_and_preserves_other_decoders",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed scripted engine, synthetic service clock and in-memory sinks; no Metal context, real model or timing measurement."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::fair_decode_service_tracks_elapsed_time_with_a_bounded_burst",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed scripted engine, synthetic service clock and in-memory sinks; no Metal context, real model or timing measurement."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::fair_prefill_starts_ced_under_load_and_keeps_decoding_between_quanta",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed scripted engine, synthetic service clock and in-memory sinks; no Metal context, real model or timing measurement."
   }
 ]

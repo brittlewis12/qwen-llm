@@ -6,6 +6,120 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - GLM IQ Arbitrary Rows: Signed Qualification and Default Widening
+
+- Main base **`97488b35`**, code **`9d795d60`**, M5 Ultra, unchanged
+  four-shard **UD-IQ3_XXS**, Fast/Half. Measured production **`a92ed2e7`**
+  differs only by a subsequently corrected test witness. **Default-on IQ2_S/IQ3_S gate/up and
+  IQ3_S down at arbitrary 1024..=4096 command rows**; adaptive N32/N64 IQ
+  panels follow the expanded admission. `QWEN_GLM53_PREFILL_IQ_ANY_ROWS=0`
+  restores the prior IQ gates while retaining KDA/Q6 widening. The enclosing
+  `QWEN_GLM53_PREFILL_ANY_ROWS`, per-stage, precision and tensor-tier controls
+  remain authoritative. Qualified 512/1024/2048 behavior, Q4_K/Q5_K gates,
+  Exact/F32, workspace ceiling **2048** and allocation terms are unchanged.
+- Revised quality assessment uses **signed** dNLL, candidate minus incumbent:
+  negative predicts the continuation better. Eight frozen code/prose documents
+  per depth/row cohort, **128 true next-token targets/document**, including
+  the append endpoint; one common default prefix snapshot per campaign.
+  Depth **8192 / 65536**, capacity **98304**, ordinary 2048-row commands.
+  Paired hierarchical bootstrap: documents, then circular **32-token blocks**,
+  **10,000** replicates; 16/64-token sensitivity analyses are retained.
+- Distinguish deterministic repeatability from numerical sensitivity.
+  **896 repeated full-vocabulary vectors are bitwise equal**, dNLL/KL zero.
+  The arithmetic control changes native sparse-attention partitions from
+  **128 to 127 keys**, still 17 partitions, preserving F32 operands and all
+  quantization; it runs only during the append. On a fixed-input leaf its F64
+  RMS error is **1.073x** native, versus about **506x** for FP16 attention.
+- Final assessment interprets the requested **per-cohort numerical noise** as
+  the **95th percentile absolute per-document arithmetic-control dNLL**.
+  IQ's one-sided 95% upper bound is below that envelope in all six cohorts.
+  Table intervals are **90% bootstrap intervals**: their upper endpoints are
+  the one-sided 95% bounds. Full two-sided 95% intervals, signed document
+  controls and KL remain in the archive. All six IQ cohorts also clear the
+  document envelope with 16- and 64-token bootstrap blocks.
+
+  | Depth / rows | Docs | IQ dNLL [90% interval] | FP16 attention dNLL [90% interval] | Document noise envelope |
+  | --- | ---: | --- | --- | ---: |
+  | 8K / 1084 | 16 | +0.00079 [-0.00397, +0.00613] | -0.00104 [-0.00586, +0.00369] | 0.01607 |
+  | 8K / 1596 | 8 | -0.00195 [-0.01120, +0.00712] | +0.00284 [-0.00333, +0.01009] | 0.01061 |
+  | 8K / 1852 | 8 | +0.00359 [-0.00296, +0.01053] | +0.00588 [-0.00144, +0.01323] | 0.02045 |
+  | 64K / 1084 | 8 | +0.00141 [-0.00524, +0.00774] | -0.00200 [-0.00877, +0.00448] | 0.02140 |
+  | 64K / 1596 | 8 | -0.00105 [-0.00628, +0.00382] | +0.00381 [-0.00939, +0.01560] | 0.00929 |
+  | 64K / 1852 | 8 | -0.00034 [-0.00580, +0.00500] | -0.00093 [-0.00787, +0.00543] | 0.01329 |
+
+- **Assessment caveat:** the initially selected, stricter envelope of the
+  *bootstrapped control mean* measures precision of the average rather than
+  document-level numerical sensitivity. That preliminary rule was not passed
+  in one cell. Its fixed eight-document follow-up gives 8K/1084 IQ dNLL
+  **+0.000793**, two-sided 95% interval **[-0.004802, +0.007199]**, upper95
+  **+0.006127** versus the averaged-control envelope **0.005979** (gap
+  **0.000148**). Both the original eight-document result and the fixed follow-up
+  are retained. The final interpretation is explicit; no prespecified global
+  noninferiority proof is claimed.
+- **F64:** independent real-GGUF row references, paired samples; shared Half
+  operands for IQ (both implementations already stage them), incumbent F32
+  queries/probabilities for attention (the candidate adds its own rounding).
+  Across **2412 unique elements/family**, IQ RMS ratios to native are
+  **0.877 IQ2_S gate/up**,
+  **0.496 IQ3_S gate/up**, and
+  **0.627 IQ3_S down**; paired bootstrap upper95 ratios are below 1.
+  Full unrounded-operand references are also reported: ratios are approximately
+  **0.9980 / 1.0000 / 0.9996**, with intervals spanning 1, dominated by the
+  operand rounding shared by both paths. Samples are deduplicated within cells;
+  document/position clusters retain correlation across row widths.
+- **Sparse attention is not widened.** Its signed NLL is mixed, and 64K/1596
+  does not clear even the document-sensitivity upper-bound rule. More decisively,
+  F64 RMS error is **569.1x** native over **86,016** output components;
+  the extra query/probability Half rounding fails the no-worse F64 condition.
+  Existing qualified Fast/Half attention gates remain unchanged.
+- The historical shipped **2048-row / 8K combined** failure was **negative**:
+  **dNLL -0.019553**, improved likelihood, not a degradation. The fresh
+  eight-document combined cell is **-0.00133**, 95% interval
+  **[-0.00975, +0.00730]**, within measured sensitivity.
+- Operator sweep: **11 widths 1024..4096**, including 1025/1084/1596/1852/
+  2047/2049/4095, real IQ2_S/IQ3_S banks and IQ3_S down, poisoned outputs,
+  partial buckets and repeated real model rows for wider layouts. All finite;
+  **22** narrow/adaptive gate/up comparisons are bitwise equal. Mode, dtype,
+  geometry, bounds and independent rollback witnesses cover the expanded gates.
+- Quiet kill test at depth **66037**, 1596 code rows: **2715.340 -> 1916.133 ms**,
+  **1.4171x**, **29.43%** lower whole-prefill latency. Warm + two retained reps
+  per arm, ABBA order, same prefix snapshot; complete endpoint logits/statuses.
+  Final production binary with rollback off/on reproduces **1536** diagnostic
+  per-target NLL values **exactly**, with equal allocation terms.
+- Fresh native equivalent of warm serve appends at **66037** reused tokens,
+  same binary, frozen code, default 2048-row workspace. One warm + two retained
+  reps/cell/arm; medians below. Prefix fill and snapshot restore are untimed.
+  An initial timing pass overlapped test CPU work and had a 5% 1084-row
+  baseline spread; it is retained separately, not pooled. This final repeat
+  runs after the full suite; every retained sample spread is below 0.08%.
+  Setup uses complete 2048-row chunks plus a 501-row tail, retaining identical
+  prefix arithmetic in both arms; these are fresh paired baseline measurements.
+
+  | New rows | IQ off ms | On/default ms | Throughput ratio | Saved ms |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 1084 | 1957.401 | 1369.923 | **1.4288x** | 587.478 |
+  | 1596 | 2714.171 | 1912.376 | **1.4193x** | 801.795 |
+  | 1852 | 3086.967 | 2186.196 | **1.4120x** | 900.771 |
+  | 2048 | 2104.344 | 2101.553 | **1.0013x** | 2.792 |
+
+- Validation: M4 CPU mode/bounds/rollback witnesses **3 passed**.
+  Full Cargo-built release lib artifact, serial, `MTL_DEBUG_LAYER=1`,
+  `QWEN_REQUIRE_METAL_TESTS=1`: **2462 passed, 0 failed, 741 ignored**,
+  **134.03 s**. The suite acquires its own per-test leases; an initial
+  outer-leased harness was stopped, and a stale legacy-width expectation was
+  corrected before this final successful run. Production code is unchanged
+  by that test-only correction. `scripts/check-contracts.sh` passes on
+  **`9d795d60`**. Numerical and timing workers use the canonical Metal lease;
+  all builds and all accepted timings hold the shared build lock, nice 10.
+  Cooling gaps and repeated zero readings between campaigns; accepted numeric
+  and timing campaigns thermal **0 throughout** under two-second monitoring.
+- Only maintained report: this entry. Frozen corpora/hashes, original and
+  follow-up protocols, both noise definitions, every loss/control, F64 samples,
+  operator sweep, binaries/sources, native comparisons, timings and check logs:
+  **`~/qwen-runs/2026-11-07-glm-iq-signed/`** on metagross, mirrored locally.
+  Temporary instrumentation/examples are removed; both worktrees are clean,
+  no GLM worker remains, and no merge was performed.
+
 ## 2026-11-07 - GLM IQ Any-Row Diagnosis: Reduction and Operand Rounding
 
 - Base **`896ece2f`**, M5 Ultra, unchanged four-shard **UD-IQ3_XXS**,

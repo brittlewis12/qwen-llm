@@ -5815,5 +5815,19 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Pure served-extension planner with fake Ready state; no Metal context, model, allocation or GPU dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "qwen4exp_qsa::tests::pool_publish::parallel_pool_geometry_retains_unqualified_shapes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure singleton publication geometry predicate; no Metal context, model import or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "qwen4exp_qsa::tests::pool_publish::parallel_pool_matches_scalar_with_shifted_buffers",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Leased model-free Metal witness: scalar/parallel F16 publication bits, shifted inputs/outputs, guards, rounding cases and long positions."
   }
 ]

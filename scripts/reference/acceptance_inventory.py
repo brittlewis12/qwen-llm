@@ -35,6 +35,7 @@ SCOPES = {
         "glm5_next_metal::tests::snapshot_gates::live_trajectory_observer_restore_is_exact",
         "qwen4exp_runtime::tests::snapshot::live_checkpoint_observer_restores_exact_state",
         "qwen4exp_runtime::retained_tests::",
+        "qwen4exp_qsa::tests::pool_publish::",
         "qwen4exp_text_session::snapshot_copy::tests::",
         "metal::moe_grouped_generic::tests::staging_ownership::",
         "metal::moe_grouped_generic::tests::wide_activation_type::",

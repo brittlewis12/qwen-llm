@@ -5026,8 +5026,8 @@ fn encode_pool_publish(
         eps: f32,
     }
     let g = workspace.geometry;
-    // Default-on M5 decode publication: preserve the serial pooled norm and
-    // parallelize the independent 128 output lanes. Packed prefill is separate.
+    /// Default-on M5 singleton pool publication across 128 output lanes, with
+    /// the incumbent serial norm and half rounding. 0 restores one-thread publication.
     const PARALLEL_POOL: &str = "QWEN_FN_QSA_POOL_PAR";
     let parallel = ctx.tensor_ops_status().is_available()
         && parallel_pool_shape(g.ratio, g.index_head_dim)

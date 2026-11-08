@@ -6,6 +6,92 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - V4.1 Concurrent Census: Prefill Dominates; Short Tail CED Rejected
+
+- **No runtime change.** Base **`c6855ba5`**, unchanged M5 Ultra four-shard
+  production GSQ-RCO IQ2_XS + IQ4_NL Engram. Reuse the prior three-agent x
+  three-turn, distinct 16K-root / ~1.1K-append protocol, 128 outputs/turn,
+  context 32768. Inspect both existing traces, then one unsplit-quantum
+  census of the incumbent. Native profiling records command timestamps;
+  no per-stage/per-dispatch splitting. Census **50.635 s**, versus clean
+  standing **50.120 s**; instrumentation/short-run variation is about 1%.
+  All 1152 outputs complete. Cooling, build lock, canonical lease and sampled
+  thermal **0 throughout**; other lanes alternate between arms.
+- Disjoint owner service intervals, including each native call's CPU/GPU
+  work and waits. Do not add per-request `prefill_ms`/`decode_ms`: those
+  overlap other requests, and shared `transition_ms` is charged per member.
+
+  | Bucket | Wall s | Cohort share | Calls |
+  | --- | ---: | ---: | ---: |
+  | Cold CED prefixes, to retained ladder cuts | **19.645** | **38.8%** | 9 quanta / 3 episodes |
+  | Cold Full tails, 3834..3836 rows | **10.184** | **20.1%** | 3 |
+  | Loaded 1122..1123-row appends | **6.759** | **13.3%** | 6 |
+  | Decode B=1 | 1.875 | 3.7% | 84 |
+  | Decode B=2 | 2.917 | 5.8% | 96 |
+  | Decode B=3 | 8.040 | 15.9% | 289 |
+  | Shared prelude and two-token headers | 0.941 | 1.9% | 4 |
+  | Outside useful quanta | **0.273** | **0.5%** | includes observation/admission/transport |
+
+  Batch counts agree exactly with the original trace's aggregate counters:
+  **469 forwards / 1143 member transitions**. Ordinary median service is
+  **13.407 / 22.363 / 27.595 ms** at B=1/2/3, about **1.20x / 1.46x**
+  aggregate decode versus independent B=1 calls. Four post-prefill outliers
+  cost **372..382 ms** each, about **1.45 s** above ordinary service. Their
+  command GPU durations are also long (**363..372 ms**); their cause is not
+  established as CPU launch latency or transport parking.
+- The **3.294 s** maximum content-event gap reproduces the prior 3.3 s
+  observation and aligns with cold Full tails. These are nonpreemptible
+  native work, not an idle scheduler timer. Audit confirms the owner parks
+  only when nothing progresses. GPU command windows total **39.839 s**
+  inside a **50.488 s** GPU span, leaving **10.649 s uncovered**. This is
+  nested within the wall buckets, not another additive bucket. Single-step
+  `gpu_step` envelopes overlap `decode_submit`; retain only the latter when
+  present. Driver intervals overlap GPU/wait and are not additive either.
+- Cold CED has **12.987 s** of GPU commands in **19.645 s** of service.
+  Host preparation is **2.181 s** (including **1.857 s** Engram and **0.319 s**
+  embedding); submission encoding is **2.108 s**, including the streamed
+  layer-14 receive before commit. Its existing late-join timer starts after
+  receive and measures the write, so it cannot be treated as the I/O wait.
+  Three encoder-to-decoder GPU gaps are **399 / 410 / 411 ms**. Allocations
+  explicitly measured here total only a few milliseconds.
+- **Kill test:** the native dependency halo is 2541 rows, so try a second
+  exact episode for the 3072..4096-row cold remainder after the retained
+  cut. It preserves cuts and reduces tail service to **8.887 s**; instrumented
+  cohort **49.098 s**, versus **50.635 s** incumbent. **Rejected:** strict
+  Full/CED body endpoint fails immediately for the 3834-row probe after
+  prefix 12593: component 0 **3.4762795 != 3.5061765**, validation enabled.
+  Do not substitute cosine/distribution tolerance for the exact CED contract.
+  No further lineage rewrite in this bounded round. Prototype and diagnostic
+  code are archived separately; the knob and code are absent from production.
+- **Ranking / estimates, not measured gains:**
+  1. Keep one CED episode through the body while retaining the same interior
+     checkpoint, avoiding the Full tail and checkpoint-only reconstruction.
+     An encoder-complete continuation checkpoint would need separate proof
+     of complete KV/Engram/compressor state; do not relabel provisional state
+     as Ready. Also settle ragged Full/CED lineage. Expected **4-5 s / 8-10%**
+     cohort gain, based on replacing 10.2 s Full tails with about 5.2 s of
+     additional encoder work. **3-5 days** for design, ownership/admission,
+     cancellation and exact restore/teacher checks.
+  2. Overlap streaming CED preparation/late Engram reads with GPU work across
+     bounded yields, and prepare decoder resources earlier. Expected
+     **1.5-2.5 s / 3-5%**, **2-3 days** including reader lifetime, cancellation
+     and buffer ownership. The measured CPU/driver intervals are not all
+     recoverable.
+  3. Diagnose the four post-prefill decode stalls: **1.45 s / 2.9% ceiling**,
+     likely less recoverable; residency/resource attribution remains unproved.
+     **1-2 days** of tracing before a safe change. Ordinary B=2/3 kernels
+     already amortize work; warm-append kernels are GPU dominated
+     (**5.901 s GPU / 6.759 s wall**), so small isolated improvements have
+     limited cohort value.
+- Stop at this decision point: no clearly qualified one-day runtime win.
+  Production Rust/shaders remain byte-identical to main. Docs whitespace/path
+  checks pass; no redundant model/full-suite campaign for a docs-only result.
+  Raw census quanta, existing-trace cross-checks, failed endpoint witness,
+  source/binary identities and prototype patch:
+  **`~/qwen-runs/2026-11-08-v41-cohort-census/`**, metagross and local mirror.
+  **`evidence/v41-cohort-census-20261108`** preserves the experiment. No merge
+  or owned process remains.
+
 ## 2026-11-08 - V4.1 Serve: Keep CED Under Load With Bounded Decode Sharing
 
 - **Default on**, implementation **`97322961`**, base **`fe5f055a`**.

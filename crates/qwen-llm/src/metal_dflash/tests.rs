@@ -3438,7 +3438,6 @@ fn product_moe_plan(
 ) -> PrefillScratchPlan {
     let modes = PrefillScratchPlanModes {
         enable_attn_packed: true,
-        enable_attn_fused_qkv_g8: false,
         enable_attn_matrix: true,
         attn_matrix_max_pos: 11_287,
         attn_matrix_online: true,

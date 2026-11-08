@@ -46,7 +46,7 @@ use crate::metal::{
     encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
     encode_rope_neox_pair_adaptive_f32_packed_consecutive, encode_scatter_offset_f32_to_f16_kv,
     encode_scatter_offset_f32_to_f16_kv_vt, encode_sigmoid_f32, encode_silu_mul_f32,
-    encode_split_qkv_fused_f32, encode_topk_logits_softmax_dot_sigmoid_packed_f32,
+    encode_topk_logits_softmax_dot_sigmoid_packed_f32,
     encode_topk_logits_softmax_dot_sigmoid_packed_f32_status, encode_topk16_f32,
     kernel_trace_begin, kernel_trace_snapshot, kernel_trace_take_delta,
 };
@@ -2116,18 +2116,6 @@ fn prefill_attn_packed_g16_min_pos() -> usize {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(128)
     })
-}
-
-fn prefill_attn_fused_qkv_g8_enabled(n_pos: usize, group: usize) -> bool {
-    static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
-    if group != 8 || n_pos < 4096 {
-        return false;
-    }
-    match *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_FUSED_QKV_G8")) {
-        PrefillEnvMode::ForceOn => true,
-        PrefillEnvMode::ForceOff => false,
-        PrefillEnvMode::Auto => false,
-    }
 }
 
 fn prefill_attn_matrix_g4_mode() -> PrefillEnvMode {
@@ -6619,7 +6607,6 @@ impl PrefillScratchAllocation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PrefillScratchPlanModes {
     enable_attn_packed: bool,
-    enable_attn_fused_qkv_g8: bool,
     enable_attn_matrix: bool,
     attn_matrix_max_pos: u64,
     attn_matrix_online: bool,
@@ -6837,11 +6824,6 @@ fn build_prefill_scratch_plan_from_arch(
     let q_dim = checked_u64_mul(n_q, head_dim, "prefill plan q_dim overflow")?;
     let kv_dim = checked_u64_mul(n_kv, head_dim, "prefill plan kv_dim overflow")?;
     let attn_q_full_dim = checked_u64_double(q_dim, "prefill plan 2*q_dim overflow")?;
-    let attn_qkv_fused_dim = checked_u64_add(
-        attn_q_full_dim,
-        checked_u64_double(kv_dim, "prefill plan 2*kv_dim overflow")?,
-        "prefill plan fused qkv dim overflow",
-    )?;
     let moe_topk = u64::from(arch.expert_used_count.min(arch.expert_count)).max(1);
     let moe_f_exp = u64::from(arch.expert_feed_forward_length).max(1);
     let moe_f_shared = u64::from(arch.expert_shared_feed_forward_length).max(1);
@@ -7044,21 +7026,12 @@ fn build_prefill_scratch_plan_from_arch(
     let nq = checked_u64_mul(n, q_dim, "prefill plan n*q overflow")?;
     let nkv = checked_u64_mul(n, kv_dim, "prefill plan n*kv overflow")?;
     let n_q_full = checked_u64_mul(n, attn_q_full_dim, "prefill plan n*q_full overflow")?;
-    let n_qkv_fused = checked_u64_mul(n, attn_qkv_fused_dim, "prefill plan n*qkv_fused overflow")?;
     let n_experts = checked_u64_mul(n, expert_count, "prefill plan n*experts overflow")?;
     let n_shared = checked_u64_mul(n, moe_f_shared, "prefill plan n*shared overflow")?;
     for (name, elements) in [
         ("x_pack", nh),
         ("h_pack", nh),
         ("mixer_out_pack", nh),
-        (
-            "attn_qkv_fused_pack",
-            if modes.enable_attn_fused_qkv_g8 {
-                n_qkv_fused
-            } else {
-                1
-            },
-        ),
         ("attn_q_full_pack", n_q_full),
         ("attn_q_pack", 1),
         ("attn_gate_pack", 1),
@@ -7184,10 +7157,6 @@ fn resolve_prefill_scratch_plan_modes(
             && head_dim == 256
             && attn_group == 6
             && mtp_attn_q2_shared_kv_enabled());
-    let enable_attn_fused_qkv_g8 = matches!(
-        std::env::var("QWEN_PREFILL_ATTN_FUSED_QKV_G8").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-    );
     let enable_attn_matrix = head_dim == 256
         && ((prefill_attn_matrix_g4_may_use()
             && arch.n_kv_heads.checked_mul(4) == Some(arch.n_q_heads))
@@ -7209,7 +7178,6 @@ fn resolve_prefill_scratch_plan_modes(
     })?;
     Ok(PrefillScratchPlanModes {
         enable_attn_packed,
-        enable_attn_fused_qkv_g8,
         enable_attn_matrix,
         attn_matrix_max_pos,
         attn_matrix_online: prefill_attn_matrix_online_enabled(),
@@ -7294,9 +7262,6 @@ pub struct MetalDFlashLayerMajorScratch {
     pub mixer_out_pack: MetalTensor,
 
     // Attention scratch (only meaningful on attn layers).
-    /// `[N, 2·q_dim + 2·kv_dim]` F32 — fused QKV front projection for the
-    /// experimental group-8 packed-prefill path.
-    pub attn_qkv_fused_pack: MetalTensor,
     /// `[N, 2·q_dim]` F32 — gated Q projection (Q + gate interleaved).
     pub attn_q_full_pack: MetalTensor,
     /// v0.447: stubbed at 1 element. The strided q-norm + fused gate
@@ -7496,7 +7461,6 @@ impl MetalDFlashLayerMajorScratch {
             &self.x_pack,
             &self.h_pack,
             &self.mixer_out_pack,
-            &self.attn_qkv_fused_pack,
             &self.attn_q_full_pack,
             &self.attn_q_pack,
             &self.attn_gate_pack,
@@ -7610,11 +7574,6 @@ impl MetalDFlashLayerMajorScratch {
         let moe_f_exp = arch.expert_feed_forward_length.max(1) as u64;
         let moe_f_shared = arch.expert_shared_feed_forward_length.max(1) as u64;
         let attn_q_full_dim = checked_u64_double(q_dim, "layer-major 2 * q_dim overflow")?;
-        let attn_qkv_fused_dim = checked_u64_add(
-            attn_q_full_dim,
-            checked_u64_double(kv_dim, "layer-major 2 * kv_dim overflow")?,
-            "layer-major attn qkv fused dim overflow",
-        )?;
         let moe_slot_elems = checked_u64_mul(n, moe_topk, "layer-major moe slot count overflow")?;
         let moe_inner_elems = checked_u64_mul(
             moe_slot_elems,
@@ -7704,7 +7663,6 @@ impl MetalDFlashLayerMajorScratch {
             (modes, plan)
         };
         let enable_attn_packed = modes.enable_attn_packed;
-        let enable_attn_fused_qkv_g8 = modes.enable_attn_fused_qkv_g8;
         let enable_attn_matrix = modes.enable_attn_matrix;
         let attn_matrix_max_pos = modes.attn_matrix_max_pos;
         // The F32 scores buffer backs the three-kernel sidecar (rollback);
@@ -7944,15 +7902,6 @@ impl MetalDFlashLayerMajorScratch {
             x_pack: allocator.f32(ctx, "x_pack", vec![n, h])?,
             h_pack: allocator.f32(ctx, "h_pack", vec![n, h])?,
             mixer_out_pack: allocator.f32(ctx, "mixer_out_pack", vec![n, h])?,
-            attn_qkv_fused_pack: allocator.f32(
-                ctx,
-                "attn_qkv_fused_pack",
-                if enable_attn_fused_qkv_g8 {
-                    vec![n, attn_qkv_fused_dim]
-                } else {
-                    vec![1]
-                },
-            )?,
             attn_q_full_pack: allocator.f32(ctx, "attn_q_full_pack", vec![n, attn_q_full_dim])?,
             attn_q_pack: allocator.f32(ctx, "attn_q_pack", vec![1])?,
             attn_gate_pack: allocator.f32(ctx, "attn_gate_pack", vec![1])?,
@@ -12214,7 +12163,6 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                         && attn_mat_mat_eligible(a.v.dtype)
                         && attn_mat_mat_eligible(a.o.dtype);
                     let trace_attn_phases = prefill_trace_attn_phases_enabled();
-                    let attn_q_full_dim = 2 * q_dim;
 
                     if attn_batched {
                         // Sized views of attn pack scratch.
@@ -12239,87 +12187,45 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                         let attn_o_pack_p = layer_scratch
                             .attn_o_pack
                             .view_subrange(0, vec![(chunk_p * q_dim) as u64]);
-                        let use_fused_qkv =
-                            layer_scratch.scratch_plan.modes.enable_attn_fused_qkv_g8
-                                && prefill_attn_fused_qkv_g8_enabled(
-                                    chunk_start as usize + chunk_p,
-                                    n_q / n_kv,
-                                )
-                                && a.qkv_fused.is_some();
                         let fused_qk_norm_rope = prefill_qk_norm_rope_fused_enabled(chunk_p)
                             && !prefill_noop_attn_body_enabled();
-                        let qkv_fused_dim = attn_q_full_dim + 2 * kv_dim;
 
                         // Step A: batched Q/K/V projections and Q/K post-processing.
                         if trace_attn_phases {
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
-                                label_prefill_encoder(
+                                label_prefill_encoder(&enc, il, "attn-proj");
+
+                                prefill_mat_mat_dispatch(
+                                    base.ctx,
                                     &enc,
-                                    il,
-                                    if use_fused_qkv {
-                                        "attn-qkv-proj"
-                                    } else {
-                                        "attn-proj"
-                                    },
-                                );
-                                if use_fused_qkv {
-                                    let fused_qkv_pack = layer_scratch
-                                        .attn_qkv_fused_pack
-                                        .view_subrange(0, vec![(chunk_p * qkv_fused_dim) as u64]);
-                                    prefill_mat_mat_dispatch(
-                                        base.ctx,
-                                        &enc,
-                                        a.qkv_fused.as_ref().expect("qkv_fused"),
-                                        &h_pack_p,
-                                        &fused_qkv_pack,
-                                        h,
-                                        qkv_fused_dim,
-                                        chunk_p,
-                                    )?;
-                                    encode_split_qkv_fused_f32(
-                                        base.ctx,
-                                        &enc,
-                                        &fused_qkv_pack,
-                                        &q_full_pack_p,
-                                        &k_now_pack_p,
-                                        &v_now_pack_p,
-                                        chunk_p,
-                                        attn_q_full_dim,
-                                        kv_dim,
-                                    )?;
-                                } else {
-                                    prefill_mat_mat_dispatch(
-                                        base.ctx,
-                                        &enc,
-                                        &a.q,
-                                        &h_pack_p,
-                                        &q_full_pack_p,
-                                        h,
-                                        2 * q_dim,
-                                        chunk_p,
-                                    )?;
-                                    prefill_mat_mat_dispatch(
-                                        base.ctx,
-                                        &enc,
-                                        &a.k,
-                                        &h_pack_p,
-                                        &k_now_pack_p,
-                                        h,
-                                        kv_dim,
-                                        chunk_p,
-                                    )?;
-                                    prefill_mat_mat_dispatch(
-                                        base.ctx,
-                                        &enc,
-                                        &a.v,
-                                        &h_pack_p,
-                                        &v_now_pack_p,
-                                        h,
-                                        kv_dim,
-                                        chunk_p,
-                                    )?;
-                                }
+                                    &a.q,
+                                    &h_pack_p,
+                                    &q_full_pack_p,
+                                    h,
+                                    2 * q_dim,
+                                    chunk_p,
+                                )?;
+                                prefill_mat_mat_dispatch(
+                                    base.ctx,
+                                    &enc,
+                                    &a.k,
+                                    &h_pack_p,
+                                    &k_now_pack_p,
+                                    h,
+                                    kv_dim,
+                                    chunk_p,
+                                )?;
+                                prefill_mat_mat_dispatch(
+                                    base.ctx,
+                                    &enc,
+                                    &a.v,
+                                    &h_pack_p,
+                                    &v_now_pack_p,
+                                    h,
+                                    kv_dim,
+                                    chunk_p,
+                                )?;
                                 // v0.432: no split_q_gate — the q-norm below
                                 // reads the interleaved Q halves directly and
                                 // the attn epilogue reads the gate halves.
@@ -12333,7 +12239,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 chunk_idx,
                                 chunk_start,
                                 il,
-                                if use_fused_qkv { "qkv_matmul" } else { "proj" },
+                                "proj",
                             )?;
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
@@ -12417,63 +12323,37 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         "attn-front"
                                     },
                                 );
-                                if use_fused_qkv {
-                                    let fused_qkv_pack = layer_scratch
-                                        .attn_qkv_fused_pack
-                                        .view_subrange(0, vec![(chunk_p * qkv_fused_dim) as u64]);
-                                    prefill_mat_mat_dispatch(
-                                        base.ctx,
-                                        &enc,
-                                        a.qkv_fused.as_ref().expect("qkv_fused"),
-                                        &h_pack_p,
-                                        &fused_qkv_pack,
-                                        h,
-                                        qkv_fused_dim,
-                                        chunk_p,
-                                    )?;
-                                    encode_split_qkv_fused_f32(
-                                        base.ctx,
-                                        &enc,
-                                        &fused_qkv_pack,
-                                        &q_full_pack_p,
-                                        &k_now_pack_p,
-                                        &v_now_pack_p,
-                                        chunk_p,
-                                        attn_q_full_dim,
-                                        kv_dim,
-                                    )?;
-                                } else {
-                                    prefill_mat_mat_dispatch(
-                                        base.ctx,
-                                        &enc,
-                                        &a.q,
-                                        &h_pack_p,
-                                        &q_full_pack_p,
-                                        h,
-                                        2 * q_dim,
-                                        chunk_p,
-                                    )?;
-                                    prefill_mat_mat_dispatch(
-                                        base.ctx,
-                                        &enc,
-                                        &a.k,
-                                        &h_pack_p,
-                                        &k_now_pack_p,
-                                        h,
-                                        kv_dim,
-                                        chunk_p,
-                                    )?;
-                                    prefill_mat_mat_dispatch(
-                                        base.ctx,
-                                        &enc,
-                                        &a.v,
-                                        &h_pack_p,
-                                        &v_now_pack_p,
-                                        h,
-                                        kv_dim,
-                                        chunk_p,
-                                    )?;
-                                }
+
+                                prefill_mat_mat_dispatch(
+                                    base.ctx,
+                                    &enc,
+                                    &a.q,
+                                    &h_pack_p,
+                                    &q_full_pack_p,
+                                    h,
+                                    2 * q_dim,
+                                    chunk_p,
+                                )?;
+                                prefill_mat_mat_dispatch(
+                                    base.ctx,
+                                    &enc,
+                                    &a.k,
+                                    &h_pack_p,
+                                    &k_now_pack_p,
+                                    h,
+                                    kv_dim,
+                                    chunk_p,
+                                )?;
+                                prefill_mat_mat_dispatch(
+                                    base.ctx,
+                                    &enc,
+                                    &a.v,
+                                    &h_pack_p,
+                                    &v_now_pack_p,
+                                    h,
+                                    kv_dim,
+                                    chunk_p,
+                                )?;
                                 // v0.432: strided q-norm replaces split_q_gate
                                 // + compact q-norm (gate halves are read by the
                                 // strided sigmoid_mul at the attn epilogue).

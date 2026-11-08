@@ -1,0 +1,320 @@
+[
+  {
+    "record": "bank",
+    "device": "Apple M5 Ultra",
+    "arch": "Arch { kind: Moe, n_layer: 40, hidden_size: 2048, intermediate_size: 0, vocab_size: 248320, full_attention_interval: 4, n_q_heads: 16, n_kv_heads: 2, attn_head_dim: 256, rope_theta: 10000000.0, partial_rotary_factor: 0.25, gdn_n_v_heads: 32, gdn_n_k_heads: 16, gdn_head_dim: 128, gdn_conv_kernel: 4, expert_count: 256, expert_used_count: 8, expert_feed_forward_length: 512, expert_shared_feed_forward_length: 512, mtp_n_hidden_layers: 0 }",
+    "bank_bytes": 200540160,
+    "bank_build_ms": 23.244417,
+    "model_load_ms": 18244.896792,
+    "model_allocated_bytes": 22324101120,
+    "tensor_available": true
+  },
+  {
+    "record": "numerics",
+    "rows": 2048,
+    "arm": "separate",
+    "dispatches": [
+      "kernel_mat_mat_q8_0_f32_tensor_wide",
+      "kernel_mat_mat_q8_0_f32_tensor_wide",
+      "kernel_mat_mat_q8_0_f32_tensor_wide"
+    ]
+  },
+  {
+    "record": "numerics",
+    "rows": 2048,
+    "arm": "fused",
+    "cosine": 0.9999999999986309,
+    "max_abs": 6.914139e-06,
+    "bitwise": false,
+    "dispatches": [
+      "kernel_mat_mat_q8_0_f32",
+      "kernel_split_qkv_fused_f32"
+    ]
+  },
+  {
+    "record": "numerics",
+    "rows": 2048,
+    "arm": "tensor-fused",
+    "cosine": 1.0000000000000002,
+    "max_abs": 0.0,
+    "bitwise": true,
+    "dispatches": [
+      "kernel_mat_mat_q8_0_f32_tensor_wide",
+      "kernel_split_qkv_fused_f32"
+    ]
+  },
+  {
+    "record": "scratch",
+    "rows": 2048,
+    "plan_bytes": 1188906008,
+    "fused_pack_bytes": 75497472,
+    "extra_over_separate": 75497468,
+    "metal_priced_extra": 75497468,
+    "allocation_ms": 0.024457999999999997,
+    "observed_allocated_bytes": 75497472,
+    "separate_tensor_selected": true,
+    "fused_tensor_selected": false
+  },
+  {
+    "record": "timing",
+    "rows": 2048,
+    "repeat": 0,
+    "arm": "separate",
+    "iterations": 8,
+    "wall_ms": 1.913822875,
+    "gpu_ms": 1.7972343775909394
+  },
+  {
+    "record": "timing",
+    "rows": 2048,
+    "repeat": 0,
+    "arm": "fused",
+    "iterations": 8,
+    "wall_ms": 2.86580725,
+    "gpu_ms": 2.833031256159302
+  },
+  {
+    "record": "timing",
+    "rows": 2048,
+    "repeat": 0,
+    "arm": "tensor-fused",
+    "iterations": 8,
+    "wall_ms": 1.0429375,
+    "gpu_ms": 1.0072552104247734
+  },
+  {
+    "record": "timing",
+    "rows": 2048,
+    "repeat": 0,
+    "arm": "tensor-fused",
+    "iterations": 8,
+    "wall_ms": 1.030484375,
+    "gpu_ms": 1.004760415526107
+  },
+  {
+    "record": "timing",
+    "rows": 2048,
+    "repeat": 0,
+    "arm": "fused",
+    "iterations": 8,
+    "wall_ms": 2.8352291249999997,
+    "gpu_ms": 2.8133281230111606
+  },
+  {
+    "record": "timing",
+    "rows": 2048,
+    "repeat": 0,
+    "arm": "separate",
+    "iterations": 8,
+    "wall_ms": 0.952791625,
+    "gpu_ms": 0.9298958320869133
+  },
+  {
+    "record": "timing",
+    "rows": 2048,
+    "repeat": 1,
+    "arm": "separate",
+    "iterations": 8,
+    "wall_ms": 0.952947875,
+    "gpu_ms": 0.9181249988614582
+  },
+  {
+    "record": "timing",
+    "rows": 2048,
+    "repeat": 1,
+    "arm": "fused",
+    "iterations": 8,
+    "wall_ms": 2.8402707499999997,
+    "gpu_ms": 2.8137031258665957
+  },
+  {
+    "record": "timing",
+    "rows": 2048,
+    "repeat": 1,
+    "arm": "tensor-fused",
+    "iterations": 8,
+    "wall_ms": 1.0296197500000002,
+    "gpu_ms": 1.0048593758256175
+  },
+  {
+    "record": "timing",
+    "rows": 2048,
+    "repeat": 1,
+    "arm": "tensor-fused",
+    "iterations": 8,
+    "wall_ms": 1.03754175,
+    "gpu_ms": 1.0062135406769812
+  },
+  {
+    "record": "timing",
+    "rows": 2048,
+    "repeat": 1,
+    "arm": "fused",
+    "iterations": 8,
+    "wall_ms": 2.845484375,
+    "gpu_ms": 2.814421874063555
+  },
+  {
+    "record": "timing",
+    "rows": 2048,
+    "repeat": 1,
+    "arm": "separate",
+    "iterations": 8,
+    "wall_ms": 0.95225525,
+    "gpu_ms": 0.9178906257147901
+  },
+  {
+    "record": "numerics",
+    "rows": 4096,
+    "arm": "separate",
+    "dispatches": [
+      "kernel_mat_mat_q8_0_f32_tensor_wide",
+      "kernel_mat_mat_q8_0_f32_tensor_wide",
+      "kernel_mat_mat_q8_0_f32_tensor_wide"
+    ]
+  },
+  {
+    "record": "numerics",
+    "rows": 4096,
+    "arm": "fused",
+    "cosine": 0.9999999999986258,
+    "max_abs": 6.914139e-06,
+    "bitwise": false,
+    "dispatches": [
+      "kernel_mat_mat_q8_0_f32",
+      "kernel_split_qkv_fused_f32"
+    ]
+  },
+  {
+    "record": "numerics",
+    "rows": 4096,
+    "arm": "tensor-fused",
+    "cosine": 0.9999999999999999,
+    "max_abs": 0.0,
+    "bitwise": true,
+    "dispatches": [
+      "kernel_mat_mat_q8_0_f32_tensor_wide",
+      "kernel_split_qkv_fused_f32"
+    ]
+  },
+  {
+    "record": "scratch",
+    "rows": 4096,
+    "plan_bytes": 2812970008,
+    "fused_pack_bytes": 150994944,
+    "extra_over_separate": 150994940,
+    "metal_priced_extra": 150994940,
+    "allocation_ms": 0.028666999999999998,
+    "observed_allocated_bytes": 150994944,
+    "separate_tensor_selected": true,
+    "fused_tensor_selected": false
+  },
+  {
+    "record": "timing",
+    "rows": 4096,
+    "repeat": 0,
+    "arm": "separate",
+    "iterations": 8,
+    "wall_ms": 2.54538025,
+    "gpu_ms": 2.4735624974709935
+  },
+  {
+    "record": "timing",
+    "rows": 4096,
+    "repeat": 0,
+    "arm": "fused",
+    "iterations": 8,
+    "wall_ms": 5.6563645000000005,
+    "gpu_ms": 5.623973964247853
+  },
+  {
+    "record": "timing",
+    "rows": 4096,
+    "repeat": 0,
+    "arm": "tensor-fused",
+    "iterations": 8,
+    "wall_ms": 2.0611146249999996,
+    "gpu_ms": 2.021578126004897
+  },
+  {
+    "record": "timing",
+    "rows": 4096,
+    "repeat": 0,
+    "arm": "tensor-fused",
+    "iterations": 8,
+    "wall_ms": 2.048328125,
+    "gpu_ms": 2.020593747147359
+  },
+  {
+    "record": "timing",
+    "rows": 4096,
+    "repeat": 0,
+    "arm": "fused",
+    "iterations": 8,
+    "wall_ms": 5.654151,
+    "gpu_ms": 5.62148437165888
+  },
+  {
+    "record": "timing",
+    "rows": 4096,
+    "repeat": 0,
+    "arm": "separate",
+    "iterations": 8,
+    "wall_ms": 1.831515625,
+    "gpu_ms": 1.8012343716691248
+  },
+  {
+    "record": "timing",
+    "rows": 4096,
+    "repeat": 1,
+    "arm": "separate",
+    "iterations": 8,
+    "wall_ms": 1.8364948749999999,
+    "gpu_ms": 1.7987760438700207
+  },
+  {
+    "record": "timing",
+    "rows": 4096,
+    "repeat": 1,
+    "arm": "fused",
+    "iterations": 8,
+    "wall_ms": 5.645151125,
+    "gpu_ms": 5.621328120469116
+  },
+  {
+    "record": "timing",
+    "rows": 4096,
+    "repeat": 1,
+    "arm": "tensor-fused",
+    "iterations": 8,
+    "wall_ms": 2.0716666249999998,
+    "gpu_ms": 2.0396874970174395
+  },
+  {
+    "record": "timing",
+    "rows": 4096,
+    "repeat": 1,
+    "arm": "tensor-fused",
+    "iterations": 8,
+    "wall_ms": 2.040322875,
+    "gpu_ms": 2.019453124376014
+  },
+  {
+    "record": "timing",
+    "rows": 4096,
+    "repeat": 1,
+    "arm": "fused",
+    "iterations": 8,
+    "wall_ms": 5.6447551250000005,
+    "gpu_ms": 5.622000004223082
+  },
+  {
+    "record": "timing",
+    "rows": 4096,
+    "repeat": 1,
+    "arm": "separate",
+    "iterations": 8,
+    "wall_ms": 1.8258854999999998,
+    "gpu_ms": 1.8001093703787774
+  }
+]

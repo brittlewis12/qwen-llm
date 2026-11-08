@@ -177,30 +177,12 @@ pub fn weight_storage_projection(
             .shared_buffer_size_and_align(request.resident_bytes)
             .map(|price| sum.saturating_add(price.size))
     });
-    let mut copied = match copied {
+    let copied = match copied {
         Ok(bytes) => bytes,
         Err(error) => {
             return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
         }
     };
-    let derived = qwen_llm::metal_forward::fused_qkv_derived_weight_sizes(
-        &bound,
-        qwen_llm::metal_forward::fused_qkv_g8_enabled_for_runtime(),
-    )
-    .and_then(|sizes| {
-        sizes.into_iter().try_fold(0u64, |sum, bytes| {
-            device
-                .shared_buffer_size_and_align(bytes)
-                .map(|price| sum.saturating_add(price.size))
-                .map_err(qwen_llm::metal_forward::MfError::Metal)
-        })
-    });
-    match derived {
-        Ok(bytes) => copied = copied.saturating_add(bytes),
-        Err(error) => {
-            return serde_json::json!({ "status": "unavailable", "reason": error.to_string() });
-        }
-    }
     let request = storage_configuration.storage_request();
     let signals = device.memory_signals();
     let mapping_unsupported = qwen_llm::metal_forward::runtime_retained_mapping_unsupported_reason(

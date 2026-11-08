@@ -155,13 +155,12 @@ impl NativeQuantEmbeddingSelection {
 
 const GGUF_NO_COPY_ALIGNMENT: usize = 32;
 const PARALLEL_COPY_MAX_WORKERS: usize = 4;
-const PARALLEL_COPY_AUTO_OVERRIDE_ENVS: [&str; 6] = [
+const PARALLEL_COPY_AUTO_OVERRIDE_ENVS: [&str; 5] = [
     "QWEN_GGUF_NO_COPY",
     "QWEN_GGUF_NO_COPY_PREFAULT",
     "QWEN_NATIVE_QUANT_EMBED",
     "QWEN_MOE_IQ3_EXPERT_NATIVE",
     "QWEN_PREFILL_MOE_GROUPED_IQ3_GATEUP",
-    "QWEN_PREFILL_ATTN_FUSED_QKV_G8",
 ];
 
 #[derive(Debug)]
@@ -519,9 +518,6 @@ impl MetalModel {
                     ] {
                         add(tensor, &mut buffers);
                     }
-                    if let Some(tensor) = &block.qkv_fused {
-                        add(tensor, &mut buffers);
-                    }
                     if let Some(moe) = &block.ffn_moe {
                         add_moe(moe, &mut buffers);
                     }
@@ -619,7 +615,6 @@ struct ResolvedStoragePolicy {
 #[derive(Clone, Copy, Debug)]
 struct ResolvedWeightLoadChoices {
     embedding_selection: NativeQuantEmbeddingSelection,
-    fused_qkv_g8: bool,
     dense_iq_native: bool,
 }
 
@@ -627,7 +622,6 @@ impl ResolvedWeightLoadChoices {
     fn resolve(embedding_selection: NativeQuantEmbeddingSelection) -> Self {
         Self {
             embedding_selection,
-            fused_qkv_g8: prefill_attn_fused_qkv_g8_enabled(),
             dense_iq_native: dense_iq_native_storage_enabled(),
         }
     }
@@ -642,68 +636,6 @@ impl ResolvedWeightLoadChoices {
             self.dense_iq_native,
         )
     }
-
-    fn fused_qkv_priced_bytes(
-        &self,
-        ctx: &MetalContext,
-        model: &Model<'_>,
-    ) -> Result<u64, MfError> {
-        if !self.fused_qkv_g8 {
-            return Ok(0);
-        }
-        let logical_sizes = fused_qkv_derived_weight_sizes(model, self.fused_qkv_g8)?;
-        logical_sizes
-            .into_iter()
-            .try_fold(0u64, |total, logical_bytes| {
-                let priced = ctx
-                    .shared_buffer_size_and_align(logical_bytes)
-                    .map_err(MfError::Metal)?
-                    .size;
-                total.checked_add(priced).ok_or_else(|| {
-                    MfError::LoadPolicy("fused QKV derived byte estimate overflow".into())
-                })
-            })
-    }
-}
-
-pub fn fused_qkv_derived_weight_sizes(
-    model: &Model<'_>,
-    enabled: bool,
-) -> Result<Vec<u64>, MfError> {
-    let mut sizes = Vec::new();
-    if !enabled {
-        return Ok(sizes);
-    }
-    for block in &model.blocks {
-        let Block::Attn(attn) = block else {
-            continue;
-        };
-        if attn.q.dtype != GgmlType::Q8_0
-            || attn.k.dtype != GgmlType::Q8_0
-            || attn.v.dtype != GgmlType::Q8_0
-            || attn.q.shape.len() != 2
-            || attn.k.shape.len() != 2
-            || attn.v.shape.len() != 2
-            || attn.q.shape[0] != attn.k.shape[0]
-            || attn.q.shape[0] != attn.v.shape[0]
-        {
-            continue;
-        }
-        let logical_bytes = attn
-            .q
-            .n_bytes
-            .checked_add(attn.k.n_bytes)
-            .and_then(|bytes| bytes.checked_add(attn.v.n_bytes))
-            .ok_or_else(|| {
-                MfError::LoadPolicy("fused QKV derived byte estimate overflow".into())
-            })?;
-        sizes.push(logical_bytes);
-    }
-    Ok(sizes)
-}
-
-pub fn fused_qkv_g8_enabled_for_runtime() -> bool {
-    prefill_attn_fused_qkv_g8_enabled()
 }
 
 pub fn model_weight_storage_requests_for_runtime<'a>(
@@ -843,7 +775,6 @@ pub struct MetalAttnBlock {
     pub q: MetalTensor, // outputs 2x q_dim — Q + gate
     pub k: MetalTensor,
     pub v: MetalTensor,
-    pub qkv_fused: Option<MetalTensor>,
     pub o: MetalTensor,
     pub q_norm: MetalTensor,
     pub k_norm: MetalTensor,
@@ -1004,18 +935,6 @@ impl WeightLoadLedger {
             kind,
             resident_bytes,
         });
-        Ok(())
-    }
-
-    fn record_derived(&mut self, tensor: &MetalTensor) -> Result<(), MfError> {
-        self.derived_allocations = self
-            .derived_allocations
-            .checked_add(1)
-            .ok_or_else(|| MfError::LoadPolicy("derived allocation count overflow".to_string()))?;
-        self.derived_bytes = self
-            .derived_bytes
-            .checked_add(tensor.n_bytes())
-            .ok_or_else(|| MfError::LoadPolicy("derived allocation byte overflow".to_string()))?;
         Ok(())
     }
 }
@@ -1563,13 +1482,6 @@ impl<'a> MetalWeightLoader<'a> {
         })
     }
 
-    fn record_derived(&mut self, tensor: Option<&MetalTensor>) -> Result<(), MfError> {
-        if let Some(tensor) = tensor {
-            self.ledger.record_derived(tensor)?;
-        }
-        Ok(())
-    }
-
     fn finish(self, expected: &[ModelWeightStorageRequest<'_>]) -> Result<(), MfError> {
         if let DirectStorage::ForcedPlanned(storage) = &self.direct_storage {
             storage.validate_complete(&self.ledger)?;
@@ -1803,10 +1715,6 @@ impl MetalModel {
                         MfError::LoadPolicy("copied weight byte estimate overflow".into())
                     })
                 })?;
-        let derived_bytes = choices.fused_qkv_priced_bytes(ctx, model)?;
-        let copied_bytes_estimate = copied_bytes_estimate
-            .checked_add(derived_bytes)
-            .ok_or_else(|| MfError::LoadPolicy("copied weight byte estimate overflow".into()))?;
         let signals = ctx.memory_signals();
         let automatic_copy_decision = decide_gguf_storage_mode_with_signals(
             copied_bytes_estimate,
@@ -2093,53 +2001,6 @@ impl MetalModel {
         let output_norm = loader.load_f32(model.output_norm)?;
         let lm_head = loader.load_weight(WeightRole::OutputHead, model.lm_head)?;
 
-        let load_attn_qkv_fused = |q: &MetalTensor,
-                                   k: &MetalTensor,
-                                   v: &MetalTensor|
-         -> Result<Option<MetalTensor>, MfError> {
-            if !choices.fused_qkv_g8 {
-                return Ok(None);
-            }
-            if !(q.dtype == k.dtype
-                && q.dtype == v.dtype
-                && q.dtype == GgmlType::Q8_0
-                && q.shape.len() == 2
-                && k.shape.len() == 2
-                && v.shape.len() == 2
-                && q.shape[0] == k.shape[0]
-                && q.shape[0] == v.shape[0])
-            {
-                return Ok(None);
-            }
-            let read_bytes = |t: &MetalTensor| -> Vec<u8> {
-                let n = t.n_bytes() as usize;
-                let mut out = vec![0u8; n];
-                unsafe {
-                    let src = (t.buffer.contents().as_ptr() as *const u8).add(t.offset as usize);
-                    std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
-                }
-                out
-            };
-            let qb = read_bytes(q);
-            let kb = read_bytes(k);
-            let vb = read_bytes(v);
-            let mut bytes = Vec::with_capacity(qb.len() + kb.len() + vb.len());
-            bytes.extend_from_slice(&qb);
-            bytes.extend_from_slice(&kb);
-            bytes.extend_from_slice(&vb);
-            let out_dim = checked_u64_add(
-                checked_u64_add(q.shape[1], k.shape[1], "attn q+k out dim overflow")?,
-                v.shape[1],
-                "attn qkv fused out dim overflow",
-            )?;
-            Ok(Some(MetalTensor::from_bytes(
-                ctx,
-                &bytes,
-                vec![q.shape[0], out_dim],
-                q.dtype,
-            )?))
-        };
-
         let projection_role = projection_weight_role(model.arch.kind);
         let mut blocks = Vec::with_capacity(model.blocks.len());
         for b in &model.blocks {
@@ -2190,8 +2051,6 @@ impl MetalModel {
                     let ffn_gate = loader.load_weight(projection_role, a.ffn_gate)?;
                     let ffn_up = loader.load_weight(projection_role, a.ffn_up)?;
                     let ffn_down = loader.load_weight(projection_role, a.ffn_down)?;
-                    let qkv_fused = load_attn_qkv_fused(&q, &k, &v)?;
-                    loader.record_derived(qkv_fused.as_ref())?;
                     let o = loader.load_weight(projection_role, a.o)?;
                     let q_norm = loader.load_f32(a.q_norm)?;
                     let k_norm = loader.load_f32(a.k_norm)?;
@@ -2205,7 +2064,6 @@ impl MetalModel {
                         ffn_gate,
                         ffn_up,
                         ffn_down,
-                        qkv_fused,
                         q,
                         k,
                         v,

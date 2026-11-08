@@ -1,0 +1,284 @@
+diff --git a/crates/qwen-llm/src/metal_forward/fused_qkv_probe.rs b/crates/qwen-llm/src/metal_forward/fused_qkv_probe.rs
+new file mode 100644
+index 00000000..906f6526
+--- /dev/null
++++ b/crates/qwen-llm/src/metal_forward/fused_qkv_probe.rs
+@@ -0,0 +1,251 @@
++//! One-off characterization of the optional attention bank, before its disposition.
++
++use super::*;
++use crate::metal::{
++    dispatch_census_begin, dispatch_census_take, encode_mat_mat_tensor_f32_wide,
++    encode_split_qkv_fused_f32,
++};
++use crate::metal_dflash::{
++    PrefillScratchConfig, plan_prefill_scratch_with_matrix_max_pos_configured,
++};
++use serde_json::json;
++
++fn values(tensor: &MetalTensor) -> Vec<f32> {
++    assert_eq!(tensor.dtype, GgmlType::F32);
++    unsafe {
++        std::slice::from_raw_parts(
++            (tensor.buffer.contents().as_ptr() as *const u8).add(tensor.offset as usize)
++                as *const f32,
++            tensor.n_elements() as usize,
++        )
++        .to_vec()
++    }
++}
++
++#[test]
++#[ignore = "bounded M4/M5 allocation and Q8 projection characterization; external build lock + lease"]
++fn real_a3b_q8_bank_scratch_and_projection_cost() {
++    let path = crate::test_fixtures::A3B_Q4_K_M.required();
++    let ctx = MetalContext::new().expect("Metal device and inherited lease");
++    let gguf = GgufFile::open(path).unwrap();
++    let model = Model::from_gguf(&gguf).unwrap();
++    assert_eq!(model.arch.kind, ArchKind::Moe);
++    assert_eq!(model.arch.mtp_n_hidden_layers, 0);
++    assert_eq!((model.arch.n_q_heads, model.arch.n_kv_heads), (16, 2));
++    assert!(prefill_attn_fused_qkv_g8_enabled());
++    let logical_bank_bytes: u64 = fused_qkv_derived_weight_sizes(&model, true)
++        .unwrap()
++        .into_iter()
++        .sum();
++    assert_eq!(logical_bank_bytes, 200_540_160);
++    QKV_PROBE_BUILD_NS.store(0, std::sync::atomic::Ordering::Relaxed);
++    let before = ctx.current_allocated_size();
++    let loaded_at = std::time::Instant::now();
++    let metal = MetalModel::load(&ctx, &gguf, &model).unwrap();
++    let load_ms = loaded_at.elapsed().as_secs_f64() * 1000.0;
++    let bank_bytes: u64 = metal
++        .blocks
++        .iter()
++        .filter_map(|block| match block {
++            MetalBlock::Attn(a) => a.qkv_fused.as_ref().map(MetalTensor::n_bytes),
++            _ => None,
++        })
++        .sum();
++    assert_eq!(bank_bytes, logical_bank_bytes);
++    let a = metal
++        .blocks
++        .iter()
++        .find_map(|block| match block {
++            MetalBlock::Attn(a) => Some(a),
++            _ => None,
++        })
++        .unwrap();
++    let fused = a.qkv_fused.as_ref().unwrap();
++    assert_eq!(
++        (a.q.dtype, a.k.dtype, a.v.dtype),
++        (GgmlType::Q8_0, GgmlType::Q8_0, GgmlType::Q8_0)
++    );
++    println!(
++        "{}",
++        json!({"record":"bank", "device":ctx.device.name().to_string(),
++        "arch":format!("{:?}",model.arch), "bank_bytes":bank_bytes,
++        "bank_build_ms":QKV_PROBE_BUILD_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6,
++        "model_load_ms":load_ms, "model_allocated_bytes":ctx.current_allocated_size()-before,
++        "tensor_available":ctx.tensor_ops_status().is_available()})
++    );
++
++    let (h, q, kv, combined) = (2048usize, 8192usize, 512usize, 9216usize);
++    for rows in [2048usize, 4096] {
++        let plan = plan_prefill_scratch_with_matrix_max_pos_configured(
++            &metal,
++            rows as u32,
++            rows * 2,
++            PrefillScratchConfig::default(),
++        )
++        .unwrap();
++        let extra = plan
++            .allocations()
++            .iter()
++            .find(|a| a.name() == "attn_qkv_fused_pack")
++            .unwrap();
++        assert_eq!(extra.logical_bytes(), (rows * combined * 4) as u64);
++        let input: Vec<f32> = (0..rows * h)
++            .map(|i| {
++                let bits = (i as u32).wrapping_mul(747796405).wrapping_add(2891336453);
++                ((bits >> 9) as f32 / 8388608.0 - 0.5) * 2.0
++            })
++            .collect();
++        let x = MetalTensor::from_bytes(
++            &ctx,
++            bytemuck::cast_slice(&input),
++            vec![h as u64, rows as u64],
++            GgmlType::F32,
++        )
++        .unwrap();
++        let scratch_before = ctx.current_allocated_size();
++        let scratch_start = std::time::Instant::now();
++        let packed = MetalTensor::zeros_f32(&ctx, vec![(rows * combined) as u64]).unwrap();
++        let scratch_allocation_ms = scratch_start.elapsed().as_secs_f64() * 1000.0;
++        let scratch_observed_bytes = ctx.current_allocated_size() as i64 - scratch_before as i64;
++        let output: Vec<_> = [q, kv, kv]
++            .into_iter()
++            .map(|width| MetalTensor::zeros_f32(&ctx, vec![(rows * width) as u64]).unwrap())
++            .collect();
++        let tensor = ctx.tensor_ops_status().is_available();
++        let arms = if tensor {
++            vec!["separate", "fused", "tensor-fused"]
++        } else {
++            vec!["separate", "fused"]
++        };
++        let run = |arm: &str, iterations: usize, census: bool| {
++            if census {
++                dispatch_census_begin();
++            }
++            let start = std::time::Instant::now();
++            let cmd = ctx.queue.commandBuffer().unwrap();
++            let enc = KernelEncoder::begin(&cmd);
++            for _ in 0..iterations {
++                if arm == "separate" {
++                    for (w, y, width) in [
++                        (&a.q, &output[0], q),
++                        (&a.k, &output[1], kv),
++                        (&a.v, &output[2], kv),
++                    ] {
++                        prefill_gemm::encode_qwen_prefill_mat_mat(
++                            &ctx,
++                            &enc,
++                            &metal.arch,
++                            w,
++                            &x,
++                            y,
++                            h,
++                            width,
++                            rows,
++                        )
++                        .unwrap();
++                    }
++                } else {
++                    if arm == "tensor-fused" {
++                        encode_mat_mat_tensor_f32_wide(
++                            &ctx, &enc, fused, &x, &packed, h, combined, rows,
++                        )
++                        .unwrap();
++                    } else {
++                        prefill_gemm::encode_qwen_prefill_mat_mat(
++                            &ctx,
++                            &enc,
++                            &metal.arch,
++                            fused,
++                            &x,
++                            &packed,
++                            h,
++                            combined,
++                            rows,
++                        )
++                        .unwrap();
++                    }
++                    encode_split_qkv_fused_f32(
++                        &ctx, &enc, &packed, &output[0], &output[1], &output[2], rows, q, kv,
++                    )
++                    .unwrap();
++                }
++            }
++            enc.end();
++            cmd.commit();
++            crate::metal::wait_completed(&cmd).unwrap();
++            let wall_ms = start.elapsed().as_secs_f64() * 1000.0 / iterations as f64;
++            let gpu_ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1000.0 / iterations as f64;
++            let dispatches = if census {
++                dispatch_census_take()
++                    .into_iter()
++                    .map(|r| r.kernel)
++                    .collect::<Vec<_>>()
++            } else {
++                vec![]
++            };
++            (wall_ms, gpu_ms, dispatches)
++        };
++        let mut reference = None;
++        for arm in &arms {
++            let (_, _, dispatches) = run(arm, 1, true);
++            let actual: Vec<f32> = output.iter().flat_map(values).collect();
++            assert!(actual.iter().all(|v| v.is_finite()));
++            if let Some(expected) = reference.as_ref() {
++                let expected: &Vec<f32> = expected;
++                let mut dot = 0f64;
++                let mut aa = 0f64;
++                let mut bb = 0f64;
++                let mut max_abs = 0f32;
++                let mut exact = true;
++                for (&x, &y) in expected.iter().zip(&actual) {
++                    dot += x as f64 * y as f64;
++                    aa += (x as f64).powi(2);
++                    bb += (y as f64).powi(2);
++                    max_abs = max_abs.max((x - y).abs());
++                    exact &= x.to_bits() == y.to_bits();
++                }
++                let cosine = dot / (aa.sqrt() * bb.sqrt());
++                println!(
++                    "{}",
++                    json!({"record":"numerics","rows":rows,"arm":arm,"cosine":cosine,"max_abs":max_abs,"bitwise":exact,"dispatches":dispatches})
++                );
++                assert!(cosine >= 0.9999);
++            } else {
++                reference = Some(actual);
++                println!(
++                    "{}",
++                    json!({"record":"numerics","rows":rows,"arm":arm,"dispatches":dispatches})
++                );
++            }
++        }
++        println!(
++            "{}",
++            json!({"record":"scratch","rows":rows,"plan_bytes":plan.logical_bytes(),"fused_pack_bytes":extra.logical_bytes(),"extra_over_separate":extra.logical_bytes()-4,
++            "metal_priced_extra":ctx.shared_buffer_size_and_align(extra.logical_bytes()).unwrap().size-ctx.shared_buffer_size_and_align(4).unwrap().size,
++            "allocation_ms":scratch_allocation_ms,"observed_allocated_bytes":scratch_observed_bytes,
++            "separate_tensor_selected":prefill_gemm::qwen_prefill_tensor_selected(&ctx,&metal.arch,GgmlType::Q8_0,h,q,rows),
++            "fused_tensor_selected":prefill_gemm::qwen_prefill_tensor_selected(&ctx,&metal.arch,GgmlType::Q8_0,h,combined,rows)})
++        );
++        let order = if tensor {
++            vec![
++                "separate",
++                "fused",
++                "tensor-fused",
++                "tensor-fused",
++                "fused",
++                "separate",
++            ]
++        } else {
++            vec!["separate", "fused", "fused", "separate"]
++        };
++        for repeat in 0..2 {
++            for arm in &order {
++                let (wall_ms, gpu_ms, _) = run(arm, 8, false);
++                println!(
++                    "{}",
++                    json!({"record":"timing","rows":rows,"repeat":repeat,"arm":arm,"iterations":8,"wall_ms":wall_ms,"gpu_ms":gpu_ms})
++                );
++            }
++        }
++    }
++}
+diff --git a/crates/qwen-llm/src/metal_forward/mod.rs b/crates/qwen-llm/src/metal_forward/mod.rs
+index 4d54a1f9..6f9c74bd 100644
+--- a/crates/qwen-llm/src/metal_forward/mod.rs
++++ b/crates/qwen-llm/src/metal_forward/mod.rs
+@@ -32,0 +33,2 @@ use crate::loader::{Block, Model, MoeFfn};
++#[cfg(test)]
++static QKV_PROBE_BUILD_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+@@ -2113,0 +2116,2 @@ impl MetalModel {
++            #[cfg(test)]
++            let probe_start = std::time::Instant::now();
+@@ -2135,6 +2139,7 @@ impl MetalModel {
+-            Ok(Some(MetalTensor::from_bytes(
+-                ctx,
+-                &bytes,
+-                vec![q.shape[0], out_dim],
+-                q.dtype,
+-            )?))
++            let fused = MetalTensor::from_bytes(ctx, &bytes, vec![q.shape[0], out_dim], q.dtype)?;
++            #[cfg(test)]
++            QKV_PROBE_BUILD_NS.fetch_add(
++                probe_start.elapsed().as_nanos() as u64,
++                std::sync::atomic::Ordering::Relaxed,
++            );
++            Ok(Some(fused))
+@@ -2600,0 +2606,2 @@ mod dispatch;
++#[cfg(test)]
++mod fused_qkv_probe;

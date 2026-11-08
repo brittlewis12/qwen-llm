@@ -6,6 +6,17 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - Delete optional A3B fused QKV projections
+
+Real A3B Q8_0 attention banks on M4 Max lose 6.4–6.6% for fused projection
+plus split at 2048/4096 rows. On M5 Ultra, current separate projections use
+tensor tiles; the old fused selector misses that shape and is ~3x slower.
+Even explicit tensor composition loses 8.8–12.2%, bitwise equal to separate
+outputs. Remove the duplicate 200,540,160-byte bank and 72/144 MiB scratch,
+selector and exclusive split kernel. Shared primitives and default-on tensor
+rollback controls remain. Both hosts used build lock + Metal lease, thermal 0.
+[Packet, raw timings and measured-source patch](bench/2026-11-08-knob-finish/qkv.md).
+
 ## 2026-11-08 - V4.1 Serve: Exact CED For Large Live Extensions
 
 - **Default on**, implementation **`b2f6fc43`** on main **`70e0c6d6`**.

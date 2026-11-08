@@ -1,0 +1,14 @@
+{
+  "source": "8d1d34011208d3c93ad2a948d35dfbd046f9811f",
+  "binary": "target/release/deps/qwen_llm-60655e5b0ca7422c",
+  "binary_sha256": "e138dd58b77a56fc86218c1b512c5240ce24514aa49735bf3b049fc7036bdd6f",
+  "machine": "Apple M5 Ultra",
+  "sdk": "27.0",
+  "exit_code": 0,
+  "success": true,
+  "observations": 40,
+  "thermal_levels": [
+    0
+  ],
+  "rustc_observed": false
+}

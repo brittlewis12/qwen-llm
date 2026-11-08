@@ -3,13 +3,6 @@
 use super::*;
 use crate::metal::encode_attn_decode_depth_f32;
 
-pub(super) fn prefill_attn_fused_qkv_g8_enabled() -> bool {
-    matches!(
-        std::env::var("QWEN_PREFILL_ATTN_FUSED_QKV_G8").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-    )
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum SnapshotKvStorageKind {

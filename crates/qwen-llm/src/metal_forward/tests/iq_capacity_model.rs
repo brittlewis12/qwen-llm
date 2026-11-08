@@ -158,11 +158,10 @@ fn plan_summary(requests: &[ModelWeightStorageRequest<'_>]) -> Value {
 }
 
 // Enumerate the actual bindings in exactly the planner's source-request order.
-// Derived fused QKV is separate; no assumption that file tensor count == requests.
-fn bindings(model: &MetalModel) -> (Vec<&MetalTensor>, Vec<&MetalTensor>) {
+// File tensor count need not equal source storage requests.
+fn bindings(model: &MetalModel) -> Vec<&MetalTensor> {
     assert_eq!(model.arch.kind, ArchKind::Dense);
     let mut source = vec![&model.token_embd, &model.output_norm, &model.lm_head];
-    let mut derived = Vec::new();
     for block in &model.blocks {
         match block {
             MetalBlock::Gdn(g) => {
@@ -199,13 +198,10 @@ fn bindings(model: &MetalModel) -> (Vec<&MetalTensor>, Vec<&MetalTensor>) {
                     &a.q_norm,
                     &a.k_norm,
                 ]);
-                if let Some(qkv) = &a.qkv_fused {
-                    derived.push(qkv);
-                }
             }
         }
     }
-    (source, derived)
+    source
 }
 fn parse_ledger(line: &str) -> BTreeMap<String, Vec<u64>> {
     assert!(line.starts_with("[metal-load-ledger] "));
@@ -227,10 +223,9 @@ fn audit(
     model: &MetalModel,
     requests: &[ModelWeightStorageRequest<'_>],
     lines: &[String],
-    expected_derived: &[u64],
     out: &mut File,
 ) {
-    let (source, derived) = bindings(model);
+    let source = bindings(model);
     assert_eq!(source.len(), requests.len());
     let mut actual = BTreeMap::<String, (usize, u64)>::new();
     for (t, r) in source.iter().zip(requests) {
@@ -252,10 +247,6 @@ fn audit(
         a.0 += 1;
         a.1 += t.n_bytes();
     }
-    assert_eq!(
-        derived.iter().map(|t| t.n_bytes()).collect::<Vec<_>>(),
-        expected_derived
-    );
     let raw: Vec<_> = lines
         .iter()
         .filter(|l| l.starts_with("[metal-load-ledger] "))
@@ -295,17 +286,11 @@ fn audit(
             converted.iter().map(|r| r.resident_bytes).sum()
         ]
     );
-    assert_eq!(
-        ledger["derived"],
-        vec![
-            derived.len() as u64,
-            derived.iter().map(|t| t.n_bytes()).sum()
-        ]
-    );
+    assert_eq!(ledger["derived"], vec![0, 0]);
     emit(
         out,
         json!({"event":"realized_summary","ledger":ledger,"actual_source_bindings_by_dtype":actual,
-        "planned_by_source_dtype_and_kind":plan_summary(requests),"derived_logical_bytes":expected_derived,
+        "planned_by_source_dtype_and_kind":plan_summary(requests),
         "reconciled":true,"note":"request counts include any source aliases; buffer_bytes per binding must not be summed as unique physical allocation"}),
     );
 }
@@ -767,28 +752,6 @@ pub(super) fn load_copied_native(
         remaining_conversions.is_empty(),
         "released-artifact zero-conversion target not met; plan flushed"
     );
-    // Match the actual optional derived-QKV loader predicate. Price its GPU
-    // destination and its two simultaneous compressed CPU concatenation copies.
-    let derived: Vec<u64> = bound
-        .blocks
-        .iter()
-        .filter_map(|b| match b {
-            Block::Attn(a)
-                if prepared.choices.fused_qkv_g8
-                    && a.q.dtype == GgmlType::Q8_0
-                    && a.k.dtype == a.q.dtype
-                    && a.v.dtype == a.q.dtype
-                    && a.q.shape.len() == 2
-                    && a.k.shape.len() == 2
-                    && a.v.shape.len() == 2
-                    && a.q.shape[0] == a.k.shape[0]
-                    && a.q.shape[0] == a.v.shape[0] =>
-            {
-                Some(a.q.n_bytes + a.k.n_bytes + a.v.n_bytes)
-            }
-            _ => None,
-        })
-        .collect();
     let config = LoadedModelConfig::default();
     let workers = if config.prefetch_workers == 0 {
         crate::prefetch::DEFAULT_WORKERS
@@ -801,12 +764,7 @@ pub(super) fn load_copied_native(
         config.prefetch_chunk_bytes
     };
     let source_pages: u64 = stamps.iter().map(|s| s.size).sum();
-    let metal_bytes: u64 = requests
-        .iter()
-        .map(|r| price(ctx, r.resident_bytes))
-        .chain(derived.iter().map(|&n| price(ctx, n)))
-        .sum();
-    let concat_bytes = derived.iter().max().copied().unwrap_or(0) * 2;
+    let metal_bytes: u64 = requests.iter().map(|r| price(ctx, r.resident_bytes)).sum();
     let f16_conversion_cpu = requests
         .iter()
         .filter(|r| r.kind == ModelWeightStorageKind::ConvertedF16)
@@ -815,12 +773,8 @@ pub(super) fn load_copied_native(
         .unwrap_or(0);
     let codec_staging = 256 * 1024u64; // canonical codec calls at most 65,536 elements.
     let headroom = config.effective_prefetch_min_headroom_bytes();
-    let cpu_bytes = source_pages
-        + (workers * chunk) as u64
-        + concat_bytes
-        + f16_conversion_cpu
-        + codec_staging
-        + headroom;
+    let cpu_bytes =
+        source_pages + (workers * chunk) as u64 + f16_conversion_cpu + codec_staging + headroom;
     let allocation = ctx.begin_allocation_transaction();
     admit(
         ctx,
@@ -830,8 +784,8 @@ pub(super) fn load_copied_native(
         cpu_bytes,
         0,
         json!({
-        "priced_copied_destinations_and_derived":metal_bytes,"source_mmap_residency_upper_bytes":source_pages,
-        "prefetch_worker_bytes":workers*chunk,"derived_concat_cpu_upper_bytes":concat_bytes,
+        "priced_copied_destinations":metal_bytes,"source_mmap_residency_upper_bytes":source_pages,
+        "prefetch_worker_bytes":workers*chunk,
         "converted_f16_cpu_upper_bytes":f16_conversion_cpu,"codec_staging_upper_bytes":codec_staging,
         "canonical_prefetch_headroom_bytes":headroom,"full_cpu_f32_model_bytes":0,
         "note":"whole source-file residency conservatively includes already resident pages; converted F32 fills Metal storage directly"}),
@@ -869,10 +823,10 @@ pub(super) fn load_copied_native(
         out,
         "before_load_recheck",
         metal_bytes,
-        source_pages + concat_bytes + f16_conversion_cpu + codec_staging + headroom,
+        source_pages + f16_conversion_cpu + codec_staging + headroom,
         0,
         json!({"source_mmap_residency_upper_bytes":source_pages,
-            "derived_concat_cpu_upper_bytes":concat_bytes,"converted_f16_cpu_upper_bytes":f16_conversion_cpu,
+            "converted_f16_cpu_upper_bytes":f16_conversion_cpu,
             "codec_staging_upper_bytes":codec_staging,"canonical_prefetch_headroom_bytes":headroom,
             "prefetch_worker_bytes":0,"note":"source reservation retained conservatively; file cache is not process mmap residency"}),
     );
@@ -886,7 +840,7 @@ pub(super) fn load_copied_native(
     let metal = result.expect("normal prepared load failed; raw record flushed");
     drop(allocation);
     footprint(ctx, out, "loaded");
-    audit(&metal, &requests, &lines, &derived, out);
+    audit(&metal, &requests, &lines, out);
     metal
 }
 

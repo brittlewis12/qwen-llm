@@ -1,0 +1,14 @@
+{
+  "source": "8d1d34011208d3c93ad2a948d35dfbd046f9811f",
+  "binary": "target/release/deps/qwen_llm-60655e5b0ca7422c",
+  "binary_sha256": "f409ee12541b249b0ad6e7c2420ce590f3f3495e382482a7dd0af7cab1900495",
+  "machine": "Apple M4 Max",
+  "sdk": "26.2",
+  "exit_code": 0,
+  "success": true,
+  "observations": 59,
+  "thermal_levels": [
+    0
+  ],
+  "rustc_observed": false
+}

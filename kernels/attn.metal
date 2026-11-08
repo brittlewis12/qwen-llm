@@ -10,7 +10,7 @@
 //   * kernel_qk_rms_norm_rope_f32_packed_consecutive — fused Q/K norm +
 //     RoPE for packed consecutive positions.
 //
-//   * kernel_split_q_gate_f32 / kernel_split_qkv_fused_f32 — un-interleave
+//   * kernel_split_q_gate_f32 — un-interleave
 //     the Q-projection output from `[h0_q(hd), h0_gate(hd), ...]` into
 //     separate `q[n_heads, head_dim]` and `gate[n_heads, head_dim]`
 //     tensors (gated-attention layout where q_proj outputs 2× the heads).
@@ -230,36 +230,6 @@ kernel void kernel_split_q_gate_f32(
     const uint src_off = hi * 2u * args.head_dim;
     q[tid]    = q_full[src_off + d];
     gate[tid] = q_full[src_off + args.head_dim + d];
-}
-
-struct split_qkv_fused_args {
-    uint n_rows;
-    uint q_full_dim;
-    uint kv_dim;
-    uint fused_stride;
-};
-
-kernel void kernel_split_qkv_fused_f32(
-        constant split_qkv_fused_args & args [[buffer(0)]],
-        device const float * src   [[buffer(1)]], // [n_rows, q_full_dim + 2*kv_dim]
-        device       float * qfull [[buffer(2)]], // [n_rows, q_full_dim]
-        device       float * k_out [[buffer(3)]], // [n_rows, kv_dim]
-        device       float * v_out [[buffer(4)]], // [n_rows, kv_dim]
-        uint tid [[thread_position_in_grid]]) {
-    const uint total = args.n_rows * args.fused_stride;
-    if (tid >= total) return;
-    const uint row = tid / args.fused_stride;
-    const uint col = tid % args.fused_stride;
-    const uint src_off = row * args.fused_stride;
-    if (col < args.q_full_dim) {
-        qfull[row * args.q_full_dim + col] = src[src_off + col];
-    } else if (col < args.q_full_dim + args.kv_dim) {
-        const uint kcol = col - args.q_full_dim;
-        k_out[row * args.kv_dim + kcol] = src[src_off + col];
-    } else {
-        const uint vcol = col - args.q_full_dim - args.kv_dim;
-        v_out[row * args.kv_dim + vcol] = src[src_off + col];
-    }
 }
 
 // ---- fused attention decode (single Q step) --------------------------------

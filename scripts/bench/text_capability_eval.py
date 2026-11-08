@@ -40,8 +40,10 @@ DEFAULT_QWEN = ROOT / "target" / "release" / "qwen"
 DEFAULT_QWEN_BENCH = ROOT / "target" / "release" / "qwen-bench"
 RUN_LOCK = ROOT / "target" / "qualitative" / ".qwen-text-capability-v1.lock"
 BATTERY_ID = "qwen-27b-text-capability-v1"
+# ac70437f replaced machine-local model paths with published filenames;
+# task manifests and both request byte streams are unchanged.
 PACKET_SEMANTIC_SHA256 = (
-    "1bf6f2a1da79314688368b340d00ede6f6bc3447b40494394b94abb74d21193e"
+    "c89f7bb60f9a9ce798a8a206cb428228f0630afb7fc95aff16a84ef385f7e848"
 )
 SEED = 42
 SAMPLING = {

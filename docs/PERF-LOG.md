@@ -6,6 +6,167 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - GLM Concurrent Serve: Qualify 16K Roots, Keep Normal Prefill Geometry
+
+- Rebased the GLM batching series onto **`c6855ba5`**. This qualification
+  supersedes the initial 512-row scheduling default in the small-root entry
+  below. Native batching stays unchanged; implementation **`10c542c7`** keeps
+  each request's normal admitted prefill ceiling (normally **2048 rows**)
+  and mandatory cuts under load. After a mixed-load quantum taking `t`,
+  decode receives `t * p / (100-p)` measured service, capped at **one second**.
+  **`QWEN_SERVE_GLM_DECODE_PERCENT=10`** is the default (integer 1..=90).
+  **`QWEN_SERVE_GLM_PREFILL_FAIR=0`** restores 512-row/one-round alternation;
+  **`QWEN_SERVE_GLM_MAX_ACTIVE=1`** retains the original serial owner and
+  single live session. Default remains four active/four idle live states,
+  M5 Fast/Half only. No native call is preempted; Exact/F32 contracts remain.
+- Reuse the Nov 8 standing's frozen distinct Rust roots and tool excerpts:
+  **three offered agents x three sequential turns**, actual replies replayed,
+  direct streaming `/v1/responses`, greedy/seed 1, **128 tokens/turn**, context
+  **32768**, ~16K cold roots and ~1K appends. Three offered clients in every
+  arm, with only MAX_ACTIVE changed in the serial control. Fresh server,
+  no client warm-up; startup separate. All nine requests/arm emit 128 tokens.
+  Individual build lock/Metal lease per arm, nice 10, 25 s cooling plus
+  three zero readings five seconds apart; one-second monitoring, thermal
+  **0 throughout**. GLM has no CED route to preserve: this recovers GEMM
+  efficiency and cuts native call/encode overhead.
+
+  | Schedule | Cohort wall s | Mean TTFT s | Loaded calls | p95 / max content gap ms |
+  | --- | ---: | ---: | ---: | ---: |
+  | Initial 512-row default | 84.058 | 13.849 | 82 | 689 / 1382 |
+  | Initial serial | 85.468 | 24.659 | 0 | 18 / 36 |
+  | Fair default, primary / reverse | **69.850 / 69.844** | **12.239 / 12.222** | **22 / 22** | 53 / 1986; 53 / 1984 |
+  | Same-binary serial | 85.551 | 24.678 | 0 | 18 / 36 |
+
+- The first schedule was only **1.0168x** serial on realistic roots despite
+  its small-root win. The final same-binary comparison is
+  **1.2248x throughput** versus serial (mean **69.847 s**, **15.704 s saved**)
+  and **1.2035x** versus the old 512-row observation (**14.211 s saved**).
+  Mean TTFT is **12.231 s**, **50.4% below serial**, versus **13.849 s**
+  initially. The native call ceiling stays **2048**, loaded
+  calls **82 -> 22**. Larger calls make stalls less frequent but longer:
+  p95 **689 -> 53 ms**, maximum **1382 -> 1986 ms**. The slowest whole-decode
+  phase improves **2.77 -> 4.37 tok/s** while cold peers prefill. First warm
+  turns can wait longer (**1.93 -> 2.83 s** mean TTFT) while cold roots finish. These are client content-event gaps, not exact native token
+  intervals or latency deadlines. Short campaigns are descriptive, with no
+  confidence-interval claim. Request/event traces retain per-agent TTFT,
+  decode rate, reuse, memory and every output.
+- Arithmetic/lifetime check, validation on: frozen code/prose at independent
+  depths **16384/16401/16418**, appends **1123/1084/1596**, arbitrary tails
+  and a nonaligned mandatory cut. Compare whole serial-geometry prefills
+  against 2048-row quanta with unrelated decoders stepping between them;
+  replay the identical one-/two-/three-member decode membership schedule,
+  then **128 teacher-forced full-vocabulary steps per sequence/stage**.
+  **125,452,800 F32 components match bitwise**, all finite, **dNLL = KL = 0**
+  for this scheduling check. Existing batch-vs-ordinary likelihood witnesses
+  remain applicable; no kernel/math change or tolerance relaxation.
+- Validation: scheduler CPU tests **13 passed**, including elapsed-service
+  repayment, one-second burst cap, credit reset outside mixed service and
+  the explicit 512-row rollback. Full release CLI ****1,689 passed / 74 ignored****; contracts
+  ****passed** on `2bc5e8ae` (tree `b104e535`)**. Native library and shaders are byte-identical to the prior
+  **2,470-pass** M5 release lib qualification. Measured candidate sources
+  match the checked Rust sources; identities and prototype patch are sealed
+  with the exact binaries. Complete evidence:
+  **`~/qwen-runs/2026-11-08-glm-batch-16k/`** on both machines.
+
+
+## 2026-11-08 - GLM Independent Decode Batching And Concurrent Serve
+
+- Base **`842083d5`**, M5 Ultra, stock four-shard **GLM-5.3-Flash
+  UD-IQ3_XXS**, Fast/Half defaults. Follow the Oct 28 V4.1 batching design
+  and Nov 4 generic few-row MMA, preserving the Aug 11 exact-reuse kill.
+  Independent one-token sequences have separate state; the Nov 6 sequential
+  four-row verifier cost 49.3 ms/round. No speculation.
+- Native increment **`9d72ce3f`** shares mHC, dense Q6/Q8 projections and F32
+  native routed-expert token grids across 2–4 sequences. Every sequence keeps
+  its own KDA convolution/recurrence, MLA latent/index cache and attention.
+  Borrow existing admitted packed activation scratch for one synchronous
+  round; admit only a small B-wide logits buffer plus CPU readback allowance.
+  B=4 census: **508 few-row GEMMs, 84 depth-4 native expert grids,
+  2,341 dispatches/round**.
+  Validate the whole group before mutation; any started failure poisons all
+  members. One-member calls use ordinary forward verbatim. Exact/DenseF32/F32
+  groups decline before mutation and the owner uses individual forwards.
+- Kill: same resident weights and independently restored document prefixes,
+  16 teacher-forced transitions/arm, excluded warm arms, **ABBA + BAAB**,
+  four retained arms/route/cell. Ordinary full-vocabulary readback and status
+  checks included; profiler/census/captures disabled during timing. Both
+  order blocks win in all cells; no timing sample dropped. Batched round time
+  is each member's inter-token interval. Isolated serial steps remain about
+  17.0/17.35 ms at 8K/32K; batching trades isolated latency for aggregate work.
+
+  | Depth | B | Serial aggregate tok/s | Batched aggregate tok/s | Serial B-step / batched interval ms | Ratio |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | 8192 | 2 | 58.72 | **71.64** | 34.06 / **27.92** | **1.220x** |
+  | 8192 | 3 | 58.70 | **84.85** | 51.10 / **35.36** | **1.445x** |
+  | 8192 | 4 | 58.71 | **93.71** | 68.14 / **42.69** | **1.596x** |
+  | 32768 | 2 | 57.62 | **70.09** | 34.71 / **28.53** | **1.217x** |
+  | 32768 | 3 | 57.61 | **82.68** | 52.07 / **36.28** | **1.435x** |
+  | 32768 | 4 | 57.64 | **90.60** | 69.39 / **44.15** | **1.572x** |
+
+- Precision correction before shipping: the generic Half-weight/F32-activation
+  few-row path had 32K signed dNLL **+0.00584**, mean KL **0.00577** over
+  1,024 positions. Keep the original generic route unchanged; GLM's new
+  explicit Q6/Q8 variant uses **F32 weight fragments and activations**, with
+  E1 accumulation order. F64 op sweeps on valid quant blocks and production
+  geometries show roughly **500–1500x smaller RMS error** than the Half-weight
+  prototype, at essentially unchanged GPU cost. No global quant-format
+  dispatch gate is widened.
+- Expanded final witness: eight frozen code/prose prefix/suffix pairs,
+  **128 sequential teacher-forced targets/document/depth**, full-vocabulary
+  distributions (1,024 positions/depth). Signed dNLL is batched minus serial;
+  bootstrap 20,000 document + eight-position-block resamples, seed 881.
+  Identical-arithmetic serial repeats are bitwise equal (noise floor zero).
+  Reordered members, active widths 2/3/4 and first-member workspace 2048/4
+  produce bit-identical per-sequence results. B=1 matches all four modes.
+
+  | Depth | Signed dNLL nats/token | Bootstrap 95% CI | Mean KL |
+  | --- | ---: | ---: | ---: |
+  | 8192 | **−0.002094** | [−0.006008, +0.001025] | **0.0003173** |
+  | 32768 | **−0.0001465** | [−0.001247, +0.000939] | **0.0001220** |
+
+- Serve increment **`da6cd31a`** resumes the existing GLM cache/checkpoint,
+  prefill and decode phases through the owner batching contract. Defaults:
+  **`QWEN_SERVE_GLM_MAX_ACTIVE=4`**, **`QWEN_SERVE_GLM_LIVE_STATES=4`** on
+  supported M5 Fast/Half; **`QWEN_SERVE_GLM_MAX_ACTIVE=1` restores the original
+  serial owner and single live session**. M4, unsupported artifacts, startup F32/Exact
+  and DFlash retain serial serving. Loaded prefill calls carry at most 512
+  new tokens and alternate with ready decode rounds. Longest compatible
+  live prefix wins; normal admission releases snapshots, then unused idle
+  states, never active states. Slow clients park outside batches; cancellation,
+  failure and shutdown complete each request once. Warm both native paths on
+  throwaway states before listening, with no client warm-up.
+- Oct 28 **three-agent x three-turn** serve protocol, fresh server per arm,
+  **D/S/D/S**, greedy seed 1, 128 output tokens/turn, 0.3 s initial stagger,
+  later turns replay conversation plus the original 40-line tool-style blob.
+  GLM uses low reasoning effort and structured reasoning replay.
+  Defaults **26.398/26.476 s** versus serial
+  **31.971/32.023 s**, **1.2103x** (pair ratios **1.2111/1.2095**),
+  **42.48 vs 35.10 aggregate tok/s**. All arms emit **1,123 tokens** and nine
+  successful responses. All six later default turns reuse live sessions;
+  serial later turns restore the nine-token shared snapshot. Default mean
+  batch width **2.919**, **99.55%** of transitions batched. Repeats are
+  transcript-identical within each route; default and serial transcripts
+  differ (batched rounding and the loaded 512-row prefill partition).
+  Mean reply latency **9.010 -> 8.625 s**, worst reply **13.92 -> 11.24 s**;
+  mean first-turn reply **4.33 -> 6.57 s**. This buys aggregate throughput
+  and fairer completion at the cost of the first serial client's head start.
+  Startup is excluded, **1.25–5.05 s** including native warm-up.
+- All M5 timing arms take the build lock and canonical Metal lease, thermal
+  **0** before/during/after; 25 s cooling gaps outside the lease. Full release
+  library suite **2,470 passed / 747 ignored** (M5, Metal
+  validation on and required), full CLI suite **1,684 passed / 74 ignored**
+  (laptop), and **`scripts/check-contracts.sh` passed** on code commit
+  `da6cd31a` (tree `723b070a`).
+  The ignored native 8K witness and existing CLI live-session witness also
+  pass on M5 with validation on (the latter compiled on the laptop), including
+  Exact warm/cold bit equality, replay and cancel/resume. Final committed
+  native dNLL/KL values equal all 1,024 expanded 8K probe positions.
+  Actual-model validation also checks wrong weight identity/capacity/workspace
+  rejection, no partial advancement, and all-member poisoning on an encoding
+  failure without affecting an outside session. Raw sources, exact binaries,
+  hashes, all retained/failed setup packets and controller logs:
+  `~/qwen-runs/2026-11-08-glm-batch-decode/` on both machines.
+
 ## 2026-11-08 - V4.1 Concurrent Census: Prefill Dominates; Short Tail CED Rejected
 
 - **No runtime change.** Base **`c6855ba5`**, unchanged M5 Ultra four-shard

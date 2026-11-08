@@ -21,6 +21,10 @@ struct Stamp {
 }
 
 impl CheckpointLineage {
+    pub(super) fn session_id(self) -> u64 {
+        self.session
+    }
+
     pub(super) fn fresh() -> Result<Self, Qwen4ExpTextSessionError> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let session = NEXT

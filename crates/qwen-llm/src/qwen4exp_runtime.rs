@@ -568,6 +568,7 @@ pub struct Qwen4ExpLoadedModel<'gguf> {
     weights: Qwen4ExpMetalWeights,
     ple_table: PleIq4NlTable<'gguf>,
     workspace: Option<Qwen4ExpTextSessionMetalWorkspace>,
+    workspace_session_id: u64,
     capacity: Qwen4ExpSessionCapacity,
     admission: Qwen4ExpRuntimeAdmission,
     observed_weight_bytes: u64,
@@ -981,6 +982,7 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         Ok(Self {
             weights,
             ple_table,
+            workspace_session_id: workspace.session_id(),
             workspace: Some(workspace),
             capacity,
             admission: Qwen4ExpRuntimeAdmission {
@@ -1067,6 +1069,7 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         let workspace = self.workspace.take().ok_or_else(|| {
             Qwen4ExpRuntimeError::Invalid("loaded model session was consumed".into())
         })?;
+        self.workspace_session_id = workspace.session_id();
         Ok(Qwen4ExpTextRunner {
             ctx,
             weights,
@@ -1088,6 +1091,22 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             return invalid("loaded model already holds a session workspace");
         }
         workspace.reset()?;
+        self.workspace = Some(workspace);
+        Ok(())
+    }
+
+    /// Return this model's healthy, released runner without resetting causal
+    /// state or logits. The owner must separately verify the exact token key
+    /// before reusing it. Foreign workspaces are never accepted as live state.
+    pub fn retain_workspace(
+        &mut self,
+        workspace: Qwen4ExpTextSessionMetalWorkspace,
+    ) -> Result<(), Qwen4ExpRuntimeError> {
+        if self.workspace.is_some() || workspace.session_id() != self.workspace_session_id {
+            return invalid("live workspace does not belong to this loaded model's runner");
+        }
+        workspace.snapshot_bytes()?;
+        workspace.logits()?;
         self.workspace = Some(workspace);
         Ok(())
     }
@@ -7221,3 +7240,7 @@ mod tests {
         eprintln!("wrote IQ3 gate/up probe to {}", output_path.display());
     }
 }
+
+#[cfg(test)]
+#[path = "qwen4exp_runtime/retained_tests.rs"]
+mod retained_tests;

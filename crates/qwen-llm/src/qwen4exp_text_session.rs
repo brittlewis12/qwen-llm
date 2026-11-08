@@ -1289,6 +1289,10 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         self.committed_length
     }
 
+    pub(crate) fn session_id(&self) -> u64 {
+        self.checkpoint_lineage.session_id()
+    }
+
     pub fn qsa_committed_lengths(&self) -> Vec<(u32, usize)> {
         self.geometry
             .post_ple

@@ -5829,5 +5829,19 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Leased model-free Metal witness: scalar/parallel F16 publication bits, shifted inputs/outputs, guards, rounding cases and long positions."
+  },
+  {
+    "target": "lib",
+    "name": "qwen4exp_qsa::tests::decode_selector::singleton_selector_scope_keeps_packed_and_other_budgets",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure singleton selector shape predicate; no Metal context, model or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "qwen4exp_qsa::tests::decode_selector::singleton_compact_selector_preserves_ids_status_and_guards",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Self-leased model-free Metal differential: exact ordered IDs, ties, nonfinite/visibility status, shifted buffers and guards against incumbent radix selection."
   }
 ]

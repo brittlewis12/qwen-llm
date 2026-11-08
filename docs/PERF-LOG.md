@@ -6,6 +6,119 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - V4.1 Serve: Keep CED Under Load With Bounded Decode Sharing
+
+- **Default on**, implementation **`97322961`**, base **`fe5f055a`**.
+  **`QWEN_SERVE_V41_PREFILL_FAIR=0`** restores the previous loaded 512-row
+  calls and one-decode-step alternation. Active/live-state defaults remain
+  **4/4**; `MAX_ACTIVE=1` retains the serial path. No native kernel, weight,
+  mapping, residency or replay changes.
+- Keep the normal **4096-row** ceiling while others decode. This preserves
+  whole-request cold/live CED planning and short-append header folding:
+  previously, the first loaded 512-row call permanently disabled CED for
+  that request. Mandatory cuts, CED minimum spans, optional admission
+  refusal, Ready-only checkpoint publication and FIFO admission remain.
+  Native calls are not preempted. After a mixed-load prefill quantum, give
+  runnable decoders a measured service budget `prefill_time * p / (100-p)`,
+  capped at **one second**; decode until paid, then resume prefill. No credit
+  accrues during single-kind service. **`QWEN_SERVE_V41_DECODE_PERCENT`** is
+  an integer **1..=90**, default **10**; a target, not a token deadline.
+- **M5 Ultra**, unchanged production four-shard **DeepSeek-V4.1-Flash-1017
+  GSQ-RCO IQ2_XS + IQ4_NL Engram**, all 384 experts/top-6, matching the
+  standing. Reuse its frozen distinct Rust roots and tool excerpts: direct
+  `/v1/responses`, **three offered agents x three sequential turns**, actual
+  replies resent, greedy/seed 1, **128 output tokens/turn**, context **32768**.
+  Fresh server per arm, no client warm-up. Both serial and batched arms keep
+  four idle live states. Server startup is separate from request-cohort wall.
+  Each arm has its own build lock/canonical GPU lease, nice 10, **25 s cooling
+  plus three zero readings five seconds apart**, one-second monitoring and
+  stop on pressure. Accepted arms sample thermal **0 throughout**; other
+  lanes alternate between arms.
+- Reproduce clean main first: default **71.832 s**, mean TTFT **11.641 s**,
+  **74 reduced loaded calls / one CED episode**; one-in-flight **53.818 s**,
+  TTFT **15.271 s**, **zero reduced calls / three CED episodes**. The earlier
+  standing's 60.187 s serial observation is separate, not pooled. Same-binary
+  policy screen at **`7774a61a`**, retaining every observation:
+
+  | Decode target | Cohort wall s | Mean TTFT s | Slowest whole-decode phase tok/s |
+  | ---: | ---: | ---: | ---: |
+  | 25% | 51.110 / 51.163 | 10.338 / 10.338 | 10.44 |
+  | 50% | 51.538 | 11.265 | 14.23 |
+  | **10%** | **50.190** | **8.160** | **5.38** |
+
+  Prefer 10% for cohort wall and TTFT. At 25/50%, an earlier completed decode
+  can enqueue its next turn behind remaining cold roots; observed worst warm
+  TTFTs are **13.714/16.979 s**, versus **1.258 s** at 10% and **1.869 s**
+  under the old scheduler. More decode service improves ongoing-stream rate,
+  with that measured cohort/queueing tradeoff. Coarser native calls are
+  burstier: screen maximum content-event gap **1.292 -> 3.330 s**. This is
+  a client-content gap, not an exact native token interval. Decoders still
+  advance between quanta; the old slowest phase was about **3 tok/s**.
+- Final same-binary confirmation uses frozen **`eb86548e`** executable,
+  order default / rollback / serial / default, with no tuning environment
+  on default arms.
+
+  | Policy | Cohort wall s | Mean TTFT s | Startup s |
+  | --- | ---: | ---: | ---: |
+  | Default, primary / reverse | **50.297 / 49.942** | **8.176 / 8.114** | 5.557 / 4.195 |
+  | Rollback, four active | 71.896 | 11.632 | 18.416 |
+  | Serial, one active / four live | 55.974 | 15.989 | 1.188 |
+
+  Default mean **50.120 s** saves **21.777 s** versus rollback
+  (**1.4345x throughput / 30.3% less wall time**) and **5.855 s** versus
+  matched serial (**1.1168x / 10.5% less wall time**). Mean TTFT is
+  **8.145 s**, about **30% below rollback**. Startup varies independently
+  and stays outside the cohort timer; its warm-up policy is unchanged.
+  All nine requests/arm reach 128 tokens. Default keeps **three CED episodes**,
+  **zero reduced loaded calls**, and folds all six warm append headers.
+  Per-agent rates, TTFTs, content gaps, startup and memory remain in each raw
+  arm; these short campaigns are not confidence-interval estimates.
+- Shape/trajectory qualification: frozen natural Rust token streams, three
+  agents, cold roots **16384/16401/16418**, **1123-row** appends and **8283-row**
+  extensions with serve-shaped prelude/body/header cuts. Compare old loaded
+  512-row Full against new serial-geometry Full/CED, then take **128
+  teacher-forced complete-vocabulary steps per stage/agent**, width-three
+  batches in both arms. **1152 paired vectors**, all finite; worst per-case
+  **|delta NLL| 0.000115799**, **mean KL 0.000048712**, argmax **1152/1152**.
+  Unchanged gates **0.005 / 0.01** pass. An unchanged cold control's **129280
+  F32 components** match bitwise. Dirty snapshot restores into a different
+  capacity produce subsequent heads matching all **148930560 F32 components**
+  bitwise across the nine cases. CED yields reject snapshots, and an unrelated
+  decoder steps between encoder quanta. No cosine substitute or tolerance relaxation.
+- Additional default-only serve check: prime a 16431-token root, then start
+  two independent coding peers with **512 output tokens each**. After both
+  emit content, append **8274 tokens** to the root's **16558-token live
+  prefix**. It keeps **one CED episode**, **three prefill calls**, zero
+  reduced calls and **5908.460 ms TTFT**; both peers finish all 512 tokens
+  at **29.16 / 27.61 tok/s** including interleaving. This is a loaded-live
+  eligibility/progress check, separate from the 3x3 timing comparison.
+- After the reverse cohort, an edited first-question fork restores the
+  **12593-token** CED-origin ladder cut. Repeating the fork replays only
+  **two header tokens**; replies match. Return to the **18927-token** warm
+  tip uses **zero prefill calls/tokens**, **23.154 / 23.236 ms TTFT** on two
+  returns, with identical reply content. These controls run after the timed
+  cohort; they do not contribute to its wall or TTFT means.
+- Final validation: at **`97322961`**, M5 serial release library **2467 passed /
+  0 failed / 745 ignored**, **137.95 s**, with Metal API validation and
+  required GPU tests. Full **`cargo test --release -p qwen-cli`**:
+  **1675 passed / 0 failed / 74 ignored**. **`scripts/check-contracts.sh`
+  passes on M4**, CPU-only, **581 acceptance tests + 10 tripwires**.
+  Three new host-only scheduler witnesses cover loaded CED entry, elapsed
+  decode service/burst cap, and cancellation without publishing provisional
+  state; the original lifecycle tests explicitly exercise rollback. All three
+  are explicitly registered as CPU acceptance tests.
+- Qualification uses **`7774a61a`**; native V4.1/library sources and shaders
+  are byte-identical to the checked tree. The only difference between timing
+  **`eb86548e`** and checked implementation **`97322961`** is the three CPU
+  inventory entries; all Rust/shader sources are byte-identical. Source and
+  binary identities are sealed in the raw build/launch receipts and
+  **`checked-source-equivalence.json`**. Prototype evidence is separate from
+  the clean landing series; no prototype/revert pair remains.
+- Complete requests/replies, every timing arm, service/thermal samples,
+  distribution and restore fixture, source identities and full test receipts:
+  **`~/qwen-runs/2026-11-08-v41-concurrent-prefill/`** on metagross and small
+  local mirror. No merge or owned worker remains.
+
 ## 2026-11-08 - Tier-1 Serve Concurrency: Three Agents At 16K Roots
 
 - Clean **`842083d5`**, M5 Ultra, production V4.1 GSQ-RCO IQ2_XS + IQ4_NL

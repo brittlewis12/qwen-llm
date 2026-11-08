@@ -589,7 +589,7 @@ where
         let backoff_active = adaptive.backoff_active();
         let backoff_probe_due = adaptive.probe_due(sampled_mode, long_mode);
         let remaining_context_tokens = sequence.remaining_context_tokens();
-        let prefix_replay_drafts = prefix_replay.and_then(|history| {
+        let prefix_replay_drafts = prefix_replay.filter(|_| !sampled_mode).and_then(|history| {
             dflash_prefix_replay_allowed(
                 spec_disabled,
                 position,
@@ -698,14 +698,6 @@ where
         let drafter_pos = position as u32;
         let prefix_replay_step = prefix_replay_drafts.is_some();
         let (draft_tokens, sparse_proposals) = if let Some(replay) = prefix_replay_drafts {
-            if let Some(proposal_sampler) = proposal_sampler.as_mut() {
-                let draws = proposal_sampler
-                    .draws()
-                    .checked_add(replay.len())
-                    .context("DFlash proposal draw count overflow")?;
-                *proposal_sampler = Sampler::at_draw(proposal_sampler.config(), draws)
-                    .context("advance DFlash proposal RNG across prefix replay")?;
-            }
             let mut drafts = Vec::with_capacity(n_block);
             drafts.push(carry);
             drafts.extend_from_slice(replay);

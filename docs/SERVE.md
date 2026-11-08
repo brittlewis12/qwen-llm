@@ -490,10 +490,14 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   token-major arithmetic. The per-request
   `serve phases:` line reports `decode_path=dflash|serial`, with a
   `serve dflash:` line carrying acceptance and backoff counters.
-  `QWEN_DFLASH_PREFIX_REPLAY=1` additionally enables a default-off,
-  single-process experiment that verifies repeated exact-prompt completions
-  before falling back to DFlash; sampled use requires two distinct-seed outputs
-  with a 32-token consensus prefix. It is not a multi-tenant cache contract.
+  Greedy repeated exact-prompt requests also reuse one bounded completion as
+  target-verified proposals, saving drafter work. This is on by default;
+  `QWEN_DFLASH_PREFIX_REPLAY=0` restores the previous path. Sampled requests
+  never use completion replay. The ordinary-Qwen backend retains at most 4096
+  tokens and reserves 53 KiB for history, clone and replacement; pressure drops
+  this optional cache before prefix snapshots or request refusal. Prefix
+  snapshots continue to cover prefill. See the
+  [charged serving packet](bench/2026-11-08-knob-finish/replay.md).
   `QWEN_DFLASH_OFF_CTX=<tokens>` overrides the default 16,384-token hard stop
   for explicit long-context canaries. Above the default boundary, admission
   backs off on low acceptance or dense exact fallback and prices recovery probes

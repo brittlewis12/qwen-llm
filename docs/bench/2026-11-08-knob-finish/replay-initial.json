@@ -1,0 +1,789 @@
+{
+  "source": "1656c1fab9e791d815f18096ae2d61ca33aec3d2",
+  "binary_sha256": "2b1aa873d9403848600ea16a9bc1e32a0d39149abedf0bcd59e8510ccc9cf726",
+  "machine": "Apple M4 Max",
+  "sdk": "26.2",
+  "packets": [
+    {
+      "packet": 0,
+      "arm": "off",
+      "startup_s": 6.137718915939331,
+      "requests": [
+        {
+          "index": 0,
+          "prompt": "A",
+          "wall_s": 1.5173793341964483,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 0
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=none tokenize_ms=0.2 alloc_ms=1.2 restore_ms=32.2 prefill_ms=621.2 prompt_capture_ms=22.1 transcript_boundary=28 transcript_captured=true prefill_path=chunked prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        },
+        {
+          "index": 1,
+          "prompt": "A",
+          "wall_s": 1.1161886248737574,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.7 restore_ms=12.6 prefill_ms=280.7 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        },
+        {
+          "index": 2,
+          "prompt": "A",
+          "wall_s": 1.116402667015791,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.7 restore_ms=11.4 prefill_ms=283.9 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        },
+        {
+          "index": 3,
+          "prompt": "B",
+          "wall_s": 1.2559438748285174,
+          "output_sha256": "9e066ed2832ddf4e458f042bc8051cca21729f608d80b019ffb5e2fec17736be",
+          "usage": {
+            "input_tokens": 34,
+            "output_tokens": 64,
+            "total_tokens": 98,
+            "input_tokens_details": {
+              "cached_tokens": 0
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=none tokenize_ms=0.0 alloc_ms=0.8 restore_ms=0.0 prefill_ms=504.5 prompt_capture_ms=16.8 transcript_boundary=27 transcript_captured=true prefill_path=chunked prefill_chunk=34 decode_path=dflash"
+          ],
+          "drafter_calls": 8
+        },
+        {
+          "index": 4,
+          "prompt": "A",
+          "wall_s": 1.1152712502516806,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.5 restore_ms=11.6 prefill_ms=281.4 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        },
+        {
+          "index": 5,
+          "prompt": "A",
+          "wall_s": 1.1151387919671834,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.7 restore_ms=11.5 prefill_ms=283.4 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        }
+      ],
+      "sampled_replay": [
+        [
+          "0",
+          "0",
+          "0",
+          "0"
+        ]
+      ]
+    },
+    {
+      "packet": 1,
+      "arm": "on",
+      "startup_s": 2.552890125196427,
+      "requests": [
+        {
+          "index": 0,
+          "prompt": "A",
+          "wall_s": 1.4396406658925116,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 0
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=none tokenize_ms=0.0 alloc_ms=0.9 restore_ms=19.5 prefill_ms=570.9 prompt_capture_ms=17.1 transcript_boundary=28 transcript_captured=true prefill_path=chunked prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        },
+        {
+          "index": 1,
+          "prompt": "A",
+          "wall_s": 0.9441888337023556,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "8",
+              "56",
+              "56",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.5 restore_ms=11.5 prefill_ms=280.5 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 0
+        },
+        {
+          "index": 2,
+          "prompt": "A",
+          "wall_s": 0.9405697081238031,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "8",
+              "56",
+              "56",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.5 restore_ms=11.0 prefill_ms=284.2 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 0
+        },
+        {
+          "index": 3,
+          "prompt": "B",
+          "wall_s": 1.268252084031701,
+          "output_sha256": "9e066ed2832ddf4e458f042bc8051cca21729f608d80b019ffb5e2fec17736be",
+          "usage": {
+            "input_tokens": 34,
+            "output_tokens": 64,
+            "total_tokens": 98,
+            "input_tokens_details": {
+              "cached_tokens": 0
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=none tokenize_ms=0.0 alloc_ms=1.4 restore_ms=0.0 prefill_ms=503.1 prompt_capture_ms=16.4 transcript_boundary=27 transcript_captured=true prefill_path=chunked prefill_chunk=34 decode_path=dflash"
+          ],
+          "drafter_calls": 8
+        },
+        {
+          "index": 4,
+          "prompt": "A",
+          "wall_s": 1.1156025831587613,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.5 restore_ms=11.3 prefill_ms=279.0 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        },
+        {
+          "index": 5,
+          "prompt": "A",
+          "wall_s": 0.9425461669452488,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "8",
+              "56",
+              "56",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.6 restore_ms=11.3 prefill_ms=281.0 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 0
+        }
+      ],
+      "sampled_replay": [
+        [
+          "0",
+          "0",
+          "0",
+          "0"
+        ]
+      ]
+    },
+    {
+      "packet": 2,
+      "arm": "on",
+      "startup_s": 2.5473672496154904,
+      "requests": [
+        {
+          "index": 0,
+          "prompt": "A",
+          "wall_s": 1.4320954577997327,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 0
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=none tokenize_ms=0.0 alloc_ms=0.7 restore_ms=19.4 prefill_ms=564.4 prompt_capture_ms=17.7 transcript_boundary=28 transcript_captured=true prefill_path=chunked prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        },
+        {
+          "index": 1,
+          "prompt": "A",
+          "wall_s": 0.9451312907040119,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "8",
+              "56",
+              "56",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.6 restore_ms=9.0 prefill_ms=279.1 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 0
+        },
+        {
+          "index": 2,
+          "prompt": "A",
+          "wall_s": 0.9395879171788692,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "8",
+              "56",
+              "56",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.5 restore_ms=11.5 prefill_ms=279.4 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 0
+        },
+        {
+          "index": 3,
+          "prompt": "B",
+          "wall_s": 1.2635678327642381,
+          "output_sha256": "9e066ed2832ddf4e458f042bc8051cca21729f608d80b019ffb5e2fec17736be",
+          "usage": {
+            "input_tokens": 34,
+            "output_tokens": 64,
+            "total_tokens": 98,
+            "input_tokens_details": {
+              "cached_tokens": 0
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=none tokenize_ms=0.0 alloc_ms=0.7 restore_ms=0.0 prefill_ms=500.3 prompt_capture_ms=15.0 transcript_boundary=27 transcript_captured=true prefill_path=chunked prefill_chunk=34 decode_path=dflash"
+          ],
+          "drafter_calls": 8
+        },
+        {
+          "index": 4,
+          "prompt": "A",
+          "wall_s": 1.1085537089966238,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.6 restore_ms=11.8 prefill_ms=281.3 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        },
+        {
+          "index": 5,
+          "prompt": "A",
+          "wall_s": 0.9458798747509718,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "8",
+              "56",
+              "56",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.7 restore_ms=11.4 prefill_ms=279.7 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 0
+        }
+      ],
+      "sampled_replay": [
+        [
+          "0",
+          "0",
+          "0",
+          "0"
+        ]
+      ]
+    },
+    {
+      "packet": 3,
+      "arm": "off",
+      "startup_s": 2.5527265002019703,
+      "requests": [
+        {
+          "index": 0,
+          "prompt": "A",
+          "wall_s": 1.432382000144571,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 0
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=none tokenize_ms=0.0 alloc_ms=0.8 restore_ms=19.2 prefill_ms=569.5 prompt_capture_ms=15.0 transcript_boundary=28 transcript_captured=true prefill_path=chunked prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        },
+        {
+          "index": 1,
+          "prompt": "A",
+          "wall_s": 1.1146327503956854,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.6 restore_ms=11.7 prefill_ms=281.5 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        },
+        {
+          "index": 2,
+          "prompt": "A",
+          "wall_s": 1.1166606657207012,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.5 restore_ms=10.7 prefill_ms=281.1 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        },
+        {
+          "index": 3,
+          "prompt": "B",
+          "wall_s": 1.2544574588537216,
+          "output_sha256": "9e066ed2832ddf4e458f042bc8051cca21729f608d80b019ffb5e2fec17736be",
+          "usage": {
+            "input_tokens": 34,
+            "output_tokens": 64,
+            "total_tokens": 98,
+            "input_tokens_details": {
+              "cached_tokens": 0
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=none tokenize_ms=0.0 alloc_ms=0.7 restore_ms=0.0 prefill_ms=504.5 prompt_capture_ms=16.9 transcript_boundary=27 transcript_captured=true prefill_path=chunked prefill_chunk=34 decode_path=dflash"
+          ],
+          "drafter_calls": 8
+        },
+        {
+          "index": 4,
+          "prompt": "A",
+          "wall_s": 1.112277583219111,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.5 restore_ms=11.4 prefill_ms=282.9 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        },
+        {
+          "index": 5,
+          "prompt": "A",
+          "wall_s": 1.1176389995962381,
+          "output_sha256": "6b93c23ae54d73d24f550abba26a71027c2302e0c67b789f6a4bd9574610688e",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 64,
+            "total_tokens": 99,
+            "input_tokens_details": {
+              "cached_tokens": 28
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 0
+            }
+          },
+          "status": "incomplete",
+          "prefix_replay": [
+            [
+              "0",
+              "0",
+              "0",
+              "0"
+            ]
+          ],
+          "phases": [
+            "serve phases: family=qwen restore_source=ram tokenize_ms=0.0 alloc_ms=0.5 restore_ms=11.2 prefill_ms=280.9 prompt_capture_ms=0.0 transcript_boundary=28 transcript_restored=true prefill_path=serial_tail prefill_chunk=35 decode_path=dflash"
+          ],
+          "drafter_calls": 9
+        }
+      ],
+      "sampled_replay": [
+        [
+          "0",
+          "0",
+          "0",
+          "0"
+        ]
+      ]
+    }
+  ],
+  "success": true
+}

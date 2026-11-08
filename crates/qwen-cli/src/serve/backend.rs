@@ -33,7 +33,6 @@ use qwen_llm::runtime::{LoadedModel, Sequence, SequenceConfig};
 use qwen_llm::sampling::{SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
 use qwen_llm::snapshot_policy::EntryId;
 use qwen_llm::tokenizer::{Tokenizer, token_ids_sha256_i32le};
-use std::collections::VecDeque;
 use std::io;
 use std::time::Instant;
 
@@ -60,10 +59,7 @@ mod restored_tail_pilot;
 mod moe_dflash_tests;
 use durable_tier::restore_source;
 const DFLASH_PREFIX_REPLAY_ENV: &str = "QWEN_DFLASH_PREFIX_REPLAY";
-const DFLASH_PREFIX_REPLAY_MAX_ENTRIES: usize = 4;
 const DFLASH_PREFIX_REPLAY_MAX_TOKENS: usize = 4096;
-const DFLASH_PREFIX_REPLAY_MIN_SAMPLED_ENTRIES: usize = 2;
-const DFLASH_PREFIX_REPLAY_MIN_SAMPLED_TOKENS: usize = 32;
 type DflashPromptCapture = (MetalTensor, usize, usize, usize, Option<usize>);
 
 fn allocate_admitted_dflash<T>(
@@ -94,40 +90,29 @@ fn allocate_admitted_dflash<T>(
 struct DflashPrefixReplayKey {
     prompt_sha256: String,
     sampler_version: u32,
-    temperature_bits: u32,
-    top_k: usize,
-    top_p_bits: u32,
-    min_p_bits: u32,
 }
 
-// Seed is intentionally excluded so repeated sampling runs can share history;
-// sampled admission separately requires consensus from distinct seeds.
-fn dflash_prefix_replay_key(prompt_ids: &[i32], sampling: SamplingConfig) -> DflashPrefixReplayKey {
-    DflashPrefixReplayKey {
+fn dflash_prefix_replay_key(
+    prompt_ids: &[i32],
+    sampling: SamplingConfig,
+) -> Option<DflashPrefixReplayKey> {
+    // Greedy only: sampled consensus changes coupling and later acceptance.
+    (sampling.temperature == 0.0).then(|| DflashPrefixReplayKey {
         prompt_sha256: token_ids_sha256_i32le(prompt_ids),
         sampler_version: SAMPLER_ALGORITHM_VERSION,
-        temperature_bits: sampling.temperature.to_bits(),
-        top_k: sampling.top_k,
-        top_p_bits: sampling.top_p.to_bits(),
-        min_p_bits: sampling.min_p.to_bits(),
-    }
+    })
 }
 
 #[derive(Default)]
 struct DflashPrefixReplayCache {
     enabled: bool,
-    entry: Option<(DflashPrefixReplayKey, VecDeque<DflashPrefixReplayHistory>)>,
-}
-
-struct DflashPrefixReplayHistory {
-    seed: u64,
-    tokens: Box<[i32]>,
+    entry: Option<(DflashPrefixReplayKey, Box<[i32]>)>,
 }
 
 impl DflashPrefixReplayCache {
     fn from_env() -> Self {
         let enabled = match std::env::var(DFLASH_PREFIX_REPLAY_ENV) {
-            Err(std::env::VarError::NotPresent) => false,
+            Err(std::env::VarError::NotPresent) => true,
             Ok(value) if matches!(value.as_str(), "0" | "false" | "off") => false,
             Ok(value) if matches!(value.as_str(), "1" | "true" | "on") => true,
             Err(std::env::VarError::NotUnicode(_)) | Ok(_) => {
@@ -144,73 +129,27 @@ impl DflashPrefixReplayCache {
     }
 
     fn lookup(&self, key: &DflashPrefixReplayKey) -> Option<Vec<i32>> {
-        let (_, histories) = self
-            .enabled
-            .then_some(())
-            .and(self.entry.as_ref())
-            .filter(|(cached_key, _)| cached_key == key)?;
-        let sampled = key.temperature_bits != 0.0f32.to_bits();
-        let distinct_seeds = histories
-            .iter()
-            .enumerate()
-            .filter(|(index, history)| {
-                !histories
-                    .iter()
-                    .take(*index)
-                    .any(|prior| prior.seed == history.seed)
-            })
-            .count();
-        if sampled && distinct_seeds < DFLASH_PREFIX_REPLAY_MIN_SAMPLED_ENTRIES {
-            return None;
-        }
-        let first = histories.front()?;
-        let mut common = first.tokens.len();
-        for history in histories.iter().skip(1) {
-            common = common.min(history.tokens.len()).min(
-                first
-                    .tokens
-                    .iter()
-                    .zip(history.tokens.iter())
-                    .take_while(|(a, b)| a == b)
-                    .count(),
-            );
-        }
-        let minimum = if sampled {
-            DFLASH_PREFIX_REPLAY_MIN_SAMPLED_TOKENS
-        } else {
-            qwen_llm::prompt_lookup::DRAFT_TOKENS + 1
-        };
-        (common >= minimum).then(|| first.tokens[..common].to_vec())
+        self.enabled.then_some(())?;
+        let (cached_key, tokens) = self.entry.as_ref()?;
+        (cached_key == key).then(|| tokens.to_vec())
     }
 
-    fn insert(&mut self, key: DflashPrefixReplayKey, seed: u64, tokens: &[i32]) {
+    fn insert(&mut self, key: DflashPrefixReplayKey, tokens: &[i32]) {
         if self.enabled
             && (qwen_llm::prompt_lookup::DRAFT_TOKENS + 1..=DFLASH_PREFIX_REPLAY_MAX_TOKENS)
                 .contains(&tokens.len())
         {
-            match self.entry.as_mut() {
-                Some((cached_key, histories)) if *cached_key == key => {
-                    if let Some(index) = histories.iter().position(|history| history.seed == seed) {
-                        histories.remove(index);
-                    }
-                    if histories.len() == DFLASH_PREFIX_REPLAY_MAX_ENTRIES {
-                        histories.pop_front();
-                    }
-                    histories.push_back(DflashPrefixReplayHistory {
-                        seed,
-                        tokens: tokens.into(),
-                    });
-                }
-                _ => {
-                    self.entry = Some((
-                        key,
-                        VecDeque::from([DflashPrefixReplayHistory {
-                            seed,
-                            tokens: tokens.into(),
-                        }]),
-                    ));
-                }
-            }
+            self.entry = Some((key, tokens.into()));
+        }
+    }
+
+    fn reserved_bytes(&self) -> u64 {
+        // Resident history, request clone and replacement may coexist. Charge
+        // the full bound before lookup/admission, plus key and allocator space.
+        if self.enabled {
+            (3 * DFLASH_PREFIX_REPLAY_MAX_TOKENS * size_of::<i32>() + 4096) as u64
+        } else {
+            0
         }
     }
 
@@ -507,6 +446,11 @@ impl EngineBackend {
             }
             None => None,
         };
+        let dflash_prefix_replay = if dflash_head.is_some() {
+            DflashPrefixReplayCache::from_env()
+        } else {
+            DflashPrefixReplayCache::default()
+        };
         Ok(Self {
             loaded,
             max_piece_bytes: tokenizer.max_decoded_piece_bytes(),
@@ -520,7 +464,7 @@ impl EngineBackend {
             template,
             no_thinking_supported,
             dflash_head,
-            dflash_prefix_replay: DflashPrefixReplayCache::from_env(),
+            dflash_prefix_replay,
             durable: None,
             restore_source: "none",
             template_style: super::items::TemplateStyle::House,
@@ -1201,10 +1145,39 @@ impl EngineBackend {
         });
         // Durable writes queued or running hold a decoded copy of their
         // snapshot that the memory signals may not show yet.
-        let cpu_reserved = super::transport_memory::combined_reserve(
+        let base_cpu_reserved = super::transport_memory::combined_reserve(
             self.durable_reserved_bytes(),
             transport_reserve_bytes,
         )?;
+        let mut cpu_reserved = super::transport_memory::combined_reserve(
+            base_cpu_reserved,
+            self.dflash_prefix_replay.reserved_bytes(),
+        )?;
+        if self.dflash_prefix_replay.enabled() {
+            let smallest_scratch = packed_tail_plan
+                .as_ref()
+                .map_or(prefill_scratch_upper_bytes, |(_, price)| {
+                    (*price).min(prefill_scratch_upper_bytes)
+                });
+            let cache_admission = self
+                .loaded
+                .qwen_execution_memory_admission_with_additional_bytes(
+                    1,
+                    capacity,
+                    smallest_scratch,
+                    0,
+                    cpu_reserved,
+                )
+                .map_err(|error| {
+                    ServeError::server_error(format!("price request memory: {error:#}"))
+                })?;
+            if cache_admission.refusal().is_some() {
+                // Drop optional output history before evicting useful prefix
+                // snapshots or refusing an otherwise viable request.
+                self.dflash_prefix_replay = DflashPrefixReplayCache::default();
+                cpu_reserved = base_cpu_reserved;
+            }
+        }
         let (packed_tail_plan, admission) = admit_with_pressure_relief(
             packed_tail_plan,
             prefill_scratch_upper_bytes,
@@ -1232,6 +1205,19 @@ impl EngineBackend {
         // Pressure is 503; telemetry and size refusals are 500 with their
         // own codes (one table across lanes, `transport_memory`).
         if let Some(denied) = admission.refusal() {
+            if self.dflash_prefix_replay.enabled() {
+                // Before any request allocation or execution, release this
+                // optional CPU cache and retry once without its reservation.
+                // The disabled instance bounds recursion and cannot reinsert.
+                self.dflash_prefix_replay = DflashPrefixReplayCache::default();
+                tracing::info!(target: "qwen_diag", "serve: released optional greedy completion replay under memory pressure");
+                return self.prepare_request_front(
+                    prompt_ids,
+                    capacity,
+                    greedy,
+                    transport_reserve_bytes,
+                );
+            }
             return Err(super::transport_memory::memory_refusal("request memory", &denied).into());
         }
 
@@ -1407,7 +1393,8 @@ impl GenerationBackend for EngineBackend {
                 .and_then(|n| n.checked_add(staging_cpu))
                 .context("diagnostic CPU admission overflow")?;
             with_native_admission(
-                self.durable_reserved_bytes(),
+                self.durable_reserved_bytes()
+                    .saturating_add(self.dflash_prefix_replay.reserved_bytes()),
                 readout_gpu,
                 readout_cpu,
                 |gpu, reserved| {
@@ -1510,13 +1497,10 @@ impl GenerationBackend for EngineBackend {
             )
             .into());
         }
-        let replay_sampling = sampler.config();
         let dflash_prefix_replay_key = (self.dflash_prefix_replay.enabled()
             && self.dflash_head.is_some())
-        .then(|| dflash_prefix_replay_key(&prompt_ids, replay_sampling));
-        let dflash_prefix_replay = dflash_prefix_replay_key
-            .as_ref()
-            .and_then(|key| self.dflash_prefix_replay.lookup(key));
+        .then(|| dflash_prefix_replay_key(&prompt_ids, sampler.config()))
+        .flatten();
 
         // Context admission fails closed (S0 F3 == spec truncation:"disabled").
         let capacity = request_capacity(
@@ -1542,6 +1526,9 @@ impl GenerationBackend for EngineBackend {
             sampler.config().temperature == 0.0,
             sink.transport_reserve_bytes(),
         )?;
+        let dflash_prefix_replay = dflash_prefix_replay_key
+            .as_ref()
+            .and_then(|key| self.dflash_prefix_replay.lookup(key));
         let cpu_reserved = front.cpu_reserved;
         let needs_scratch = front.needs_scratch;
         let mut chunk = front.chunk;
@@ -2133,7 +2120,6 @@ impl GenerationBackend for EngineBackend {
                             })
                         }),
                     dflash_prefix_replay_key.as_ref(),
-                    replay_sampling.seed,
                     transcript_entry,
                     format!(
                         "tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} prefill_path={prefill_path} prefill_chunk={chunk} decode_path=dflash"
@@ -2218,7 +2204,6 @@ impl GenerationBackend for EngineBackend {
                     })
                 }),
             dflash_prefix_replay_key.as_ref(),
-            replay_sampling.seed,
             transcript_entry,
             format!("tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}{transcript_phase} prefill_path={prefill_path} prefill_chunk={chunk} decode_path=serial"),
         )
@@ -2294,7 +2279,10 @@ impl EngineBackend {
         if let Err((reason, signals)) = super::admit_snapshot_capture_for(
             "qwen",
             estimate
-                .saturating_add(self.durable_reserved_bytes())
+                .saturating_add(
+                    self.durable_reserved_bytes()
+                        .saturating_add(self.dflash_prefix_replay.reserved_bytes()),
+                )
                 .saturating_add(self.control_cpu_reserve),
             || self.loaded.context().memory_signals(),
             |bytes| self.loaded.evict_prefix_cache_for(bytes),
@@ -2358,7 +2346,6 @@ impl EngineBackend {
         restore_ms: f64,
         capture_ring: Option<(MetalTensor, usize, usize, usize, usize)>,
         dflash_prefix_replay_key: Option<&DflashPrefixReplayKey>,
-        dflash_prefix_replay_seed: u64,
         transcript_entry: Option<EntryId>,
         phases: String,
     ) -> Result<GenerationOutcome, BackendFailure> {
@@ -2419,11 +2406,8 @@ impl EngineBackend {
         // this turn's tokens, instead of risking a cold prefill).
         self.durable_note_request_end(transcript_entry.or(completed_entry));
         if let Some(key) = dflash_prefix_replay_key.filter(|_| completed_boundary_valid) {
-            self.dflash_prefix_replay.insert(
-                key.clone(),
-                dflash_prefix_replay_seed,
-                &generation.tokens,
-            );
+            self.dflash_prefix_replay
+                .insert(key.clone(), &generation.tokens);
         }
 
         let (stop_reason, end) = match generation.stop_reason {
@@ -2749,93 +2733,55 @@ mod tests {
     }
 
     #[test]
-    fn dflash_prefix_replay_key_allows_new_seeds_but_not_new_sampling_shapes() {
-        let first = dflash_prefix_replay_key(
-            &[1, 2, 3],
-            SamplingConfig {
-                temperature: 0.7,
-                top_k: 200,
-                top_p: 1.0,
-                min_p: 0.05,
-                seed: 101,
-            },
-        );
-        let mut changed_seed = SamplingConfig {
-            temperature: 0.7,
-            top_k: 200,
-            top_p: 1.0,
-            min_p: 0.05,
-            seed: 102,
+    fn dflash_prefix_replay_is_greedy_only() {
+        let greedy = SamplingConfig {
+            temperature: 0.0,
+            ..SamplingConfig::default()
         };
-        assert_eq!(first, dflash_prefix_replay_key(&[1, 2, 3], changed_seed));
-        changed_seed.min_p = 0.1;
-        assert_ne!(first, dflash_prefix_replay_key(&[1, 2, 3], changed_seed));
+        let first = dflash_prefix_replay_key(&[1, 2, 3], greedy).unwrap();
+        assert_eq!(
+            Some(first.clone()),
+            dflash_prefix_replay_key(
+                &[1, 2, 3],
+                SamplingConfig {
+                    seed: 102,
+                    ..greedy
+                }
+            )
+        );
+        assert_ne!(Some(first), dflash_prefix_replay_key(&[1, 2, 4], greedy));
+        assert!(
+            dflash_prefix_replay_key(
+                &[1, 2, 3],
+                SamplingConfig {
+                    temperature: 0.7,
+                    ..greedy
+                }
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn dflash_prefix_replay_cache_is_single_entry_and_bounded() {
         let mut cache = replay_cache();
-        let config = SamplingConfig::default();
-        let first = dflash_prefix_replay_key(&[1], config);
-        let second = dflash_prefix_replay_key(&[2], config);
-        cache.insert(first.clone(), 1, &[7; 8]);
+        let greedy = SamplingConfig {
+            temperature: 0.0,
+            ..SamplingConfig::default()
+        };
+        let first = dflash_prefix_replay_key(&[1], greedy).unwrap();
+        let second = dflash_prefix_replay_key(&[2], greedy).unwrap();
+        cache.insert(first.clone(), &[7; 8]);
         assert_eq!(cache.lookup(&first), Some(vec![7; 8]));
-
-        cache.insert(second.clone(), 1, &[8; 9]);
+        cache.insert(second.clone(), &[8; 9]);
         assert_eq!(cache.lookup(&first), None);
         assert_eq!(cache.lookup(&second), Some(vec![8; 9]));
-
-        cache.insert(first.clone(), 1, &[9; 7]);
-        assert_eq!(cache.lookup(&first), None);
-        cache.insert(
-            first.clone(),
-            1,
-            &vec![9; DFLASH_PREFIX_REPLAY_MAX_TOKENS + 1],
-        );
+        cache.insert(first.clone(), &[9; 7]);
+        cache.insert(first.clone(), &vec![9; DFLASH_PREFIX_REPLAY_MAX_TOKENS + 1]);
         assert_eq!(cache.lookup(&first), None);
         assert_eq!(cache.lookup(&second), Some(vec![8; 9]));
-    }
-
-    #[test]
-    fn dflash_prefix_replay_uses_only_prior_consensus() {
-        let mut cache = replay_cache();
-        let key = dflash_prefix_replay_key(&[1], SamplingConfig::default());
-        cache.insert(key.clone(), 1, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        cache.insert(key.clone(), 2, &[1, 2, 3, 4, 5, 6, 7, 8, 20, 21]);
-        assert_eq!(cache.lookup(&key), Some(vec![1, 2, 3, 4, 5, 6, 7, 8]));
-
-        cache.insert(key.clone(), 3, &[1, 2, 3, 4, 5, 6, 30, 31, 32]);
-        assert_eq!(cache.lookup(&key), None);
-    }
-
-    #[test]
-    fn dflash_prefix_replay_sampled_requires_two_long_consistent_histories() {
-        let mut cache = replay_cache();
-        let key = dflash_prefix_replay_key(
-            &[1],
-            SamplingConfig {
-                temperature: 0.7,
-                ..SamplingConfig::default()
-            },
-        );
-        cache.insert(key.clone(), 1, &[1; 64]);
-        assert_eq!(cache.lookup(&key), None);
-        cache.insert(key.clone(), 1, &[1; 64]);
-        assert_eq!(cache.lookup(&key), None);
-
-        let mut second = vec![1; 64];
-        second[31] = 2;
-        cache.insert(key.clone(), 2, &second);
-        assert_eq!(cache.lookup(&key), None);
-
-        let third = vec![1; 64];
-        cache.insert(key.clone(), 3, &third);
-        assert_eq!(cache.lookup(&key), None);
-
-        let mut consistent = replay_cache();
-        consistent.insert(key.clone(), 1, &[1; 64]);
-        consistent.insert(key.clone(), 2, &[1; 64]);
-        assert_eq!(consistent.lookup(&key), Some(vec![1; 64]));
+        assert_eq!(cache.reserved_bytes(), 53_248);
+        assert_eq!(DflashPrefixReplayCache::default().reserved_bytes(), 0);
     }
 
     #[test]

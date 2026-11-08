@@ -6,6 +6,20 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - Default bounded greedy completion replay through serve
+
+`QWEN_DFLASH_PREFIX_REPLAY=0` is now the rollback. Remove sampled replay and
+its consensus/RNG machinery; retain one greedy completion of at most 4096
+tokens, with 53 KiB prospective CPU admission and optional-cache pressure
+fallback. The conversation ladder does not replace this ordinary-Qwen decode
+cache. A real M4 Qwen3.8-27B Q4 + DFlash2 Q8 ABBA screen charges A,A,A,B,A,A
+through `/v1/responses`: six-request means **7.192 -> 6.643 s**, **1.083x**
+request throughput, all 24 greedy contents identical. Hits accept 56/56 cached
+drafts and make zero drafter calls versus nine; sampled requests never replay.
+Includes first request, restore, capture and insertion; excludes common model
+startup. Build lock + Metal lease, nice 10, all thermal 0/no rustc.
+[Scope, raw receipts and driver](bench/2026-11-08-knob-finish/replay.md).
+
 ## 2026-11-08 - Delete optional A3B fused QKV projections
 
 Real A3B Q8_0 attention banks on M4 Max lose 6.4–6.6% for fused projection

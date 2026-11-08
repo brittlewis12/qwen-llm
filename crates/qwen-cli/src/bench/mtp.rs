@@ -411,15 +411,18 @@ fn continuation_distribution_metrics(
     ))
 }
 
-pub(crate) const MTP_CONTINUATION_AUDIT_STEPS: usize = 16;
-
 pub(crate) fn audit_mtp_target_state_chain(
     forward: &MetalForward<'_>,
     reference: &mut MetalSession,
     candidate: &mut MetalSession,
     expected_position: usize,
     pending_terminal_token: i32,
+    continuation_steps: usize,
 ) -> Result<MtpTargetStateAudit> {
+    anyhow::ensure!(
+        continuation_steps > 0,
+        "resume audit requires at least one step"
+    );
     let mut audit = audit_mtp_target_state(
         forward,
         reference,
@@ -427,7 +430,7 @@ pub(crate) fn audit_mtp_target_state_chain(
         expected_position,
         pending_terminal_token,
     )?;
-    for offset in 1..MTP_CONTINUATION_AUDIT_STEPS {
+    for offset in 1..continuation_steps {
         let next_token = audit.continuation_token;
         let next = audit_mtp_target_state(
             forward,
@@ -438,8 +441,8 @@ pub(crate) fn audit_mtp_target_state_chain(
         )?;
         merge_target_state_audit(&mut audit, next);
     }
-    audit.continuation_kl /= MTP_CONTINUATION_AUDIT_STEPS as f64;
-    audit.continuation_nll_delta /= MTP_CONTINUATION_AUDIT_STEPS as f64;
+    audit.continuation_kl /= continuation_steps as f64;
+    audit.continuation_nll_delta /= continuation_steps as f64;
     audit.resume_audit_pass &= audit.gdn_state_max_abs <= 1e-2;
     audit.resume_audit_pass &= audit.gdn_conv_max_abs <= 1e-1;
     Ok(audit)
@@ -465,12 +468,17 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
         mtp_history,
         mtp_rank_topk,
         mtp_state_trace,
+        mtp_resume_steps,
         output,
         include_token_ids,
         tokens,
         stop_tokens,
         no_warmup,
     } = args;
+    anyhow::ensure!(
+        (1..=4096).contains(&mtp_resume_steps),
+        "--mtp-resume-steps must be in 1..=4096"
+    );
 
     let ctx = MetalContext::new().context("init MetalContext")?;
     eprintln!("[mtp-bench] device: {}", ctx.describe());
@@ -663,7 +671,7 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
     } else {
         None
     };
-    let cap = prompt_ids.len() + tokens + 16;
+    let cap = prompt_ids.len() + tokens + mtp_resume_steps.max(16);
 
     if !no_warmup {
         let mut s = MetalSession::fresh(&ctx, &mm, cap).context("warmup session")?;
@@ -677,8 +685,8 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
     let t_ref_prefill = Instant::now();
     // Product reference: ordinary qwen uses packed multi-token prefill, so MTP
     // must preserve this target stream rather than a retired serial-prefill
-    // reduction order. The terminal audit still compares continuation state
-    // against serial target transitions under numerical tolerances.
+    // reduction order. The normal terminal audit reuses this exact session,
+    // comparing serial and speculative decode from the same prompt state.
     let mut ref_layer_scratch =
         MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, 16).context("ref layer scratch")?;
     let last_logits = prefill_tokens_with_multi_hidden(
@@ -815,6 +823,7 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
                 &mut spec_session,
                 prompt_ids.len() + generated.len(),
                 pending_terminal_token,
+                mtp_resume_steps,
             )?);
         }
         Ok(output)
@@ -946,18 +955,17 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
                     let pending_terminal_token = *ref_generated_vec
                         .last()
                         .context("native MTP produced no terminal token")?;
-                    let mut serial_session = MetalSession::fresh(&ctx, &mm, cap)
-                        .context("state-audit serial session")?;
-                    for (position, &token) in prompt_ids.iter().chain(generated).enumerate() {
-                        mf.single_token(token, position as u32, &mut serial_session)
-                            .context("state-audit serial transition")?;
-                    }
+                    // Reuse the actual product baseline: packed prompt, then
+                    // serial decode. Replaying the prompt serially changes the
+                    // initial state before any speculation and measures prefill
+                    // arithmetic rather than MTP resume correctness.
                     let audit = audit_mtp_target_state_chain(
                         &mf,
-                        &mut serial_session,
+                        &mut ref_session,
                         &mut spec_session,
                         prompt_ids.len() + generated.len(),
                         pending_terminal_token,
+                        mtp_resume_steps,
                     )?;
                     if !audit.resume_audit_pass {
                         deferred_gate_failure.get_or_insert_with(|| {
@@ -1228,13 +1236,14 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
                 "[mtp-bench] terminal resume: {} continuation_steps={} \
                  kv_pos={:?} kv_max_abs={:.3e} kv_cos={:.10} \
                  gdn_state_max_abs={:.3e} gdn_conv_max_abs={:.3e} \
-                 continuation_max_abs={:.3e} continuation_cos={:.10}",
+                 continuation_max_abs={:.3e} continuation_cos={:.10} \
+                 mean_kl={:.3e} mean_nll_delta={:.3e}",
                 if audit.resume_audit_pass {
                     "PASS"
                 } else {
                     "FAIL"
                 },
-                MTP_CONTINUATION_AUDIT_STEPS,
+                mtp_resume_steps,
                 audit.candidate_final_position,
                 audit.kv_payload_max_abs,
                 audit.kv_payload_cosine,
@@ -1242,6 +1251,8 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
                 audit.gdn_conv_max_abs,
                 audit.continuation_logits_max_abs,
                 audit.continuation_logits_cosine,
+                audit.continuation_kl,
+                audit.continuation_nll_delta,
             );
         } else {
             eprintln!(
@@ -1309,7 +1320,12 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
             });
         let target_state = target_state_audit.map_or(serde_json::Value::Null, |audit| {
             serde_json::json!({
-                "continuation_steps": MTP_CONTINUATION_AUDIT_STEPS,
+                "continuation_steps": mtp_resume_steps,
+                "reference_execution": if mtp_probe == MtpProbeMode::Normal {
+                    "packed_prefill_serial_decode"
+                } else {
+                    "serial_prefill_serial_decode"
+                },
                 "resume_audit_pass": audit.resume_audit_pass,
                 "kv_position_equal": audit.kv_position_equal,
                 "kv_payload_exact": audit.kv_payload_exact,
@@ -1471,6 +1487,21 @@ mod tests {
             continuation_kl: 0.0,
             continuation_nll_delta: 0.0,
         }
+    }
+
+    #[test]
+    fn continuation_distribution_metrics_use_normalized_full_vocabulary() {
+        let r = [0.0, 0.0];
+        let c = [0.0, (3.0f32).ln()];
+        let (kl, delta) = super::continuation_distribution_metrics(&r, &c, 0).unwrap();
+        assert!((kl - (4.0f64 / 3.0).ln() / 2.0).abs() < 1e-7);
+        assert!((delta - 2.0f64.ln()).abs() < 1e-7);
+        let (shift_kl, shift_delta) =
+            super::continuation_distribution_metrics(&r, &[10.0, 10.0], 1).unwrap();
+        assert!(shift_kl < 1e-12 && shift_delta.abs() < 1e-12);
+        assert!(super::continuation_distribution_metrics(&r, &[0.0, f32::NAN], 0).is_err());
+        assert!(super::continuation_distribution_metrics(&r, &[0.0], 0).is_err());
+        assert!(super::continuation_distribution_metrics(&r, &r, 2).is_err());
     }
 
     #[test]

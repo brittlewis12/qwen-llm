@@ -1127,11 +1127,16 @@ pub(crate) struct MtpArgs {
     /// readback and is diagnostic-only, not a timing path.
     #[arg(long)]
     pub(crate) mtp_rank_topk: Option<PathBuf>,
-    /// Per-packet candidate-vs-shadow-serial state trace (oracle probe
-    /// only). Prints per-packet GDN state/conv max-abs deltas against an
-    /// in-process serial shadow session. Diagnostic-only; wrecks timing.
+    /// Per-packet persistent-state trace against a serial decode shadow.
+    /// Normal mode shares the product packed prompt and also reports the
+    /// serial-vs-packed prefill control; oracle mode uses serial prefill.
+    /// Diagnostic-only; wrecks timing.
     #[arg(long)]
     pub(crate) mtp_state_trace: bool,
+    /// Teacher-forced serial continuation steps in the terminal resume audit
+    /// (1..=4096). Runs after timing; every state/logit bound applies at each step.
+    #[arg(long, default_value = "16")]
+    pub(crate) mtp_resume_steps: usize,
     /// Write a compact JSON summary for MTPLX/profile-parity sweeps.
     #[arg(long)]
     pub(crate) output: Option<PathBuf>,

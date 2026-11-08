@@ -6,6 +6,58 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - GLM: Enable KDA Half Inputs Composed With Shipped Defaults
+
+- Base **`8883a612`**, implementation **`83ca56dd`**, M5 Ultra / 256 GiB,
+  unchanged **UD-IQ3_XXS**. **`QWEN_GLM53_KDA_HALF_INPUTS` is default-on**;
+  **`=0`** restores per-projection staging. Eligible Fast/Half KDA projections
+  share one conversion per block. Existing tensor, dtype, geometry, capacity
+  and backing checks remain; Exact/F32 and non-tensor execution retain their
+  operands. No new kernel or numerical policy.
+- Requalified with shipped IQ routed tensor gate/up, any-row IQ/KDA/Q6,
+  wide dense projections and attention defaults active. The historical Q4
+  isolated witnesses still explicitly disable routed gate/up; they are not
+  the composition evidence. The stock 2048-row workspace already has the
+  **same 16 MiB `[4096,2048]` shared Half buffer** under KDA rollback.
+  Enabling KDA leaves every allocation term and the live buffer identity
+  unchanged. Each normal chunk records **34 KDA conversions / 204 staged
+  consumers / 42 routed packet refreshes** (twice for pp4096). Routed gate/up
+  already recopies after FFN normalization; it never consumes stale KDA input.
+- Validation-on, frozen `quality-v1.json` prose/code/long documents: **16
+  paired cases**, depth 0 and 65536, including 512/513/1024/1025/1596/2048/4096
+  rows. Poisoned shared backing before each arm; all 45 layer outputs match
+  bitwise (**4,386,078,720 F32 values**), as do **1024 paired full-vocabulary
+  teacher-forced vectors**: **dNLL = KL = 0**. Ordinary execution endpoints
+  also match. With workspace 2048, 512 rows now engages KDA staging through
+  the shipped short-prefill policy; **513** is the unchanged control.
+- Ordinary native prefill, no captures/census, one resident session per
+  campaign, restored common state, warm off/on then **ABBA + BAAB** (four
+  retained observations per arm). Timing holds the build lock and canonical
+  Metal lease, validation off, thermal **0 throughout**; cooling gap between
+  depth campaigns. Means in milliseconds, throughput gain relative to rollback:
+
+  | Depth | New rows | KDA off | Default on | Gain |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 0 | 512 | 574.57 | 567.90 | +1.18% |
+  | 0 | 513 (control) | 1122.18 | 1121.71 | +0.04% |
+  | 0 | 2048 | 1764.50 | 1730.46 | +1.97% |
+  | 0 | 4096 | 3657.23 | 3600.80 | +1.57% |
+  | 65536 | 1596 | 1923.71 | 1901.70 | +1.16% |
+
+  Both retained blocks are positive for every active size (pp4096
+  +1.58/+1.56%; 1596/64K +1.34/+0.97%). Small wall-time improvement, consistent
+  with the isolated sweep, now demonstrated with default routed consumers.
+  Timing binary adds a runtime override and tiny host atomic call counters
+  solely to witness composition; those diagnostics are not shipped.
+- Checks: full `cargo test --release -p qwen-llm --lib` **2466 passed,
+  0 failed, 746 ignored**; `scripts/check-contracts.sh` passed on `83ca56dd`.
+  New ignored actual-model regression **passed with validation on**; it keeps routed
+  defaults on, proves both dispatch families execute, poisons and reuses the
+  same buffer, compares all layer taps and teacher vectors, then checks
+  ordinary prefill. CPU policy tests preserve Exact/F32 eligibility and the
+  four ownership combinations. Raw sources, binary, logs and timings:
+  `$RUNS/2026-11-08-glm-kda-half/`. No merge; no retained workers.
+
 ## 2026-11-08 - V4.1: Exact Sorted Native-IQ Expert Tiles
 
 - **Default on**, implementation **`29e49325`** on main **`8883a612`**.

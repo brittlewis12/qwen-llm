@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - V4.1 Serve: Header Folding With The Checkpoint Ladder
+
+- Integrates the serve append change with main **`97488b35`**. Implementation **`a45c0791`**; fixture refresh **`73bf94c1`**. Same M5 Ultra production **GSQ-RCO IQ2_XS + IQ4_NL Engram**, all 384 experts/top-6, ordinary Full with 4096-row ceiling.
+- Keep one validated **`generation_cut`** for the body boundary and ladder eligibility, plus the shared-cut alias guard. Existing conversation keys, actual-call interior candidates, admission/cancellation and post-decode retention remain. A folded append captures **prompt-end state and logits**; retention promotes that actual endpoint, not the nonexistent pre-header key. An exact full-prompt restore retains the same endpoint despite executing no prefill. Rollback retains the original body cut. No new execution cuts or extra small-append payload copies.
+- **99 focused tests pass**: V4.1 controller/reuse, ladder and snapshot-cache cases. The new regression uses fake native state with the real cache: long system prefix, interior capture, folded/rollback tip promotion, immutable fork restore and exact full-prompt reuse. Cached logits include signed zero and an adjacent F32 value and are compared by bits.
+- One fresh-server pair through **`/v1/responses`**, ladder enabled in both arms: untimed frozen 64932-token prime / 64 generated, then **64995 reused + 1626 new** and **200 output tokens**, context 98304, greedy/seed 1. Same rendered request hash. Rollback sets only header folding / idle residency to zero; default uses both. Cool 25 s plus three nominal readings five seconds apart. **TTFT 3349.325 -> 1750.495 ms (1.913x)**; complete response **6097.338 -> 4493.374 ms (26.3% lower)**. Full calls **2 -> 1**; declared >=1.05x /100 ms gate passes.
+- Through that same default server, edit the older question after the cold 64K source turn, return to the original folded append, then repeat the fork:
+
+  | Request | Restored prefix | New rows | Full calls | TTFT ms |
+  | --- | ---: | ---: | ---: | ---: |
+  | Edited older question | 61783 | 3148 | 2 | 3391.322 |
+  | Original folded append | 66621 | 0 | 0 | 79.169 |
+  | Repeated older fork | 64929 | 2 | 1 | 220.921 |
+
+  All restore from **snapshot RAM**. Original/folded-return and first/repeated-fork **200-token reply contents match exactly**, excluding generated IDs. The retained 61783 interior is the actual last committed full body call; the folded hot tip is 66621, not body cut 66619.
+- Real-artifact native restore witness at **61783 / 66621**: capture Full state, dirty a destination with three decode steps at a smaller capacity, restore, then compare **eight sequential full-vocabulary heads** with the original captured trajectory. **2,068,480 F32 components bitwise equal**, finite, with matching positions/causal payload extents (405909504 / 436872704 B). No cold-canonical comparison or tolerance relaxation.
+- Validation: full M5 **`cargo test --release -p qwen-llm --lib`**: **2461 passed / 0 failed / 741 ignored**, 135.91 s, serial, Metal debug layer and required GPU tests. Full **`cargo test --release -p qwen-cli`**: **1663 passed / 0 failed / 73 ignored**, including the subprocess info fixture and doctests. **`scripts/check-contracts.sh` passes**, 562 CPU acceptance tests plus 10 tripwires. Library/code/contract receipts at `a45c0791` / `193621f1`; the later fixture-only change leaves all Rust, kernels, library and inventory inputs unchanged.
+- Full CLI exposed stale unit and subprocess info goldens. Untouched main reproduces the same complete actual/expected unit objects: missing **invalid V4.1 plan** metadata and **`qwen4_unidentified`** sampling identity/text for an unrecognized synthetic fixture. Refresh both checked-in JSON fixtures to those existing semantics; keep exact comparisons and all eight families. No production info behavior changes.
+- Timing/build lock, nice 10, canonical Metal leases, wait enabled; sampled thermal pressure **0 before/during/after** accepted work. Native bitwise-only work uses the Metal lease and makes no performance claim. All failed checks and baseline reproduction retained. Commands, source/binary identities, request/event/reply bodies, native probe and conditions: **`$HOME/qwen-runs/2026-11-08-v41-serve-ladder`** on metagross. No merge or owned worker left running.
+
 ## 2026-11-07 - V4.1 Serve: 64K Appends, Idle Residency And Header Folding
 
 - **Default on**, M5 Ultra, production four-shard **DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS + IQ4_NL disk Engram**, all **384 experts/top-6**: matches the serve standing's artifact, without REAP. Primary grid: **`dbde303c`** on **`eb02cb0b`**, archived on **`perf/v41-serve-append-evidence`**. Final source **`3eb0c9ce`** rebases the same feature onto main **`896ece2f`**; retains main's ordinary loader and removal of the P4 override.

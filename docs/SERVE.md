@@ -223,7 +223,8 @@ unchanged. Small extensions do not add interior copies (V4.1 uses the
 scheduler's actual call width, including 512-row calls under load). At least
 4096 matching-prefix tokens separate optional retained points. V4.1 and
 Flash-Next promote already captured turn tips as history advances, with no
-second payload copy. When a GLM request has no full command, it may instead
+second payload copy. Tip promotion/pruning runs after decode; `retention_ms`
+reports that housekeeping separately, outside the first-token path. When a GLM request has no full command, it may instead
 capture its committed endpoint after decode, outside the first-token path. This
 keeps coverage advancing through many short appends; its separate
 `ladder_tip_capture_ms` reports the remaining per-turn completion cost.

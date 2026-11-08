@@ -6,6 +6,58 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - Tier-1 Serve Checkpoint Ladder: Older-Message Forks
+
+- **Default-on RAM checkpoint coverage** for GLM-5.3, V4.1 and Flash-Next.
+  Final implementation **`293c7c62`**, based on main **`eb02cb0b`**. Existing
+  committed command/call boundaries only; no numerical kernels, precision or
+  execution cuts changed. Restore reproduces the captured trajectory exactly.
+  [Source, per-turn costs and qualifications](bench/2026-11-07-serve-checkpoints.md).
+- M5 Ultra, production tier-1 artifacts, no drafter, greedy/seed 1, context
+  **98304**, real Rust/tool-shaped Responses history grown to ~70K. Edited
+  earlier questions at ~48K and ~64K; 200 output tokens. One paired session per
+  model plus focused confirmations, canonical Metal lease/build lock/nice 10,
+  cooling gaps, thermal **0 before/after every qualified turn**.
+
+  | Artifact | 48K fork TTFT off → on, s | 64K fork TTFT off → on, s | New rows off → on |
+  | --- | ---: | ---: | ---: |
+  | GLM-5.3 UD-IQ3_XXS | 34.354 → 3.239 | 18.984 → 3.282 | 33994/17349 → 1723 |
+  | V4.1 GSQ-RCO IQ2_XS + IQ4_NL Engram | 15.994 → 5.326 | 16.609 → 6.429 | 16158 → 3805 |
+  | Flash-Next GSQ-RCO IQ3_S | 9.038 → 1.868 | 9.159 → 1.944 | 16093/16091 → 1757/1755 |
+
+- GLM extensions publish **30721/46844/62967** points in a separate actual-
+  trajectory namespace; its cold-canonical guard remains intact. Extra copies
+  **49–84 ms** on long extensions; one **94 ms post-decode** endpoint capture
+  advances coverage through short appends. Append TTFT stays within ~3 ms of
+  rollback. GLM's second rollback fork benefits from the first fork's new
+  canonical checkpoint; the table does not treat it as an independent cold fork.
+- V4.1 extra interiors cost **6–42 ms** on long turns, zero extra copies on
+  small appends. The rollback A3 has a **6.109 s scheduling interval** versus
+  ~1.37 s in the first on pass, with equal ~1.82 s GPU time; no append speedup
+  is credited to this outlier. Final small-append retention bookkeeping is
+  **0.024–0.029 ms** after decode. Serving remains **Full**, not shrinking CED.
+- Flash-Next final on appends **1.525/1.847/2.027 s TTFT** versus same-binary
+  late rollback **1.554/1.901/2.122 s**; no extra small-append copy. Retention
+  **0.071–0.077 ms** after decode. Copy/restore time drifts during the long
+  session, so the earlier faster rollback is retained as evidence, not used
+  to attribute a small steady-state regression. All **21 pre-fork reply
+  contents match**, excluding generated response IDs.
+- **Budget:** at most five spaced optional points per conversation family,
+  plus hot tips, sharing the existing snapshot cache/admission/expiry. New
+  **`QWEN_SERVE_CHECKPOINT_LADDER_MIB=auto`** = **8192 MiB**, capped at half the
+  parent cache; **`QWEN_SERVE_CHECKPOINT_LADDER=0`** rolls back capture/lookup.
+  Peak logged auxiliary storage **2.89 GiB GLM / 5.87 GiB Flash-Next**; V4.1
+  logs **0.92 GiB interiors**, excluding later metadata-only tip promotions.
+- **Validation:** full release lib **2469 passed / 741 ignored / 0 failed**;
+  contracts pass on the final implementation. New leased GLM and Flash-Next
+  restore witnesses pass bitwise logits and persistent state. An additional
+  **UD-specific** Flash-Next cold/split check, explored with a **GSQ override**,
+  passed restore equality then exceeded its separate max-logit tolerance
+  (**0.2204 > 0.2**); no tolerance changed. See the packet for scope and metrics.
+- Raw bodies/events/logs/corpus/build checksums and archived earlier on arms:
+  **`~/qwen-runs/2026-11-07-serve-checkpoints/`**. No merge. Bench servers stop
+  after each arm; the M5 scratch checkout/target is removed after qualification.
+
 ## 2026-11-07 - GLM Serve Rows: Bitwise KDA/Q6 Widening; IQ/Attention Not Promoted
 
 - Base **`eb02cb0b`**, code **`bc6c659a`**, M5 Ultra, unchanged four-shard

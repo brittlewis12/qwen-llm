@@ -6,6 +6,94 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - V4.1 Serve: Exact CED For Large Live Extensions
+
+- **Default on**, implementation **`b2f6fc43`** on main **`70e0c6d6`**.
+  **`QWEN_SERVE_V41_LIVE_CED=0`** restores Full for history extensions;
+  the cold-CED control remains independent. Reused requests with at least
+  **8192 new tokens** may start an exact CED episode when the owner has its
+  idle **4096-row** quantum. Loaded starts retain Full; active episodes still
+  yield in loaded **512-row** quanta. Small appends keep their existing Full
+  and header-folding behavior. No native kernel or arithmetic changes.
+- Plan across the same validated checkpoint cuts. Encode the new suffix and
+  reconstruct the complete required decoder tail, including its dependency
+  halo, at the **last existing Full body boundary** retained by the ladder.
+  Finish the remaining body and header with Full. Live episodes may use a
+  **4096-row** interior when an 8K extension's header leaves its body below
+  8192 rows; cold planning retains its existing two-chunk minimum. The native
+  planner declines before mutation if dependencies overlap the committed
+  prefix or memory pressure prevents the additional storage. Only completed **Ready**
+  endpoints publish checkpoints. Cancellation/error discards the provisional
+  working state; immutable checkpoints remain usable.
+- **M5 Ultra**, unchanged production four-shard **GSQ-RCO IQ2_XS + IQ4_NL
+  Engram**, all **384 experts/top-6**. Actual **`qwen serve` / `/v1/responses`**,
+  fresh server per arm, context **131072**, ordinary mapping/residency,
+  header folding and checkpoint ladder defaults. Both policies prime the same
+  frozen agent-study root with **64932 input / 64 output** tokens using cold
+  CED, then reuse **64995 consumed tokens**. Frozen Rust tool outputs supply
+  nominal 8K/16K/32K extensions; only the live-CED control changes. Greedy,
+  seed 1, **64 output-token cap** on each large extension. Same executable
+  across all twelve arms, **`bafbebea`**, SHA256 **`fcd1e034…ac700c32`**.
+- Per cell, order **Full/CED/CED/Full**, two calls/policy; reverse arms repeat
+  the cold prime and large extension. **25 s cooling plus three zero readings
+  five seconds apart** before each request, continuous two-second monitoring
+  during each server session, sampled pressure **0 throughout** accepted arms.
+  Separate canonical GPU lease and build lock per server arm, nice 10, with
+  gaps so other lanes can alternate. Large-extension requests, reply content, reused extents and
+  physical prefill ranges match across policies. Every chronological pair
+  improves; all cells pass the frozen **>=1.05x and >=250 ms** gate. Small
+  sample counts support this shipping screen, not a confidence-interval claim.
+
+  | New tokens | Full TTFT arms ms | CED TTFT arms ms | Mean Full -> CED ms | Ratio |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 8283 | 7784.623, 8429.899 | 6137.567, 6026.379 | **8107.261 -> 6081.973** | **1.333x** |
+  | 16475 | 16116.064, 16282.545 | 10745.721, 10321.521 | **16199.304 -> 10533.621** | **1.538x** |
+  | 32859 | 34985.428, 32316.153 | 18860.644, 18961.267 | **33650.790 -> 18910.956** | **1.779x** |
+
+  Save **2.025 / 5.666 / 14.740 s**, or **25.0 / 35.0 / 43.8%** of mean TTFT.
+- Following the primary 16K extension, ordinary small append and edited-question
+  fork each generate **200 tokens**; repeated requests check their restores.
+  One control per policy, with unchanged requests and replies:
+
+  | Control | Reused / new tokens | Full-origin TTFT ms | CED-origin TTFT ms |
+  | --- | ---: | ---: | ---: |
+  | Small append, folded header | 81533 / 1614 | 1689.541 | 1697.219 |
+  | Fork from retained interior | 81379 / 92 | 608.769 | 633.492 |
+  | Return to small prompt | 83147 / 0 | 93.182 | 105.484 |
+  | Repeat fork, replay header | 81469 / 2 | 227.088 | 233.815 |
+
+  All remain **Full or zero-prefill**, and none crosses the predeclared
+  **>5% AND >100 ms** regression investigation threshold. The fork restores
+  exactly the same **81379-token** ladder cut. The small append retains its
+  actual **83147-token post-header endpoint and logits**; returning to it
+  performs **zero native prefill calls**. Repeated replies match their originals.
+- Real-artifact exactness at a **64995-token** prefix: 8K/16K/32K extensions,
+  plus 16K using an initial 4096-row quantum followed by loaded 512-row quanta.
+  Compare Full and CED at the ladder interior, completed prompt/header and
+  following **1626-row** append. At all **12 cuts**, take **128 teacher-forced
+  complete-vocabulary steps** in Full, CED and a dirtied/restored CED state at
+  a different capacity. All **398,699,520 F32 component comparisons are finite
+  and bitwise equal**, hence dNLL/KL zero. Provisional yields refuse snapshots.
+  Separate reduced GPU witnesses pass for mixed quanta, exact prefix restores
+  and cancellation at a yield without publishing partial state.
+- Timings and the real-artifact exactness proof use **`bafbebea`**. After the
+  GLM-only main rebase, the **entire CLI, V4.1 native code, Metal host code and
+  shaders are byte-identical**; **`rebase-equivalence.json`** records the check.
+  Final combined-tree validation at **`785e922a`**: focused serve **87 passed**
+  on the identical backend; full M5 release library **2467 passed / 0 failed /
+  748 ignored**, serial, required GPU tests and Metal validation, **141.03 s**. Full **`cargo test --release -p qwen-cli`**
+  **1674 passed / 0 failed / 74 ignored**, including ladder and snapshot tests.
+  **`scripts/check-contracts.sh` passes**, **576 CPU acceptance tests + 10
+  tripwires**. All served root/extension/control replies match across policies,
+  excluding generated response IDs; no numeric tolerance was relaxed.
+- Raw frozen sources/binaries, input chunks, launch identities, every arm,
+  native exactness and complete test receipts:
+  **`~/qwen-runs/2026-11-08-v41-live-ced/`**, metagross and small local mirror;
+  see **`rule.json`**, **`summary.json`**, **`native-live-v1.log`**,
+  **`full-checks-rebased.log`** and **`contracts-rebased-m5.log`**. The preceding sorted-tile
+  entry also records the corrected exact/non-replay mlx-serve comparison.
+  PV folding remains outside this increment. No merge or owned worker remains.
+
 ## 2026-11-08 - GLM: Enable KDA Half Inputs Composed With Shipped Defaults
 
 - Base **`8883a612`**, implementation **`83ca56dd`**, M5 Ultra / 256 GiB,
@@ -80,8 +168,11 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Ordinary **`qwen-bench suite`**, pp4096/depth 0, one warmup and one measured
   CED prefill per process: rollback **2221.677/2227.402 ms**, default
   **2140.470/2132.314 ms**, balanced ABBA. Mean **2224.539 -> 2136.392 ms**,
-  **1841 -> 1917 tok/s**, **1.041x**. This is a measured local increment;
-  it does not close the mlx-serve standing's larger prefill gap.
+  **1841 -> 1917 tok/s**, **1.041x**. With exact CED plus these tiles, our
+  roughly **1920 tok/s** exceeds mlx-serve's roughly **1800 tok/s non-replay
+  path** on the matched artifact. Its roughly **2790 tok/s headline** uses
+  bounded replay, which missed our frozen quality gate and remains declined;
+  see **2026-11-07, "V4.1 Bounded-Window Replay: Not Promoted"** below.
 - **Fresh first appends**, new process/state per arm, identical untimed CED
   prefix with sorted experts disabled, ordinary Full append with only this
   control changed. P4 **4 GiB soft mapping target**. An **untimed residency

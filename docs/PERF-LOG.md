@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - A3B MTP Resume Audit: Numerical Qualification
+
+- **INF-KHTK**, M4 Max, code **`cfd1d27f`**. The normal D7/N8 audit failure
+  combines a serial-versus-packed prompt reference mismatch with MoE batch
+  numerics. A target-only N8 replay, without a draft head or rejected draft
+  tokens, matches every live GDN/conv/KV byte of the MTP return. All eight
+  rejected-suffix keep-length controls and their serial resumes match bitwise.
+- From a common packed prompt, 128 teacher-forced resume steps have mean
+  **KL 0.00109148**, worst **KL 0.0504773**, mean **NLL delta +0.0008172**
+  nats/token; F32/native MTP banks and D1/N2 have identical metrics. The 128
+  generated tokens match; longer resumed argmaxes can differ. The corrected
+  MoE audit uses explicit distribution budgets and retains the original strict
+  numeric result. Dense/oracle strict gates remain. No decoder arithmetic or
+  performance policy changed; diagnostic timings support no throughput claim.
+  [Localization, bounds, regression tests and receipts](bench/2026-11-08-mtp-resume/README.md).
+
 ## 2026-11-08 - Flash-Next Serve: Resident Turns And Exact Endpoint Retries
 
 - Base **`d960dc77`**, clean implementation **`b157d847` / `5548c202`**,

@@ -47,6 +47,13 @@ A legacy D1 F32 trial also differs from the product packed-prefill reference.
 These rejected decoder probes supply no new end-to-end MTP throughput claim.
 The bank promotion is supported by storage, composed-logit and relative-state checks.
 
+Resolved by the [terminal-resume investigation](../2026-11-08-mtp-resume/README.md):
+the audit mixed serial and packed prompt references, and packed MoE decode has
+small numerical differences that can amplify at routing boundaries. Target-only
+packed replay matches MTP live state bitwise, and changed rejected suffixes leave
+no observable state. The corrected audit reports both strict numeric metrics and
+bounded continuation KL/NLL; native and F32 banks pass the 128-step resume gate.
+
 ## Verification
 
 - `cargo fmt --all` and format checks.

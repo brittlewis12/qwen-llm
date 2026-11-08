@@ -6,6 +6,87 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - V4.1 Prefill: Reject PV Fold; Retire Q5_K Override
+
+- **Ship only cleanup `efea2b22`**, rebased on **`753245c3`**. Remove
+  **`QWEN_V41_Q5K_MATMAT`** and its V4.1 dispatch override, plus the generated
+  ENV entry; **V41-Y2MH is done by deletion**. Default arithmetic is unchanged.
+  Shared Q5_K matmat kernels and normal fallback remain available to other
+  callers. The held October Full-only **+2.54%** result predates exact CED,
+  cached dense operands and wide tiles. The override bypasses the normal
+  lineage-aware dense route and selects different arithmetic for physical
+  shrinking row shapes; cosine agreement never qualified Full/CED endpoints.
+  A current four-arm pp4096 kill test is scheduling-noisy (flag 0:
+  **2203/3539 ms**, flag 1: **2340/2477 ms**), establishing no repeatable current
+  win. Retire the family override rather than spend another lineage rewrite
+  on the superseded isolated result.
+- **PV fold not shipped.** Prototype preserves the existing tensor64 PV MAC
+  order, rounds division to F32, applies inverse RoPE, and writes the final
+  grouped layout directly. An initial one-ULP odd-RoPE difference was fixed
+  with the legacy kernel's explicit FMA operand order. Strict GPU comparison
+  of old PV/division/RoPE/grouping versus folded output passes bitwise for
+  1/3/127/512 rows, 512/640 keys, groups 1/8/64, shifted output and guards.
+  Metal API validation passes; shader instrumentation instead exceeds the
+  existing score kernel's 32-KiB threadgroup limit before reaching PV, and is
+  not counted as a passing check. No Full/CED full-state promotion gate was
+  claimed for this rejected prototype.
+- **M5 Ultra**, unchanged four-shard **GSQ-RCO IQ2_XS + IQ4_NL Engram**,
+  all 384 experts/top-6. PV timings use **`b6778c0e`**, same executable per
+  policy pair. Build lock, canonical GPU lease, nice 10; sampled thermal
+  pressure **0 throughout**. Raw canonical cold pp4096 BAAB remains noisy
+  (off **3159/3567**, on **2870/2427 ms**); do not treat that spread as a
+  kernel gain. A separate controlled cold attribution harness, identical
+  untimed residency pulse after warmup, ABBA, measures wall mean
+  **2493.4 -> 2363.9 ms** and GPU sum **1698.3 -> 1634.3 ms**: **64.0 ms /
+  3.8% GPU savings**. All 129,280 complete-vocabulary F32 components match bitwise in
+  each arm. These profiled synthetic inputs are separate from serve cells.
+- Fresh **`qwen serve`** per arm at context 131072, identical 64932-token
+  cold root/64-token reply, then large append reusing **64995 tokens**.
+  Existing exact cold/live CED, header folding and ladder defaults in both
+  arms. Primary off/on 16K and 32K cells; reverse on/off 16K confirmation
+  profiles native operations without splitting commands. **25 s cooling plus
+  three zero readings five seconds apart**, continuous two-second thermal
+  monitoring. Every arm and the reverse controls are retained:
+
+  | Cell | PV off ms | PV on ms |
+  | --- | ---: | ---: |
+  | 16475-token extension, primary / reverse | 10367.0 / 9978.2 | 9957.9 / 9942.7 |
+  | Following 1614-token append, primary / reverse | 1698.6 / 1855.6 | 2150.4 / 2118.3 |
+  | Extension + small append, mean summed TTFT | **11949.7** | **12084.7** |
+  | 32859-token extension, one pair | 18469.3 | 17886.2 |
+
+  Large-only gains are about **2.2% / 3.2%**, but the 16K agent sequence is
+  flat/slower (**+135 ms / 1.1%**). Reverse small-append GPU times match
+  (**1486.7 / 1492.0 ms**) and Engram waits match; the gap before the
+  layers-14..39 command is **7.8 -> 434.4 ms**. This is launch/scheduling
+  attribution, not a proven root cause. The ragged 1614-row append takes
+  the unchanged PV path under both settings. Forks restore the same
+  **81379-token** cut; return-to-small does zero prefill, repeated fork
+  replays two header tokens. All cold/large/small/fork/return replies match
+  across policies and repeats. Do not ship an isolated GPU improvement
+  whose measured following agent turn cancels it.
+- **Larger unimplemented target:** cold CED has about **252 ms** of exposed
+  inter-command GPU gaps, including **~150 ms** at encoder-to-decoder
+  handoff, unchanged by PV folding. Sum of driver scheduling intervals
+  overlaps and is not additive exposed time. Earlier preparation/reuse of
+  decoder scratch and command resources could plausibly recover
+  **100-200 ms (~4-8% of this cold pp4096)** per episode; large-extension benefit is unmeasured. This is an estimate,
+  not a measured gain. Expected cost **2-4 days** for tracing, resource
+  ownership/admission, cancellation and exactness checks. Pause here for
+  that tradeoff.
+- Final validation at **`efea2b22`**: full M5 serial release library
+  **2463 passed / 0 failed / 745 ignored**, required GPU tests and Metal API
+  validation, **135.25 s**; full **`cargo test --release -p qwen-cli`**
+  **1672 passed / 0 failed / 74 ignored**. **`scripts/check-contracts.sh`
+  passes**, **576 CPU acceptance tests + 10 tripwires**. No new numerical
+  qualification is needed for removal of the default-off override.
+- Raw arm requests/responses, thermal and launch identities, profiles,
+  strict fixture, complete receipts and decision summary:
+  **`~/qwen-runs/2026-11-08-v41-pv-fold/`**, metagross and small local mirror.
+  Rejected source is preserved on **`evidence/v41-pv-fold-20261108`**;
+  the landing series contains no PV experiment or prototype/revert pair.
+  No merge or owned worker remains.
+
 ## 2026-11-08 - Retire unfinished MTP two-query shared-KV attention
 
 Delete `QWEN_MTP_ATTN_Q2_SHARED_KV`, the G6 N2 verifier branch, its dedicated

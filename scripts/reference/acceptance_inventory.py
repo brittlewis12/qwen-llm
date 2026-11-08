@@ -54,6 +54,8 @@ SCOPES = {
     "qwen": [
         "deepseek_v41::tests::",
         "serve::backend_v41::",
+        "serve::batching::driver::tests::",
+        "serve::backend_glm5_next::scheduler::tests::",
         "serve::checkpoint_ladder::",
         "serve::snapshot_cache::tests::ladder_",
         "serve::backend_glm5_next::chunk_checkpoint::tests::live_targets_follow_committed_command_plan",

@@ -24,6 +24,7 @@ pub(crate) mod backend_v41;
 pub(crate) mod batching;
 mod checkpoint_ladder;
 mod control;
+mod decode_cursor;
 pub(crate) mod decode_loop;
 pub(crate) mod durable;
 pub(crate) mod events;

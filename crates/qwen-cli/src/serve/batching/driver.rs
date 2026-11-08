@@ -1,0 +1,493 @@
+//! Owner-thread scheduling over a family's resumable request phases.
+//! Native state, cache policy and admission stay in the runtime adapter.
+use super::{BatchSink, Job, shutting_down};
+use crate::serve::{
+    decode_cursor::{Advance, DecodeCursor},
+    http::{BackendFailure, GenerationOutcome, GenerationSink, PreparedResponse},
+    items::ServeError,
+};
+use std::{
+    collections::VecDeque,
+    io,
+    time::{Duration, Instant},
+};
+
+pub(crate) enum Begun<R> {
+    Run(Box<R>),
+    Complete(GenerationOutcome),
+}
+
+pub(crate) trait Runtime {
+    type Run;
+    type State;
+    fn extra_reserve(&self) -> u64;
+    fn begin(
+        &mut self,
+        prepared: &PreparedResponse,
+        sink: &mut dyn GenerationSink,
+    ) -> Result<Begun<Self::Run>, BackendFailure>;
+    fn rows(&self, run: &Self::Run) -> usize;
+    fn now(&mut self) -> Instant {
+        Instant::now()
+    }
+    fn prefill(
+        &mut self,
+        run: &mut Self::Run,
+        rows: usize,
+        sink: &mut dyn GenerationSink,
+        reserve: u64,
+    ) -> Result<Option<DecodeCursor>, BackendFailure>;
+    fn advance(
+        &mut self,
+        run: &mut Self::Run,
+        cursor: &mut DecodeCursor,
+        sink: &mut dyn GenerationSink,
+        reserve: u64,
+    ) -> Result<Advance, BackendFailure>;
+    fn state(run: &mut Self::Run) -> &mut Self::State;
+    fn can_step(&self, state: &Self::State) -> bool;
+    fn poisoned(state: &Self::State) -> bool;
+    fn step(&mut self, state: &mut Self::State, token: u32) -> Result<Vec<f32>, String>;
+    fn step_batch(
+        &mut self,
+        states: &mut [&mut Self::State],
+        tokens: &[u32],
+    ) -> Result<Vec<Vec<f32>>, String>;
+    fn finish(
+        &mut self,
+        run: Self::Run,
+        generation: &crate::GenerationResult,
+        batch: serde_json::Value,
+    ) -> Result<GenerationOutcome, BackendFailure>;
+}
+
+pub(crate) struct Publish<'a> {
+    pub sink: &'a mut dyn BatchSink,
+    pub reserve: u64,
+}
+impl GenerationSink for Publish<'_> {
+    fn cancellation_flag(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        Some(self.sink.cancellation_flag())
+    }
+    fn transport_reserve_bytes(&self) -> u64 {
+        self.reserve
+    }
+    fn piece(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.sink.check()?;
+        self.sink.queue(bytes);
+        Ok(())
+    }
+    fn tick(&mut self) -> io::Result<()> {
+        self.sink.check()
+    }
+}
+struct Pending {
+    job: Job,
+    submitted: Instant,
+}
+struct Active<R> {
+    sink: Box<dyn BatchSink>,
+    run: Option<Box<R>>,
+    cursor: Option<DecodeCursor>,
+    next: Option<u32>,
+    finished: Option<GenerationOutcome>,
+    reserve: u64,
+    queue_ms: f64,
+    parked: Option<Instant>,
+    parked_ms: f64,
+    steps: usize,
+    width_sum: usize,
+    width_max: usize,
+    batched: usize,
+    loaded_prefills: usize,
+}
+/// One bounded prefill call or one decode round per pump. Client delivery
+/// never waits: parked clients leave decode rounds until they drain.
+pub(crate) struct Driver<R> {
+    max_active: usize,
+    pending: VecDeque<Pending>,
+    active: Vec<Active<R>>,
+    prefer_prefill: bool,
+    prefill_fair: bool,
+    decode_percent: usize,
+    decode_budget: Duration,
+    native_failed: bool,
+    park_timeout: Duration,
+}
+impl<R> Driver<R> {
+    pub(crate) fn new(max_active: usize) -> Self {
+        Self {
+            max_active,
+            pending: VecDeque::new(),
+            active: Vec::new(),
+            prefer_prefill: false,
+            prefill_fair: true,
+            decode_percent: 10,
+            decode_budget: Duration::ZERO,
+            native_failed: false,
+            park_timeout: Duration::from_secs(30),
+        }
+    }
+    pub(crate) fn with_prefill_policy(mut self, fair: bool, percent: usize) -> Self {
+        assert!((1..=90).contains(&percent));
+        self.prefill_fair = fair;
+        self.decode_percent = percent;
+        self
+    }
+    pub(crate) fn max_active(&self) -> usize {
+        self.max_active
+    }
+    pub(crate) fn submit(&mut self, job: Job) {
+        self.pending.push_back(Pending {
+            job,
+            submitted: Instant::now(),
+        });
+    }
+    pub(crate) fn take_native_failure(&mut self) -> bool {
+        std::mem::take(&mut self.native_failed)
+    }
+    pub(crate) fn abort_all(&mut self) {
+        for p in self.pending.drain(..) {
+            p.job.sink.complete(Err(shutting_down().into()));
+        }
+        for a in self.active.drain(..) {
+            a.sink.complete(Err(BackendFailure::Aborted(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "serve is shutting down",
+            ))));
+        }
+    }
+    fn total_reserve<E: Runtime<Run = R>>(&self, runtime: &E) -> Option<u64> {
+        self.active
+            .iter()
+            .try_fold(runtime.extra_reserve(), |n, a| n.checked_add(a.reserve))
+    }
+    fn retire(&mut self, index: usize, result: Result<GenerationOutcome, BackendFailure>) {
+        self.active.remove(index).sink.complete(result);
+    }
+    fn fail(&mut self, index: usize, error: BackendFailure) {
+        let error = match self.active[index].sink.check() {
+            Err(e) => BackendFailure::Aborted(e),
+            Ok(()) => error,
+        };
+        self.retire(index, Err(error));
+    }
+    fn publish(&mut self, index: usize) -> bool {
+        let a = &mut self.active[index];
+        match a.sink.flush() {
+            Err(e) => {
+                self.retire(index, Err(BackendFailure::Aborted(e)));
+                true
+            }
+            Ok(true) => {
+                if let Some(start) = a.parked.take() {
+                    a.parked_ms += start.elapsed().as_secs_f64() * 1e3;
+                }
+                if let Some(out) = a.finished.take() {
+                    self.retire(index, Ok(out));
+                    true
+                } else {
+                    false
+                }
+            }
+            Ok(false) => {
+                a.parked.get_or_insert_with(Instant::now);
+                false
+            }
+        }
+    }
+    fn advance<E: Runtime<Run = R>>(&mut self, index: usize, runtime: &mut E) {
+        let Some(reserve) = self.total_reserve(runtime) else {
+            return self.fail(
+                index,
+                crate::serve::output_memory::size_overflow("batch transport").into(),
+            );
+        };
+        let a = &mut self.active[index];
+        let run = a.run.as_mut().expect("decoding run");
+        let outcome = runtime.advance(
+            run,
+            a.cursor.as_mut().expect("cursor"),
+            &mut Publish {
+                sink: a.sink.as_mut(),
+                reserve,
+            },
+            reserve,
+        );
+        match outcome {
+            Err(e) => self.fail(index, e),
+            Ok(Advance::Forward(token)) => {
+                a.next = Some(token);
+                self.publish(index);
+            }
+            Ok(Advance::Done(generation)) => {
+                if let Err(e) = a.sink.check() {
+                    return self.retire(index, Err(BackendFailure::Aborted(e)));
+                }
+                let run = a.run.take().expect("run");
+                a.cursor = None;
+                let stats = serde_json::json!({"max_active":self.max_active,"queue_ms":a.queue_ms,"parked_ms":a.parked_ms,"stepped_transitions":a.steps,"width_max":a.width_max,"width_mean":(a.steps>0).then(||a.width_sum as f64/a.steps as f64),"batched_transitions":a.batched,"prefill_loaded_rows":if self.prefill_fair {runtime.rows(&run)} else {512},"prefill_fair":self.prefill_fair,"decode_percent":self.prefill_fair.then_some(self.decode_percent),"prefill_loaded_calls":a.loaded_prefills});
+                match runtime.finish(*run, &generation, stats) {
+                    Ok(out) => {
+                        self.active[index].finished = Some(out);
+                        self.publish(index);
+                    }
+                    Err(e) => self.fail(index, e),
+                }
+            }
+        }
+    }
+    fn step_one<E: Runtime<Run = R>>(
+        &mut self,
+        index: usize,
+        runtime: &mut E,
+    ) -> (usize, Result<Vec<f32>, String>, f64, usize) {
+        let a = &mut self.active[index];
+        let start = Instant::now();
+        let result = runtime.step(
+            E::state(a.run.as_mut().expect("run")),
+            a.next.expect("pending token"),
+        );
+        if result.is_err() && E::poisoned(E::state(a.run.as_mut().expect("run"))) {
+            self.native_failed = true;
+        }
+        (index, result, start.elapsed().as_secs_f64() * 1e3, 1)
+    }
+    fn decode<E: Runtime<Run = R>>(&mut self, members: Vec<usize>, runtime: &mut E) {
+        let (mut batch, mut results) = (Vec::new(), Vec::new());
+        for i in members {
+            if runtime.can_step(E::state(self.active[i].run.as_mut().expect("run"))) {
+                batch.push(i)
+            } else {
+                results.push(self.step_one(i, runtime));
+            }
+        }
+        if batch.len() == 1 {
+            results.push(self.step_one(batch[0], runtime));
+        }
+        if batch.len() > 1 {
+            let tokens: Vec<_> = batch
+                .iter()
+                .map(|&i| self.active[i].next.expect("pending token"))
+                .collect();
+            let start = Instant::now();
+            let mut states: Vec<_> = self
+                .active
+                .iter_mut()
+                .enumerate()
+                .filter(|(i, _)| batch.contains(i))
+                .map(|(_, a)| E::state(a.run.as_mut().expect("run")))
+                .collect();
+            let result = runtime.step_batch(&mut states, &tokens);
+            let poisoned = states.iter().any(|s| E::poisoned(s));
+            let elapsed = start.elapsed().as_secs_f64() * 1e3;
+            match result {
+                Ok(logits) if logits.len() == batch.len() => {
+                    for (i, v) in batch.iter().copied().zip(logits) {
+                        results.push((i, Ok(v), elapsed, batch.len()));
+                    }
+                }
+                Err(_) if !poisoned => {
+                    for i in batch {
+                        results.push(self.step_one(i, runtime));
+                    }
+                }
+                result => {
+                    self.native_failed = true;
+                    let message = result
+                        .err()
+                        .unwrap_or_else(|| "batched forward returned wrong row count".into());
+                    let message = format!("batched decode step failed: {message}");
+                    for i in batch.iter().copied() {
+                        results.push((i, Err(message.clone()), elapsed, batch.len()));
+                    }
+                }
+            }
+        }
+        // Descending indices allow a completion/failure to retire one member
+        // without changing the identity of any result still to be delivered.
+        results.sort_by_key(|x| std::cmp::Reverse(x.0));
+        for (index, result, elapsed, width) in results {
+            let a = &mut self.active[index];
+            a.next = None;
+            match a.cursor.as_mut().expect("cursor").on_logits(
+                result.map_err(anyhow::Error::msg),
+                elapsed,
+                crate::shutdown::checkpoint,
+            ) {
+                Err(e) => self.fail(index, e),
+                Ok(()) => {
+                    a.steps += 1;
+                    a.width_sum += width;
+                    a.width_max = a.width_max.max(width);
+                    a.batched += usize::from(width > 1);
+                    self.advance(index, runtime);
+                }
+            }
+        }
+    }
+    pub(crate) fn pump<E: Runtime<Run = R>>(&mut self, runtime: &mut E) -> bool {
+        let mut progress = false;
+        for i in (0..self.active.len()).rev() {
+            if let Err(e) = self.active[i].sink.check() {
+                self.retire(i, Err(BackendFailure::Aborted(e)));
+                progress = true;
+                continue;
+            }
+            if self.active[i]
+                .parked
+                .is_some_and(|t| t.elapsed() >= self.park_timeout)
+            {
+                self.retire(
+                    i,
+                    Err(BackendFailure::Aborted(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "slow batch client",
+                    ))),
+                );
+                progress = true;
+                continue;
+            }
+            progress |= self.publish(i);
+        }
+        while self
+            .pending
+            .front()
+            .is_some_and(|p| p.job.sink.check().is_err())
+        {
+            let p = self.pending.pop_front().expect("front");
+            p.job
+                .sink
+                .complete(Err(BackendFailure::Aborted(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "request cancelled before start",
+                ))));
+            progress = true;
+        }
+        if !self.pending.is_empty() && self.active.len() < self.max_active {
+            let p = self.pending.pop_front().expect("pending");
+            let mut sink = p.job.sink;
+            let queue_ms = p.submitted.elapsed().as_secs_f64() * 1e3;
+            let own = sink.transport_reserve_bytes();
+            let reserve = self.total_reserve(runtime).and_then(|n| n.checked_add(own));
+            match reserve {
+                None => sink.complete(Err(crate::serve::output_memory::size_overflow(
+                    "batch transport",
+                )
+                .into())),
+                Some(reserve) => match runtime.begin(
+                    &p.job.prepared,
+                    &mut Publish {
+                        sink: sink.as_mut(),
+                        reserve,
+                    },
+                ) {
+                    Err(e) => sink.complete(Err(e)),
+                    Ok(result) => {
+                        let (run, finished) = match result {
+                            Begun::Run(r) => (Some(r), None),
+                            Begun::Complete(o) => (None, Some(o)),
+                        };
+                        self.active.push(Active {
+                            sink,
+                            run,
+                            cursor: None,
+                            next: None,
+                            finished,
+                            reserve: own,
+                            queue_ms,
+                            parked: None,
+                            parked_ms: 0.0,
+                            steps: 0,
+                            width_sum: 0,
+                            width_max: 0,
+                            batched: 0,
+                            loaded_prefills: 0,
+                        });
+                    }
+                },
+            }
+            progress = true;
+        }
+        let prefill = self.active.iter().position(|a| {
+            a.run.is_some() && a.cursor.is_none() && a.finished.is_none() && a.parked.is_none()
+        });
+        let members: Vec<_> = self
+            .active
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.next.is_some() && a.parked.is_none())
+            .map(|(i, _)| i)
+            .collect();
+        let mixed = prefill.is_some() && !members.is_empty();
+        if !mixed {
+            self.decode_budget = Duration::ZERO;
+        }
+        let prefill_turn = members.is_empty()
+            || if self.prefill_fair {
+                self.decode_budget.is_zero()
+            } else {
+                self.prefer_prefill
+            };
+        let started = runtime.now();
+        if let Some(i) = prefill.filter(|_| prefill_turn) {
+            let Some(reserve) = self.total_reserve(runtime) else {
+                self.fail(
+                    i,
+                    crate::serve::output_memory::size_overflow("batch transport").into(),
+                );
+                return true;
+            };
+            let a = &mut self.active[i];
+            let run = a.run.as_mut().expect("prefill run");
+            let loaded = !members.is_empty();
+            let rows = if loaded && !self.prefill_fair {
+                512
+            } else {
+                runtime.rows(run).max(1)
+            };
+            match runtime.prefill(
+                run,
+                rows,
+                &mut Publish {
+                    sink: a.sink.as_mut(),
+                    reserve,
+                },
+                reserve,
+            ) {
+                Err(e) => self.fail(i, e),
+                Ok(cursor) => {
+                    if loaded {
+                        a.loaded_prefills += 1;
+                    }
+                    if let Some(cursor) = cursor {
+                        a.cursor = Some(cursor);
+                        self.advance(i, runtime);
+                    }
+                }
+            }
+            if self.prefill_fair && mixed {
+                self.decode_budget = runtime
+                    .now()
+                    .saturating_duration_since(started)
+                    .mul_f64(self.decode_percent as f64 / (100 - self.decode_percent) as f64)
+                    .min(Duration::from_secs(1));
+            }
+            self.prefer_prefill = false;
+            return true;
+        }
+        if !members.is_empty() {
+            self.decode(members, runtime);
+            self.decode_budget = self
+                .decode_budget
+                .saturating_sub(runtime.now().saturating_duration_since(started));
+            self.prefer_prefill = true;
+            return true;
+        }
+        progress
+    }
+}
+
+#[cfg(test)]
+#[path = "driver_tests.rs"]
+mod tests;

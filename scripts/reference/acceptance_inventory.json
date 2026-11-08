@@ -5894,10 +5894,108 @@
     "reason": "Actual M5 UD-IQ3_XXS likelihood, mode and noninterference witness; GLM53_GGUF, validation and internal production lease required."
   },
   {
+    "target": "qwen",
+    "name": "serve::backend_glm5_next::scheduler::tests::glm_batch_limits_are_bounded_and_have_an_explicit_serial_rollback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure startup limit parsing; no environment mutation, Metal or model."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_batches_independent_streams_without_changing_token_lifecycle",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted independent states and nonblocking in-memory clients exercise the shared owner scheduler; no Metal context, model or network."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_cancel_during_batch_drops_only_that_request",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted independent states and nonblocking in-memory clients exercise the shared owner scheduler; no Metal context, model or network."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_loaded_prefill_is_bounded_and_alternates_with_decode",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted independent states and nonblocking in-memory clients exercise the shared owner scheduler; no Metal context, model or network."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_park_timeout_releases_only_the_slow_client",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted independent states and nonblocking in-memory clients exercise the shared owner scheduler; no Metal context, model or network."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_post_start_failure_never_retries_the_poisoned_batch",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted independent states and nonblocking in-memory clients exercise the shared owner scheduler; no Metal context, model or network."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_preflight_decline_retries_only_as_individual_steps",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted independent states and nonblocking in-memory clients exercise the shared owner scheduler; no Metal context, model or network."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_reserve_overflow_refuses_before_starting_a_request",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted independent states and nonblocking in-memory clients exercise the shared owner scheduler; no Metal context, model or network."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_serial_limit_keeps_one_forward_per_transition",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted independent states and nonblocking in-memory clients exercise the shared owner scheduler; no Metal context, model or network."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_shutdown_completes_active_and_pending_exactly_once",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted independent states and nonblocking in-memory clients exercise the shared owner scheduler; no Metal context, model or network."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_slow_client_parks_without_blocking_other_requests",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted independent states and nonblocking in-memory clients exercise the shared owner scheduler; no Metal context, model or network."
+  },
+  {
     "target": "lib",
     "name": "metal::mat_mat::tests::fewrow_f32_weights_match_f64_and_reduce_rounding_error",
     "class": "gpu",
     "ignored": false,
     "reason": "Metal Q6/Q8 few-row kernels, odd output tails and offset tensors against an F64 dot; requires a Metal device."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_unready_member_fails_alone_before_forming_the_batch",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted invalid-member isolation before an independent decode batch; no device, model or network."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_fair_prefill_keeps_normal_geometry_and_pays_elapsed_decode_service",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted runtime, synthetic service clock and in-memory sinks; no Metal context, model or real timing."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_fair_service_credit_is_capped_and_cleared_without_mixed_work",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted runtime, synthetic service clock and in-memory sinks; no Metal context, model or real timing."
   }
 ]

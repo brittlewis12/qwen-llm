@@ -62,17 +62,17 @@ cache: the 27B's 16 attention layers hold 64 KiB per token, so 133K is about
 9 GB (4.5 GB measured at 66K).
 
 **F3 — Honest behaviour when busy: implemented, live rerun pending.** Serve
-executes one request at a time. Without Lens, the acceptor holds up to
+executes one request at a time for single-flight backends. Without Lens,
+the acceptor holds up to
 `QWEN_SERVE_QUEUE_DEPTH` connections (default 8: the executing one plus those
 waiting, run in arrival order); a connection beyond that depth, or any
 connection with `QWEN_SERVE_QUEUE_DEPTH=1`, fails fast with
 `503 Service Unavailable`, `Retry-After: 1`, and a `server_busy` envelope
 instead of waiting silently in the listen backlog. Connections still queued at
 shutdown receive the same busy response. The Lens/control acceptor keeps its
-own execution gate. DeepSeek V4.1 alone can opt into several requests in
-flight (`QWEN_SERVE_V41_MAX_ACTIVE`; see
-[DeepSeek V4.1 continuous batching](#deepseek-v41-continuous-batching)); the
-queue depth then still bounds active plus waiting connections.
+own execution gate. DeepSeek V4.1 and supported M5 GLM Fast/Half serving
+keep several requests in flight by default (see the continuous batching
+sections below); queue depth still bounds active plus waiting connections.
 
 **F4 — DeepSeek V4 tool support: implemented.** DS4 serve renders declared
 tools with the 0731 chat template (`render_ds4.rs`, pinned against the
@@ -93,14 +93,12 @@ capture is memory-admitted and best-effort: denial or capture failure skips the
 snapshot while the request continues. Both caches are byte-bounded; DS4 session
 construction returns ownership on failure so residency remains recoverable.
 
-**F6 — Concurrency / continuous batching.** The engine already provides
-`admit_independent_queue2`, `create_dense_batch8_executor`,
-`create_moe_batch16_executor`, and `concurrent_jsonl.rs` runs width-2
-overlapped decode today. Route serve through them: wiring and
-scheduling, with F3 as the on-ramp. First family wired: DeepSeek V4.1
-(opt-in, `Forward::step_batch`; see
-[DeepSeek V4.1 continuous batching](#deepseek-v41-continuous-batching)); the
-owner-loop and scheduler contract is family-neutral, Qwen/DS4 remain serial.
+**F6 — Concurrency / continuous batching.** The owner-loop contract is
+family-neutral: bounded request admission, one decode round over ready members,
+chunked prefill between rounds, nonblocking output, and isolated cancellation.
+[DeepSeek V4.1](#deepseek-v41-continuous-batching) and supported
+[M5 GLM Fast/Half](#glm-53-flash-continuous-batching) enable it by default.
+Qwen/DS4 remain serial.
 
 **F7 — Long-context performance stability.** Measured overnight
 (2026-08-20, 27B Q8): decode fell 14.5 → 8.4 tok/s from 31 k → 133 k, and
@@ -784,6 +782,57 @@ before listening.
 Limits: one owner thread; no preemption of a running prefill call; a
 waiting request is admitted only when fewer than N are active; no survivor
 recovery after a post-start batch failure.
+
+## GLM-5.3-Flash continuous batching
+
+On supported M5 devices and the qualified Fast/Half weight geometry,
+`QWEN_SERVE_GLM_MAX_ACTIVE` defaults to **4**. **`=1` restores the original
+serial owner path and single live session.** `QWEN_SERVE_GLM_LIVE_STATES`
+(default 4) bounds idle conversations retained for exact-prefix reuse. Both
+startup limits accept 1..=4. M4, unsupported layouts, F32 startup precision
+and DFlash serving keep the serial path. Startup warms one batched and one
+plain throwaway decode before accepting requests.
+
+- **Scheduling.** One owner thread admits at most one waiting request per
+  pass. Ready requests decode together. `QWEN_SERVE_GLM_PREFILL_FAIR` defaults
+  on: retain each request's admitted normal prefill geometry (normally 2048
+  rows), including its mandatory cuts, while other requests decode. After a
+  mixed-load prefill call costing `t`, decoders earn `t * p / (100-p)` of
+  measured service, capped at one second. `QWEN_SERVE_GLM_DECODE_PERCENT`
+  selects `p` (default 10, integer 1..=90). Single-kind service earns no
+  credit. Calls remain nonpreemptible; larger quanta improve throughput and
+  can increase streaming gaps. `QWEN_SERVE_GLM_PREFILL_FAIR=0` restores
+  512-row calls alternating with one decode round. A client
+  whose earlier output has not drained is parked outside decode batches;
+  after 30 seconds without draining it is aborted alone. Queue depth still
+  bounds active plus waiting connections.
+- **Arithmetic and state.** Batched dense Q6/Q8 projections use few-row MMA
+  with F32 dequantized weights and activations; summation differs from plain
+  decode. Routed experts retain the native F32 token-grid arithmetic. Every
+  sequence owns its KDA/conv state, MLA cache, pending indexer ring and sparse
+  selection. One-member rounds are ordinary `forward`. Exact and F32 members
+  take individual steps. Greedy text may differ at near ties; determinism
+  depends on batch membership and the loaded prefill partition.
+- **Cache and memory.** Existing checkpoint cuts, admission, namespaces and
+  canonical/trajectory distinctions remain. The default keeps normal chunk
+  geometry; scheduling rollback can change Fast rounding and canonical
+  eligibility by subdividing those chunks. The
+  longest compatible idle exact prefix wins; in-flight sessions are never
+  pooled. Snapshot relief precedes releasing unused idle sessions before a
+  pressure refusal. All states and the small batch logits workspace are
+  admitted normally; no expanded weight cache is created. Match context and
+  snapshot budgets to the active plus idle state limits.
+- **Failure isolation.** Cancellation is checked outside the shared GPU
+  step. An invalid/unready member steps alone. A batch declined before state
+  mutation falls back to individual steps; a started batch failure fails all
+  affected members, retaining no poisoned session. Other requests continue.
+  Shutdown aborts active requests and returns the existing busy envelope for
+  requests that never started.
+- **Stats.** `x_qwen.phases.batch` reports active limit, queue/park time,
+  maximum and mean step width, batched transitions, loaded-prefill calls,
+  the prefill ceiling, fair policy and decode service target.
+  Shared step time is the per-sequence interval, not divided by batch width.
+  The usual usage and cached-token counts retain their meaning.
 
 ## K2 Horizon Raw Profile
 

@@ -221,10 +221,9 @@ pub(super) fn with_pins<V, T>(
 /// Optional capture at one already-existing chunk boundary. All storage
 /// allocation/admission remains in capture_into; this only tracks provenance
 /// and accounts for the copy independently of compute time.
-pub(super) struct Capture<'a> {
+pub(super) struct Capture {
     pub shared: CacheNamespace,
     pub namespace: CacheNamespace,
-    pub tokens: &'a [u32],
     pub target: Option<usize>,
     pub estimate: Option<u64>,
     pub restored: Option<EntryId>,
@@ -237,18 +236,18 @@ pub(super) struct Capture<'a> {
     pub trajectory_valid: bool,
 }
 
-impl Capture<'_> {
+impl Capture {
     pub(super) fn prefill_segment(
         &mut self,
         session: &mut Glm5NextSession<'_>,
         ctx: &MetalContext,
         cache: &mut SnapshotCache<Glm5NextSnapshot, CacheNamespace>,
+        tokens: &[u32],
         range: std::ops::Range<usize>,
         before: &mut dyn FnMut() -> std::result::Result<(), String>,
     ) -> Result<Vec<f32>, Glm5NextMetalError> {
         self.trajectory_valid &= session.position() == range.start;
         let mut start = range.start;
-        let tokens = self.tokens;
         session.prefill_packed_with_observer(ctx, &tokens[range], before, &mut |session, len| {
             let committed = session.position();
             let valid = committed.checked_sub(start) == Some(len);

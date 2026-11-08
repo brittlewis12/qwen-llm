@@ -47,3 +47,5 @@ pub(crate) fn shutting_down() -> ServeError {
         message: "server is shutting down".into(),
     }
 }
+
+pub(crate) mod driver;

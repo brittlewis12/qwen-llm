@@ -54,7 +54,9 @@ use std::time::Instant;
 
 mod chunk_checkpoint;
 mod dflash;
+mod execution;
 mod prefill_plan;
+mod scheduler;
 
 /// Default-on rollback lever for live-session and snapshot reuse.
 const PREFIX_REUSE_ENV: &str = "QWEN_GLM_PREFIX_REUSE";
@@ -137,6 +139,7 @@ pub(super) struct Prepared<'g> {
     fast_precision: FastPrecision,
     checkpoint_ladder: super::checkpoint_ladder::Config,
     drafter: Option<crate::drafter_policy::PreparedDrafter>,
+    batching: scheduler::Config,
 }
 
 impl<'g> Prepared<'g> {
@@ -192,6 +195,7 @@ impl<'g> Prepared<'g> {
             fast_precision,
             checkpoint_ladder: super::checkpoint_ladder::Config::from_env()?,
             drafter,
+            batching: scheduler::Config::from_env()?,
         })
     }
 
@@ -305,6 +309,9 @@ pub(super) struct Glm5NextBackend<'w, 'g> {
     prepared: Prepared<'g>,
     model_id: String,
     session: Option<Glm5NextSession<'w>>,
+    batch: Option<qwen_llm::glm5_next_metal::Glm5NextBatch>,
+    scheduler: Option<super::batching::driver::Driver<execution::Run<'w>>>,
+    idle_sessions: std::collections::VecDeque<scheduler::Idle<'w>>,
     drafter: Option<qwen_llm::metal_dflash::MetalDFlashHead>,
     /// Exactly the tokens `session` has consumed, or empty when unknown.
     history: Vec<u32>,
@@ -669,6 +676,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             prepared,
             model_id,
             session: None,
+            batch: None,
+            scheduler: None,
+            idle_sessions: std::collections::VecDeque::new(),
             drafter: None,
             history: Vec::new(),
             prefix_reuse: qwen_llm::env_flag::read_default_on(PREFIX_REUSE_ENV),
@@ -801,6 +811,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             })
             .context("GLM-5.3 serve warm-up")?;
         drop(session);
+        self.enable_batching()?;
         // The server is about to accept: open the idle-residency window.
         self.idle_residency.note_activity();
         Ok(started.elapsed().as_secs_f64() * 1e3)
@@ -815,6 +826,43 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         boundaries: Option<PromptBoundaries>,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        let mut run = match self.begin_generation(request, prompt, boundaries, sink)? {
+            execution::Begun::Complete(outcome) => return Ok(outcome),
+            execution::Begun::Run(run) => run,
+        };
+        while !self.prefill_run(&mut run, usize::MAX, sink)? {}
+        self.finish_prefill(&mut run, sink)?;
+        let session = self.session.as_mut().expect("prepared session");
+        let generation = decode_loop::decode_serial(
+            decode_loop::DecodeRequest {
+                family: FAMILY,
+                logits: std::mem::take(&mut run.logits),
+                max_tokens: run.maximum,
+                stop_tokens: &CHAT_STOPS,
+                vocab_size: run.vocab_size,
+            },
+            &mut run.sampler,
+            self.prepared.artifact.tokenizer(),
+            sink,
+            |token| Ok(session.forward(self.ctx, token)?),
+        );
+        let generation = match generation {
+            Ok(g) => g,
+            Err(error) => {
+                self.session = None;
+                return Err(error);
+            }
+        };
+        self.finish_run(*run, &generation)
+    }
+
+    fn begin_generation(
+        &mut self,
+        request: &ServeRequest,
+        prompt: &str,
+        boundaries: Option<PromptBoundaries>,
+        sink: &mut dyn GenerationSink,
+    ) -> Result<execution::Begun<'w>, BackendFailure> {
         self.idle_residency.before_request();
         // Everything a client can get wrong is refused before the live
         // session is touched, so a 400 keeps the cached conversation.
@@ -841,13 +889,15 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             self.prepared.capacity,
         )?;
         if self.prepared.drafter.is_some() || self.drafter.is_some() {
-            return self.generate_dflash(request, &tokens, maximum, sampler, sink);
+            return self
+                .generate_dflash(request, &tokens, maximum, sampler, sink)
+                .map(execution::Begun::Complete);
         }
         // A tool block's memory is admitted as it grows (the tools partition),
         // not reserved here at its rarely approached worst case.
         let reserve = sink.transport_reserve_bytes();
         // Cached snapshots are optional: released before a pressure refusal.
-        with_transport_snapshot_release(&mut self.cache, None, || {
+        scheduler::with_transport_relief(&mut self.cache, &mut self.idle_sessions, None, || {
             super::transport_memory::admit_resident_transport_with_headroom(
                 reserve,
                 qwen_llm::metal::host_memory_headroom(),
@@ -857,6 +907,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
 
         // Taken before the session is used and republished only for a state
         // the session is known to hold, so a failure leaves no stale history.
+        self.take_idle(&tokens, request_lineage(request, self.lineage));
         let saved_chunk_origin = self.chunk_origin.take();
         #[cfg(test)]
         {
@@ -878,6 +929,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         );
         let mut schedule = snapshot_schedule(self.cache.max_bytes(), self.fast_snapshots, lineage);
         let boundary_t0 = Instant::now();
+        let tokenizer = self.prepared.artifact.tokenizer();
         let cuts = schedule.map_or_else(Vec::new, |schedule| {
             cut_positions(
                 |text| decode_loop::encode_checked(tokenizer, text, false, vocab_size, FAMILY),
@@ -1011,16 +1063,21 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                         &mut self.cache,
                         [shared, Some(hit.id)],
                         |cache| {
-                            with_snapshot_release(cache, Some(hit.id), || {
-                                new_session(
-                                    self.ctx,
-                                    self.weights,
-                                    &self.prepared,
-                                    reserve,
-                                    lineage,
-                                    selected_rows,
-                                )
-                            })
+                            scheduler::with_session_relief(
+                                cache,
+                                &mut self.idle_sessions,
+                                Some(hit.id),
+                                || {
+                                    new_session(
+                                        self.ctx,
+                                        self.weights,
+                                        &self.prepared,
+                                        reserve,
+                                        lineage,
+                                        selected_rows,
+                                    )
+                                },
+                            )
                         },
                     );
                     self.session = Some(created.map_err(session_error)?);
@@ -1049,16 +1106,21 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                         drop(hit);
                         self.session = None;
                         self.session = Some(
-                            with_snapshot_release(&mut self.cache, None, || {
-                                new_session(
-                                    self.ctx,
-                                    self.weights,
-                                    &self.prepared,
-                                    reserve,
-                                    lineage,
-                                    selected_rows,
-                                )
-                            })
+                            scheduler::with_session_relief(
+                                &mut self.cache,
+                                &mut self.idle_sessions,
+                                None,
+                                || {
+                                    new_session(
+                                        self.ctx,
+                                        self.weights,
+                                        &self.prepared,
+                                        reserve,
+                                        lineage,
+                                        selected_rows,
+                                    )
+                                },
+                            )
                             .map_err(session_error)?,
                         );
                         canonical = true;
@@ -1102,9 +1164,12 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 let weights = self.weights;
                 let prepared = &self.prepared;
                 let mut create = |rows| {
-                    with_snapshot_release(&mut self.cache, None, || {
-                        new_session(ctx, weights, prepared, reserve, lineage, rows)
-                    })
+                    scheduler::with_session_relief(
+                        &mut self.cache,
+                        &mut self.idle_sessions,
+                        None,
+                        || new_session(ctx, weights, prepared, reserve, lineage, rows),
+                    )
                     .map_err(session_error)
                 };
                 let created = if let Some(initial) = plan {
@@ -1200,14 +1265,12 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         // Whatever happens next, the live state's provenance is recomputed.
         self.live_canonical = false;
 
-        let ctx = self.ctx;
         let prefill_t0 = Instant::now();
         let mut capture_ms = 0.0;
         let mut captures = Vec::new();
         let mut chunk_capture = chunk_namespace.map(|deep_namespace| chunk_checkpoint::Capture {
             shared: namespace.expect("chunk capture requires shared schedule"),
             namespace: deep_namespace,
-            tokens: &tokens,
             target: chunk_target,
             estimate: chunk_target.and_then(|cut| snapshot_bytes(&self.weights.config, cut as u64)),
             restored,
@@ -1249,7 +1312,6 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             let cut = cuts.iter().copied().filter(|&cut| cut <= matched).max()?;
             self.cache.entry_for_in(&namespace, &tokens[..cut])
         });
-        let rows = selected_rows.max(1);
         let mut position = matched;
         let mut logits = Vec::new();
         let ends: Vec<usize> = cuts
@@ -1258,123 +1320,218 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             .filter(|&cut| cut > matched)
             .chain([tokens.len()])
             .collect();
-        for end in ends {
-            // Chunks of this segment start at `position`: they stay on the
-            // from-0 grid only if it is a multiple of the chunk rows.
-            canonical &= position % rows == 0;
-            let session = self.session.as_mut().expect("session present");
-            let mut checkpoint_abort: Option<io::Error> = None;
-            let mut before = || {
-                sink.tick().map_err(|error| {
-                    checkpoint_abort = Some(error);
-                    "transport aborted during GLM-5.3 prefill".into()
-                })
-            };
-            let result = if let Some(capture) = &mut chunk_capture {
-                capture.prefill_segment(session, ctx, &mut self.cache, position..end, &mut before)
-            } else {
-                session.prefill_packed_with_checkpoint(ctx, &tokens[position..end], &mut before)
-            };
-            logits = match result {
-                Ok(logits) => logits,
-                Err(error) => {
-                    if let (Glm5NextMetalError::Cancelled(_), Some(abort)) =
-                        (&error, checkpoint_abort)
-                    {
-                        // Cancelled at a chunk boundary: the committed prefix
-                        // is consistent, so a retry of this prompt resumes
-                        // from it.
-                        let position = session.position();
-                        self.history = tokens[..position].to_vec();
-                        self.live_canonical = canonical && lineage == PackedLineage::Fast;
-                        self.chunk_origin = chunk_capture
-                            .as_ref()
-                            .and_then(|capture| capture.origin)
-                            .filter(|origin| origin.at(position));
-                        return Err(BackendFailure::Aborted(abort));
-                    }
-                    self.session = None;
-                    return Err(
-                        ServeError::server_error(format!("{FAMILY} prefill: {error}")).into(),
-                    );
+
+        Ok(execution::Begun::Run(Box::new(execution::Run {
+            session: None,
+            tokens,
+            history,
+            sampler,
+            maximum,
+            vocab_size,
+            required,
+            conversation,
+            reserve,
+            chunk_enabled,
+            lineage,
+            canonical,
+            schedule,
+            cuts,
+            selected_rows,
+            namespace,
+            chunk_namespace,
+            chunk_target,
+            matched,
+            restore_origin,
+            restore_ms,
+            reuse_source,
+            boundary_ms,
+            prefill_t0,
+            capture_ms,
+            captures,
+            chunk_capture,
+            protect,
+            position,
+            logits,
+            ends,
+            segment: 0,
+            prefill_ms: 0.0,
+            chunk_capture_ms: 0.0,
+            ready: false,
+        })))
+    }
+
+    fn prefill_run(
+        &mut self,
+        run: &mut execution::Run<'w>,
+        maximum_rows: usize,
+        sink: &mut dyn GenerationSink,
+    ) -> Result<bool, BackendFailure> {
+        if run.position == run.tokens.len() {
+            return Ok(true);
+        }
+        let ctx = self.ctx;
+        let tokens = &run.tokens;
+        let lineage = run.lineage;
+        let namespace = run.namespace;
+        let reserve = run.reserve;
+        let mut canonical = run.canonical;
+        let mut chunk_capture = run.chunk_capture.take();
+        let mut protect = run.protect;
+        let mut capture_ms = run.capture_ms;
+        let mut captures = std::mem::take(&mut run.captures);
+        let mut position = run.position;
+        let rows = run.selected_rows.max(1);
+        let planned_end = run.ends[run.segment];
+        let end = planned_end.min(position.saturating_add(maximum_rows.max(1)));
+        // Chunks of this segment start at `position`: they stay on the
+        // from-0 grid only if it is a multiple of the chunk rows.
+        canonical &= position % rows == 0;
+        let session = self.session.as_mut().expect("session present");
+        let mut checkpoint_abort: Option<io::Error> = None;
+        let mut before = || {
+            sink.tick().map_err(|error| {
+                checkpoint_abort = Some(error);
+                "transport aborted during GLM-5.3 prefill".into()
+            })
+        };
+        let result = if let Some(capture) = &mut chunk_capture {
+            capture.prefill_segment(
+                session,
+                ctx,
+                &mut self.cache,
+                tokens,
+                position..end,
+                &mut before,
+            )
+        } else {
+            session.prefill_packed_with_checkpoint(ctx, &tokens[position..end], &mut before)
+        };
+        let logits = match result {
+            Ok(logits) => logits,
+            Err(error) => {
+                if let (Glm5NextMetalError::Cancelled(_), Some(abort)) = (&error, checkpoint_abort)
+                {
+                    // Cancelled at a chunk boundary: the committed prefix
+                    // is consistent, so a retry of this prompt resumes
+                    // from it.
+                    let position = session.position();
+                    self.history = tokens[..position].to_vec();
+                    self.live_canonical = canonical && lineage == PackedLineage::Fast;
+                    self.chunk_origin = chunk_capture
+                        .as_ref()
+                        .and_then(|capture| capture.origin)
+                        .filter(|origin| origin.at(position));
+                    return Err(BackendFailure::Aborted(abort));
                 }
-            };
-            position = end;
+                self.session = None;
+                return Err(ServeError::server_error(format!("{FAMILY} prefill: {error}")).into());
+            }
+        };
+        position = end;
+
+        if end == planned_end {
             if let Some(capture) = &mut chunk_capture {
                 capture.reached_segment_end(position, canonical);
             }
-            if end == tokens.len() {
-                break;
+            run.segment += 1;
+            if end < tokens.len() {
+                let namespace = namespace.expect("cuts come from a snapshot schedule");
+                let capture_t0 = Instant::now();
+                let pinned = protect.filter(|&id| self.cache.pin(id));
+                let outcome = if namespace.schedule == Schedule::FastSharedSplitV1 && !canonical {
+                    // Live history segmented differently (an earlier cut, a
+                    // cancellation off the chunk grid, decoded tokens): this
+                    // state is not the one a miss would publish.
+                    CaptureOutcome::NonCanonical
+                } else if self.deny_captures() {
+                    CaptureOutcome::Denied
+                } else {
+                    capture_into(
+                        &mut self.cache,
+                        self.session.as_ref().expect("session present"),
+                        ctx,
+                        namespace,
+                        &tokens[..end],
+                        snapshot_bytes(&self.weights.config, end as u64),
+                        reserve,
+                    )
+                };
+                if let Some(id) = pinned {
+                    self.cache.unpin(id);
+                }
+                capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
+                protect = self
+                    .cache
+                    .entry_for_in(&namespace, &tokens[..end])
+                    .or(protect);
+                captures.push(format!("{end}:{}", outcome.name()));
             }
-            let namespace = namespace.expect("cuts come from a snapshot schedule");
-            let capture_t0 = Instant::now();
-            let pinned = protect.filter(|&id| self.cache.pin(id));
-            let outcome = if namespace.schedule == Schedule::FastSharedSplitV1 && !canonical {
-                // Live history segmented differently (an earlier cut, a
-                // cancellation off the chunk grid, decoded tokens): this
-                // state is not the one a miss would publish.
-                CaptureOutcome::NonCanonical
-            } else if self.deny_captures() {
-                CaptureOutcome::Denied
-            } else {
-                capture_into(
-                    &mut self.cache,
-                    self.session.as_ref().expect("session present"),
-                    ctx,
-                    namespace,
-                    &tokens[..end],
-                    snapshot_bytes(&self.weights.config, end as u64),
-                    reserve,
-                )
-            };
-            if let Some(id) = pinned {
-                self.cache.unpin(id);
-            }
-            capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
-            protect = self
-                .cache
-                .entry_for_in(&namespace, &tokens[..end])
-                .or(protect);
-            captures.push(format!("{end}:{}", outcome.name()));
+        }
+        run.canonical = canonical;
+        run.chunk_capture = chunk_capture;
+        run.protect = protect;
+        run.capture_ms = capture_ms;
+        run.captures = captures;
+        run.position = position;
+        run.logits = logits;
+        Ok(position == tokens.len())
+    }
+
+    fn finish_prefill(
+        &mut self,
+        run: &mut execution::Run<'w>,
+        sink: &mut dyn GenerationSink,
+    ) -> Result<(), BackendFailure> {
+        if run.ready {
+            return Ok(());
         }
         #[cfg(test)]
         {
-            self.last_prefill_logits = logits.iter().map(|v| v.to_bits()).collect();
+            self.last_prefill_logits = run.logits.iter().map(|v| v.to_bits()).collect();
         }
-        let chunk_capture_ms = chunk_capture
-            .as_ref()
-            .map_or(0.0, |capture| capture.elapsed_ms);
-        capture_ms += chunk_capture_ms;
-        let session = self.session.as_mut().expect("session present");
         if let Err(abort) = sink.tick() {
-            // The prompt is consumed but no retry can extend it (an equal
-            // prompt has no fresh row): release the session now.
             self.session = None;
             return Err(BackendFailure::Aborted(abort));
         }
-        let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3 - capture_ms;
-        let generation = decode_loop::decode_serial(
-            decode_loop::DecodeRequest {
-                family: FAMILY,
-                logits,
-                max_tokens: maximum,
-                stop_tokens: &CHAT_STOPS,
-                vocab_size,
-            },
-            &mut sampler,
-            tokenizer,
-            sink,
-            |token| Ok(session.forward(ctx, token)?),
-        );
-        let generation = match generation {
-            Ok(generation) => generation,
-            Err(failure) => {
-                // A decode abort or failure clears the live session: a
-                // retry's prompt never extends a partially generated history.
-                self.session = None;
-                return Err(failure);
-            }
-        };
+        run.chunk_capture_ms = run.chunk_capture.as_ref().map_or(0.0, |c| c.elapsed_ms);
+        run.capture_ms += run.chunk_capture_ms;
+        run.prefill_ms = run.prefill_t0.elapsed().as_secs_f64() * 1e3 - run.capture_ms;
+        run.ready = true;
+        Ok(())
+    }
+
+    fn finish_run(
+        &mut self,
+        run: execution::Run<'w>,
+        generation: &crate::GenerationResult,
+    ) -> Result<GenerationOutcome, BackendFailure> {
+        let execution::Run {
+            tokens,
+            history,
+            required,
+            conversation,
+            reserve,
+            chunk_enabled,
+            lineage,
+            schedule,
+            cuts,
+            selected_rows,
+            chunk_namespace,
+            chunk_target,
+            matched,
+            restore_origin,
+            restore_ms,
+            reuse_source,
+            boundary_ms,
+            prefill_ms,
+            capture_ms,
+            captures,
+            chunk_capture,
+            chunk_capture_ms,
+            ..
+        } = run;
+        let ctx = self.ctx;
+        let session = self.session.as_mut().expect("prepared session");
         if session.position() != tokens.len() + generation.transitions {
             self.session = None;
             return Err(ServeError::server_error(format!(
@@ -1471,6 +1628,28 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
 }
 
 impl GenerationBackend for Glm5NextBackend<'_, '_> {
+    fn max_active(&self) -> usize {
+        self.scheduler
+            .as_ref()
+            .map_or(1, super::batching::driver::Driver::max_active)
+    }
+    fn submit(&mut self, job: super::batching::Job) {
+        if let Some(s) = &mut self.scheduler {
+            s.submit(job);
+        } else {
+            job.sink.complete(Err(
+                ServeError::server_error("GLM batching is not enabled").into()
+            ));
+        }
+    }
+    fn pump(&mut self) -> bool {
+        self.pump_batch()
+    }
+    fn abort_all(&mut self) {
+        if let Some(s) = &mut self.scheduler {
+            s.abort_all();
+        }
+    }
     fn model_id(&self) -> &str {
         &self.model_id
     }
@@ -1527,6 +1706,10 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
     }
 
     fn shutdown(&mut self) {
+        self.abort_all();
+        self.scheduler = None;
+        self.batch = None;
+        self.idle_sessions.clear();
         self.idle_residency.shutdown();
         self.session = None;
         self.history.clear();

@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - Tier-1 Serve Concurrency: Three Agents At 16K Roots
+
+- Clean **`842083d5`**, M5 Ultra, production V4.1 GSQ-RCO IQ2_XS + IQ4_NL
+  Engram, GLM-5.3 UD-IQ3_XXS, Flash-Next GSQ-RCO IQ3_S. Direct API, three
+  agents × three turns, greedy/seed 1, **128 tokens/turn**, distinct ~16K Rust
+  roots, later ~1K tool reads; actual histories resent. Fresh server per arm,
+  no client warm-up; context 32768. [Per-agent TTFT/decode, queueing and memory](bench/2026-11-08-tier1-concurrency.md),
+  [all 63 requests](bench/2026-11-08-tier1-concurrency.csv).
+
+  | Model | One-in-flight wall s | Three-client/default wall s | Ratio, one/default |
+  | --- | ---: | ---: | ---: |
+  | V4.1 | **60.187** | **71.885 / 71.914** | **0.84x** |
+  | GLM | **85.412** | **85.626** | **1.00x** |
+  | Flash-Next | **52.044** | **51.845** | **1.00x** |
+
+- V4.1 changes **MAX_ACTIVE 1 → default 4**, keeping **LIVE_STATES=4**;
+  three offered clients in both. Default mean TTFT **11.68/11.63 s** versus
+  serial **17.39 s**, but total wall is **19.4% longer**. Loaded-prefill calls
+  **0 → 74**, CED episodes **3 → 1**, batch width reaches **3**. Under-load
+  prefill/CED scheduling is the main observed difference. The October 28
+  **1.25x** used a different root shape and **1 live state** in its control;
+  it is not a matched baseline. No warm-only or global rollback conclusion.
+- GLM/FN stay serial: client windows 1 versus 3 move waits from the client to
+  the server, up to **35.3 / 22.4 s** before headers; ready TTFT is unchanged.
+  No busy responses or memory-admission failures. Startup is separate in the
+  packet; only V4.1 batching exposes a native scheduler queue counter.
+- Sampled peak footprints: V4.1 **19.4–20.0 GiB**, GLM **6.3 GiB**, FN
+  **14.2–14.3 GiB**; these exclude some mapped/GPU charges and are not model sizes.
+  Minimum conservative host availability **31.3 / 63.7 / 94.0 GiB** respectively;
+  exact Metal headroom was not externally sampled.
+- **Seven arms / 63 requests**, all 128-token limits reached, thermal **0
+  before/during/after**, canonical lease/wait, build lock/nice 10, cooling gaps.
+  Reverse serial and historical one-live controls skipped for the budget.
+  M5 build/model scratch removed and no owned jobs/port remain by **20:26:02 UTC**,
+  about **28 minutes** after the first host check. Docs-only checks pass;
+  temporary local worktree removed after commit, no merge. Evidence/manifest:
+  **`$HOME/qwen-runs/2026-11-08-tier1-concurrency/`** on metagross and local mirror.
+
 ## 2026-11-08 - Flash-Next Decode: Exact QSA Publication And Selection
 
 - Base **`e8df177f`**, M5 Ultra, unchanged two-shard **GSQ-RCO IQ3_S**.

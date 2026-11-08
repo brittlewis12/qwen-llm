@@ -282,18 +282,9 @@ struct DeepSeekV4PublishedRows<'a> {
 }
 
 #[cfg(not(test))]
-const DEEPSEEK_V4_F16_MATRIX_SCORER_MIN_VISIBLE_ROWS: usize = 16_384;
-#[cfg(not(test))]
-#[cfg(not(test))]
 crate::env_flag!(
     default_on deepseek_v4_multigroup_selector_enabled,
     "QWEN_DSV4_MULTIGROUP_SELECTOR"
-);
-
-#[cfg(not(test))]
-crate::env_flag!(
-    default_off deepseek_v4_f16_matrix_scorer_enabled,
-    "QWEN_DSV4_LIGHTNING_F16_MATRIX"
 );
 
 #[cfg(all(test, feature = "dsv4-diagnostics"))]

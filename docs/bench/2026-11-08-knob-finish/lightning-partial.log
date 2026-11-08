@@ -1,0 +1,76 @@
+lightning_real corpus_tokens=78236 prefix=65536 tokens_sha256=6d6e1bada31c6a8ec0ba57a4c07e45aad5888218d0007db65322e5285cbaadf3
+deepseek_v4: experts=256 device="Apple M4 Max" qualified_fast_paths=per_path_dtype_contracts
+deepseek_v4: grouped-head online dense attention active; rollback=QWEN_DSV4_PACKED_GROUP8_DENSE=0
+deepseek_v4: Q8 compressor matrices active for N=4096 chunks; rollback=QWEN_DSV4_PACKED_Q8_COMPRESSOR_MATRIX=0
+deepseek_v4: shared-expert Q8 matrices active for N=4096 chunks; rollback=QWEN_DSV4_PACKED_Q8_SHARED_MATRIX=0
+deepseek_v4: wide F32 Q8 sparse-indexer Q matrix active for full N=4096 chunks; rollback=QWEN_DSV4_PACKED_INDEXER_Q_MATRIX=0
+deepseek_v4: Q8 Q-B matrix policy=wide_f32_matrix active for N=4096 chunks; rollback=QWEN_DSV4_PACKED_Q8_QB=f32_matrix; exact_rollback=QWEN_DSV4_PACKED_Q8_QB=exact
+deepseek_v4: Q8 output A/B matrix policy=wide_f32_matrix active for N=4096 chunks; rollback=QWEN_DSV4_PACKED_Q8_OUTPUT=f32_matrix; exact_rollback=QWEN_DSV4_PACKED_Q8_OUTPUT=exact
+deepseek_v4: half-staged 64x32 IQ2 packed prefill active for qualified N=4096 chunks; eligible_layers=25; rollback=QWEN_DSV4_PACKED_IQ2_F16_MATRIX=0
+deepseek_v4: grouped all-IQ3 packed experts active for full N=4096 chunks; rollback=QWEN_DSV4_PACKED_GROUPED_IQ3=0
+deepseek_v4: strided grouped Q8 output A active for full N=4096 chunks; rollback=QWEN_DSV4_PACKED_Q8_OUTPUT_GROUPED=0
+deepseek_v4: packed indexer query RoPE policy=batched; rollback=QWEN_DSV4_PACKED_INDEXER_BATCHED_ROPE=0
+deepseek_v4: packed indexer score dispatch is visibility-bounded; rollback=QWEN_DSV4_PACKED_INDEXER_VISIBLE_DISPATCH=0
+deepseek_v4: packed indexer score policy=tiled_f32; rollback=QWEN_DSV4_PACKED_INDEXER_TILED_F32=0
+deepseek_v4: packed selected attention policy=online-direct; staged=QWEN_DSV4_ONLINE_DIRECT_LOAD=0 legacy=QWEN_DSV4_PACKED_SELECTED_ONLINE=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=159 matrix_columns=24135 scalar_columns=441; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=198 matrix_columns=24240 scalar_columns=336; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=4096 elapsed_s=66.270
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=168 matrix_columns=24164 scalar_columns=412; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=213 matrix_columns=24393 scalar_columns=183; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=8192 elapsed_s=92.230
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=170 matrix_columns=24141 scalar_columns=435; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=211 matrix_columns=24342 scalar_columns=234; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=12288 elapsed_s=113.936
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=157 matrix_columns=24083 scalar_columns=493; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=203 matrix_columns=24338 scalar_columns=238; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=16384 elapsed_s=136.070
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=158 matrix_columns=24134 scalar_columns=442; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=204 matrix_columns=24303 scalar_columns=273; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=20480 elapsed_s=159.213
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=163 matrix_columns=24163 scalar_columns=413; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=204 matrix_columns=24285 scalar_columns=291; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=24576 elapsed_s=187.102
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=174 matrix_columns=24261 scalar_columns=315; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=208 matrix_columns=24245 scalar_columns=331; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=28672 elapsed_s=219.184
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=167 matrix_columns=24141 scalar_columns=435; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=200 matrix_columns=24218 scalar_columns=358; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=32768 elapsed_s=248.233
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=169 matrix_columns=24211 scalar_columns=365; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=204 matrix_columns=24255 scalar_columns=321; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=36864 elapsed_s=277.958
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=168 matrix_columns=24210 scalar_columns=366; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=205 matrix_columns=24246 scalar_columns=330; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=40960 elapsed_s=306.831
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=172 matrix_columns=24147 scalar_columns=429; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=200 matrix_columns=24208 scalar_columns=368; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=45056 elapsed_s=338.296
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=161 matrix_columns=24178 scalar_columns=398; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=181 matrix_columns=24163 scalar_columns=413; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=49152 elapsed_s=369.025
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=161 matrix_columns=24141 scalar_columns=435; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=184 matrix_columns=24149 scalar_columns=427; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=53248 elapsed_s=398.119
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=162 matrix_columns=24157 scalar_columns=419; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=194 matrix_columns=24177 scalar_columns=399; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=57344 elapsed_s=444.102
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=172 matrix_columns=24051 scalar_columns=525; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=210 matrix_columns=24341 scalar_columns=235; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=61440 elapsed_s=475.399
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_S up=IQ3_S matrix_dispatches=163 matrix_columns=24055 scalar_columns=521; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+deepseek_v4: MXFP4 F32 matrix routed down active gate=IQ3_XXS up=IQ3_XXS matrix_dispatches=208 matrix_columns=24356 scalar_columns=220; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0
+lightning_real prefilled=65536 elapsed_s=519.954
+lightning_real causal_prefix_sha256=[3a, 69, ef, ba, 6c, 6a, e0, b8, f1, 73, dc, 60, 60, 64, d4, 73, 77, bd, 1b, da, fc, 7c, ab, af, d2, 6d, 26, 9c, a9, 7d, 14, 59] prefill_seconds=520.297
+deepseek_v4: decode Q/KV projections, norms, and RoPE run as paired dispatches; rollback=QWEN_DSV4_DECODE_PREPARE_PAIRED=0
+deepseek_v4: decode output A runs one grouped GEMV; rollback=QWEN_DSV4_DECODE_OUTPUT_GROUPED=0
+deepseek_v4: decode shared gate/up/clamped-SwiGLU runs one fused dispatch; rollback=QWEN_DSV4_DECODE_SHARED_SWIGLU=0
+deepseek_v4: decode Q8 compressor projections and frontier write run one fused dispatch; rollback=QWEN_DSV4_DECODE_COMPRESSOR_FUSED=0
+lightning_real arm=control transcript=false gpu_ms=203.481 wall_ms=2873.210 causal_sha256=[15, 8d, 12, ab, d3, 49, 30, 3, b8, ef, 20, d8, 7c, a5, 7e, 8f, 57, 69, fa, 32, e4, e0, 61, de, 61, e1, ce, e0, 44, 85, bb, b6]
+lightning_real arm=control transcript=false gpu_ms=213.126 wall_ms=217.762 causal_sha256=[15, 8d, 12, ab, d3, 49, 30, 3, b8, ef, 20, d8, 7c, a5, 7e, 8f, 57, 69, fa, 32, e4, e0, 61, de, 61, e1, ce, e0, 44, 85, bb, b6]
+lightning_real arm=matrix transcript=false gpu_ms=200.630 wall_ms=215.497 causal_sha256=[fc, 90, 4b, 1c, 2e, aa, 56, 5f, 41, 8c, 1b, bc, 9, 60, ca, 77, 6b, e8, 7, 1c, ac, 20, 35, 30, 5b, 5a, 60, 78, 3f, a7, f5, be]
+lightning_real arm=control transcript=false gpu_ms=211.807 wall_ms=216.284 causal_sha256=[15, 8d, 12, ab, d3, 49, 30, 3, b8, ef, 20, d8, 7c, a5, 7e, 8f, 57, 69, fa, 32, e4, e0, 61, de, 61, e1, ce, e0, 44, 85, bb, b6]
+
+thread 'deepseek_v4_metal::tests::lightning_real::nonzero_long_context_matrix_score_replay' (220256625) panicked at crates/qwen-llm/src/deepseek_v4_metal/tests/lightning_real.rs:79:22:
+called `Result::unwrap()` on an `Err` value: Diagnostics(DuplicateCapture)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

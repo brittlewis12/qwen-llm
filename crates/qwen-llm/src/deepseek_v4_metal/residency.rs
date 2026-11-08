@@ -1421,12 +1421,6 @@ pub(super) fn deepseek_v4_session_allocation_requests_for_kinds(
         64 * 128,
         f32_bytes,
     )?;
-    push_session_allocation(
-        &mut requests,
-        "sparse_csa.matrix_queries_f16",
-        64 * 128,
-        f16_bytes,
-    )?;
     push_session_allocation(&mut requests, "sparse_csa.head_weights", 64, f32_bytes)?;
     push_session_allocation(&mut requests, "sparse_csa.visible_counts", 1, i32_bytes)?;
     push_session_allocation(

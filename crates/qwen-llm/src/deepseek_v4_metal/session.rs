@@ -1573,22 +1573,12 @@ impl DeepSeekV4Session {
                     let rows = self.compressor_frontiers.csa_rows(layer, position)?;
                     match rows.filter(|rows| rows.count > DEEPSEEK_V4_CSA_TOP_K) {
                         Some(rows) => {
-                            let query_norms =
-                                if self.sparse_csa.use_f16_matrix_score(ctx, rows.count) {
-                                    host_l2_norms_f16_rows(
-                                        &self.sparse_csa.matrix_queries_f16,
-                                        64,
-                                        128,
-                                        "diagnostic sparse CSA F16 matrix queries",
-                                    )?
-                                } else {
-                                    host_l2_norms_f32_rows(
-                                        &self.sparse_csa.index_queries,
-                                        64,
-                                        128,
-                                        "diagnostic sparse CSA index queries",
-                                    )?
-                                };
+                            let query_norms = host_l2_norms_f32_rows(
+                                &self.sparse_csa.index_queries,
+                                64,
+                                128,
+                                "diagnostic sparse CSA index queries",
+                            )?;
                             (
                                 Some(
                                     self.sparse_csa

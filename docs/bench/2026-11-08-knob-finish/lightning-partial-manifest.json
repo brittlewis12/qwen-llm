@@ -1,0 +1,13 @@
+{
+  "source": "1656c1fab9e791d815f18096ae2d61ca33aec3d2",
+  "binary_sha256": "cf042a12c7915291e1d64427e6c697cda6cfd0778fdda068d383d2e74622a7ba",
+  "machine": "Apple M4 Max",
+  "test_exit_code": 101,
+  "summary": [],
+  "thermal_levels": [
+    0
+  ],
+  "rustc_observed": false,
+  "qualification_passed": false,
+  "observations": 283
+}

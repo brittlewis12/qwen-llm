@@ -1,0 +1,188 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal/tests.rs b/crates/qwen-llm/src/deepseek_v4_metal/tests.rs
+index bff64fbb..5f6deb50 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal/tests.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal/tests.rs
+@@ -23063,0 +23064,4 @@ fn initial_repeat_and_first_pre_match_equal_stream_oracle() {
++
++#[cfg(feature = "dsv4-diagnostics")]
++#[path = "tests/lightning_real.rs"]
++mod lightning_real;
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal/tests/lightning_real.rs b/crates/qwen-llm/src/deepseek_v4_metal/tests/lightning_real.rs
+new file mode 100644
+index 00000000..158202b2
+--- /dev/null
++++ b/crates/qwen-llm/src/deepseek_v4_metal/tests/lightning_real.rs
+@@ -0,0 +1,173 @@
++use super::*;
++
++#[test]
++#[ignore = "requires the released DS4 IQ3_XXS model; causally prefills 65K real tokens on M4"]
++fn nonzero_long_context_matrix_score_replay() {
++    const PREFIX: usize = 65_536;
++    const CONTINUATION: usize = 4;
++    let path = crate::test_fixtures::DEEPSEEK_V4_IQ3_XXS.required();
++    let ctx = MetalContext::new().unwrap();
++    assert!(
++        crate::metal::DEEPSEEK_V4_F16_MATRIX_SCORER
++            .decline_reason(ctx.device_facts())
++            .is_none()
++    );
++    let (gguf, model_id) = open_pinned_current_gguf(path);
++    let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
++    let text = format!(
++        "Explain and review these Rust engine sources.\n{}\n{}\n{}",
++        include_str!("../../runtime.rs"),
++        include_str!("../../sampling.rs"),
++        include_str!("../session.rs")
++    );
++    let corpus = tokenizer.encode(&text, true).unwrap();
++    assert!(corpus.len() > 4096);
++    let tokens: Vec<u32> = corpus
++        .iter()
++        .cycle()
++        .take(PREFIX + CONTINUATION)
++        .map(|&id| u32::try_from(id).unwrap())
++        .collect();
++    eprintln!(
++        "lightning_real corpus_tokens={} prefix={} tokens_sha256={}",
++        corpus.len(),
++        PREFIX,
++        crate::tokenizer::token_ids_sha256_i32le(
++            &tokens.iter().map(|&x| x as i32).collect::<Vec<_>>()
++        )
++    );
++    let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, tokens.len()).unwrap();
++    let admitted = plan.admit(ctx.memory_signals()).unwrap();
++    let residency = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
++        .unwrap()
++        .into_residency();
++    let mut session =
++        DeepSeekV4Session::new_with_model_content_id(&ctx, residency, model_id).unwrap();
++    let started = std::time::Instant::now();
++    for chunk in tokens[..PREFIX].chunks(DEEPSEEK_V4_PREFILL_MAX_TOKENS) {
++        session.advance_tokens(&ctx, chunk).unwrap();
++        if session.next_position() % 2048 == 0 {
++            eprintln!(
++                "lightning_real prefilled={} elapsed_s={:.3}",
++                session.next_position(),
++                started.elapsed().as_secs_f64()
++            );
++        }
++    }
++    assert_eq!(session.next_position() as usize, PREFIX);
++    let snapshot = session.capture_causal_snapshot().unwrap();
++    let baseline_digest = causal_snapshot_digest(&snapshot);
++    eprintln!(
++        "lightning_real causal_prefix_sha256={baseline_digest:x?} prefill_seconds={:.3}",
++        started.elapsed().as_secs_f64()
++    );
++    let mut run = |matrix: bool, transcript: bool| {
++        session.restore_causal_snapshot(&snapshot).unwrap();
++        session.sparse_csa.set_score_test_policy(if matrix {
++            DeepSeekV4IndexerScoreTestPolicy::MatrixF16
++        } else {
++            DeepSeekV4IndexerScoreTestPolicy::Production
++        });
++        let mut logits = Vec::new();
++        let mut decisions = Vec::new();
++        let mut gpu_ms = 0.0;
++        let mut wall_ms = 0.0;
++        for &token in &tokens[PREFIX..] {
++            if transcript {
++                session
++                    .arm_decision_transcript(session.next_position())
++                    .unwrap();
++                session.forward_token(&ctx, token).unwrap();
++                decisions.push(session.take_decision_transcript().unwrap());
++            } else {
++                let p = session.forward_token_whole_profiled(&ctx, token).unwrap();
++                gpu_ms += p.command_gpu_ms;
++                wall_ms += p.forward_wall_ms;
++            }
++            logits.push(session.copy_logits_f32().unwrap());
++        }
++        let digest = causal_snapshot_digest(&session.capture_causal_snapshot().unwrap());
++        eprintln!(
++            "lightning_real arm={} transcript={} gpu_ms={gpu_ms:.3} wall_ms={wall_ms:.3} causal_sha256={digest:x?}",
++            if matrix { "matrix" } else { "control" },
++            transcript
++        );
++        (logits, decisions, digest, gpu_ms, wall_ms)
++    };
++    let _ = run(false, false); // Residency/clock warmup.
++    let before = run(false, false);
++    let matrix = run(true, false);
++    let after = run(false, false);
++    let control_witness = run(false, true);
++    let matrix_witness = run(true, true);
++    assert_eq!(before.0, after.0, "control must reproduce");
++    assert_eq!(before.2, after.2);
++    let mut changed_ids = 0;
++    let mut mismatched_argmax = 0;
++    let mut minimum_cosine = 1.0f64;
++    let mut max_relative_rms = 0.0f64;
++    for (i, (actual, reference)) in matrix.0.iter().zip(&before.0).enumerate() {
++        let argmax = |xs: &[f32]| {
++            xs.iter()
++                .enumerate()
++                .max_by(|a, b| a.1.total_cmp(b.1))
++                .unwrap()
++                .0
++        };
++        mismatched_argmax += usize::from(argmax(actual) != argmax(reference));
++        let dot: f64 = actual
++            .iter()
++            .zip(reference)
++            .map(|(&a, &b)| f64::from(a) * f64::from(b))
++            .sum();
++        let aa: f64 = actual.iter().map(|&a| f64::from(a).powi(2)).sum();
++        let bb: f64 = reference.iter().map(|&b| f64::from(b).powi(2)).sum();
++        let error: f64 = actual
++            .iter()
++            .zip(reference)
++            .map(|(&a, &b)| f64::from(a - b).powi(2))
++            .sum();
++        assert!(actual.iter().all(|v| v.is_finite()));
++        minimum_cosine = minimum_cosine.min(dot / (aa * bb).sqrt());
++        max_relative_rms = max_relative_rms.max((error / bb).sqrt());
++        for (a, b) in matrix_witness.1[i]
++            .layers
++            .iter()
++            .zip(&control_witness.1[i].layers)
++        {
++            let layer = a.layer;
++            if let (Some(a), Some(b)) = (&a.csa, &b.csa) {
++                let equal = a.cache_order_selected_ids == b.cache_order_selected_ids;
++                changed_ids += usize::from(!equal);
++                eprintln!(
++                    "lightning_real cutoff position={} layer={} ids_equal={} control_margin={} matrix_margin={} control_rank512={:?} control_rank513={:?} matrix_rank512={:?} matrix_rank513={:?}",
++                    PREFIX + i,
++                    layer,
++                    equal,
++                    b.rank_512_margin,
++                    a.rank_512_margin,
++                    b.rank_512,
++                    b.rank_513,
++                    a.rank_512,
++                    a.rank_513
++                );
++            }
++        }
++    }
++    eprintln!(
++        "lightning_real summary changed_id_sets={changed_ids} argmax_changes={mismatched_argmax} cosine={minimum_cosine:.9} rel_rms={max_relative_rms:.9} state_equal={} gpu_saving_ms={:.3} wall_saving_ms={:.3}",
++        matrix.2 == before.2,
++        (before.3 + after.3) * 0.5 - matrix.3,
++        (before.4 + after.4) * 0.5 - matrix.4
++    );
++    assert_eq!(changed_ids, 0, "nonzero causal selection differs");
++    assert_eq!(mismatched_argmax, 0);
++    assert_eq!(
++        matrix.0, before.0,
++        "unchanged consumed IDs must preserve logits"
++    );
++    assert_eq!(
++        matrix.2, before.2,
++        "unchanged consumed IDs must preserve causal state"
++    );
++}

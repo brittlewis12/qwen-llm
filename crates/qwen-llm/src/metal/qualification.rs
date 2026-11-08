@@ -318,33 +318,6 @@ const MEASUREMENTS_DEEPSEEK_V4_MULTIGROUP_SELECTOR: &[DeviceMeasurement] = &[
     ),
 ];
 
-const MEASUREMENTS_DEEPSEEK_V4_F16_MATRIX_SCORER: &[DeviceMeasurement] = &[
-    device_measurement(
-        "Apple M4 Max",
-        MeasurementResult::Passed,
-        MeasurementResult::Passed,
-        "2026-10-14",
-        "qual-m4max.json sha256=aa186d57e040e263df0bec60531eead39beeafedd2d5705133db42ba8d83df8b",
-        None,
-    ),
-    device_measurement(
-        "Apple M1 Pro",
-        MeasurementResult::NotApplicable,
-        MeasurementResult::Passed,
-        "2026-10-14",
-        "qual-m1pro-2.json sha256=fc18b4f7ef79b7fe5f0586d964049f52ed7987679d64f28522ecd0edd8c9dd2c",
-        None,
-    ),
-    device_measurement(
-        "Apple M5 Ultra",
-        MeasurementResult::NotApplicable,
-        MeasurementResult::Passed,
-        "2026-10-17",
-        "docs/bench/2026-10-17-m5-toolchain-baseline/results.json sha256=1ba1ce14804b9ada2330f374d792bf7b9396072ba0961785e6973801639eb2c2",
-        None,
-    ),
-];
-
 const MEASUREMENTS_DEEPSEEK_V4_GROUPED_LONG_HCA: &[DeviceMeasurement] = &[
     device_measurement(
         "Apple M4 Max",
@@ -695,26 +668,6 @@ pub static DEEPSEEK_V4_MULTIGROUP_SELECTOR: Qualification = Qualification {
     correctness_characterized_device: None,
     performance_characterized_device: Some("Apple M4 Max"),
 };
-pub static DEEPSEEK_V4_F16_MATRIX_SCORER: Qualification = Qualification {
-    path: "deepseek_v4.singleton_f16_matrix_scorer",
-    measurements: MEASUREMENTS_DEEPSEEK_V4_F16_MATRIX_SCORER,
-    excluded: NO_EXCLUSIONS,
-    capability_gate: QualifiedDevices::AppleFamily7,
-    requires_unified_memory: false,
-    minimum_os_version: None,
-    memory: QualifiedMemory::Any,
-    host_page_size_bytes: None,
-    max_buffer_length_bytes: None,
-    required_headroom_bytes: None,
-    required_headroom_scope: None,
-    evidence: "PERF-LOG 2026-08-08: Far Lightning F16 Matrix Candidate HOLD; Real-History F16 Lightning KILL",
-    correctness: "cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_weight_boundary_optimization_differentials -- --ignored --exact --nocapture --test-threads=1",
-    correctness_kind: QualificationWitnessKind::M4CharacterizationSkip,
-    performance: "cargo test --release -p qwen-llm --lib deepseek_v4_metal::tests::profile_lightning_matrix_ceiling_at_far_context -- --ignored --exact --nocapture",
-    performance_kind: QualificationWitnessKind::Replay,
-    correctness_characterized_device: Some("Apple M4 Max"),
-    performance_characterized_device: None,
-};
 pub static DEEPSEEK_V4_GROUPED_LONG_HCA: Qualification = Qualification {
     path: "deepseek_v4.grouped_long_hca",
     measurements: MEASUREMENTS_DEEPSEEK_V4_GROUPED_LONG_HCA,
@@ -958,7 +911,6 @@ pub static DEEPSEEK_V4_RESIDENCY_SET: Qualification = Qualification {
 };
 pub static QUALIFICATIONS: &[&Qualification] = &[
     &DEEPSEEK_V4_MULTIGROUP_SELECTOR,
-    &DEEPSEEK_V4_F16_MATRIX_SCORER,
     &DEEPSEEK_V4_GROUPED_LONG_HCA,
     &DEEPSEEK_V4_SPLITK_HCA,
     &DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY,
@@ -975,7 +927,6 @@ pub static QUALIFICATIONS: &[&Qualification] = &[
 
 pub static DEEPSEEK_V4_QUALIFICATIONS: &[&Qualification] = &[
     &DEEPSEEK_V4_MULTIGROUP_SELECTOR,
-    &DEEPSEEK_V4_F16_MATRIX_SCORER,
     &DEEPSEEK_V4_GROUPED_LONG_HCA,
     &DEEPSEEK_V4_SPLITK_HCA,
     &DEEPSEEK_V4_PACKED_Q8_MATRIX_FAMILY,

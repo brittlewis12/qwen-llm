@@ -6,6 +6,18 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - Delete rejected DS4 F16 Lightning singleton staging
+
+Remove `QWEN_DSV4_LIGHTNING_F16_MATRIX`, its DS4 caller, staging allocation,
+qualification and exclusive tests. The 2026-08-08 **Real-History F16 Lightning
+KILL** already records 935/1,365 changed selected sets plus divergent tokens,
+logits and causal state at 97K; the earlier knob audit missed that entry.
+A current M4 65,536-token causal prefix also gives repeat-identical F32 end
+states and a different F16 state over four teacher-forced transitions. Its
+later cutoff capture hit a probe reset error, so make no new cutoff or speed
+claim. Keep the shared matrix scorer used by GLM.
+[Decision and transparent partial-probe receipt](bench/2026-11-08-knob-finish/lightning.md).
+
 ## 2026-11-08 - Default bounded greedy completion replay through serve
 
 `QWEN_DFLASH_PREFIX_REPLAY=0` is now the rollback. Remove sampled replay and

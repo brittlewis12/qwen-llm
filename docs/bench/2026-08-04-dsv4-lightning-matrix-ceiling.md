@@ -2,7 +2,10 @@
 
 Date: 2026-08-04
 
-Status: schedule-ceiling `GO`; no production or FP4 promotion.
+Status: historical schedule-ceiling `GO`; the authoritative DS4 singleton
+caller was retired on 2026-11-08 after the 2026-08-08 real-history `KILL`.
+The shared primitive remains in GLM. Commands below refer to the historical
+source. See [the disposition](2026-11-08-knob-finish/lightning.md).
 
 ## Scope
 

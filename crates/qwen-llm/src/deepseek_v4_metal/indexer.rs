@@ -1828,10 +1828,6 @@ pub(super) fn deepseek_v4_multigroup_selector_qualified(facts: &crate::metal::De
     crate::metal::DEEPSEEK_V4_MULTIGROUP_SELECTOR.holds_for(facts)
 }
 
-pub(super) fn deepseek_v4_f16_matrix_scorer_qualified(facts: &crate::metal::DeviceFacts) -> bool {
-    crate::metal::DEEPSEEK_V4_F16_MATRIX_SCORER.holds_for(facts)
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DeepSeekV4SparseSelectorMode {
     Radix4,
@@ -1994,7 +1990,6 @@ impl DeepSeekV4MultigroupSelectorScratch {
 pub(super) struct DeepSeekV4SparseCsaScratch {
     pub(super) capacity_rows: usize,
     pub(super) index_queries: MetalTensor,
-    pub(super) matrix_queries_f16: MetalTensor,
     pub(super) head_weights: MetalTensor,
     pub(super) visible_counts: MetalTensor,
     pub(super) scores: MetalTensor,
@@ -2016,7 +2011,6 @@ pub(super) struct DeepSeekV4SparseCsaScratch {
 pub(super) enum DeepSeekV4IndexerScoreTestPolicy {
     Production,
     ScalarOracle,
-    MatrixF16,
 }
 
 impl DeepSeekV4SparseCsaScratch {
@@ -2048,7 +2042,6 @@ impl DeepSeekV4SparseCsaScratch {
         Ok(Self {
             capacity_rows,
             index_queries: MetalTensor::zeros_f32(ctx, vec![128, 64, 1])?,
-            matrix_queries_f16: MetalTensor::zeros_f16(ctx, vec![128, 64, 1])?,
             head_weights: MetalTensor::zeros_f32(ctx, vec![64, 1])?,
             visible_counts: MetalTensor::zeros_i32(ctx, vec![1])?,
             scores: MetalTensor::zeros_f32(ctx, vec![capacity_rows as u64, 1])?,
@@ -2113,20 +2106,6 @@ impl DeepSeekV4SparseCsaScratch {
         #[cfg(not(test))]
         {
             false
-        }
-    }
-
-    pub(super) fn use_f16_matrix_score(&self, ctx: &MetalContext, visible_rows: usize) -> bool {
-        #[cfg(test)]
-        {
-            let _ = (ctx, visible_rows);
-            self.score_test_policy == DeepSeekV4IndexerScoreTestPolicy::MatrixF16
-        }
-        #[cfg(not(test))]
-        {
-            visible_rows >= DEEPSEEK_V4_F16_MATRIX_SCORER_MIN_VISIBLE_ROWS
-                && deepseek_v4_f16_matrix_scorer_qualified(ctx.device_facts())
-                && deepseek_v4_f16_matrix_scorer_enabled()
         }
     }
 
@@ -2265,54 +2244,20 @@ impl DeepSeekV4SparseCsaScratch {
         rows: DeepSeekV4CsaRows<'_>,
         record: &DeepSeekV4SelectionRecord,
     ) -> Result<(), DeepSeekV4MetalError> {
-        if self.use_f16_matrix_score(ctx, rows.count) {
-            #[cfg(not(test))]
-            {
-                static REPORTED: std::sync::Once = std::sync::Once::new();
-                REPORTED.call_once(|| {
-                    eprintln!(
-                        "deepseek_v4: forced F16-staged Lightning matrix scorer active for far singleton rows; disable=QWEN_DSV4_LIGHTNING_F16_MATRIX=0"
-                    );
-                });
-            }
-            encode_scatter_offset_f32_to_f16(
-                ctx,
-                enc,
-                &self.index_queries,
-                &self.matrix_queries_f16,
-                0,
-                64 * 128,
-            )?;
-            encode_lightning_indexer_scores_f16_matrix(
-                ctx,
-                enc,
-                &self.matrix_queries_f16,
-                &self.head_weights,
-                rows.indexer_cache,
-                &record.visible_count,
-                &self.scores,
-                64,
-                128,
-                rows.capacity_rows,
-                rows.count,
-                1,
-            )?;
-        } else {
-            encode_lightning_indexer_scores_f16_with_policy(
-                ctx,
-                enc,
-                &self.index_queries,
-                &self.head_weights,
-                rows.indexer_cache,
-                &record.visible_count,
-                &self.scores,
-                64,
-                128,
-                rows.capacity_rows,
-                1,
-                self.force_scalar_score_kernel(),
-            )?;
-        }
+        encode_lightning_indexer_scores_f16_with_policy(
+            ctx,
+            enc,
+            &self.index_queries,
+            &self.head_weights,
+            rows.indexer_cache,
+            &record.visible_count,
+            &self.scores,
+            64,
+            128,
+            rows.capacity_rows,
+            1,
+            self.force_scalar_score_kernel(),
+        )?;
         self.encode_scored_rows(ctx, enc, rows.capacity_rows, rows.count, record)
     }
 
@@ -4000,47 +3945,6 @@ pub(super) fn encode_lightning_indexer_scores_f16_with_limit_and_kernel(
             );
         }
     }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn encode_lightning_indexer_scores_f16_matrix(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    queries: &MetalTensor,
-    head_weights: &MetalTensor,
-    keys: &MetalTensor,
-    visible_counts: &MetalTensor,
-    scores: &MetalTensor,
-    head_count: usize,
-    head_dim: usize,
-    row_capacity: usize,
-    max_dispatched_rows: usize,
-    query_count: usize,
-) -> Result<(), DeepSeekV4MetalError> {
-    // DS4 policy: its indexer is 64 heads of width 128. Geometry, bindings
-    // and dispatch are the family-neutral encoder's.
-    if head_count != 64 || head_dim != 128 {
-        return invalid(format!(
-            "matrix-ceiling indexer requires 64 heads of width 128, got {head_count}x{head_dim}"
-        ));
-    }
-    crate::metal::encode_lightning_scores_f16_matrix(
-        ctx,
-        enc,
-        &crate::metal::LightningScores {
-            queries,
-            head_weights,
-            keys,
-            visible_counts,
-            scores,
-        },
-        head_count,
-        head_dim,
-        row_capacity,
-        max_dispatched_rows,
-        query_count,
-    )?;
     Ok(())
 }
 

@@ -236,7 +236,7 @@
         }
       },
       "sampling": {
-        "identity": "qwen3.8_flash_next",
+        "identity": "qwen4_unidentified",
         "temperature": 1.0,
         "top_k": 20,
         "top_p": 0.95,
@@ -291,7 +291,7 @@
       "drafter run: permitted",
       "drafter serve: permitted",
       "prompt lookup: unsupported (family_no_prompt_lookup)",
-      "sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen3.8_flash_next)",
+      "sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen4_unidentified)",
       "os_build: <device-derived>",
       "reasoning: unsupported (prompt_protocol_unsupported)",
       "input: raw supported, user unsupported (prompt_protocol_unsupported), messages unsupported (prompt_protocol_unsupported), tools unsupported (prompt_protocol_unsupported)",
@@ -460,6 +460,10 @@
         "local_fit": {
           "status": "not_evaluated",
           "stage": "runtime_memory_admission"
+        },
+        "plan": {
+          "status": "invalid",
+          "code": "invalid_v41_gguf"
         }
       },
       "os_build": "<device-derived>"

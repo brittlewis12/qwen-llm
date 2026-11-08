@@ -149,6 +149,10 @@
         "local_fit": {
           "status": "not_evaluated",
           "stage": "runtime_memory_admission"
+        },
+        "plan": {
+          "status": "invalid",
+          "code": "invalid_v41_gguf"
         }
       },
       "os_build": "<device-derived>"
@@ -720,7 +724,7 @@
         }
       },
       "sampling": {
-        "identity": "qwen3.8_flash_next",
+        "identity": "qwen4_unidentified",
         "temperature": 1.0,
         "top_k": 20,
         "top_p": 0.95,
@@ -771,6 +775,6 @@
       },
       "os_build": "<device-derived>"
     },
-    "text_utf8": "loaded <model>: arch=qwen4exp 36 tensors, 1 shard(s), mmap=0 MiB, primary tensor-data starts at 2976\nfamily: Qwen3.8-Flash-Next (qwen4exp)\nblocks: 3\nmetadata (qwen4exp.*):\n  qwen4exp.attention.head_count = 1\n  qwen4exp.attention.head_count_kv = 1\n  qwen4exp.attention.key_length = 2\n  qwen4exp.block_count = 3\n  qwen4exp.embedding_length = 2\n  qwen4exp.expert_count = 2\n  qwen4exp.expert_feed_forward_length = 4\n  qwen4exp.expert_shared_feed_forward_length = 4\n  qwen4exp.expert_used_count = 1\n  qwen4exp.feed_forward_length = 4\n  qwen4exp.full_attention_interval = 1\n  qwen4exp.ssm.conv_kernel = 4\n  qwen4exp.ssm.group_count = 1\n  qwen4exp.ssm.state_size = 2\n  qwen4exp.ssm.time_step_rank = 1\ncapabilities:\n  drafter run: permitted\n  drafter serve: permitted\n  prompt lookup: unsupported (family_no_prompt_lookup)\n  sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen3.8_flash_next)\n  os_build: <device-derived>\n  reasoning: unsupported (prompt_protocol_unsupported)\n  input: raw supported, user unsupported (prompt_protocol_unsupported), messages unsupported (prompt_protocol_unsupported), tools unsupported (prompt_protocol_unsupported)\n  template: unknown\n"
+    "text_utf8": "loaded <model>: arch=qwen4exp 36 tensors, 1 shard(s), mmap=0 MiB, primary tensor-data starts at 2976\nfamily: Qwen3.8-Flash-Next (qwen4exp)\nblocks: 3\nmetadata (qwen4exp.*):\n  qwen4exp.attention.head_count = 1\n  qwen4exp.attention.head_count_kv = 1\n  qwen4exp.attention.key_length = 2\n  qwen4exp.block_count = 3\n  qwen4exp.embedding_length = 2\n  qwen4exp.expert_count = 2\n  qwen4exp.expert_feed_forward_length = 4\n  qwen4exp.expert_shared_feed_forward_length = 4\n  qwen4exp.expert_used_count = 1\n  qwen4exp.feed_forward_length = 4\n  qwen4exp.full_attention_interval = 1\n  qwen4exp.ssm.conv_kernel = 4\n  qwen4exp.ssm.group_count = 1\n  qwen4exp.ssm.state_size = 2\n  qwen4exp.ssm.time_step_rank = 1\ncapabilities:\n  drafter run: permitted\n  drafter serve: permitted\n  prompt lookup: unsupported (family_no_prompt_lookup)\n  sampling: temperature 1.0 top-k 20 top-p 0.95 min-p 0.0 (qwen4_unidentified)\n  os_build: <device-derived>\n  reasoning: unsupported (prompt_protocol_unsupported)\n  input: raw supported, user unsupported (prompt_protocol_unsupported), messages unsupported (prompt_protocol_unsupported), tools unsupported (prompt_protocol_unsupported)\n  template: unknown\n"
   }
 }

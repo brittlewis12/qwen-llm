@@ -38,6 +38,7 @@ SCOPES = {
         "qwen4exp_text_session::snapshot_copy::tests::",
         "metal::moe_grouped_generic::tests::staging_ownership::",
         "metal::moe_grouped_generic::tests::wide_activation_type::",
+        "metal::moe_grouped_generic::tests::sorted_experts::",
     ],
     "oracle": [],
     "bench": [

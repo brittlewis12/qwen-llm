@@ -3,6 +3,7 @@ use crate::metal::test_support::*;
 
 mod flash_next;
 mod iq1;
+mod sorted_experts;
 mod staging_ownership;
 mod wide_activation_type;
 

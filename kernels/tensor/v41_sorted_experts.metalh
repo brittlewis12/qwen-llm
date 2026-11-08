@@ -1,0 +1,322 @@
+/*
+Sorted-run TensorOps dataflow adapted from mlx-serve v26.11.2,
+src/sdk/quant/gguf/metal/kernels/gather_nax_gu.metal.
+
+MIT License
+
+Copyright (c) 2026 David Dalcu
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+// Expert-major dataflow. Operands retain the incumbent half
+// narrowing; native quantized banks are decoded one K64 slab at a time.
+// A prefix of counts maps compact panels to contiguous sorted activation rows.
+kernel void v41_sorted_plan(device const int *counts [[buffer(0)]],
+                            device int *plan [[buffer(1)]],
+                            constant uint3 &dims [[buffer(2)]],
+                            uint tid [[thread_position_in_grid]]) {
+    if (tid) return;
+    int rows = 0, panels = 0;
+    for (uint e = 0; e < dims.x; ++e) {
+        plan[e] = rows;
+        plan[dims.x + 1 + e] = panels;
+        int n = clamp(counts[e], 0, int(dims.y));
+        rows += n;
+        panels += (n + 63) / 64;
+    }
+    plan[dims.x] = rows;
+    plan[2 * dims.x + 1] = panels;
+}
+
+kernel void v41_sorted_pack(device const half *src [[buffer(0)]],
+                            device const int *ids [[buffer(1)]],
+                            device const int *plan [[buffer(2)]],
+                            device half *dst [[buffer(3)]],
+                            constant uint4 &dims [[buffer(4)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    // dims = hidden, tokens, experts, topk. Router proves a slot permutation.
+    if (gid.x >= dims.x || gid.y >= dims.y * dims.w) return;
+    if (gid.y >= uint(plan[dims.z])) {
+        dst[ulong(gid.y) * dims.x + gid.x] = half(0);
+        return;
+    }
+    uint lo = 0, hi = dims.z - 1;
+    while (lo < hi) {
+        uint mid = (lo + hi + 1) / 2;
+        if (plan[mid] <= int(gid.y)) lo = mid; else hi = mid - 1;
+    }
+    int slot = ids[lo * dims.y + gid.y - plan[lo]];
+    dst[ulong(gid.y) * dims.x + gid.x] = slot >= 0 && uint(slot) < dims.y * dims.w
+        ? src[ulong(slot / int(dims.w)) * dims.x + gid.x] : half(0);
+}
+
+// Decode one shared-metadata unit directly into its operand slab. Avoid
+// materializing a 16-value array and issuing a separate byte-grid lookup
+// for every scalar coefficient.
+template <int FORMAT>
+inline void v41_iq_unit(device const uchar *b, uint ib, threadgroup half *dst) {
+    device const ushort *h = (device const ushort *)b;
+    float d = float(as_type<half>(h[0]));
+    uint aux0 = 0, aux1 = 0;
+    if (FORMAT == 0) {
+        aux0 = uint(h[1 + 4 * ib]) | (uint(h[2 + 4 * ib]) << 16);
+        aux1 = uint(h[3 + 4 * ib]) | (uint(h[4 + 4 * ib]) << 16);
+    }
+    for (uint l = 0; l < 4; ++l) {
+        ulong grid;
+        uint signs, scale;
+        if (FORMAT == 0) {
+            grid = iq2_xxs_grid[(aux0 >> (8 * l)) & 255];
+            signs = iq2_xxs_signs[(aux1 >> (7 * l)) & 127];
+            scale = aux1 >> 28;
+        } else if (FORMAT == 1) {
+            uint q = h[1 + 4 * ib + l];
+            grid = mv_iq2xs_grid[q & 511];
+            signs = qt_ksigns_iq2xs[q >> 9];
+            scale = (b[66 + ib] >> (4 * (l / 2))) & 15;
+        } else {
+            uint code = uint(b[2 + 4 * ib + l])
+                      | ((uint(b[66 + ib]) << (8 - 2 * l)) & 768);
+            grid = qt_iq2s_grid[code];
+            signs = b[34 + 4 * ib + l];
+            scale = (b[74 + ib] >> (4 * (l / 2))) & 15;
+        }
+        float dl = d * (0.5f + float(scale)) * 0.25f;
+        for (uint part = 0; part < 2; ++part) {
+            uint word = uint(grid >> (part * 32));
+            float4 mag = float4(uint4(word, word >> 8, word >> 16, word >> 24) & 255);
+            uint4 mask = uint4(1, 2, 4, 8) << (4 * part);
+            float4 sign = select(float4(1), float4(-1), (uint4(signs) & mask) != 0);
+            half4 value = half4(dl * mag * sign);
+            *(threadgroup half4 *)(dst + 8 * l + 4 * part) = value;
+        }
+    }
+}
+
+template <int FORMAT, int BYTES,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &)>
+kernel void v41_sorted_gu(constant uint4 &dims [[buffer(0)]],
+                          device const uchar *gate [[buffer(1)]],
+                          device const uchar *up [[buffer(2)]],
+                          device const half *x [[buffer(3)]],
+                          device const int *plan [[buffer(4)]],
+                          device const int *ids [[buffer(5)]],
+                          constant uint2 &routes [[buffer(7)]],
+                          constant float &limit [[buffer(8)]],
+                          device const float *weights [[buffer(9)]],
+                          device half *sorted_inner [[buffer(10)]],
+                          threadgroup uchar *scratch [[threadgroup(0)]],
+                          uint2 group [[threadgroup_position_in_grid]],
+                          ushort tid [[thread_index_in_threadgroup]],
+                          ushort sg [[simdgroup_index_in_threadgroup]]) {
+    // dims = K, M, E, N; routes = slots, topk.
+    constexpr int KS = 64, WS = 72;
+    const device int *offs = plan;
+    const device int *tiles = plan + dims.z + 1;
+    int tile = group.y;
+    if (tile >= tiles[dims.z]) return;
+    int lo = 0, hi = int(dims.z) - 1;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (tiles[mid] <= tile) lo = mid; else hi = mid - 1;
+    }
+    int m0 = offs[lo] + (tile - tiles[lo]) * 64;
+    int live = min(64, offs[lo + 1] - m0);
+    // Device tensor slices must fit, including the final partial run.
+    int a0 = min(m0, int(routes.x) - 64), shift = m0 - a0;
+    uint n0 = group.x * 64;
+    uint row = n0 + tid % 64;
+    ulong row_bytes = ulong(dims.x / 256) * BYTES;
+    device const uchar *w = (tid < 64 ? gate : up)
+                         + (ulong(lo) * dims.y + row) * row_bytes;
+    threadgroup half *wt = (threadgroup half *)scratch;
+    constexpr auto desc = tensor_ops::matmul2d_descriptor(
+        32, 32, KS, false, true, true,
+        tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    tensor_ops::matmul2d<desc, execution_simdgroup> op;
+    tensor<device half, dextents<int, 2>, tensor_inline> A(
+        (device half *)x, dextents<int, 2>(dims.x, routes.x));
+    tensor<threadgroup half, dextents<int, 2>, tensor_inline> B(
+        wt + 32 * sg * WS, dextents<int, 2>(KS, 32), array<int, 2>{1, WS});
+    auto a = A.template slice<KS, 32>(0, a0);
+    auto b = B.template slice<KS, 32>(0, 0);
+    auto c0 = op.template get_destination_cooperative_tensor<
+        metal::remove_addrspace_t<decltype(a)>, metal::remove_addrspace_t<decltype(b)>, float>();
+    auto c1 = op.template get_destination_cooperative_tensor<
+        metal::remove_addrspace_t<decltype(a)>, metal::remove_addrspace_t<decltype(b)>, float>();
+    for (ushort i = 0; i < c0.get_capacity(); ++i) { c0[i] = 0; c1[i] = 0; }
+    for (uint k = 0; k < dims.x; k += KS) {
+        if (FORMAT < 3) {
+            v41_iq_unit<FORMAT>(w + (k / 256) * BYTES, (k % 256) / 32, wt + tid * WS);
+            v41_iq_unit<FORMAT>(w + (k / 256) * BYTES, (k % 256) / 32 + 1, wt + tid * WS + 32);
+        } else {
+            for (short j = 0; j < 4; ++j) {
+                half4x4 q;
+                DEQ(w + (k / 256) * BYTES, short((k % 256) / 16) + j, q);
+                for (short v = 0; v < 4; ++v)
+                    *(threadgroup half4 *)(wt + tid * WS + j * 16 + v * 4) = q[v];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (shift < 32) { auto a0t = A.template slice<KS, 32>(k, a0); op.run(a0t, b, c0); }
+        if (shift + live > 32) { auto a1t = A.template slice<KS, 32>(k, a0 + 32); op.run(a1t, b, c1); }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    threadgroup float *stage = (threadgroup float *)scratch;
+    tensor<threadgroup float, dextents<int, 2>, tensor_inline> C(
+        stage + 1024 * sg, dextents<int, 2>(32, 32), array<int, 2>{1, 32});
+    for (int h = 0; h < 2; ++h) {
+        int r0 = max(32 * h, shift), r1 = min(32 * h + 32, shift + live);
+        if (r0 >= r1) continue;
+        if (h == 0) c0.store(C); else c1.store(C);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint i = tid; i < 32 * 64; i += 128) {
+            int r = 32 * h + int(i / 64);
+            uint col = i % 64;
+            if (r < r0 || r >= r1) continue;
+            uint at = (col / 32) * 1024 + uint(r - 32 * h) * 32 + col % 32;
+            float g = min(stage[at], limit);
+            float u = clamp(stage[2048 + at], -limit, limit);
+            stage[at] = g / (1.0f + exp(-g)) * u;
+        }
+        // Preserve the two F32 rounding boundaries of the incumbent chain:
+        // raw SwiGLU, then weighted activation, then the F16 conversion. A
+        // shared barrier prevents reassociation across either stored value.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint i = tid; i < 32 * 64; i += 128) {
+            int r = 32 * h + int(i / 64);
+            uint col = i % 64;
+            if (r < r0 || r >= r1) continue;
+            uint at = (col / 32) * 1024 + uint(r - 32 * h) * 32 + col % 32;
+            int slot = ids[lo * dims.w + a0 + r - offs[lo]];
+            if (slot >= 0 && uint(slot) < routes.x) stage[at] = stage[at] * weights[slot];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint i = tid; i < 32 * 64; i += 128) {
+            int r = 32 * h + int(i / 64);
+            uint col = i % 64;
+            if (r < r0 || r >= r1) continue;
+            uint at = (col / 32) * 1024 + uint(r - 32 * h) * 32 + col % 32;
+            sorted_inner[ulong(a0 + r) * dims.y + n0 + col] = half(stage[at]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+typedef decltype(v41_sorted_gu<2, QT_IQ2_S_BYTES, qt_dequantize_iq2_s>) v41_sorted_gu_t;
+#define V41_SORTED_GU(suffix, FORMAT, BYTES, DEQ) \
+    template [[host_name("v41_sorted_gu_" #suffix)]] kernel v41_sorted_gu_t v41_sorted_gu<FORMAT, BYTES, DEQ>;
+V41_SORTED_GU(iq2_s, 2, QT_IQ2_S_BYTES, qt_dequantize_iq2_s)
+V41_SORTED_GU(iq2_xs, 1, QT_IQ2_XS_BYTES, qt_dequantize_iq2_xs)
+V41_SORTED_GU(iq2_xxs, 0, QT_IQ2_XXS_BYTES, qt_dequantize_iq2_xxs)
+V41_SORTED_GU(iq3_xxs, 3, QT_IQ3_XXS_BYTES, qt_dequantize_iq3_xxs)
+
+template <int FORMAT, int BYTES,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &)>
+kernel void v41_sorted_down(constant uint4 &dims [[buffer(0)]],
+                          device const uchar *gate [[buffer(1)]],
+                          device const half *x [[buffer(3)]],
+                          device const int *plan [[buffer(4)]],
+                          device const int *ids [[buffer(5)]],
+                          device float *out [[buffer(6)]],
+                          constant uint2 &routes [[buffer(7)]],
+                          threadgroup uchar *scratch [[threadgroup(0)]],
+                          uint2 group [[threadgroup_position_in_grid]],
+                          ushort tid [[thread_index_in_threadgroup]],
+                          ushort sg [[simdgroup_index_in_threadgroup]]) {
+    // dims = K, M, E, N; routes = slots, topk.
+    constexpr int KS = 64, WS = 72;
+    const device int *offs = plan;
+    const device int *tiles = plan + dims.z + 1;
+    int tile = group.y;
+    if (tile >= tiles[dims.z]) return;
+    int lo = 0, hi = int(dims.z) - 1;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (tiles[mid] <= tile) lo = mid; else hi = mid - 1;
+    }
+    int m0 = offs[lo] + (tile - tiles[lo]) * 64;
+    int live = min(64, offs[lo + 1] - m0);
+    // Device tensor slices must fit, including the final partial run.
+    int a0 = min(m0, int(routes.x) - 64), shift = m0 - a0;
+    uint n0 = group.x * 128;
+    uint row = n0 + tid;
+    ulong row_bytes = ulong(dims.x / 256) * BYTES;
+    device const uchar *w = gate
+                         + (ulong(lo) * dims.y + row) * row_bytes;
+    threadgroup half *wt = (threadgroup half *)scratch;
+    constexpr auto desc = tensor_ops::matmul2d_descriptor(
+        32, 32, KS, false, true, true,
+        tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    tensor_ops::matmul2d<desc, execution_simdgroup> op;
+    tensor<device half, dextents<int, 2>, tensor_inline> A(
+        (device half *)x, dextents<int, 2>(dims.x, routes.x));
+    tensor<threadgroup half, dextents<int, 2>, tensor_inline> B(
+        wt + 32 * sg * WS, dextents<int, 2>(KS, 32), array<int, 2>{1, WS});
+    auto a = A.template slice<KS, 32>(0, a0);
+    auto b = B.template slice<KS, 32>(0, 0);
+    auto c0 = op.template get_destination_cooperative_tensor<
+        metal::remove_addrspace_t<decltype(a)>, metal::remove_addrspace_t<decltype(b)>, float>();
+    auto c1 = op.template get_destination_cooperative_tensor<
+        metal::remove_addrspace_t<decltype(a)>, metal::remove_addrspace_t<decltype(b)>, float>();
+    for (ushort i = 0; i < c0.get_capacity(); ++i) { c0[i] = 0; c1[i] = 0; }
+    for (uint k = 0; k < dims.x; k += KS) {
+        if (FORMAT < 3) {
+            v41_iq_unit<FORMAT>(w + (k / 256) * BYTES, (k % 256) / 32, wt + tid * WS);
+            v41_iq_unit<FORMAT>(w + (k / 256) * BYTES, (k % 256) / 32 + 1, wt + tid * WS + 32);
+        } else {
+            for (short j = 0; j < 4; ++j) {
+                half4x4 q;
+                DEQ(w + (k / 256) * BYTES, short((k % 256) / 16) + j, q);
+                for (short v = 0; v < 4; ++v)
+                    *(threadgroup half4 *)(wt + tid * WS + j * 16 + v * 4) = q[v];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (shift < 32) { auto a0t = A.template slice<KS, 32>(k, a0); op.run(a0t, b, c0); }
+        if (shift + live > 32) { auto a1t = A.template slice<KS, 32>(k, a0 + 32); op.run(a1t, b, c1); }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    threadgroup float *stage = (threadgroup float *)scratch;
+    tensor<threadgroup float, dextents<int, 2>, tensor_inline> C(
+        stage + 1024 * sg, dextents<int, 2>(32, 32), array<int, 2>{1, 32});
+    for (int h = 0; h < 2; ++h) {
+        int r0 = max(32 * h, shift), r1 = min(32 * h + 32, shift + live);
+        if (r0 >= r1) continue;
+        if (h == 0) c0.store(C); else c1.store(C);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint i = tid; i < 32 * 128; i += 128) {
+            int r = 32 * h + int(i / 128);
+            uint col = i % 128;
+            if (r < r0 || r >= r1) continue;
+            uint at = (col / 32) * 1024 + uint(r - 32 * h) * 32 + col % 32;
+            int slot = ids[lo * dims.w + a0 + r - offs[lo]];
+            if (slot >= 0 && uint(slot) < routes.x) out[ulong(slot) * dims.y + n0 + col] = stage[at];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+typedef decltype(v41_sorted_down<2, QT_IQ2_S_BYTES, qt_dequantize_iq2_s>) v41_sorted_down_t;
+#define V41_SORTED_DOWN(suffix, FORMAT, BYTES, DEQ) \
+    template [[host_name("v41_sorted_down_" #suffix)]] kernel v41_sorted_down_t v41_sorted_down<FORMAT, BYTES, DEQ>;
+V41_SORTED_DOWN(iq2_s, 2, QT_IQ2_S_BYTES, qt_dequantize_iq2_s)
+V41_SORTED_DOWN(iq2_xs, 1, QT_IQ2_XS_BYTES, qt_dequantize_iq2_xs)
+V41_SORTED_DOWN(iq2_xxs, 0, QT_IQ2_XXS_BYTES, qt_dequantize_iq2_xxs)
+V41_SORTED_DOWN(iq3_xxs, 3, QT_IQ3_XXS_BYTES, qt_dequantize_iq3_xxs)

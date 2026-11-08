@@ -5780,5 +5780,26 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Host-only byte copies, worker bounds, cross-region partial partitions and immutable ownership; no Metal context, model import or GPU allocation."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ffn_gpu::tests::sorted_expert_rows_stay_within_qualified_geometry",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure geometry gate; no Metal context, allocation or model."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::sorted_experts::sorted_iq_experts_match_rectangular_and_preserve_scratch_guards",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Self-leased M5 native-IQ tensor differential with device allocations and dispatches; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "metal::moe_grouped_generic::tests::sorted_experts::sorted_iq_experts_refuse_bad_bindings_before_dispatch",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Self-leased M5 Metal binding refusal and canary witness; excluded from CPU acceptance."
   }
 ]

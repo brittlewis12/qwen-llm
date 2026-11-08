@@ -31,6 +31,7 @@ using namespace metal;
 using namespace mpp;
 
 #include "../quant_tiles.h"
+#include "v41_sorted_experts.metalh"
 
 #define TT_NR0 64             // weight rows per tile
 #define TT_NR1 32             // slots per tile

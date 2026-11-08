@@ -1,6 +1,7 @@
 //! FFN component of the full GPU graph. No CPU routes or intermediate readbacks.
 use super::prefill::RowsArithmetic;
 use super::*;
+use crate::env_flag::read_default_on;
 use objc2_metal::MTLSize;
 
 #[cfg(test)]
@@ -9,6 +10,22 @@ pub(super) mod tests;
 #[cfg(test)]
 #[path = "ffn_gpu/tests/arithmetic.rs"]
 mod arithmetic_tests;
+
+/// Sorted native-IQ K64 tensor experts for qualified V4.1 prefill rows
+/// (1024..4096). Fuses clipped gate/up, weights and half storage, then sorted
+/// down; reuses existing scratch. Set to 0 for rectangular tiles. Decode,
+/// short rows and telemetry retain the incumbent path.
+fn sorted_experts_enabled() -> bool {
+    // Read at the encode boundary so same-process diagnostics can keep the
+    // untimed cold prefix identical while measuring a fresh append.
+    // Default-on sorted native-IQ tensor experts for 1024..4096 V4.1 rows; 0 restores rectangular tiles. Existing half operands and F32 staging.
+    read_default_on("QWEN_V41_SORTED_EXPERT")
+}
+
+fn sorted_rows_geometry(c: &Config, rows: usize) -> bool {
+    (1024..=4096).contains(&rows)
+        && (c.hidden, c.intermediate, c.experts, c.topk) == (5120, 2304, 384, 6)
+}
 
 pub(super) struct Workspace {
     // 0 X, 1 incoming pre, 2 projected mixes, 3 next pre, 4 post, 5 comb,
@@ -1255,6 +1272,71 @@ impl Workspace {
                 c.topk,
             )?;
             e.mark(4);
+            if tensor
+                && sorted_rows_geometry(c, n)
+                && layer.banks[0].dtype == layer.banks[1].dtype
+                && layer
+                    .banks
+                    .iter()
+                    .all(|b| metal::sorted_iq_supported(b.dtype))
+                && !crate::half_telemetry::enabled()
+                && sorted_experts_enabled()
+            {
+                let owned_half = match (input_half, &scratch.half_input) {
+                    (None, Some(half)) => {
+                        Some(half.convert(ctx, e.enc(), &scratch.hc.normalized, c.hidden * n)?)
+                    }
+                    _ => None,
+                };
+                let x = input_half.or(owned_half.as_ref()).unwrap();
+                let plan =
+                    b[10].view_subrange(c.experts as u64, vec![(2 * (c.experts + 1)) as u64]);
+                // Down output is dead until GU completes; weighted F32 scratch
+                // is dead for the whole sorted chain. Reuse both as half slabs.
+                let mut packed = b[14].view_subrange(0, vec![(c.hidden * c.topk * n / 2) as u64]);
+                packed.dtype = GgmlType::F16;
+                packed.shape = vec![(c.hidden * c.topk * n) as u64];
+                let mut sorted =
+                    b[13].view_subrange(0, vec![(c.intermediate * c.topk * n / 2) as u64]);
+                sorted.dtype = GgmlType::F16;
+                sorted.shape = vec![(c.intermediate * c.topk * n) as u64];
+                let experts = metal::SortedExperts::prepare(
+                    ctx,
+                    e.enc(),
+                    layer.banks,
+                    x,
+                    &counts,
+                    &b[11],
+                    &b[9],
+                    &plan,
+                    &packed,
+                    &sorted,
+                    &b[14],
+                    metal::SortedExpertGeometry {
+                        hidden: c.hidden,
+                        inner: c.intermediate,
+                        experts: c.experts,
+                        topk: c.topk,
+                        rows: n,
+                        clamp: c.clamp,
+                    },
+                )?;
+                experts.encode_gate_up(e.enc());
+                e.mark(5);
+                e.mark(6);
+                experts.encode_down(e.enc());
+                e.mark(7);
+                e.enc()
+                    .set_pipeline(&ctx.pipeline("kernel_deepseek_v41_sum")?);
+                e.enc().set_bytes(0, &(c.hidden as u32));
+                e.enc().set_bytes(1, &(c.topk as u32));
+                for (slot, tensor) in [&b[14], &b[4], &b[5], &status].iter().enumerate() {
+                    e.enc().set_tensor(slot + 2, tensor);
+                }
+                e.enc().set_bytes(6, &(n as u32));
+                dispatch(e.enc(), extents.output as usize, 256);
+                return Ok(());
+            }
             if tensor {
                 // The caller's half copy of the normalized input when it made
                 // one (the shared gate/up read it too); otherwise convert here.
@@ -1403,7 +1485,8 @@ impl Workspace {
 
 /// Prefill FFN stage names in mark order (`QWEN_V41_PREFILL_STAGES`): HC pre,
 /// router, shared expert, route + bucket, routed gate/up, routing weights +
-/// half copy, routed down, sum + HC post.
+/// half copy, routed down, sum + HC post. Sorted gate/up includes weighting
+/// and the half store; its separate weight/half span is empty.
 pub(super) const PREFILL_FFN_STAGES: [&str; 8] = [
     "prefill_ffn_hc",
     "prefill_ffn_router",

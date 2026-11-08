@@ -14,6 +14,40 @@ mod shared_columns;
 mod strategy;
 
 #[test]
+fn sorted_expert_rows_stay_within_qualified_geometry() {
+    let c = Config {
+        hidden: 5120,
+        intermediate: 2304,
+        experts: 384,
+        topk: 6,
+        ..Config::default()
+    };
+    for n in [0, 1, 512, 1023, 1024, 1300, 2048, 4096, 4097] {
+        assert_eq!(sorted_rows_geometry(&c, n), (1024..=4096).contains(&n));
+    }
+    for changed in [
+        Config {
+            hidden: 2560,
+            ..c.clone()
+        },
+        Config {
+            intermediate: 2048,
+            ..c.clone()
+        },
+        Config {
+            experts: 256,
+            ..c.clone()
+        },
+        Config {
+            topk: 8,
+            ..c.clone()
+        },
+    ] {
+        assert!(!sorted_rows_geometry(&changed, 2048));
+    }
+}
+
+#[test]
 fn execution_contract_rejections_match_ffn_workspace_and_composition_guards() {
     for c in [
         Config {

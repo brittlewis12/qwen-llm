@@ -61,6 +61,7 @@ mod checkpoint;
 mod device_checkpoint;
 mod row_logits;
 mod snapshot;
+mod snapshot_copy;
 
 pub(crate) use capture::Qwen4ExpCaptureSink;
 pub use capture::{Qwen4ExpCaptureBank, Qwen4ExpCapturePlan, Qwen4ExpCapturedFeatures};

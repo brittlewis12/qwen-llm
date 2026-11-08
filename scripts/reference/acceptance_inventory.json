@@ -5766,5 +5766,19 @@
     "class": "model",
     "ignored": true,
     "reason": "Exclusive real-model Metal witness: retained workspace owner identity, exact logits, persistent state and PLE history across runner release; explicit leased execution only."
+  },
+  {
+    "target": "lib",
+    "name": "qwen4exp_text_session::snapshot_copy::tests::parallel_copy_preserves_region_boundaries_and_immutable_payload",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only byte copies, worker bounds, cross-region partial partitions and immutable ownership; no Metal context, model import or GPU allocation."
+  },
+  {
+    "target": "lib",
+    "name": "qwen4exp_text_session::snapshot_copy::tests::empty_and_short_copy_have_no_unwritten_tail",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only byte copies, worker bounds, cross-region partial partitions and immutable ownership; no Metal context, model import or GPU allocation."
   }
 ]

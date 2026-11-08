@@ -102,6 +102,21 @@ impl Qwen4ExpTextSessionMetalWorkspace {
     }
 
     pub fn capture_snapshot(&self) -> Result<Qwen4ExpTextSnapshot, Qwen4ExpTextSessionError> {
+        self.capture_snapshot_with_copy(false)
+    }
+
+    /// Same immutable RAM format and committed extent, with joined CPU copies
+    /// for large payloads. No GPU state or publication point changes.
+    pub fn capture_snapshot_parallel(
+        &self,
+    ) -> Result<Qwen4ExpTextSnapshot, Qwen4ExpTextSessionError> {
+        self.capture_snapshot_with_copy(true)
+    }
+
+    fn capture_snapshot_with_copy(
+        &self,
+        parallel: bool,
+    ) -> Result<Qwen4ExpTextSnapshot, Qwen4ExpTextSessionError> {
         let length = self.require_snapshot_ready()?;
         let expected = self.geometry.snapshot_bytes(length)? as usize;
         let tensors = self.snapshot_regions(length)?;
@@ -115,12 +130,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
                 regions.iter().sum::<usize>()
             ));
         }
-        let mut arena = Vec::new();
-        arena.try_reserve_exact(expected).map_err(|error| {
-            Qwen4ExpTextSessionError::Invalid(format!(
-                "snapshot arena of {expected} bytes refused: {error}"
-            ))
-        })?;
+        let mut sources = Vec::with_capacity(tensors.len());
         for tensor in &tensors {
             // SAFETY: shared-storage buffers; the session is idle, so every
             // command that wrote these rows has completed. The view lies
@@ -136,8 +146,14 @@ impl Qwen4ExpTextSessionMetalWorkspace {
                     tensor.n_bytes() as usize,
                 )
             };
-            arena.extend_from_slice(bytes);
+            sources.push(bytes);
         }
+        let workers = if parallel {
+            snapshot_copy::parallel_workers(expected)
+        } else {
+            1
+        };
+        let arena = snapshot_copy::copy_regions(&sources, workers)?;
         Ok(Qwen4ExpTextSnapshot {
             geometry: self.geometry.clone(),
             length,

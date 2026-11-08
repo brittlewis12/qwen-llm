@@ -32,6 +32,9 @@ const LIVE: &str = "QWEN_SERVE_FN_LIVE";
 /// 512..2048-row appends. Body/header arithmetic stays unchanged; 0 restores
 /// pre-header transcript checkpoints and header replay on retries.
 const ENDPOINT: &str = "QWEN_SERVE_FN_ENDPOINT";
+/// Default-on bounded parallel CPU snapshot copies on the M5 tensor-capable
+/// device. Same bytes/keys and capture points; 0 restores single-thread copies.
+const PARALLEL_CAPTURE: &str = "QWEN_SERVE_FN_PARALLEL_CAPTURE";
 impl TurnConfig {
     pub(super) fn from_env() -> Self {
         let on = qwen_llm::env_flag::read_default_on(TURNS);
@@ -213,7 +216,14 @@ pub(super) fn capture_snapshot_impl(
         );
         return false;
     }
-    match runner.capture_snapshot() {
+    let snapshot = if ctx.tensor_ops_status().is_available()
+        && qwen_llm::env_flag::read_default_on(PARALLEL_CAPTURE)
+    {
+        runner.capture_snapshot_parallel()
+    } else {
+        runner.capture_snapshot()
+    };
+    match snapshot {
         Ok(snapshot) => {
             debug_assert_eq!(snapshot.payload_bytes(), payload_bytes);
             let inserted = match conversation {

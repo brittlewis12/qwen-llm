@@ -1706,6 +1706,11 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         Ok(self.workspace.capture_snapshot()?)
     }
 
+    /// Capture the same immutable state using bounded, joined CPU copy workers.
+    pub fn capture_snapshot_parallel(&self) -> Result<Qwen4ExpTextSnapshot, Qwen4ExpRuntimeError> {
+        Ok(self.workspace.capture_snapshot_parallel()?)
+    }
+
     /// Continue from `snapshot`; the next prefill starts at its length. On
     /// failure the runner is left reset at position zero.
     pub fn restore_snapshot(

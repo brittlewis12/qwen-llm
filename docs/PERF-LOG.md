@@ -6,6 +6,74 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - GLM Serve Rows: Bitwise KDA/Q6 Widening; IQ/Attention Not Promoted
+
+- Base **`eb02cb0b`**, code **`bc6c659a`**, M5 Ultra, unchanged four-shard
+  **GLM-5.3-Flash UD-IQ3_XXS**, ordinary Fast/Half. The
+  [serve standing](bench/2026-11-07-tier1-serve-agents.md) exposed 1596-row
+  native PP **2.927 s**, slower than 2048 rows at **2.090 s** at depth 66037.
+- **Default on:** `QWEN_GLM53_PREFILL_ANY_ROWS` extends **KDA value4 to
+  128..=4096 command rows** and **wide Q6_K to 1025..=4096**. `=0` restores
+  the previous row gates. Existing short-prefill, KDA, wide-Q6, precision and
+  hardware controls remain authoritative. Exact/F32 keep their encoders.
+  The ordinary **2048-row workspace ceiling**, chunk splits, state/cache
+  formats and GPU allocation terms are unchanged; guarded partial tiles use
+  the actual row count. Tiny tails retain the existing paths.
+- Operator screen: real GGUF **4096 x 8192 Q6_K**, **19 widths from 128 to
+  4096**, including 129/511/513/1025/1084/1596/1852/2047/2049/4095. Wide
+  versus narrow tensor **1.29-1.53x**, every comparison bitwise equal.
+  Expanded validation covers F32 input, genuine M tails, poisoned outputs,
+  guards, Exact/F32 and rollback predicates. KDA recurrence output/state/carry
+  bits match through 4096 rows; the 1596-row stage screen was
+  **138.68 -> 61.55 ms**. A new dense TensorOps admission below 1024 failed
+  the distribution screen and is excluded; the qualified 512-row path remains.
+- Final **native equivalent of warm serve appends**, same binary off/on,
+  **66037** reused tokens, context capacity **98304**, ordinary **2048-row**
+  commands. A real untimed prefix is filled in several calls, with irregular
+  buildup tails; immutable prefix restores are outside the timers. Complete
+  endpoint logits/status handling included. One warm + two retained reps per
+  cell/arm; medians below. Frozen natural-code inputs differ from the earlier
+  synthetic native bridge; these are fresh paired PP measurements.
+
+  | New rows | Off ms | On/default ms | Throughput ratio | Saved ms |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 1084 | 2107.953 | 1959.981 | **1.07550x** | 147.972 |
+  | 1596 | 2948.366 | 2714.673 | **1.08609x** | 233.693 |
+  | 1852 | 3366.648 | 3091.146 | **1.08913x** | 275.502 |
+  | 2048 control | 2102.946 | 2103.373 | 0.99980x | -0.427 |
+
+- Final distribution check: frozen disjoint Rust-prefix / code-or-prose
+  continuation files, independent off/on prefix execution. **8192 / 65536**
+  depth; the former uses repeated 1596-row calls, the latter four irregular
+  buildup calls. Append **128/513/1084/1596/1852/2049/4095/4096**, then 128
+  sequential teacher-forced targets/cell. **2048 paired full-vocabulary
+  vectors**, all finite and **bitwise equal**, **dNLL = mean/max KL = 0**;
+  allocation terms match. First and every retained timing endpoint hash also
+  matches. The unchanged bars are **|dNLL| <=0.005**, **mean KL <=0.01**.
+- **Not promoted:** broad IQ gate/up, IQ3_S down and sparse QK/PV row gates.
+  A common-prefix, per-stage/per-format ablation reproduces the baseline;
+  at 1596/64K IQ2_S gate/up has **dNLL -0.0152182**, sparse attention
+  **-0.0370984**. At 1852, IQ3_S down mean KL is **0.0110477**. These exceed
+  the unchanged cohort limits despite operator speedups. IQ3_S-only gate/up
+  passes the two target-shape smoke cells, but covers one bank: its measured
+  operator savings are only **9-21 ms**, implying under **0.7%** whole-PP value here.
+  Those routes retain their original qualified gates. The larger shape
+  inversion remains; this increment removes **148-276 ms**, not the full gap.
+- Build lock + canonical Metal lease, wait enabled, nice 10 for timing;
+  25-second gaps followed by three zero readings five seconds apart. Thermal
+  pressure **0 throughout** all accepted arms under two-second monitoring.
+  An early ablation read an edited prefix file; unchanged-shape controls
+  caught it. Those pairs are invalidated, retained separately, and excluded.
+  Final inputs are immutable copies with recorded hashes.
+- Validation on M5: full `cargo test --release -p qwen-llm --lib`:
+  **2473 passed, 0 failed, 739 ignored**, 135.66 s, serial,
+  `MTL_DEBUG_LAYER=1` and `QWEN_REQUIRE_METAL_TESTS=1`.
+  `scripts/check-contracts.sh` passes on **`bc6c659a`**.
+- Sources, commands, frozen corpus hashes, every arm, rejected/invalidated
+  checks, full quality vectors and receipts: **`~/qwen-runs/2026-11-07-glm-serve-rows/`**
+  on metagross; metadata/source receipts mirrored locally. Temporary diagnostic
+  instrumentation and examples are removed. No merge or running GLM worker.
+
 ## 2026-11-07 - Knob Sweep: Dense 27B Q8 Native Embeddings
 
 - Qualified untied dense 27B Q8_0 embeddings are automatic; `QWEN_NATIVE_QUANT_EMBED=0` rolls back. Positive values retain qualification.

@@ -256,10 +256,6 @@ fn poison_capture_tensor(tensor: &MetalTensor) -> Result<(), MetalError> {
 
 crate::env_flag!(default_on dense_packed_gdn_step_enabled, "QWEN_DENSE_GDN_STEP_PACKED");
 crate::env_flag!(
-    default_off mtp_attn_q2_shared_kv_enabled,
-    "QWEN_MTP_ATTN_Q2_SHARED_KV"
-);
-crate::env_flag!(
     default_on prefill_attn_gdn_scratch_overlay_enabled,
     "QWEN_PREFILL_ATTN_GDN_SCRATCH_OVERLAY"
 );
@@ -6834,11 +6830,7 @@ fn build_prefill_scratch_plan_from_arch(
     let moe_group_ids_elems =
         checked_u64_mul(expert_count, n, "prefill plan moe group ids overflow")?;
     let attn_group = n_q.checked_div(n_kv.max(1)).unwrap_or(1).max(1);
-    let attn_packed_rows = if include_spec_packs && attn_group == 6 && block_size == 2 {
-        n
-    } else {
-        ATTN_PREFILL_V4_PACKED_ROWS as u64
-    };
+    let attn_packed_rows = ATTN_PREFILL_V4_PACKED_ROWS as u64;
     let attn_partial_group = checked_u64_mul(
         attn_group,
         head_dim,
@@ -7151,12 +7143,7 @@ fn resolve_prefill_scratch_plan_modes(
     ) || matches!(
         std::env::var("QWEN_PREFILL_ATTN_PACKED_G16").as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-    ) || (head_dim == 256 && matches!(attn_group, 8 | 16))
-        || (include_spec_packs
-            && block_size == 2
-            && head_dim == 256
-            && attn_group == 6
-            && mtp_attn_q2_shared_kv_enabled());
+    ) || (head_dim == 256 && matches!(attn_group, 8 | 16));
     let enable_attn_matrix = head_dim == 256
         && ((prefill_attn_matrix_g4_may_use()
             && arch.n_kv_heads.checked_mul(4) == Some(arch.n_q_heads))
@@ -7591,11 +7578,7 @@ impl MetalDFlashLayerMajorScratch {
             .checked_div((arch.n_kv_heads as u64).max(1))
             .unwrap_or(1)
             .max(1);
-        let attn_packed_rows = if include_spec_packs && attn_group == 6 && block_size == 2 {
-            n
-        } else {
-            ATTN_PREFILL_V4_PACKED_ROWS as u64
-        };
+        let attn_packed_rows = ATTN_PREFILL_V4_PACKED_ROWS as u64;
         let attn_prefill_v4_o_partial_elems = checked_u64_mul4(
             attn_packed_rows,
             (arch.n_kv_heads as u64).max(1),
@@ -9981,35 +9964,12 @@ pub fn encode_packed_verify_layer_major_inner_for(
                     }
                     emit_mtp_verify_count_phase(trace_counts, il as isize, "attn", "front");
 
-                    // V1 (v0.77): shared-KV chunk path, via either the
-                    // legacy n==2 gate or the generalized 2..=8 chain.
-                    // Both resolve to one `nwg` for a single chunked call
-                    // over `[0, start_position + n)`.
+                    #[cfg(test)]
                     let shared_kv_shape_ok = head_dim == 256
                         && n_q == 24
                         && n_kv == 4
                         && target_session.kv_k[ai].dtype == GgmlType::F16
                         && target_session.kv_v[ai].dtype == GgmlType::F16;
-                    let packed_q2_nwg = if mtp_attn_q2_shared_kv_enabled()
-                        && n == 2
-                        && start_position as usize + n >= 16_384
-                        && shared_kv_shape_ok
-                    {
-                        let n_pos0 = start_position as usize + 1;
-                        let n_pos1 = start_position as usize + 2;
-                        let nwg0 = crate::metal::attn_v4_choose_nwg(n_pos0, 6);
-                        let nwg1 = crate::metal::attn_v4_choose_nwg(n_pos1, 6);
-                        let tile0 = crate::metal::attn_v4_choose_tile_c(n_pos0, 6);
-                        let tile1 = crate::metal::attn_v4_choose_tile_c(n_pos1, 6);
-                        (nwg0 == nwg1
-                            && n_pos0.div_ceil(nwg0) == n_pos1.div_ceil(nwg1)
-                            && tile0 == 32
-                            && tile1 == 32)
-                            .then_some(nwg1)
-                    } else {
-                        None
-                    };
-
                     #[cfg(test)]
                     let pilot_handled = if let Some(workspace) = &layer_scratch.online_verify_pilot
                     {
@@ -10059,50 +10019,6 @@ pub fn encode_packed_verify_layer_major_inner_for(
                     let pilot_handled = false;
 
                     if pilot_handled {
-                    } else if let Some(nwg) = packed_q2_nwg {
-                        let enc = KernelEncoder::begin(&cmd_buf);
-                        if !fused_qk_norm_rope {
-                            encode_prefill_qk_rope(
-                                base.ctx,
-                                &enc,
-                                &attn_q_normed_pack,
-                                &attn_k_normed_pack,
-                                n,
-                                n_q,
-                                n_kv,
-                                head_dim,
-                                n_rot,
-                                start_position,
-                                arch.rope_theta,
-                            )?;
-                        }
-                        encode_scatter_offset_f32_to_f16_kv(
-                            base.ctx,
-                            &enc,
-                            &attn_k_normed_pack,
-                            &attn_v_now_pack,
-                            &target_session.kv_k[ai],
-                            &target_session.kv_v[ai],
-                            start_position as usize * kv_dim,
-                            n * kv_dim,
-                        )?;
-                        target_session.kv_n_pos[ai] = start_position as usize + n;
-                        crate::metal::encode_attn_prefill_v4_g6_q2_c32_f32(
-                            base.ctx,
-                            &enc,
-                            &attn_q_normed_pack,
-                            &target_session.kv_k[ai],
-                            &target_session.kv_v[ai],
-                            &layer_scratch.attn_prefill_v4_o_partial_pack,
-                            &layer_scratch.attn_prefill_v4_ml_partial_pack,
-                            &attn_o_pack,
-                            n,
-                            start_position as usize,
-                            nwg,
-                            true,
-                        )?;
-
-                        enc.end();
                     } else {
                         // The generic path appends and attends one causal row at
                         // a time because each row sees a different KV extent.

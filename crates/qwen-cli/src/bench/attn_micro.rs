@@ -137,7 +137,6 @@ pub(crate) fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
     let n_kv: usize = m.arch.n_kv_heads as usize;
     let (group_tile, tile_c) = match (n_q, n_kv) {
         (16, 2) => (2, 64),
-        (24, 4) => (6, 32),
         (32, 2) => (4, 64),
         _ => (0, 0),
     };
@@ -246,20 +245,6 @@ pub(crate) fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
         let cmd = ctx.queue.commandBuffer().context("packed cmd")?;
         let enc = KernelEncoder::begin(&cmd);
         match (n_q, n_kv, qt) {
-            (24, 4, 2) => encode_attn_prefill_v4_g6_q2_c32_f32(
-                &ctx,
-                &enc,
-                &q_t,
-                &k_cache,
-                &v_cache,
-                &o_partial_packed,
-                &ml_partial_packed,
-                &out_packed,
-                rows,
-                base_pos,
-                nwg,
-                false,
-            )?,
             (16, 2, 2) => encode_attn_prefill_v4_g8_t2_q2_c64_f32(
                 &ctx,
                 &enc,
@@ -375,7 +360,6 @@ pub(crate) fn run_attn_layer_micro(args: AttnLayerMicroArgs) -> Result<()> {
     let group = n_q / n_kv;
     let (group_tile, tile_c) = match (n_q, n_kv) {
         (16, 2) => (2, 64),
-        (24, 4) => (6, 32),
         (32, 2) => (4, 64),
         _ => anyhow::bail!(
             "attn-layer-micro unsupported shape n_q={} n_kv={}",
@@ -627,20 +611,6 @@ pub(crate) fn run_attn_layer_micro(args: AttnLayerMicroArgs) -> Result<()> {
         let enc = KernelEncoder::begin(&cmd);
         run_front(&enc, &packed, &packed_k_cache, &packed_v_cache)?;
         match (n_q, n_kv, qt) {
-            (24, 4, 2) => encode_attn_prefill_v4_g6_q2_c32_f32(
-                &ctx,
-                &enc,
-                &packed.q_normed,
-                &packed_k_cache,
-                &packed_v_cache,
-                &packed.o_partial,
-                &packed.ml_partial,
-                &packed.attn_o,
-                rows,
-                base_pos,
-                nwg,
-                false,
-            )?,
             (16, 2, 2) => encode_attn_prefill_v4_g8_t2_q2_c64_f32(
                 &ctx,
                 &enc,

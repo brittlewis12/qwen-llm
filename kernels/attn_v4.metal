@@ -1022,22 +1022,6 @@ kernel void kernel_attn_prefill_v4_g16_t4_q2_c64_f32(
 
 
 
-[[max_total_threads_per_threadgroup(32)]]
-kernel void kernel_attn_prefill_v4_g6_q2_c32_f32(
-        constant attn_v4_prefill_args & args [[buffer(0)]],
-        device const float    * q          [[buffer(1)]],
-        device const half     * k_cache    [[buffer(2)]],
-        device const half     * v_cache    [[buffer(3)]],
-        device       float    * o_partial  [[buffer(4)]],
-        device       float    * ml_partial [[buffer(5)]],
-        threadgroup  half     * sq         [[threadgroup(0)]],
-        threadgroup  float    * ss         [[threadgroup(1)]],
-        uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiisg [[thread_index_in_simdgroup]]) {
-    attn_v4_prefill_main_subgroup_body<6, 6, 2, 32>(args, q, k_cache, v_cache, o_partial, ml_partial,
-                                                    sq, ss, tgpig, tiisg);
-}
-
 // ============================================================================
 // Experimental non-flash matrix-attention sidecar.
 //
@@ -1793,20 +1777,6 @@ kernel void kernel_attn_prefill_v4_reduce_rows_g8_f32(
         uint3  tgpig [[threadgroup_position_in_grid]],
         ushort tiisg [[thread_index_in_simdgroup]]) {
     attn_v4_prefill_reduce_rows_body<8>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
-}
-
-[[max_total_threads_per_threadgroup(32)]]
-kernel void kernel_attn_prefill_v4_reduce_rows_g6_f32(
-        constant attn_v4_prefill_reduce_args & args [[buffer(0)]],
-        device const float * o_partial   [[buffer(1)]],
-        device const float * ml_partial  [[buffer(2)]],
-        device       float * out         [[buffer(3)]],
-        threadgroup  float * sh_m        [[threadgroup(0)]],
-        threadgroup  float * sh_l        [[threadgroup(1)]],
-        threadgroup  float * sh_ef       [[threadgroup(2)]],
-        uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiisg [[thread_index_in_simdgroup]]) {
-    attn_v4_prefill_reduce_rows_body<6>(args, o_partial, ml_partial, out, sh_m, sh_l, sh_ef, tgpig, tiisg);
 }
 
 [[max_total_threads_per_threadgroup(32)]]

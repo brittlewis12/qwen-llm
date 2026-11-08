@@ -641,7 +641,6 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
     let iq3_s_n2_nc2 = env_flag_default_on("QWEN_MATMAT_IQ3_S_N2_NC2");
     let skip_final_checkpoint = env_flag_default_on("QWEN_MTP_SKIP_FINAL_CKPT");
     let direct_mtp_f32_destination = env_flag_default_on("QWEN_MTP_DIRECT_F32_DEST");
-    let shared_kv_q2_requested = env_flag_enabled("QWEN_MTP_ATTN_Q2_SHARED_KV");
     let build_identity = recorded_build_identity();
     let qwen_env = capture_qwen_env();
 
@@ -729,15 +728,13 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
     eprintln!(
         "[mtp-bench] execution_features: packed_base_prefill={} q5_k_n2_seq={} \
          iq2_s_n2_nc2={} iq3_s_n2_nc2={} skip_final_checkpoint={} \
-         direct_mtp_f32_destination={} \
-         shared_kv_q2_requested={} shared_kv_q2_min_position=16384",
+         direct_mtp_f32_destination={}",
         packed_base_prefill,
         q5_k_n2_seq,
         iq2_s_n2_nc2,
         iq3_s_n2_nc2,
         skip_final_checkpoint,
         direct_mtp_f32_destination,
-        shared_kv_q2_requested,
     );
     eprintln!("[mtp-bench] MTP head load: {mtp_load_ms:.3} ms");
     eprintln!(
@@ -1560,8 +1557,6 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
                 "iq3_s_n2_nc2": iq3_s_n2_nc2,
                 "skip_final_checkpoint": skip_final_checkpoint,
                 "direct_mtp_f32_destination": direct_mtp_f32_destination,
-                "shared_kv_q2_requested": shared_kv_q2_requested,
-                "shared_kv_q2_min_position": 16_384,
             },
             "terminal_token_target_transition_consumed": if target_state_audit.is_some() {
                 Some(false)

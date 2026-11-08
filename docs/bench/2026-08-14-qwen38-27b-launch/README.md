@@ -202,9 +202,8 @@ queries for the 24Q/4KV group-6 shape. Its measured outputs have printed
 those cells, not a byte-level proof. At base position 20,480, a complete attention layer
 moves 4.10 -> 1.94 ms (2.108x); at 32,768 the isolated attention body moves
 4.71 -> 2.33 ms (2.020x). Short and medium cells do not reliably win, so the
-branch is context-gated at 16K and remains opt-in behind
-`QWEN_MTP_ATTN_Q2_SHARED_KV=1`; its dedicated packed scratch must become lazy
-before product promotion. Raw rows are retained in
+prototype was context-gated at 16K and needed lazy packed scratch. It was
+removed on 2026-11-08 when the unfinished speculation experiment was retired. Raw rows are retained in
 `attn-q2-shared-kv-base20480.log` and `attn-q2-shared-kv-base32768.log`.
 
 Recursive D3/N4 and D7/N8 remain closed at 0.670x and 0.740x total because deep

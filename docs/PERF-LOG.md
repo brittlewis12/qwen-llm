@@ -6,6 +6,16 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - Retire unfinished MTP two-query shared-KV attention
+
+Delete `QWEN_MTP_ATTN_Q2_SHARED_KV`, the G6 N2 verifier branch, its dedicated
+packed-scratch sizing, two exclusive shader entry points and their host encoder,
+benchmark arms and tests. The sole production caller required this default-off
+flag at >=16K; no currently enabled path depends on it. Speculation development
+is outside this finish packet. Keep shared template bodies, enabled G8/G16
+kernels, ordinary G6 decode and all default-on rollback controls. Historical
+measurements remain; the launch note now marks the prototype retired.
+
 ## 2026-11-08 - Delete rejected DS4 F16 Lightning singleton staging
 
 Remove `QWEN_DSV4_LIGHTNING_F16_MATRIX`, its DS4 caller, staging allocation,

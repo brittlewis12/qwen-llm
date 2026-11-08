@@ -5026,7 +5026,26 @@ fn encode_pool_publish(
         eps: f32,
     }
     let g = workspace.geometry;
-    let pso = ctx.pipeline("kernel_qwen4exp_qsa_pool_publish_f16")?;
+    // Default-on M5 decode publication: preserve the serial pooled norm and
+    // parallelize the independent 128 output lanes. Packed prefill is separate.
+    const PARALLEL_POOL: &str = "QWEN_FN_QSA_POOL_PAR";
+    let parallel = ctx.tensor_ops_status().is_available()
+        && parallel_pool_shape(g.ratio, g.index_head_dim)
+        && crate::env_flag::read_default_on(PARALLEL_POOL);
+    let parallel_pso = parallel
+        .then(|| {
+            ctx.pipeline("kernel_qwen4exp_qsa_pool_publish_parallel_f16")
+                .ok()
+        })
+        .flatten()
+        .filter(|pso| {
+            pso.threadExecutionWidth() == 32 && pso.maxTotalThreadsPerThreadgroup() >= 128
+        });
+    let threads = if parallel_pso.is_some() { 128 } else { 1 };
+    let pso = match parallel_pso {
+        Some(pso) => pso,
+        None => ctx.pipeline("kernel_qwen4exp_qsa_pool_publish_f16")?,
+    };
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
@@ -5049,12 +5068,16 @@ fn encode_pool_publish(
             depth: 1,
         },
         MTLSize {
-            width: 1,
+            width: threads,
             height: 1,
             depth: 1,
         },
     );
     Ok(())
+}
+
+fn parallel_pool_shape(ratio: usize, head_dim: usize) -> bool {
+    ratio == 4 && head_dim == 128
 }
 
 fn encode_index_scores(

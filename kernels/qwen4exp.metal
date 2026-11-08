@@ -707,6 +707,59 @@ kernel void kernel_qwen4exp_qsa_pool_publish_f16(
     }
 }
 
+// The scalar norm keeps the incumbent lane/slot FMA order. Only the
+// independent RoPE/output lanes are parallel; publication still completes
+// in this dispatch before index scoring can read the new block.
+kernel void kernel_qwen4exp_qsa_pool_publish_parallel_f16(
+        constant qwen4exp_qsa_pool_args & args [[buffer(0)]],
+        device const float * pending [[buffer(1)]],
+        device const float * weight [[buffer(2)]],
+        device half * compressed [[buffer(3)]],
+        uint lane [[thread_index_in_threadgroup]]) {
+    threadgroup float shared_norm;
+    if (lane == 0u) {
+        float sum_square = 0.0f;
+        for (uint inner = 0u; inner < args.head_dim; ++inner) {
+            float sum = 0.0f;
+            for (uint slot = 0u; slot < args.ratio; ++slot) {
+                sum += pending[(ulong)slot * args.head_dim + inner];
+            }
+            const float rounded = float(half(sum / float(args.ratio)));
+            sum_square += rounded * rounded;
+        }
+        shared_norm = rsqrt(sum_square / float(args.head_dim) + args.eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane >= args.head_dim) return;
+    const float norm = shared_norm;
+    const uint position = args.block * args.ratio;
+    float sum = 0.0f;
+    for (uint slot = 0u; slot < args.ratio; ++slot) {
+        sum += pending[(ulong)slot * args.head_dim + lane];
+    }
+    const float rounded = float(half(sum / float(args.ratio)));
+    float rotated = rounded * weight[lane];
+    if (lane < args.rotary_dim) {
+        const uint half_dim = args.rotary_dim / 2u;
+        const uint pair = lane % half_dim;
+        float paired_sum = 0.0f;
+        for (uint slot = 0u; slot < args.ratio; ++slot) {
+            paired_sum += pending[(ulong)slot * args.head_dim
+                + pair + (lane < half_dim ? half_dim : 0u)];
+        }
+        const float paired = float(half(paired_sum / float(args.ratio)));
+        const float frequency = pow(args.theta,
+            -2.0f * float(pair) / float(args.rotary_dim));
+        const float angle = float(position) * frequency;
+        rotated = lane < half_dim
+            ? rounded * weight[lane] * cos(angle)
+                - paired * weight[pair + half_dim] * sin(angle)
+            : rounded * weight[lane] * cos(angle)
+                + paired * weight[pair] * sin(angle);
+    }
+    compressed[(ulong)args.block * args.head_dim + lane] = half(rotated * norm);
+}
+
 // Publish from the pre-chunk pending slots before the following dispatch
 // advances those slots to their final per-residue values.
 kernel void kernel_qwen4exp_qsa_pool_publish_packed_f16(

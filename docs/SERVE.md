@@ -1495,8 +1495,13 @@ because client model-pickers probe it).
   checkpoint. Head bytes count
   toward the cache budget. `QWEN_SERVE_FN_ENDPOINT=0` restores pre-header
   checkpoints; `QWEN_SERVE_FN_LIVE=0` restores reset/restore and eager completed
-  copies. These controls are read at backend creation. Flash-Next drafter mode
-  always cold-prefills without snapshots. DS4 captures prompt and completed boundaries and
+  copies. These controls are read at backend creation. On M5 with the tensor
+  library available, captures of at least 256 MiB use up to eight temporary CPU
+  workers, all joined before the immutable checkpoint is published. Bytes,
+  capture points and cache accounting are unchanged. The independent
+  `QWEN_SERVE_FN_PARALLEL_CAPTURE=0` restores serial copies; M4 and the ordinary
+  native snapshot API retain serial copying. Flash-Next drafter mode always
+  cold-prefills without snapshots. DS4 captures prompt and completed boundaries and
   skips a completed boundary with no transition or a truncation inside open
   reasoning. Eligible boundaries enter the **RAM** prefix cache (8–42 ms each
   per S0). Evidence: PERF-LOG 2026-09-23 transcript-boundary entry.

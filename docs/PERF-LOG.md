@@ -6,6 +6,67 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - Flash-Next: Recover Full-Session Snapshot Capture Cost
+
+- Base **`6c53d956`**, implementation/qualification **`62ecfcfd`**, M5 Ultra /
+  256 GiB, unchanged **GSQ-RCO IQ3_S**. **Default-on bounded CPU capture
+  copies:** on M5 with the tensor library available, payloads >=256 MiB use
+  up to **eight temporary joined workers**. Smaller captures, M4 and the
+  ordinary native snapshot API retain serial copying. Same immutable RAM
+  format, bytes, keys, budgets, capture points and ladder policy; no GPU
+  arithmetic or scheduling changes. A failed worker publishes no snapshot.
+  **`QWEN_SERVE_FN_PARALLEL_CAPTURE=0`** restores serial copying independently
+  of the existing live/endpoint controls. Workers finish before cache publication.
+- Full standing protocol, **one complete session per arm**, same binary and
+  frozen requests: four ~16K buildup turns, three successive 1.1–1.9K appends
+  with **200-token replies**, the older-question fork, then the existing
+  reasoning-omission return. Context **98304**, low effort, greedy/seed 1.
+  All **18 replies** match the standing's structured contents exactly,
+  excluding generated IDs; processed/reused counts match on every turn.
+  This is a paired session screen, not confidence intervals or repeated samples
+  of one size. All observations are retained.
+
+  | New / reused tokens | Serial TTFT ms | Default TTFT ms | Capture ms, serial -> default |
+  | --- | ---: | ---: | ---: |
+  | 1117 / 65024 | 1439.751 | **1287.826** | 216.0 -> **59.0** |
+  | 1630 / 66340 | 1804.594 | **1643.772** | 227.4 -> **71.4** |
+  | 1886 / 68169 | 1978.999 | **1809.678** | 243.6 -> **78.9** |
+
+- Mean append TTFT **1741.114 -> 1580.426 ms**, **160.689 ms / 9.23% lower**;
+  complete 200-token responses average **4821.649 -> 4642.337 ms**. Relate
+  the baselines explicitly: default is **127 ms below** the refreshed standing's
+  **1708 ms**, and below the original **1640 ms**. The fresh serial control's
+  copy spans are larger than the refreshed standing; they are not substituted
+  into that historical table. At A2, the standing's **178.3 -> 71.4 ms** capture
+  recovers **106.9 ms** of the reported regression.
+- Allocation/copy attribution at A2, **1,840,693,248 bytes**: arena reservation
+  **0.010 -> 0.009 ms**, copy span (including any first-touch work)
+  **227.253 -> 71.254 ms**. Native prefill phases **1556.4 -> 1544.5 ms**;
+  all appends retain **two calls**, live reuse and zero restore/completed-copy
+  time. The transfer improvement accounts for the TTFT saving.
+- Fork retains **47048 tokens / 1757 new rows**, TTFT
+  **1991.429 -> 1823.150 ms**; deferred departing copy **236.0 -> 85.3 ms**.
+  Fork and return replies are exact. The reasoning-omission control still
+  replays **53006 rows** from **16387** reused; its unrelated prefix mismatch
+  is unchanged (**29263.923 -> 28970.013 ms** TTFT).
+- Correctness: host tests cover odd/empty source regions, partial worker
+  partitions, invalid worker bounds and ownership after producer mutation.
+  Separate native 64K-prefix serial/parallel endpoint snapshots are dirtied,
+  restored, and compared on **128 fixed code/prose targets per size**:
+  **768 paired full-vocabulary vectors bitwise equal**, finite,
+  **dNLL = KL = 0** in all six cells. No precision or tolerance changes.
+- Validation at **`62ecfcfd`**: full release M5 library **2466 passed / 745
+  ignored / 0 failed**, **133.75 s**, serial with Metal validation/required
+  GPU tests; full main CLI **1044 passed / 50 ignored / 0 failed**.
+  **`scripts/check-contracts.sh` passes**, **573 CPU acceptance tests** plus
+  **10 tripwires**. Subsequent edits are maintained documentation only.
+  Shared build lock/nice 10, canonical leases with wait, standing's 25-second
+  cooling plus repeated zero readings, one-second monitoring; accepted timing
+  and native campaigns stay pressure **0**. Frozen protocol, all requests,
+  events/replies, copy attribution, numerical source/results, binaries and
+  receipts: **`~/qwen-runs/2026-11-08-fn-snapshot-copy/`**, M5 and local mirror.
+  No merge or owned worker left running.
+
 ## 2026-11-08 - Tier-1 Serve Agents: Current Main Versus First Standing
 
 - Clean source **`3a36b6e8`**, M5 Ultra / 256 GiB, same three production

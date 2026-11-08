@@ -115,6 +115,8 @@ pub struct CedMemoryLedger {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CedPlan {
+    pub start_position: usize,
+    pub encoder_chunks: Option<Vec<Range<usize>>>,
     pub prompt_rows: usize,
     /// Full's selected chunk width; encoder execution follows it. Decoder
     /// replay and its reusable backing remain bounded by DEFAULT_CHUNK_ROWS.
@@ -132,7 +134,76 @@ pub struct CedPlan {
 
 impl CedPlan {
     pub(super) fn scalar_tail(&self) -> Option<usize> {
-        super::prefill::original_scalar_tail(self.prompt_rows, self.full_chunk_rows)
+        if let Some(chunks) = &self.encoder_chunks
+            && let Some(last) = chunks.last()
+            && last.end == self.prompt_rows
+        {
+            return (last.len() == 1).then_some(last.start);
+        }
+        super::prefill::original_scalar_tail(
+            self.prompt_rows - self.start_position,
+            self.full_chunk_rows,
+        )
+        .map(|p| p + self.start_position)
+    }
+
+    /// Complete a long encoder suffix of an already committed exact prefix.
+    /// Every decoder dependency must lie in newly encoded rows; the old prefix
+    /// supplies only ordinary encoder history and published global KV.
+    pub(super) fn from_prefix(
+        config: &Config,
+        schedule: &Schedule,
+        engram: &HashConfig,
+        start: usize,
+        end: usize,
+        capacity: usize,
+        rows: usize,
+    ) -> Result<Self> {
+        let mut plan = Self::shrinking(
+            config,
+            schedule,
+            engram,
+            &CedRequest::cold(end, capacity).with_full_chunk_rows(rows),
+        )?;
+        if start > plan.boundary_rows.start {
+            return Err(CedPlanError::UnsupportedRequest(
+                "CED prefix overlaps decoder dependency halo",
+            ));
+        }
+        plan.start_position = start;
+        plan.encoder_chunks = Some(Vec::new());
+        plan.work.encoder_output_rows = mul(
+            end - start,
+            plan.encoder_layers.len(),
+            "encoder output rows",
+        )?;
+        plan.work.publication_rows = end - start;
+        plan.work.full_forward_output_rows =
+            mul(end - start, schedule.layers, "full-forward output rows")?;
+        plan.work.total_output_rows = add(
+            plan.work.encoder_output_rows,
+            plan.work.decoder_output_rows,
+            "total output rows",
+        )?;
+        plan.work.total_execution_rows = add(
+            add(
+                plan.work.total_output_rows,
+                plan.work.decoder_seed_rows,
+                "total execution rows",
+            )?,
+            end - start,
+            "total execution rows",
+        )?;
+        Ok(plan)
+    }
+
+    pub(super) fn fuse_seed(&self, layer: &CedLayerPlan) -> bool {
+        if self.start_position == 0 && self.encoder_chunks.is_none() {
+            return layer.fuse_seed_with_packed_output(self.prompt_rows, self.full_chunk_rows);
+        }
+        !layer.seed_rows.is_empty()
+            && layer.seed_rows.len() <= DEFAULT_CHUNK_ROWS
+            && layer.output_rows.start < self.scalar_tail().unwrap_or(layer.output_rows.end)
     }
 
     pub fn shrinking(
@@ -272,6 +343,8 @@ impl CedPlan {
             .and_then(|n| n.checked_add(selected_bytes))
             .ok_or(CedPlanError::Overflow("retained bytes"))?;
         Ok(Self {
+            start_position: 0,
+            encoder_chunks: None,
             prompt_rows: n,
             full_chunk_rows: request.full_chunk_rows,
             encoder_layers: 0..split,
@@ -389,6 +462,25 @@ impl std::iter::FusedIterator for CedChunks {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committed_prefix_plan_keeps_absolute_halo_and_relative_chunk_lineage() {
+        let c = Config::default();
+        let s = Schedule::default();
+        let h = HashConfig::default();
+        for tail in [0, 1, 333] {
+            let p = CedPlan::from_prefix(&c, &s, &h, 343, 343 + 8192 + tail, 20000, 4096).unwrap();
+            assert_eq!(p.start_position, 343);
+            assert_eq!(
+                p.work.encoder_output_rows,
+                (8192 + tail) * p.encoder_layers.len()
+            );
+            assert_eq!(p.work.publication_rows, 8192 + tail);
+            assert_eq!(p.scalar_tail(), (tail == 1).then_some(p.prompt_rows - 1));
+            assert!(p.decoder.iter().all(|l| l.input_rows.start >= 343));
+        }
+        assert!(CedPlan::from_prefix(&c, &s, &h, 343, 500, 20000, 4096).is_err());
+    }
 
     fn plan(n: usize) -> CedPlan {
         CedPlan::shrinking(

@@ -305,3 +305,23 @@ fn controlled_f32_attention_census_proves_both_pv_routes_and_matching_allocation
         enc.end();
     });
 }
+
+#[test]
+fn publication_policy_keeps_full_and_ced_on_the_same_pruned_row_geometry() {
+    for (unpruned, long, m5, start, rows, enabled, expected) in [
+        (true, false, false, 0, 4096, false, true),
+        (false, true, true, 16384, 2048, true, false),
+        (false, true, true, 32767, 512, true, false),
+        (false, true, true, 32768, 511, true, false),
+        (false, true, true, 32768, 512, true, true),
+        (false, true, true, 32768, 2048, true, true),
+        (false, true, true, 32768, 4096, true, false),
+        (false, true, false, 32768, 1024, true, false),
+        (false, true, true, 32768, 1024, false, false),
+    ] {
+        assert_eq!(
+            publication_row_geometry(unpruned, long, m5, start, rows, enabled),
+            expected
+        );
+    }
+}

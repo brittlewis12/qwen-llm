@@ -81,6 +81,8 @@ struct StubEngine {
     logits: Logits,
     /// Prompt length whose decode logits carry a NaN after its first step.
     nan_prompt: Option<usize>,
+    cold: bool,
+    cold_encoded: usize,
 }
 
 impl StubEngine {
@@ -124,6 +126,43 @@ impl execution::Engine<Seq> for StubEngine {
         }
         state.prompt = state.tokens.len();
         Ok(self.logits(state))
+    }
+    fn cold_prefill(
+        &mut self,
+        state: &mut Seq,
+        tokens: &[u32],
+        _: &AtomicBool,
+        begin: bool,
+        max_rows: usize,
+    ) -> Result<Option<qwen_llm::deepseek_v41::forward::ColdPrefillSlice>, ServeError> {
+        if !self.cold {
+            return Ok(None);
+        }
+        if begin {
+            assert!(!state.unready);
+            state.unready = true;
+            self.cold_encoded = 0;
+        } else {
+            assert!(state.unready);
+        }
+        let rows = max_rows.min(tokens.len() - self.cold_encoded);
+        self.cold_encoded += rows;
+        self.clock += Duration::from_millis(rows as u64);
+        self.log.borrow_mut().events.push(format!("ced {rows}"));
+        let complete = self.cold_encoded == tokens.len();
+        let logits = if complete {
+            state.tokens.extend_from_slice(tokens);
+            state.prompt = state.tokens.len();
+            state.unready = false;
+            self.logits(state)
+        } else {
+            vec![]
+        };
+        Ok(Some(qwen_llm::deepseek_v41::forward::ColdPrefillSlice {
+            encoder_rows: rows,
+            complete,
+            logits,
+        }))
     }
     fn step(
         &mut self,
@@ -197,18 +236,39 @@ impl BatchEngine<Seq> for StubEngine {
 #[derive(Default)]
 struct Recording {
     commits: Vec<Vec<u32>>,
+    ready_short: bool,
 }
 
 impl reuse::Reuse<Seq> for Recording {
     fn take(
         &mut self,
-        _: &[u32],
-        _: usize,
+        ids: &[u32],
+        required: usize,
         _: u64,
     ) -> std::result::Result<Option<reuse::Restored<Seq>>, ServeError> {
+        if self.ready_short && ids.len() < 512 {
+            let state = Seq {
+                tokens: ids.to_vec(),
+                prompt: ids.len(),
+                poisoned: false,
+                unready: false,
+                capacity: required,
+            };
+            let logits = next_logits(&state, Logits::Peaked);
+            return Ok(Some(reuse::Restored {
+                live: reuse::Live {
+                    state,
+                    tokens: ids.to_vec(),
+                    logits,
+                },
+                source: "snapshot_ram",
+            }));
+        }
         Ok(None)
     }
-    fn checkpoint(&mut self, _: &Seq, _: &[u32], _: &[f32], _: u64) {}
+    fn checkpoint(&mut self, state: &Seq, _: &[u32], _: &[f32], _: u64) {
+        assert!(!state.unready);
+    }
     fn commit(&mut self, live: reuse::Live<Seq>) {
         assert!(!live.state.poisoned);
         self.commits.push(live.tokens);
@@ -1016,5 +1076,64 @@ fn pooled_sampling_preserves_owner_failure_handling() {
     assert!(
         matches!(&failed[0].1, Err((false, 500, message)) if message.contains("malformed logits")),
         "{failed:?}"
+    );
+}
+
+#[test]
+fn cold_ced_yields_then_uses_loaded_quanta_while_another_request_decodes() {
+    let settings = settings();
+    let mut scheduler = Scheduler::new(2);
+    let mut engine = StubEngine {
+        cold: true,
+        ..StubEngine::default()
+    };
+    let mut reuse = Recording {
+        ready_short: true,
+        ..Recording::default()
+    };
+    let mut request = prepared(&settings, &"x".repeat(12000), true);
+    Arc::get_mut(&mut request).unwrap().boundaries = None;
+    let cold = submit(&mut scheduler, request);
+    for _ in 0..4 {
+        scheduler.pump(&settings, &mut engine, &mut reuse);
+        if engine.cold_encoded > 0 {
+            break;
+        }
+    }
+    assert_eq!(engine.cold_encoded, 4096);
+    let short = submit(&mut scheduler, prepared(&settings, "hi", false));
+    drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+    assert!(matches!(cold.terminal(), Some(Ok(_))));
+    assert!(matches!(short.terminal(), Some(Ok(_))));
+    let log = engine.log.borrow();
+    assert!(
+        log.events.iter().any(|e| e == "ced 512"),
+        "{:?}",
+        log.events
+    );
+    let first = log
+        .events
+        .iter()
+        .position(|e| e.starts_with("ced"))
+        .unwrap();
+    let last = log
+        .events
+        .iter()
+        .rposition(|e| e.starts_with("ced"))
+        .unwrap();
+    assert!(
+        log.events[first..last]
+            .iter()
+            .any(|e| e.starts_with("step"))
+    );
+    let Some(Ok((_, _, phases))) = cold.terminal() else {
+        unreachable!()
+    };
+    assert_eq!(phases["ced_episodes"], 1);
+    let ranges = phases["prefill_chunk_ranges"].as_array().unwrap();
+    assert!(
+        ranges
+            .iter()
+            .any(|r| r[1].as_u64().unwrap() - r[0].as_u64().unwrap() == 512)
     );
 }

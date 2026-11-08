@@ -125,7 +125,11 @@ impl<'a, 'b> Session<'a, 'b> {
 }
 
 fn reuse_eligible(ready: bool, origin: PrefillExecution) -> bool {
-    ready && origin == PrefillExecution::FullForward
+    ready
+        && matches!(
+            origin,
+            PrefillExecution::FullForward | PrefillExecution::ShrinkingCed
+        )
 }
 
 fn describe(state: &State) -> (usize, bool) {

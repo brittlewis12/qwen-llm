@@ -39,6 +39,7 @@ impl Settings {
     /// Drive one request to completion on the calling thread: the serial
     /// path every request takes unless the batch scheduler is enabled. The
     /// resumable phases below run in exactly this order.
+    #[cfg(test)]
     pub(super) fn execute_with_ceiling<S>(
         &self,
         ceiling: super::super::output_memory::OutputByteCeiling,
@@ -65,26 +66,38 @@ impl Settings {
             step,
             now,
         };
-        let mut run = self.begin(
+        self.execute_with_engine(
             ceiling,
             request,
             prompt,
             boundaries,
             sink,
-            0,
             &mut engine,
             reuse,
-        )?;
+        )
+    }
+
+    pub(super) fn execute_with_engine<S>(
+        &self,
+        ceiling: super::super::output_memory::OutputByteCeiling,
+        request: &ServeRequest,
+        prompt: &str,
+        boundaries: Option<super::super::http::PromptBoundaries>,
+        sink: &mut dyn GenerationSink,
+        engine: &mut impl Engine<S>,
+        reuse: &mut impl reuse::Reuse<S>,
+    ) -> std::result::Result<GenerationOutcome, BackendFailure> {
+        let mut run = self.begin(ceiling, request, prompt, boundaries, sink, 0, engine, reuse)?;
         while !run.prefilled() {
             self.prefill_slice(
                 &mut run,
                 crate::family_options::V41_PREFILL_ROWS,
                 sink,
-                &mut engine,
+                engine,
                 reuse,
             )?;
         }
-        self.finish_prefill(&mut run, sink, &mut engine, reuse)?;
+        self.finish_prefill(&mut run, sink, engine, reuse)?;
         let flag = run.flag.clone();
         let cancel = cancel_of(&flag);
         let generation = {
@@ -271,6 +284,12 @@ impl Settings {
             generation_cut,
             fuse_header,
             header_fused: false,
+            cold_ced: self.cold_ced && matched == 0,
+            ced_ranges: Vec::new(),
+            ced_target: None,
+            ced_active: false,
+            ced_episodes: 0,
+            ced_yields: 0,
             conversation: super::super::checkpoint_ladder::conversation(request),
             ladder_attempted: false,
             ladder_capture_ms: 0.0,
@@ -314,19 +333,79 @@ impl Settings {
         let position = run.position;
         check(sink, cancel)?;
         admit_output(reuse, run.reserve, self.headroom)?;
-        let endpoint = run.next_endpoint(max_rows);
+        if run.ced_target.is_none() && run.cold_ced {
+            // A request admitted under load keeps the existing small Full
+            // path. Active CED episodes also accept loaded encoder quanta.
+            if max_rows != crate::family_options::V41_PREFILL_ROWS {
+                run.cold_ced = false;
+            } else {
+                let segment_end = run
+                    .checkpoint_cuts
+                    .iter()
+                    .copied()
+                    .find(|&cut| cut > position)
+                    .unwrap_or(ids.len());
+                run.ced_target = cold_episode_end(
+                    position,
+                    segment_end,
+                    max_rows,
+                    !run.ladder_attempted
+                        && reuse.ladder_enabled()
+                        && run.conversation.is_some()
+                        && segment_end == run.generation_cut.unwrap_or(ids.len()),
+                );
+            }
+        }
+        let mut episode = false;
+        let mut endpoint = run.next_endpoint(max_rows);
+        if let Some(target) = run.ced_target {
+            let begin = !run.ced_active;
+            match engine
+                .cold_prefill(
+                    &mut run.state,
+                    &ids[position..target],
+                    cancel,
+                    begin,
+                    max_rows,
+                )
+                .map_err(|error| prefill_error(cancel, error))?
+            {
+                Some(progress) => {
+                    run.ced_active = true;
+                    run.ced_yields += 1;
+                    let first = run.ced_ranges.last().map_or(position, |r| r[1]);
+                    run.ced_ranges.push([first, first + progress.encoder_rows]);
+                    check(sink, cancel)?;
+                    if !progress.complete {
+                        return Ok(());
+                    }
+                    run.ced_active = false;
+                    run.ced_target = None;
+                    run.ced_episodes += 1;
+                    endpoint = target;
+                    run.logits = progress.logits;
+                    episode = true;
+                }
+                None => {
+                    run.ced_target = None;
+                    run.cold_ced = false;
+                }
+            }
+        }
         let fused_header = run
             .generation_cut
             .is_some_and(|header| position < header && header < endpoint);
         let with_logits = endpoint == ids.len();
-        run.logits = engine
-            .prefill(
-                &mut run.state,
-                &ids[position..endpoint],
-                cancel,
-                with_logits,
-            )
-            .map_err(|error| prefill_error(cancel, error))?;
+        if !episode {
+            run.logits = engine
+                .prefill(
+                    &mut run.state,
+                    &ids[position..endpoint],
+                    cancel,
+                    with_logits,
+                )
+                .map_err(|error| prefill_error(cancel, error))?;
+        }
         check(sink, cancel)?;
         if with_logits
             && (run.logits.len() != run.vocab || !run.logits.iter().all(|v| v.is_finite()))
@@ -338,11 +417,23 @@ impl Settings {
             return Err(ServeError::server_error("V4.1 prefill report extent mismatch").into());
         }
         run.selected_rows = Some(report.selected_rows);
-        run.prefill_rows = run.prefill_rows.max(report.max_chunk_rows());
-        run.prefill_chunks += report.chunk_count();
         run.prefill_calls += 1;
-        run.prefill_ranges
-            .extend(report.chunk_ranges().map(|range| [range.start, range.end]));
+        if episode {
+            run.prefill_chunks += run.ced_ranges.len();
+            run.prefill_rows = run.prefill_rows.max(
+                run.ced_ranges
+                    .iter()
+                    .map(|r| r[1] - r[0])
+                    .max()
+                    .unwrap_or(0),
+            );
+            run.prefill_ranges.append(&mut run.ced_ranges);
+        } else {
+            run.prefill_rows = run.prefill_rows.max(report.max_chunk_rows());
+            run.prefill_chunks += report.chunk_count();
+            run.prefill_ranges
+                .extend(report.chunk_ranges().map(|range| [range.start, range.end]));
+        }
         run.position = endpoint;
         run.header_fused |= fused_header;
         let segment_end = run
@@ -354,11 +445,15 @@ impl Settings {
         if !run.ladder_attempted
             && segment_end == run.generation_cut.unwrap_or(ids.len())
             && reuse.ladder_enabled()
-            && ladder_candidate(position, endpoint, segment_end, max_rows)
+            && (ladder_candidate(position, endpoint, segment_end, max_rows)
+                || (episode
+                    && endpoint < segment_end
+                    && segment_end - endpoint <= crate::family_options::V41_PREFILL_ROWS))
             && let Some(conversation) = run.conversation
         {
-            // A successful, already-existing call committed this prefix. No
-            // extra split/head, including while the scheduler changes width.
+            // Full uses an actual call boundary; CED commits the endpoint
+            // planned for this ladder before any encoder work. A loaded final
+            // quantum must not discard that planned Ready checkpoint.
             run.ladder_attempted = true;
             let start = engine.now();
             reuse.ladder_checkpoint(conversation, &run.state, &ids[..endpoint], run.reserve);
@@ -412,6 +507,8 @@ impl Settings {
             generation_cut,
             checkpoint_cuts,
             header_fused,
+            ced_episodes,
+            ced_yields,
             prefill_rows,
             prefill_chunks,
             prefill_calls,
@@ -441,11 +538,13 @@ impl Settings {
         let transition_ms = generation.transition_ms;
         let prefill_mode = if prefill_chunks == 0 {
             "none"
+        } else if ced_episodes > 0 {
+            "shrinking_ced+full"
         } else {
             crate::family_options::V41_PREFILL_MODE
         };
         tracing::info!(target: "qwen_diag",
-            "serve phases: family=deepseek_v41 prefill_ms={prefill_ms:.3} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.3} prefill_tokens={} prefill_mode={prefill_mode} prefill_rows={prefill_rows} prefill_chunks={prefill_chunks} prefill_calls={prefill_calls} prefill_selected_rows={selected_rows:?} prefill_rows_max={} decode_ms={:.3} required_forwards={required} capacity={} transitions={transitions} transition_ms={transition_ms:.3} ced=false ladder_capture_ms={ladder_capture_ms:.3} retention_ms={retention_ms:.3}",
+            "serve phases: family=deepseek_v41 prefill_ms={prefill_ms:.3} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.3} prefill_tokens={} prefill_mode={prefill_mode} prefill_rows={prefill_rows} prefill_chunks={prefill_chunks} prefill_calls={prefill_calls} prefill_selected_rows={selected_rows:?} prefill_rows_max={} decode_ms={:.3} required_forwards={required} capacity={} transitions={transitions} transition_ms={transition_ms:.3} ced_episodes={ced_episodes} ced_yields={ced_yields} ladder_capture_ms={ladder_capture_ms:.3} retention_ms={retention_ms:.3}",
             ids.len() - matched, crate::family_options::V41_PREFILL_ROWS, generation.wall_ms, capacity);
         let mut phases = serde_json::json!({
             "family":"deepseek_v41", "prefill_ms":prefill_ms, "ladder_capture_ms":ladder_capture_ms, "retention_ms":retention_ms, "prefill_tokens":ids.len() - matched,
@@ -456,7 +555,7 @@ impl Settings {
             "prefill_header_fused":header_fused,
             "decode_ms":generation.wall_ms, "generated_tokens":generation.tokens.len(),
             "transitions":transitions, "transition_ms":transition_ms,
-            "required_forwards":required, "capacity":capacity, "reused_tokens":matched, "reuse_source":reuse_source, "restore_ms":restore_ms, "ced":false,
+            "required_forwards":required, "capacity":capacity, "reused_tokens":matched, "reuse_source":reuse_source, "restore_ms":restore_ms, "ced":ced_episodes > 0, "ced_episodes":ced_episodes, "ced_yields":ced_yields,
             "cache_policy":"exact_prefix_ram",
             "reuse_selection_policy":"compatible_live_then_longest_snapshot_then_cold",
         });
@@ -495,6 +594,17 @@ pub(super) trait Engine<S> {
         cancel: &AtomicBool,
         with_logits: bool,
     ) -> std::result::Result<Vec<f32>, ServeError>;
+    fn cold_prefill(
+        &mut self,
+        _: &mut S,
+        _: &[u32],
+        _: &AtomicBool,
+        _: bool,
+        _: usize,
+    ) -> std::result::Result<Option<qwen_llm::deepseek_v41::forward::ColdPrefillSlice>, ServeError>
+    {
+        Ok(None)
+    }
     fn step(
         &mut self,
         state: &mut S,
@@ -504,6 +614,7 @@ pub(super) trait Engine<S> {
     fn now(&mut self) -> Duration;
 }
 
+#[cfg(test)]
 struct Closures<A, N, P, T, C> {
     admit: A,
     new_state: Option<N>,
@@ -512,6 +623,7 @@ struct Closures<A, N, P, T, C> {
     now: C,
 }
 
+#[cfg(test)]
 impl<S, A, N, P, T, C> Engine<S> for Closures<A, N, P, T, C>
 where
     A: FnMut(usize, usize, u64) -> std::result::Result<(), StateError>,
@@ -564,6 +676,12 @@ pub(super) struct Run<S> {
     generation_cut: Option<usize>,
     fuse_header: bool,
     header_fused: bool,
+    cold_ced: bool,
+    ced_ranges: Vec<[usize; 2]>,
+    ced_target: Option<usize>,
+    pub(super) ced_active: bool,
+    ced_episodes: usize,
+    ced_yields: usize,
     conversation: Option<super::super::checkpoint_ladder::Conversation>,
     ladder_attempted: bool,
     ladder_capture_ms: f64,
@@ -715,6 +833,18 @@ impl<A: FnMut() -> Result<(), ServeError>> GenerationSink for BudgetedSink<'_, A
     }
 }
 
+/// One cold request plan: preserve mandatory cuts, and reconstruct at the
+/// last existing full body boundary when the ladder will retain an interior.
+/// Amortize the dependency halo over at least two idle encoder chunks.
+fn cold_episode_end(start: usize, end: usize, rows: usize, ladder: bool) -> Option<usize> {
+    let target = if ladder {
+        start.checked_add((end.checked_sub(start + 1)? / rows) * rows)?
+    } else {
+        end
+    };
+    (target.checked_sub(start)? >= 2 * crate::family_options::V41_PREFILL_ROWS).then_some(target)
+}
+
 /// Last existing full call strictly before this segment's terminal boundary.
 /// Using the actual call width also works when the scheduler interleaves 512
 /// rows with another request's decode. No hypothetical grid authorizes capture.
@@ -727,7 +857,18 @@ fn ladder_candidate(start: usize, end: usize, segment_end: usize, rows: usize) -
 
 #[cfg(test)]
 mod ladder_tests {
-    use super::ladder_candidate;
+    use super::{cold_episode_end, ladder_candidate};
+    #[test]
+    fn cold_episodes_retain_real_ladder_boundaries_and_amortize_reconstruction() {
+        assert_eq!(cold_episode_end(343, 64930, 4096, true), Some(61783));
+        assert_eq!(cold_episode_end(343, 12631, 4096, true), Some(8535));
+        assert_eq!(cold_episode_end(343, 16671, 4096, false), Some(16671));
+        assert_eq!(cold_episode_end(0, 343, 4096, false), None);
+        assert_eq!(cold_episode_end(61783, 64930, 4096, true), None);
+        assert_eq!(cold_episode_end(0, 8192, 4096, false), Some(8192));
+        assert_eq!(cold_episode_end(0, 8192, 4096, true), None);
+    }
+
     #[test]
     fn last_committed_full_call_excludes_tip_and_small_appends() {
         assert!(ladder_candidate(100, 4196, 5000, 4096));

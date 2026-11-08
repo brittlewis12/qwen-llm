@@ -1443,13 +1443,7 @@ impl Workspace {
         let plan = admitted.plan();
         self.commands = 0;
         self.trace_copies = 0;
-        let maximum = maximum_decoder_rows(plan, arithmetic)?;
         self.attention.begin_ced(plan)?;
-        let chunk_rows = if arithmetic.scalar() {
-            1
-        } else {
-            prefill::DEFAULT_CHUNK_ROWS
-        };
         let mut counters = CedCounters::default();
         let encoder_rows = if arithmetic.scalar() {
             1
@@ -1666,6 +1660,30 @@ impl Workspace {
                 *addresses = next;
             }
         }
+        let logits =
+            self.finish_ced_stream(model, plan, cancel, arithmetic, &mut storage, &mut counters)?;
+        Ok(Output {
+            logits,
+            counters,
+            observed_incremental_metal_bytes: storage.peak.get(),
+        })
+    }
+
+    pub(in super::super) fn finish_ced_stream(
+        &mut self,
+        model: &Forward<'_>,
+        plan: &CedPlan,
+        cancel: Option<&AtomicBool>,
+        arithmetic: Arithmetic,
+        storage: &mut Storage,
+        counters: &mut CedCounters,
+    ) -> Result<Vec<f32>> {
+        let chunk_rows = if arithmetic.scalar() {
+            1
+        } else {
+            prefill::DEFAULT_CHUNK_ROWS
+        };
+        let maximum = maximum_decoder_rows(plan, arithmetic)?;
         #[cfg(test)]
         super::super::ced::qualification::publication(&self.attention, plan.prompt_rows)?;
         let mut pool = DecoderRowsPool {
@@ -1673,18 +1691,10 @@ impl Workspace {
             backing: None,
         };
         if !arithmetic.scalar() && batch_selection(plan)?.layers != 0 {
-            self.ced_decoder_groups_pipelined(
-                model,
-                plan,
-                cancel,
-                &mut storage,
-                &mut counters,
-                &mut pool,
-            )?;
+            self.ced_decoder_groups_pipelined(model, plan, cancel, storage, counters, &mut pool)?;
         } else {
             for layer in &plan.decoder {
-                let mut fuse_seed = !arithmetic.scalar()
-                    && layer.fuse_seed_with_packed_output(plan.prompt_rows, plan.full_chunk_rows);
+                let mut fuse_seed = !arithmetic.scalar() && plan.fuse_seed(layer);
                 #[cfg(test)]
                 {
                     fuse_seed &= !super::super::ced::tests::unfused();
@@ -1702,8 +1712,8 @@ impl Workspace {
                             chunk.absolute_rows,
                             arithmetic,
                             cancel,
-                            &mut storage,
-                            &mut counters,
+                            storage,
+                            counters,
                         )
                     })?;
                 }
@@ -1727,8 +1737,8 @@ impl Workspace {
                                 range.start,
                                 final_logits,
                                 cancel,
-                                &mut storage,
-                                &mut counters,
+                                storage,
+                                counters,
                             )
                         } else {
                             self.ced_decoder_rows(
@@ -1742,8 +1752,8 @@ impl Workspace {
                                 },
                                 final_logits,
                                 cancel,
-                                &mut storage,
-                                &mut counters,
+                                storage,
+                                counters,
                                 &mut pool,
                             )
                         }
@@ -1758,8 +1768,8 @@ impl Workspace {
                             position,
                             layer.layer + 1 == model.layers.len(),
                             cancel,
-                            &mut storage,
-                            &mut counters,
+                            storage,
+                            counters,
                         )
                     })?;
                 }
@@ -1784,10 +1794,35 @@ impl Workspace {
         super::super::ced::tests::checkpoint("ced_commit", cancel)?;
         cancelled(cancel)?;
         self.attention.commit_ced(plan.prompt_rows)?;
-        Ok(Output {
-            logits,
-            counters,
-            observed_incremental_metal_bytes: storage.peak.get(),
-        })
+        Ok(logits)
+    }
+
+    pub(in super::super) fn start_ced_stream(&mut self, plan: &CedPlan) -> Result<()> {
+        self.commands = 0;
+        self.trace_copies = 0;
+        self.attention.begin_ced(plan)
+    }
+
+    pub(in super::super) fn ced_stream_encoder(
+        &mut self,
+        model: &Forward<'_>,
+        plan: &CedPlan,
+        start: usize,
+        tokens: &[u32],
+        hashes: &[engram::LayerRows],
+        cancel: Option<&AtomicBool>,
+        storage: &mut Storage,
+        counters: &mut CedCounters,
+    ) -> Result<()> {
+        if tokens.len() == 1 {
+            self.ced_encoder_scalar(
+                model, plan, start, tokens[0], &hashes[0], cancel, storage, counters,
+            )
+        } else {
+            self.ced_encoder_rows(
+                model, plan, start, tokens, hashes, None, None, cancel, storage, counters,
+            )
+            .map(|_| ())
+        }
     }
 }

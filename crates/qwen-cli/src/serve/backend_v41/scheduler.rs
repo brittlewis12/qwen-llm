@@ -147,9 +147,10 @@ impl GenerationSink for Publish<'_> {
 }
 
 /// Wraps prefill calls with the request's opt-in process IO observation.
-struct Observed<'a, E> {
-    engine: &'a mut E,
-    prefill_io: Option<&'a mut memory_io::ChunkObservations>,
+pub(super) struct Observed<'a, E> {
+    pub(super) engine: &'a mut E,
+    pub(super) prefill_io: Option<&'a mut memory_io::ChunkObservations>,
+    pub(super) token_io: Option<&'a mut memory_io::Observations>,
 }
 
 impl<S, E: BatchEngine<S>> Engine<S> for Observed<'_, E> {
@@ -180,13 +181,31 @@ impl<S, E: BatchEngine<S>> Engine<S> for Observed<'_, E> {
             || self.engine.prefill(state, tokens, cancel, with_logits),
         )
     }
+    fn cold_prefill(
+        &mut self,
+        state: &mut S,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        begin: bool,
+        max_rows: usize,
+    ) -> std::result::Result<Option<qwen_llm::deepseek_v41::forward::ColdPrefillSlice>, ServeError>
+    {
+        self.engine
+            .cold_prefill(state, tokens, cancel, begin, max_rows)
+    }
     fn step(
         &mut self,
         state: &mut S,
         token: u32,
         cancel: &AtomicBool,
     ) -> std::result::Result<Vec<f32>, String> {
-        self.engine.step(state, token, cancel)
+        let position = self.engine.position(state);
+        memory_io::observe(
+            self.token_io.as_deref_mut(),
+            position,
+            || qwen_llm::pid_metrics::PidSnapshot::now().ok(),
+            || self.engine.step(state, token, cancel),
+        )
     }
     fn now(&mut self) -> Duration {
         self.engine.now()
@@ -464,6 +483,7 @@ impl<S> Scheduler<S> {
             others,
             &mut Observed {
                 engine,
+                token_io: None,
                 prefill_io: prefill_io.as_mut(),
             },
             reuse,
@@ -530,6 +550,7 @@ impl<S> Scheduler<S> {
             &mut Publish(active.sink.as_mut()),
             &mut Observed {
                 engine,
+                token_io: None,
                 prefill_io: active.prefill_io.as_mut(),
             },
             reuse,

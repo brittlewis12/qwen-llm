@@ -5,6 +5,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 pub(in super::super) mod chunked;
+mod streaming;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in super::super) enum Action {
@@ -221,6 +222,7 @@ fn scoped_hooks_are_one_shot_nested_thread_local_and_unwind_safe() {
 fn cpu_state() -> State {
     State {
         gpu_step: None,
+        cold_prefill: None,
         attention: attention::Session::default(),
         addresses: engram::AddressState::new(2).unwrap(),
         max_context: 33,

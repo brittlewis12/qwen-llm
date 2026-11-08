@@ -54,6 +54,10 @@ const PREFILL_TIMING_ENV: &str = "QWEN_SERVE_V41_PREFILL_TIMING";
 /// end with logits instead. Default on; 0 restores the separate header call.
 /// Read once when preparing the server.
 const FUSE_HEADER_ENV: &str = "QWEN_SERVE_V41_FUSE_HEADER";
+/// Plan exact shrinking CED across a cold serve request's retained cuts.
+/// Default on; 0 restores Full for cold requests. Warm requests remain Full.
+/// Read once when preparing the server.
+const COLD_CED_ENV: &str = "QWEN_SERVE_V41_COLD_CED";
 
 /// Agent workloads keep about three conversations busy at once. M5 Ultra, GSQ
 /// IQ2_XS, three agents x three turns (greedy, 128 tokens per turn, fresh
@@ -291,6 +295,7 @@ pub(crate) struct Settings {
     model_id: String,
     headroom: fn() -> Option<HostMemoryHeadroom>,
     fuse_header: bool,
+    cold_ced: bool,
 }
 
 impl Settings {
@@ -325,6 +330,7 @@ impl Settings {
             model_id,
             headroom: qwen_llm::metal::host_memory_headroom,
             fuse_header: qwen_llm::env_flag::read_default_on(FUSE_HEADER_ENV),
+            cold_ced: qwen_llm::env_flag::read_default_on(COLD_CED_ENV),
         })
     }
 
@@ -494,6 +500,29 @@ impl execution::Engine<qwen_llm::deepseek_v41::forward::State> for ForwardEngine
             native_prefill(self.forward, state, tokens, cancel, with_logits),
         )
         .map_err(state_error)
+    }
+    fn cold_prefill(
+        &mut self,
+        state: &mut qwen_llm::deepseek_v41::forward::State,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        begin: bool,
+        max_rows: usize,
+    ) -> std::result::Result<Option<qwen_llm::deepseek_v41::forward::ColdPrefillSlice>, ServeError>
+    {
+        let result = (|| {
+            if begin
+                && !self
+                    .forward
+                    .begin_cold_prefill_episode(state, tokens.len())?
+            {
+                return Ok(None);
+            }
+            self.forward
+                .cold_prefill_episode_slice(state, tokens, Some(cancel), max_rows)
+                .map(Some)
+        })();
+        track_native_failure(&self.native_failed, result).map_err(state_error)
     }
     fn step(
         &mut self,
@@ -667,66 +696,27 @@ impl Backend<'_> {
         let mut prefill_observations = request
             .echo_stats
             .then(memory_io::ChunkObservations::default);
-        let cold_plan = std::cell::RefCell::new(None);
-        let native_failed = std::cell::Cell::new(false);
-        let outcome = self.settings.execute_with_ceiling(
+        let mut engine = ForwardEngine {
+            forward: &self.forward,
+            ctx: self.ctx,
+            cold_plan: None,
+            epoch,
+            native_failed: std::cell::Cell::new(false),
+        };
+        let outcome = self.settings.execute_with_engine(
             ceiling,
             request,
             prompt,
             boundaries,
             sink,
-            |positions, prefill_tokens, reserve| {
-                let plan = self
-                    .forward
-                    .plan_request(positions, prefill_tokens, reserve)?;
-                admit_request_memory(plan.memory(), reserve, self.ctx.memory_signals())
-                    .map_err(StateError::MemoryAdmissionDenied)?;
-                *cold_plan.borrow_mut() = Some(plan);
-                Ok(())
-            },
-            |_| {
-                self.forward
-                    .new_state_from_plan(
-                        &cold_plan
-                            .borrow_mut()
-                            .take()
-                            .expect("cold allocation follows admission"),
-                    )
-                    .map_err(state_error)
+            &mut scheduler::Observed {
+                engine: &mut engine,
+                prefill_io: prefill_observations.as_mut(),
+                token_io: observations.as_mut(),
             },
             &mut reuse::Session::new(&self.forward, &mut self.reuse, self.ctx),
-            |state, tokens, cancel, with_logits| {
-                memory_io::observe_chunk(
-                    prefill_observations.as_mut(),
-                    state.position(),
-                    tokens.len(),
-                    || qwen_llm::pid_metrics::PidSnapshot::now().ok(),
-                    || {
-                        track_native_failure(
-                            &native_failed,
-                            native_prefill(&self.forward, state, tokens, cancel, with_logits),
-                        )
-                    },
-                )
-                .map_err(state_error)
-            },
-            |state, token, cancel| {
-                let position = state.position();
-                memory_io::observe(
-                    observations.as_mut(),
-                    position,
-                    || qwen_llm::pid_metrics::PidSnapshot::now().ok(),
-                    || {
-                        track_native_failure(
-                            &native_failed,
-                            self.forward.step(state, token, Some(cancel)),
-                        )
-                    },
-                )
-            },
-            || epoch.elapsed(),
         );
-        if native_failed.get() {
+        if engine.native_failed.get() {
             self.idle_residency.request_failed_on_server();
         }
         let mut outcome = outcome?;
@@ -745,6 +735,8 @@ impl Backend<'_> {
     }
 }
 
+#[cfg(test)]
+mod cold_tests;
 #[cfg(test)]
 mod reuse_tests;
 #[cfg(test)]

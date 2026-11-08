@@ -64,6 +64,17 @@ fn command_free_prepared(
     !(ordinary && owns && publish || index && select)
 }
 
+fn publication_row_geometry(
+    unpruned: bool,
+    long: bool,
+    m5: bool,
+    start: usize,
+    rows: usize,
+    long_enabled: bool,
+) -> bool {
+    unpruned || long && m5 && start >= 32768 && (512..=2048).contains(&rows) && long_enabled
+}
+
 const HIER_K: usize = 512;
 const HIER_PARTITION: usize = 4096;
 const HIER_LIMIT: usize = 16384;
@@ -861,43 +872,15 @@ impl Workspace {
         let c = &self.config;
         let hidden = c.hidden;
         let owner = self.schedule.owner_slot(id);
-        let ratio = self.schedule.ratio(id);
-        let last_length = (start + rows.rows) / ratio.max(1);
-        let selector = self.schedule.produces_index(id)
-            && owner.is_some()
-            && ratio > 0
-            && std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_none();
-        let unpruned_batch =
-            selector && last_length.div_ceil(c.candidate_block) <= c.candidate_topk;
-        // Past the unpruned selectors' domain: batched F32 index scores,
-        // candidate publication and radix top-k over row sub-tiles.
-        let long_batch = selector
-            && !unpruned_batch
-            && super::select_radix_enabled()
-            && super::index_ilp_supported(c)
-            && long_selection_tile(
-                c,
-                last_length,
-                rows.rows,
-                rows.select_scores.n_elements() as usize,
-                self.schedule.candidate_source_layer == Some(id),
-            )
-            .is_some();
+        let (unpruned_batch, long_batch) = self.selection_batches(
+            id,
+            start,
+            rows.rows,
+            rows.select_scores.n_elements() as usize,
+        );
         let batched = unpruned_batch || long_batch;
-        // ReusePublished replays against a completed authoritative cache; the
-        // per-row path already suppresses its publication for that mode, and
-        // the batch must match it. The split owner itself is an ordinary
-        // producer during the encoder phase only. Long selection bounds each
-        // query by its own visible length, just like unpruned selection.
-        let owner_batch = (unpruned_batch
-            || long_batch
-                && ctx.device_facts().name == "Apple M5 Ultra"
-                && start >= 32768
-                && (512..=2048).contains(&rows.rows)
-                && compress_long_rows_enabled())
-            && mode == GlobalKvMode::Ordinary
-            && self.schedule.owns_kv(id)
-            && compress_rows_enabled();
+        let owner_batch =
+            self.owner_batch_enabled(ctx, id, start, rows.rows, unpruned_batch, long_batch, mode);
         let (head, body, _tail) = if owner_batch {
             self.publish_owner_rows(
                 ctx,
@@ -972,6 +955,60 @@ impl Workspace {
             &rows.candidates,
         )?;
         Ok(())
+    }
+
+    pub(super) fn selection_batches(
+        &self,
+        id: usize,
+        start: usize,
+        rows: usize,
+        score_capacity: usize,
+    ) -> (bool, bool) {
+        let c = &self.config;
+        let ratio = self.schedule.ratio(id);
+        let last_length = (start + rows) / ratio.max(1);
+        let selector = self.schedule.produces_index(id)
+            && self.schedule.owner_slot(id).is_some()
+            && ratio > 0
+            && std::env::var_os("QWEN_V41_SELECT_PER_ROW").is_none();
+        let unpruned = selector && last_length.div_ceil(c.candidate_block) <= c.candidate_topk;
+        let long = selector
+            && !unpruned
+            && super::select_radix_enabled()
+            && super::index_ilp_supported(c)
+            && long_selection_tile(
+                c,
+                last_length,
+                rows,
+                score_capacity,
+                self.schedule.candidate_source_layer == Some(id),
+            )
+            .is_some();
+        (unpruned, long)
+    }
+
+    pub(super) fn owner_batch_enabled(
+        &self,
+        ctx: &MetalContext,
+        id: usize,
+        start: usize,
+        rows: usize,
+        unpruned: bool,
+        long: bool,
+        mode: GlobalKvMode,
+    ) -> bool {
+        // Publication arithmetic follows Full's actual selector and row shape.
+        // CED must use the same decision, including the pruned-depth rollback.
+        publication_row_geometry(
+            unpruned,
+            long,
+            ctx.device_facts().name == "Apple M5 Ultra",
+            start,
+            rows,
+            compress_long_rows_enabled(),
+        ) && mode == GlobalKvMode::Ordinary
+            && self.schedule.owns_kv(id)
+            && compress_rows_enabled()
     }
 
     fn validate_serial_range(
@@ -1451,15 +1488,38 @@ impl Workspace {
         rows: &Rows,
     ) -> Result<()> {
         let tile = tile_rows();
-        let prompt_rows = self.ced_decoder_prompt_rows(id, start, rows.rows)?;
         let mut first = 0;
         while first < rows.rows {
             let position = start.checked_add(first).ok_or("query position overflow")?;
-            let (n, _) = query_tile_span(prompt_rows, position, rows.rows - first, tile)?;
+            let (n, _) =
+                self.query_rows_span(id, start, rows.rows, position, rows.rows - first, tile)?;
             self.sink_tile(ctx, enc, id, start, rows, first, n)?;
             first += n;
         }
         Ok(())
+    }
+
+    fn query_rows_span(
+        &self,
+        id: usize,
+        start: usize,
+        rows: usize,
+        position: usize,
+        remaining: usize,
+        tile: usize,
+    ) -> Result<(usize, usize)> {
+        let original = self.ced_decoder_prompt_rows(id, start, rows)?;
+        if original.is_some()
+            && let Some(chunk) = self.ced_query_chunk(position)?
+        {
+            return query_tile_span(
+                Some((chunk.len(), chunk.len())),
+                position - chunk.start,
+                remaining.min(chunk.end - position),
+                tile,
+            );
+        }
+        query_tile_span(original, position, remaining, tile)
     }
 
     pub(super) fn sink_tile(
@@ -1478,8 +1538,8 @@ impl Workspace {
             "query tile extent",
         )?;
         let position = start.checked_add(first).ok_or("query position overflow")?;
-        let prompt_rows = self.ced_decoder_prompt_rows(id, start, rows.rows)?;
-        let (span, logical_arity) = query_tile_span(prompt_rows, position, n, tile_rows())?;
+        let (span, logical_arity) =
+            self.query_rows_span(id, start, rows.rows, position, n, tile_rows())?;
         op::require(span == n, "query tile crosses original Full tile")?;
         let history = match rows.history.get() {
             Some(history) => history,

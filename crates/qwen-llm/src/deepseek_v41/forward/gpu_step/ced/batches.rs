@@ -299,8 +299,7 @@ impl Workspace {
                         )?;
                     }
                     let compound_seed = unit.kind == Kind::Seed
-                        && plan.decoder[unit.layer - plan.publication_layer]
-                            .fuse_seed_with_packed_output(plan.prompt_rows, plan.full_chunk_rows);
+                        && plan.fuse_seed(&plan.decoder[unit.layer - plan.publication_layer]);
                     if !compound_seed {
                         attention_status(&status.attention)?;
                     }
@@ -558,8 +557,7 @@ impl Workspace {
                 )?;
             }
             let compound_seed = unit.kind == Kind::Seed
-                && plan.decoder[unit.layer - plan.publication_layer]
-                    .fuse_seed_with_packed_output(plan.prompt_rows, plan.full_chunk_rows);
+                && plan.fuse_seed(&plan.decoder[unit.layer - plan.publication_layer]);
             if !compound_seed {
                 attention_status(&status.attention)?;
             }

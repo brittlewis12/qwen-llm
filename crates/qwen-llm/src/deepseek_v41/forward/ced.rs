@@ -111,7 +111,7 @@ impl CedCounters {
                 .find(|count| count.layer == layer)
                 .ok_or("missing CED encoder work counter")?;
             op::require(
-                count.encoder_output_rows == plan.prompt_rows
+                count.encoder_output_rows == plan.prompt_rows - plan.start_position
                     && count.decoder_output_rows == 0
                     && count.seed_rows == 0
                     && count.publication_rows == 0,
@@ -130,7 +130,7 @@ impl CedCounters {
                     && count.encoder_output_rows == 0
                     && count.publication_rows
                         == if layer.layer == plan.publication_layer {
-                            plan.prompt_rows
+                            plan.prompt_rows - plan.start_position
                         } else {
                             0
                         },
@@ -676,6 +676,10 @@ impl Forward<'_> {
         }
     }
 }
+
+mod streaming;
+pub use streaming::ColdPrefillSlice;
+pub(super) use streaming::Progress;
 
 #[cfg(test)]
 pub(super) mod qualification;

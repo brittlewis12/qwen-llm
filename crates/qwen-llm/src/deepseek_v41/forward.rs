@@ -8,7 +8,10 @@ pub use binding::BindingMemoryPlan;
 mod ced;
 mod ced_plan;
 mod columns;
-pub use ced::{CedCounters, CedLayerCounters, CedMemoryEstimate, PrefillExecution, PrefillReport};
+pub use ced::{
+    CedCounters, CedLayerCounters, CedMemoryEstimate, ColdPrefillSlice, PrefillExecution,
+    PrefillReport,
+};
 mod engram_gpu;
 mod prefill;
 pub use prefill::DEFAULT_CHUNK_ROWS as PREFILL_CHUNK_ROWS;
@@ -772,6 +775,7 @@ pub struct Forward<'a> {
 /// reusing partially advanced KV caches. Start a fresh State to retry a prompt.
 pub struct State {
     gpu_step: Option<gpu_step::Workspace>,
+    cold_prefill: Option<ced::Progress>,
     #[cfg(test)]
     attention: attention::Session,
     addresses: engram::AddressState,
@@ -852,6 +856,7 @@ impl<'a> Forward<'a> {
         )?;
         Ok(State {
             gpu_step: None,
+            cold_prefill: None,
             #[cfg(test)]
             attention: attention::Session::default(),
             addresses: engram::AddressState::new_with_config(self.pad, &self.engram_hash)

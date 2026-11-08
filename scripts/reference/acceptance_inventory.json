@@ -1779,6 +1779,20 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::streaming::episode_cancellation_at_yield_poisons_without_publishing_partial_prefix",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Self-leased reduced native Metal model; provisional/cancel/restore and bitwise Full comparison."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced::tests::streaming::prefix_episodes_yield_provisional_then_match_full_and_restore_by_bits",
+    "class": "gpu",
+    "ignored": true,
+    "reason": "Self-leased reduced native Metal model; provisional/cancel/restore and bitwise Full comparison."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::forward::ced::tests::unfused_reference_is_nested_thread_local_and_unwind_safe",
     "class": "cpu",
     "ignored": false,
@@ -1832,6 +1846,13 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only CED, request-planning, execution contract or synthetic storage control; no Metal context or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::ced_plan::tests::committed_prefix_plan_keeps_absolute_halo_and_relative_chunk_lineage",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed exact-prefix episode planning with pure arithmetic; no Metal context."
   },
   {
     "target": "lib",
@@ -4733,6 +4754,13 @@
   },
   {
     "target": "qwen",
+    "name": "serve::backend_v41::execution::ladder_tests::cold_episodes_retain_real_ladder_boundaries_and_amortize_reconstruction",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed exact-prefix episode planning with pure arithmetic; no Metal context."
+  },
+  {
+    "target": "qwen",
     "name": "serve::backend_v41::reuse::tests::capture_admission_checks_full_entry_plus_reserve_and_overflow",
     "class": "cpu",
     "ignored": false,
@@ -4775,7 +4803,7 @@
   },
   {
     "target": "qwen",
-    "name": "serve::backend_v41::reuse::tests::initial_reuse_requires_ready_full_forward_origin",
+    "name": "serve::backend_v41::reuse::tests::reuse_requires_ready_exact_full_or_ced_origin",
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
@@ -5682,5 +5710,26 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::cold_tests::whole_cold_plan_yields_without_snapshots_then_preserves_shared_interior_and_body",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed controller with fake provisional engine and immutable checkpoint assertions; no Metal context."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::cold_ced_yields_then_uses_loaded_quanta_while_another_request_decodes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed owner scheduler with fake provisional CED and independent decoding state; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::query_batch::arithmetic_tests::publication_policy_keeps_full_and_ced_on_the_same_pruned_row_geometry",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure shared publication selector thresholds and rollback flags; no Metal context."
   }
 ]

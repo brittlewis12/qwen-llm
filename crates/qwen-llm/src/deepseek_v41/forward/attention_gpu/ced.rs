@@ -507,8 +507,8 @@ impl Cursor {
         )?;
         Ok(Self {
             plan: plan.clone(),
-            encoder_completed: 0,
-            publication_completed: 0,
+            encoder_completed: plan.start_position,
+            publication_completed: plan.start_position,
             decoder_next: 0,
             seed_completed: plan.decoder.iter().map(|l| l.seed_rows.start).collect(),
             output_completed: plan.decoder.iter().map(|l| l.output_rows.start).collect(),
@@ -683,8 +683,7 @@ impl Cursor {
             p.encoded
                 && rows <= prefill::DEFAULT_CHUNK_ROWS
                 && p.encoded_seed_prefix.is_none()
-                && self.plan.decoder[j]
-                    .fuse_seed_with_packed_output(self.plan.prompt_rows, self.plan.full_chunk_rows)
+                && self.plan.fuse_seed(&self.plan.decoder[j])
                 && range.end <= self.plan.scalar_tail().unwrap_or(self.plan.prompt_rows)
                 && self.seed_frontier(j) == seed.start
                 && start == seed.end
@@ -1099,7 +1098,7 @@ impl Workspace {
     }
 
     pub(in super::super) fn begin_ced(&mut self, plan: &CedPlan) -> Result<()> {
-        self.validate_snapshot_position(0)?;
+        self.validate_snapshot_position(plan.start_position)?;
         self.ced = Some(Cursor::new(
             plan,
             &self.config,
@@ -1195,6 +1194,43 @@ impl Workspace {
             Some(ced) => ced.pending.as_ref().and_then(|p| p.batch.as_ref()),
             None => self.batch.as_ref(),
         }
+    }
+
+    pub(super) fn ced_query_chunk(
+        &self,
+        position: usize,
+    ) -> Result<Option<std::ops::Range<usize>>> {
+        let Some(chunks) = self
+            .ced
+            .as_ref()
+            .and_then(|ced| ced.plan.encoder_chunks.as_ref())
+        else {
+            return Ok(None);
+        };
+        chunks
+            .iter()
+            .find(|r| r.contains(&position))
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| "CED query has no original encoder chunk".into())
+    }
+
+    pub(in super::super) fn record_ced_stream_chunk(
+        &mut self,
+        range: std::ops::Range<usize>,
+    ) -> Result<()> {
+        let ced = self.ced.as_mut().ok_or("CED not active")?;
+        let chunks = ced
+            .plan
+            .encoder_chunks
+            .as_mut()
+            .ok_or("CED is not streaming")?;
+        op::require(
+            range.start == ced.encoder_completed && range.end <= ced.plan.prompt_rows,
+            "CED streaming chunk frontier",
+        )?;
+        chunks.push(range);
+        Ok(())
     }
 
     pub(super) fn ced_decoder_prompt_rows(
@@ -1493,19 +1529,39 @@ impl Workspace {
             .kv
             .encode_rows(enc, normalized_u, &scratch.value, scratch.rows)
             .map_err(|e| e.to_string())?;
-        // Same published arithmetic as the Full path: complete ratio groups
-        // through the batched tile, head/tail rows through the per-row chain.
-        // The CED split owner is ratio 1, so the gate is unused by the batch.
-        let (head, body, _tail) = self.publish_owner_rows(
+        // Full's wide pruned chunks use the per-row key projection, while
+        // unpruned and qualified short long-depth chunks batch it. Those
+        // projection/reduction paths can round differently; sharing the gate
+        // is required even though both publish the same logical rows.
+        let score_capacity = super::query_batch::selection_shapes(
+            &self.config,
+            self.capacity,
+            scratch.rows,
+            super::query_batch::tile_rows(),
+        )?[0];
+        let (unpruned, long) = self.selection_batches(owner, start, scratch.rows, score_capacity);
+        let (head, body, _tail) = if self.owner_batch_enabled(
             ctx,
-            enc,
             owner,
             start,
             scratch.rows,
-            w,
-            &scratch.value,
-            &self.gate,
-        )?;
+            unpruned,
+            long,
+            GlobalKvMode::Ordinary,
+        ) {
+            self.publish_owner_rows(
+                ctx,
+                enc,
+                owner,
+                start,
+                scratch.rows,
+                w,
+                &scratch.value,
+                &self.gate,
+            )?
+        } else {
+            (0, 0, 0)
+        };
         for row in (0..head).chain(head + body..scratch.rows) {
             self.publish_owner_transition(
                 ctx,

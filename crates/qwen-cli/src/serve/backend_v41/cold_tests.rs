@@ -114,13 +114,25 @@ fn heads() -> Vec<f32> {
 }
 #[derive(Default)]
 struct Cache {
+    matched: usize,
     cuts: Vec<usize>,
     interior: Vec<usize>,
     committed: bool,
 }
 impl Reuse<Seq> for Cache {
-    fn take(&mut self, _: &[u32], _: usize, _: u64) -> Result<Option<Restored<Seq>>, ServeError> {
-        Ok(None)
+    fn take(&mut self, ids: &[u32], _: usize, _: u64) -> Result<Option<Restored<Seq>>, ServeError> {
+        Ok((self.matched > 0).then(|| Restored {
+            live: Live {
+                state: Seq {
+                    position: self.matched,
+                    ready: true,
+                    ..Seq::default()
+                },
+                tokens: ids[..self.matched].to_vec(),
+                logits: vec![],
+            },
+            source: "snapshot_ram",
+        }))
     }
     fn prefill_report(&self, s: &Seq, _: usize, _: usize) -> PrefillGeometry {
         assert!(s.ready);
@@ -165,7 +177,13 @@ impl GenerationSink for Sink {
 
 #[test]
 fn whole_cold_plan_yields_without_snapshots_then_preserves_shared_interior_and_body() {
-    for (enabled, decline) in [(true, false), (false, false), (true, true)] {
+    for (enabled, decline, matched) in [
+        (true, false, 0),
+        (false, false, 0),
+        (true, true, 0),
+        (true, false, 343),
+        (false, false, 343),
+    ] {
         let mut settings = Settings::new(
             tokenizer_fixture::tokenizer(None),
             32768,
@@ -196,22 +214,46 @@ fn whole_cold_plan_yields_without_snapshots_then_preserves_shared_interior_and_b
             decline,
             ..Probe::default()
         };
-        let mut cache = Cache::default();
+        let mut cache = Cache {
+            matched,
+            ..Cache::default()
+        };
         let result = settings
             .execute_with_engine(
                 ceiling, &request, &prompt, bounds, &mut Sink, &mut probe, &mut cache,
             )
             .unwrap();
         assert!(cache.committed);
-        assert_eq!(cache.cuts, vec![343, body]);
+        assert_eq!(
+            cache.cuts,
+            if matched == 0 {
+                vec![343, body]
+            } else {
+                vec![body]
+            }
+        );
         assert_eq!(cache.interior, vec![343 + 4 * 4096]);
         if enabled && !decline {
             assert_eq!(probe.cold_calls, 4);
-            assert_eq!(probe.full_calls, vec![343, 7, 2]);
+            assert_eq!(
+                probe.full_calls,
+                if matched == 0 {
+                    vec![343, 7, 2]
+                } else {
+                    vec![7, 2]
+                }
+            );
             assert_eq!(result.stats.unwrap().phases.unwrap()["ced_episodes"], 1);
         } else {
             assert_eq!(probe.cold_calls, 0);
-            assert_eq!(probe.full_calls, vec![343, 4096, 4096, 4096, 4096, 7, 2]);
+            assert_eq!(
+                probe.full_calls,
+                if matched == 0 {
+                    vec![343, 4096, 4096, 4096, 4096, 7, 2]
+                } else {
+                    vec![4096, 4096, 4096, 4096, 7, 2]
+                }
+            );
         }
     }
 }

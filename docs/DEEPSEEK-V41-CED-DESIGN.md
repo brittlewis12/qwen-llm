@@ -2,7 +2,8 @@
 
 Date: 2026-10-23. Current status: qualified native cold shrinking CED is the
 default for `qwen run` and ordinary `qwen-bench`, with optional Full fallback.
-Full remains the reference and explicit rollback. Serving remains Full.
+`qwen serve` also plans exact CED episodes for eligible cold request bodies.
+Full remains the reference and explicit rollback.
 Bounded-128 replay and encoder replay are not implemented by this executor.
 
 ## Native Interface And Qualification
@@ -13,7 +14,9 @@ and ordinary `qwen-bench` prefer shrinking CED with the measured 4 GiB soft
 resident mapping target (P4) when the variable is unset or explicitly
 `QWEN_V41_PREFILL_EXECUTION=shrinking_ced`. Setting it to `full_forward`
 restores ordinary Full execution and its untargeted resident mapping.
-Serving does not read this control. Unsupported schedules,
+Serving uses its own default-on `QWEN_SERVE_V41_COLD_CED` control; `=0`
+restores Full for cold requests. It keeps serve's ordinary resident mapping,
+idle-residency policy and warm header folding. Unsupported schedules,
 nonzero starting positions, and declined CED admission fall back before state
 mutation, reporting the reason and actual full-forward execution. Execution
 failures after mutation poison the provisional state instead of restarting it.
@@ -21,13 +24,35 @@ failures after mutation poison the provisional state instead of restarting it.
 The native implementation retains E/P and query controls with checked absolute
 origins, separately completes publication and KV-only seed frontiers, and
 commits a Ready state only after every decoder layer completes. Completed CED
-states support scalar continuation and snapshot restore/growth, but their
-origin excludes them from serving prefix reuse. Counters report completed
+states support scalar continuation and snapshot restore/growth. Ready Full and
+exact shrinking-CED states both support serving live/snapshot prefix reuse;
+provisional and poisoned states remain ineligible. Counters report completed
 encoder, publication, seed, and decoder work rather than inferred savings.
 
-Serving needs request-level cold planning across its checkpoint cuts and
-interleaved prefill calls, plus CED-origin live/snapshot reuse integration.
-Changing the cold CLI policy does not change that Full-only serving contract.
+Serve plans endpoints over the whole request, preserving shared/body cuts and
+the ladder's last existing full body boundary. A zero-prefix request, or one
+reusing only its exact shared prelude, can start a CED episode spanning at least
+two idle encoder chunks. Smaller spans and history appends keep Full. A cold
+request beginning with loaded 512-row quanta keeps Full; an active CED episode
+can yield 512 encoder rows while another request decodes. It records the actual
+encoder partitions so decoder query tiles and genuine scalar tails retain
+Full's arithmetic lineage.
+
+`Forward::begin_cold_prefill_episode` admits an episode before mutation;
+`cold_prefill_episode_slice` yields after one completed encoder chunk, with
+bounded decoder reconstruction at the endpoint. Every decoder dependency must
+lie after the committed prefix. State position stays at that prefix while
+provisional; only a completed Ready endpoint can publish a checkpoint or enter
+decode. Cancellation/error poisons and discards the working state. Warm
+appends remain Full, including folded headers and exact prompt-logit reuse.
+The original whole-prompt API retains its existing eligibility restrictions.
+
+CED and Full share the owner-publication decision. At pruned depths a wide
+Full chunk uses the per-row publication chain; using the batched publication
+tile unconditionally in CED can change rounding. Matching this decision is
+necessary for exact long-context integration, as well as correct query-tile
+lineage. See the November 8 serve entry in `PERF-LOG.md` for the native checks
+and measured workload.
 
 The [2026-10-25 cold-profile qualification](bench/2026-10-25-v41-current-ced-8k.md#cold-profile-delivery)
 passed all 257 complete vocabulary heads and all 56 causal-region hashes at

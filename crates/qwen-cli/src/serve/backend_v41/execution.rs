@@ -284,7 +284,9 @@ impl Settings {
             generation_cut,
             fuse_header,
             header_fused: false,
-            cold_ced: self.cold_ced && matched == 0,
+            // Reusing only the shared prelude still leaves a cold request
+            // body. Its Ready prefix is the same input as the first cold cut.
+            cold_ced: self.cold_ced && (matched == 0 || Some(matched) == shared_cut),
             ced_ranges: Vec::new(),
             ced_target: None,
             ced_active: false,

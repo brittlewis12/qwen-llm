@@ -1,15 +1,11 @@
 //! Resident Qwen3.8-Flash-Next [`GenerationBackend`].
 //!
 //! The text session's workspace is allocated once at load for a fixed
-//! forward limit; each request takes it as a runner and hands it back reset
-//! (`Qwen4ExpLoadedModel::restore_workspace`). Optional DFlash scratch is request-local.
-//! History carries across requests only through a serve-owned RAM snapshot
-//! cache keyed by exact token prefix: a request restores the longest cached
-//! strictly-shorter prefix, then prefills the rest. As on the Qwen backend,
-//! prefill stops before the generation header to snapshot the transcript
-//! boundary — the only point a thinking turn's next request still extends,
-//! since the template re-renders prior reasoning and GDN state cannot be
-//! rewound.
+//! forward limit. Healthy ordinary turns retain their exact consumed token key
+//! and workspace; compatible continuations avoid reset and restore. Branches use
+//! immutable RAM checkpoints, with completed live state copied on departure.
+//! Short reused appends preserve header arithmetic and cache the actual prompt
+//! endpoint plus logits. DFlash remains cold and request-local.
 
 use super::backend::{IM_START_MARKER, transcript_boundary};
 use super::decode_loop;
@@ -35,6 +31,8 @@ use std::time::Instant;
 const FAMILY: &str = "Qwen3.8-Flash-Next";
 
 mod dflash;
+mod reuse;
+use reuse::*;
 
 pub(super) struct Prepared {
     context_limit: usize,
@@ -179,7 +177,9 @@ pub(crate) struct FlashNextBackend {
     im_start: Option<u32>,
     /// Owned by this backend and its one loaded model; restore additionally
     /// refuses a snapshot whose session geometry differs.
-    cache: SnapshotCache<Qwen4ExpTextSnapshot>,
+    cache: SnapshotCache<Checkpoint>,
+    turns: TurnConfig,
+    live: Option<Live>,
     pub(super) snapshot_cache_plan: super::SnapshotCachePlan,
     /// Deployment default for `x_qwen.template_style` (`--template-style`).
     pub(super) template_style: super::items::TemplateStyle,
@@ -328,6 +328,8 @@ impl FlashNextBackend {
             vocab_size,
             stop_tokens: prepared.stop_tokens,
             im_start: prepared.im_start,
+            turns: TurnConfig::from_env(),
+            live: None,
             cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_cache_plan.policy)
                 .with_checkpoint_ladder(prepared.checkpoint_ladder),
             snapshot_cache_plan,
@@ -426,6 +428,8 @@ impl GenerationBackend for FlashNextBackend {
             .create_runner(&self.ctx)
             .map_err(|error| ServeError::server_error(format!("bind {FAMILY} runner: {error}")))?;
 
+        let previous_live = self.live.take();
+        let mut next_live = None;
         let mut run = || -> Result<GenerationOutcome, BackendFailure> {
             if let Some(head) = &self.dflash_head {
                 sink.tick().map_err(BackendFailure::Aborted)?;
@@ -471,19 +475,80 @@ impl GenerationBackend for FlashNextBackend {
                 ));
             }
             let restore_t0 = Instant::now();
-            let matched_tokens = restore_best_prefix(
-                &mut self.cache,
-                &prompt_ids,
-                &mut runner,
-                |runner, snapshot| {
-                    runner.restore_snapshot(snapshot)?;
-                    Ok(runner.next_position())
-                },
-                |runner| runner.reset(),
-            )
-            .map_err(|error| {
-                ServeError::server_error(format!("reset {FAMILY} session: {error}"))
-            })?;
+            let ready = !runner.is_poisoned() && runner.logits().is_ok();
+            let live_match = previous_live
+                .as_ref()
+                .filter(|_| self.turns.live)
+                .and_then(|live| {
+                    live_prefix_len(&live.tokens, &prompt_ids, runner.next_position(), ready)
+                });
+            let mut restored_logits = None;
+            let mut departing_capture_ms = 0.0;
+            let (matched_tokens, reuse_source) = if let Some(matched) = live_match {
+                (matched, "live_session")
+            } else {
+                let hit = checkpoint_candidate(
+                    &mut self.cache,
+                    &prompt_ids,
+                    self.turns.live || self.turns.endpoint_checkpoint,
+                    |checkpoint| {
+                        checkpoint.logits.len() == self.vocab_size as usize
+                            && checkpoint.logits.iter().all(|x| x.is_finite())
+                    },
+                );
+                // Publish a departing live branch only when it is actually
+                // needed. Protect the selected restore during admission.
+                let pinned = hit
+                    .as_ref()
+                    .map(|hit| hit.id)
+                    .filter(|&id| self.cache.pin(id));
+                if self.turns.live
+                    && ready
+                    && let Some(live) = previous_live.as_ref()
+                    && live.tokens.len() == runner.next_position()
+                {
+                    let started = Instant::now();
+                    let head = runner
+                        .logits()
+                        .map_err(|e| ServeError::server_error(e.to_string()))?
+                        .to_vec();
+                    capture_with_logits(
+                        &mut self.cache,
+                        &self.ctx,
+                        &runner,
+                        &live.tokens,
+                        "departing_live",
+                        self.control_cpu_reserve,
+                        &head,
+                    );
+                    self.cache.record_tip(live.conversation, &(), &live.tokens);
+                    departing_capture_ms = started.elapsed().as_secs_f64() * 1e3;
+                }
+                if let Some(id) = pinned {
+                    self.cache.unpin(id);
+                }
+                let restored = restore_prefix_hit(
+                    &mut self.cache,
+                    hit,
+                    &mut runner,
+                    |runner, checkpoint: &Checkpoint| {
+                        runner.restore_snapshot(&checkpoint.snapshot)?;
+                        restored_logits =
+                            (!checkpoint.logits.is_empty()).then(|| checkpoint.logits.clone());
+                        Ok(runner.next_position())
+                    },
+                    |runner| runner.reset(),
+                );
+                let matched = restored.map_err(|error| {
+                    ServeError::server_error(format!("reset {FAMILY} session: {error}"))
+                })?;
+                if matched == 0 && (runner.next_position() != 0 || runner.is_poisoned()) {
+                    runner.reset().map_err(|e| {
+                        ServeError::server_error(format!("reset {FAMILY} session: {e}"))
+                    })?;
+                }
+                (matched, if matched == 0 { "cold" } else { "snapshot_ram" })
+            };
             let restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
 
             // Transcript-boundary capture: stop prefill before the generation
@@ -491,6 +556,13 @@ impl GenerationBackend for FlashNextBackend {
             let transcript_at = self
                 .im_start
                 .and_then(|im_start| transcript_boundary(&prompt_ids, im_start));
+            let endpoint_checkpoint = endpoint_checkpoint(
+                self.turns.endpoint_checkpoint,
+                matched_tokens,
+                prompt_ids.len(),
+                transcript_at,
+                runner.packed_prefill_capacity(),
+            );
             let transcript_split = transcript_split(transcript_at, matched_tokens);
             // A restore ending exactly on the transcript boundary (a resent or
             // regenerated turn) already holds the transcript snapshot; it is
@@ -501,7 +573,9 @@ impl GenerationBackend for FlashNextBackend {
             let transcript_restored = transcript_entry.is_some();
             let prefill_t0 = Instant::now();
             let mut capture_ms = 0.0;
+            let mut prefill_calls = 0;
             if let Some(boundary) = transcript_split {
+                prefill_calls += 1;
                 capture_ms += prefill_ladder_segment(
                     &mut runner,
                     &mut self.cache,
@@ -512,46 +586,56 @@ impl GenerationBackend for FlashNextBackend {
                     conversation,
                     self.control_cpu_reserve,
                 )?;
-                let capture_t0 = Instant::now();
-                if capture_snapshot(
-                    &mut self.cache,
-                    &self.ctx,
-                    &runner,
-                    &prompt_ids[..boundary],
-                    "transcript",
-                    self.control_cpu_reserve,
-                ) {
-                    transcript_entry = self.cache.entry_for(&prompt_ids[..boundary]);
+                if !endpoint_checkpoint {
+                    let capture_t0 = Instant::now();
+                    if capture_snapshot(
+                        &mut self.cache,
+                        &self.ctx,
+                        &runner,
+                        &prompt_ids[..boundary],
+                        "transcript",
+                        self.control_cpu_reserve,
+                    ) {
+                        transcript_entry = self.cache.entry_for(&prompt_ids[..boundary]);
+                    }
+                    capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
                 }
-                capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
             }
             let start = transcript_split.unwrap_or(matched_tokens);
-            capture_ms += prefill_ladder_segment(
-                &mut runner,
-                &mut self.cache,
-                &self.ctx,
-                &prompt_ids,
-                start..prompt_ids.len(),
-                sink,
-                conversation,
-                self.control_cpu_reserve,
-            )?;
+            if start < prompt_ids.len() {
+                prefill_calls += 1;
+                capture_ms += prefill_ladder_segment(
+                    &mut runner,
+                    &mut self.cache,
+                    &self.ctx,
+                    &prompt_ids,
+                    start..prompt_ids.len(),
+                    sink,
+                    conversation,
+                    self.control_cpu_reserve,
+                )?;
+            }
             let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3 - capture_ms;
-            let logits = runner
-                .logits()
-                .map_err(|error| ServeError::server_error(format!("{FAMILY} logits: {error}")))?
-                .to_vec();
+            let logits = if matched_tokens == prompt_ids.len() && restored_logits.is_some() {
+                restored_logits.take().expect("exact checkpoint logits")
+            } else {
+                runner
+                    .logits()
+                    .map_err(|error| ServeError::server_error(format!("{FAMILY} logits: {error}")))?
+                    .to_vec()
+            };
             // The transcript boundary a few header tokens earlier already
             // holds this prompt's reusable prefix.
             if transcript_entry.is_none() {
                 let capture_t0 = Instant::now();
-                capture_snapshot(
+                capture_with_logits(
                     &mut self.cache,
                     &self.ctx,
                     &runner,
                     &prompt_ids,
                     "prompt",
                     self.control_cpu_reserve,
+                    if endpoint_checkpoint { &logits } else { &[] },
                 );
                 capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
             }
@@ -562,6 +646,7 @@ impl GenerationBackend for FlashNextBackend {
                 prompt_ids.len()
             };
             let mut retention_ms = 0.0;
+            let mut completed_capture_ms = 0.0;
             let generation = decode_loop::decode_serial(
                 decode_loop::DecodeRequest {
                     family: FAMILY,
@@ -576,10 +661,9 @@ impl GenerationBackend for FlashNextBackend {
                 |token| Ok(runner.forward_token(token)?.to_vec()),
             )?;
 
-            // Completed-turn capture under prompt + consumed generated tokens.
-            // The transcript snapshot is what the next turn reuses when the
-            // template re-renders this one; pin it so admitting the completed
-            // boundary never evicts it.
+            // Keep exactly the consumed prefix; the final sampled token has
+            // not been forwarded. Completed state stays live until a branch
+            // departure needs a RAM copy. Rollback retains eager capture.
             match crate::derive_completed_checkpoint_boundary(
                 prompt_ids.len(),
                 &generation.tokens,
@@ -594,15 +678,24 @@ impl GenerationBackend for FlashNextBackend {
                 Ok(consumed)
             }) {
                 Ok(consumed) => {
-                    let pinned = transcript_entry.filter(|&entry| self.cache.pin(entry));
-                    capture_snapshot(
-                        &mut self.cache,
-                        &self.ctx,
-                        &runner,
-                        &consumed,
-                        "completed",
-                        self.control_cpu_reserve,
-                    );
+                    let pinned = self
+                        .cache
+                        .entry_for(&prompt_ids[..tip_end])
+                        .filter(|&entry| self.cache.pin(entry));
+                    let retain =
+                        self.turns.live && !runner.is_poisoned() && runner.logits().is_ok();
+                    if !retain {
+                        let started = Instant::now();
+                        capture_snapshot(
+                            &mut self.cache,
+                            &self.ctx,
+                            &runner,
+                            &consumed,
+                            "completed",
+                            self.control_cpu_reserve,
+                        );
+                        completed_capture_ms = started.elapsed().as_secs_f64() * 1e3;
+                    }
                     let retention_start = Instant::now();
                     self.cache
                         .record_tip(conversation, &(), &prompt_ids[..tip_end]);
@@ -610,6 +703,12 @@ impl GenerationBackend for FlashNextBackend {
                     retention_ms += retention_start.elapsed().as_secs_f64() * 1e3;
                     if let Some(entry) = pinned {
                         self.cache.unpin(entry);
+                    }
+                    if retain {
+                        next_live = Some(Live {
+                            tokens: consumed,
+                            conversation,
+                        });
                     }
                 }
                 Err(error) => {
@@ -629,7 +728,7 @@ impl GenerationBackend for FlashNextBackend {
             };
             tracing::info!(
                 target: "qwen_diag",
-                "serve phases: family=qwen4exp tokenize_ms={tokenize_ms:.1} restore_ms={restore_ms:.1} matched_tokens={matched_tokens} prefill_ms={prefill_ms:.1} prefill_tokens={} snapshot_capture_ms={capture_ms:.1}{transcript_phase} decode_ms={:.1} required_forwards={required} forward_limit={} transitions={} snapshot_cache_bytes={} ladder={:?} retention_ms={retention_ms:.3}",
+                "serve phases: family=qwen4exp tokenize_ms={tokenize_ms:.1} restore_ms={restore_ms:.1} reuse_source={reuse_source} departing_capture_ms={departing_capture_ms:.1} endpoint_checkpoint={endpoint_checkpoint} prefill_calls={prefill_calls} completed_capture_ms={completed_capture_ms:.1} matched_tokens={matched_tokens} prefill_ms={prefill_ms:.1} prefill_tokens={} snapshot_capture_ms={capture_ms:.1}{transcript_phase} decode_ms={:.1} required_forwards={required} forward_limit={} transitions={} snapshot_cache_bytes={} ladder={:?} retention_ms={retention_ms:.3}",
                 prompt_ids.len() - matched_tokens,
                 generation.wall_ms,
                 self.forward_limit,
@@ -645,11 +744,20 @@ impl GenerationBackend for FlashNextBackend {
             ))
         };
         let outcome = run();
+        let retain = outcome.is_ok() && next_live.is_some();
+        let position = runner.next_position();
         let workspace = runner.into_workspace();
-        with_request_workspace(
+        let returned_at = Instant::now();
+        let outcome = with_request_workspace(
             outcome,
             workspace,
-            |workspace| self.loaded.restore_workspace(workspace),
+            |workspace| {
+                if retain {
+                    self.loaded.retain_workspace(workspace)
+                } else {
+                    self.loaded.restore_workspace(workspace)
+                }
+            },
             |error| {
                 tracing::error!(
                     target: "qwen_diag",
@@ -657,7 +765,10 @@ impl GenerationBackend for FlashNextBackend {
                 );
                 std::process::abort();
             },
-        )
+        );
+        self.live = if retain { next_live } else { None };
+        tracing::info!(target: "qwen_diag", "serve workspace: family=qwen4exp retained={retain} position={position} return_ms={:.3}", returned_at.elapsed().as_secs_f64() * 1e3);
+        outcome
     }
 }
 
@@ -686,7 +797,7 @@ fn prefill_segment(
 /// Short appends take the previous API directly and make no extra state copy.
 fn prefill_ladder_segment(
     runner: &mut Qwen4ExpTextRunner<'_, '_, '_>,
-    cache: &mut SnapshotCache<Qwen4ExpTextSnapshot>,
+    cache: &mut SnapshotCache<Checkpoint>,
     ctx: &MetalContext,
     tokens: &[u32],
     range: std::ops::Range<usize>,
@@ -708,7 +819,7 @@ fn prefill_ladder_segment(
     }), &mut |runner, chunk| {
         if chunk.len()==rows && chunk.end<endpoint && endpoint-chunk.end<=rows {
             let started=Instant::now();
-            let retained=capture_snapshot_impl(cache,ctx,runner,&tokens[..chunk.end],"ladder",reserve,conversation);
+            let retained=capture_snapshot_impl(cache,ctx,runner,&tokens[..chunk.end],"ladder",reserve,conversation,&[]);
             elapsed+=started.elapsed().as_secs_f64()*1e3;
             tracing::info!(target:"qwen_diag", "serve checkpoint: family=qwen4exp position={} retained={retained} ladder={:?}",chunk.end,cache.ladder_status());
         }
@@ -725,148 +836,4 @@ fn map_prefill_result<T>(
         Some(error) => BackendFailure::Aborted(error),
         None => ServeError::server_error(format!("prefill {FAMILY} prompt: {error}")).into(),
     })
-}
-
-fn transcript_split(transcript_at: Option<usize>, matched_tokens: usize) -> Option<usize> {
-    transcript_at.filter(|&boundary| boundary > matched_tokens)
-}
-
-/// Return Flash-Next's single workspace after request work, including aborts.
-fn with_request_workspace<T, E, W, R>(
-    outcome: Result<T, E>,
-    workspace: W,
-    restore: impl FnOnce(W) -> Result<(), R>,
-    on_restore_failure: impl FnOnce(R),
-) -> Result<T, E> {
-    if let Err(error) = restore(workspace) {
-        on_restore_failure(error);
-    }
-    outcome
-}
-
-fn admit_flash_next_snapshot_capture(
-    bytes: u64,
-    signals: impl Fn() -> qwen_llm::metal::MetalMemorySignals,
-    evict_for: impl FnOnce(u64) -> qwen_llm::snapshot_policy::Evicted,
-) -> Result<
-    (),
-    (
-        super::SnapshotCaptureDenial,
-        qwen_llm::metal::MetalMemorySignals,
-    ),
-> {
-    super::admit_snapshot_capture_for(FAMILY, bytes, signals, evict_for)
-}
-
-fn restore_best_prefix<V, R, E: std::fmt::Debug>(
-    cache: &mut SnapshotCache<V>,
-    tokens: &[u32],
-    runner: &mut R,
-    restore: impl FnOnce(&mut R, &V) -> Result<usize, E>,
-    reset: impl FnOnce(&mut R) -> Result<(), E>,
-) -> Result<usize, E> {
-    let Some(hit) = cache.peek_best_prefix_in(&(), tokens) else {
-        return Ok(0);
-    };
-    match restore(runner, &hit.value) {
-        Ok(position) if position == hit.prefix_len => {
-            cache.touch(hit.id);
-            Ok(hit.prefix_len)
-        }
-        outcome => {
-            tracing::warn!(
-                "serve: qwen4exp restore of {} tokens failed, cold prefilling: {:?}",
-                hit.prefix_len,
-                outcome.err()
-            );
-            cache.remove(hit.id);
-            reset(runner)?;
-            Ok(0)
-        }
-    }
-}
-
-/// Snapshot the runner's committed state under `tokens`; true when cached.
-/// Pinned entries are never evicted to admit it.
-fn capture_snapshot(
-    cache: &mut SnapshotCache<Qwen4ExpTextSnapshot>,
-    ctx: &MetalContext,
-    runner: &Qwen4ExpTextRunner<'_, '_, '_>,
-    tokens: &[u32],
-    boundary: &'static str,
-    control_cpu_reserve: u64,
-) -> bool {
-    capture_snapshot_impl(
-        cache,
-        ctx,
-        runner,
-        tokens,
-        boundary,
-        control_cpu_reserve,
-        None,
-    )
-}
-
-fn capture_snapshot_impl(
-    cache: &mut SnapshotCache<Qwen4ExpTextSnapshot>,
-    ctx: &MetalContext,
-    runner: &Qwen4ExpTextRunner<'_, '_, '_>,
-    tokens: &[u32],
-    boundary: &'static str,
-    control_cpu_reserve: u64,
-    conversation: Option<super::checkpoint_ladder::Conversation>,
-) -> bool {
-    if cache.max_bytes() == 0 {
-        return false;
-    }
-    let payload_bytes = match runner.snapshot_bytes() {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            tracing::warn!("serve: qwen4exp {boundary} snapshot estimate failed: {error}");
-            return false;
-        }
-    };
-    let Some(entry_bytes) = (match conversation {
-        Some(key) => cache.ladder_eligibility_in(key, &(), tokens, payload_bytes),
-        None => cache.strict_eligibility(tokens, payload_bytes),
-    }) else {
-        tracing::info!(
-            target: "qwen_diag",
-            "serve: qwen4exp {boundary} snapshot not cached (already present or over budget); payload_bytes={payload_bytes} cache_budget_bytes={}",
-            cache.max_bytes(),
-        );
-        return false;
-    };
-    if let Err((reason, signals)) = admit_flash_next_snapshot_capture(
-        entry_bytes.saturating_add(control_cpu_reserve),
-        || ctx.memory_signals(),
-        |deficit| cache.evict_for(deficit),
-    ) {
-        tracing::warn!(
-            "serve: qwen4exp {boundary} snapshot denied by memory headroom; reason={reason:?} payload_bytes={payload_bytes} metal_current_bytes={} metal_recommended_bytes={} process_remaining_bytes={:?}",
-            signals.current_allocated_bytes,
-            signals.recommended_max_bytes,
-            signals.process_limit_remaining_bytes,
-        );
-        return false;
-    }
-    match runner.capture_snapshot() {
-        Ok(snapshot) => {
-            debug_assert_eq!(snapshot.payload_bytes(), payload_bytes);
-            let inserted = match conversation {
-                Some(key) => {
-                    cache.insert_ladder_in(key, (), tokens.to_vec(), snapshot, entry_bytes)
-                }
-                None => cache.insert_strict(tokens.to_vec(), snapshot, entry_bytes),
-            };
-            if !inserted {
-                tracing::warn!("serve: qwen4exp {boundary} snapshot rejected at cache insertion");
-            }
-            inserted
-        }
-        Err(error) => {
-            tracing::warn!("serve: qwen4exp {boundary} snapshot capture failed: {error}");
-            false
-        }
-    }
 }

@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - Real OpenCode Agent Sessions On Tier-1 Serve
+
+- Clean M5 **`a41e20b0`**, installed laptop OpenCode run implementation
+  **`0c8dfd95`**, real `opencode run`/cx argument shape, per-process model and
+  scratch-permission overlays, no auto-accept. Pin-guard coding/tests, continued
+  session, then effort change. Final actual test receipts: **15 passed / 0 failed
+  per model**. [Protocol, per-turn accounting, session IDs and options](bench/2026-11-08-real-opencode-agents.md);
+  [all 122 native requests](bench/2026-11-08-real-opencode-agent-calls.csv).
+- These are different agent trajectories, not engine speed ratios. Active
+  invocation seconds exclude operator pauses; FN includes its pilot and one
+  failed setup-bounded coding turn, followed by successful same-session recovery.
+
+  | Model | Calls | Max prompt | Active wall s | Logged pre-decode s | Decode s | Tool-only s | Other s |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | V4.1 | 58 | 81,109 | 501.7 | 112.7 | 354.8 | 14.4 | 19.9 |
+  | GLM | 34 | 37,469 | 321.8 | 70.2 | 240.1 | 5.8 | 5.5 |
+  | FN | 30 | 78,926 | 631.7 | 117.9 | 504.2 | 4.7 | 5.0 |
+
+- Ordinary reuse is healthy: **54 live + 1 snapshot V4.1**, **31 live GLM**,
+  **25 live + 1 snapshot FN**. Effort changes do cause **75998 / 33717 / 71389**
+  new rows from zero reuse, costing **43.28 / 31.95 / 38.75 s** pre-decode
+  (V4.1 / GLM / FN). FN's separate initial continuation cold fill is an explicit
+  operator server restart, not a prefix bug. V4.1 live CED and FN's bounded
+  8-worker copies are already engaged; do not carry forward their old gaps.
+- Generation dominates: one V4.1 call emits **9062 tokens / 125.16 s**, mainly
+  visible planning. A hypothetical **1.1x** decode rate saves **22–46 s/session**;
+  reducing output needs task-quality checks. Packet ranks cache-compatible
+  decode, effort-head policy, two localized replay gaps, then auxiliary work.
+- `--format json` supplies terminal records only. DB observation is read-only,
+  restricted to owned session IDs; **119 primary requests join by exact token
+  counts**, three initial title helpers are explicit. First-part TTFT uses part
+  creation, because text completion overwrites the client's `time.start`.
+  `Other` includes unlogged server work and timing uncertainty, not just client
+  overhead; tool/model overlap is unioned, not double-counted.
+- **Isolation exception:** initial excluded pilot auto-discovered port 3456
+  with GETs before the overlay model was rejected. No restart/signal or config
+  edit; all later runs disable server discovery. Config hash/mtime and PID/start/
+  command are unchanged. Setup output/step caps and shell denials are separately
+  retained. No storage-lock errors; all **1572 thermal samples are zero**.
+  One owned client/model at a time, loopback forwarding, lease/build lock/nice 10.
+- All four session IDs remain listed in the packet; no session deletion. Owned
+  clients/servers/forwards exit; coding clones, M5 build scratch and local docs
+  worktree are removed. Docs-only checks pass; no engine/client changes or merge.
+  Evidence/manifest: **`$HOME/qwen-runs/2026-11-08-real-opencode-agents/`** on both hosts.
+
 ## 2026-11-08 - V4.1 Prefill: Reject PV Fold; Retire Q5_K Override
 
 - **Ship only cleanup `efea2b22`**, rebased on **`753245c3`**. Remove

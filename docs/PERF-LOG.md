@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - V4.1 Serve: Exact Cold CED With Checkpoint Reuse
+
+- **Default on**, same M5 Ultra production four-shard **GSQ-RCO IQ2_XS + IQ4_NL Engram**, all **384 experts/top-6**: matches the serve standing and preceding append work. **`QWEN_SERVE_V41_COLD_CED=0`** restores cold Full. Ordinary serve mapping, idle residency, header folding and checkpoint ladder stay at their defaults.
+- Plan CED episodes across validated shared/body cuts and the ladder's last existing idle full-body boundary. Spans below **8192 rows** stay Full. Start from zero or an exact shared-prelude hit; history appends stay Full. Yield between encoder chunks, accepting loaded **512-row** quanta once an episode starts; retain actual encoder partitions for decoder query tiles and genuine scalar tails. Publish only completed **Ready** endpoints. Cancellation/error poisons and discards the working state without a Full retry. Ready exact CED states now support live/snapshot reuse.
+- The initial strict **64K** probe caught CED always batching owner publication while wide pruned Full chunks used the per-row chain. Share Full's selector/publication decision, including its row/rollback gates; keep strict comparisons. No shader, quantization or precision changes. Corrected real-artifact proof at **16K/64K**, interior/cold endpoint/following warm tip: **128 teacher-forced complete vocabulary heads per cut/policy**, plus dirty-destination restore at a different capacity. **199,349,760 float comparisons bitwise equal**, all finite; no tolerance relaxation. Native source **`8d83f94b`**; later changes are test formatting and serve eligibility, not native episode arithmetic.
+- Actual **`qwen serve` / `/v1/responses`**, fresh server per cold arm, frozen real Rust/tool-shaped study inputs, greedy/seed 1, **64 cold output tokens**, context **98304**. Only the cold-CED control changes. Following **1626-row** warm append and older-question fork each generate **200 tokens**. Cold order **Full/CED/CED/Full**, two calls/policy/cell; reverse pair is cold-only. Same executable within each pair. Primary **`9a6f49a9`**; reverse confirmation/full tests **`5e07952c`**, rebased onto GLM-only main **`d960dc77`**. V4.1 backend/library directories and all kernels are byte-identical across that rebase; the shared helper change is restricted to GLM's geometry.
+
+  | Prompt tokens | Full TTFT arms ms | CED TTFT arms ms | Median Full -> CED ms | Ratio |
+  | --- | ---: | ---: | ---: | ---: |
+  | 16460 | 14615.426, 13362.956 | 11794.337, 11226.120 | 13989.191 -> 11510.228 | 1.215x |
+  | 64932 | 60272.272, 57916.730 | 37716.622, 35999.943 | 59094.501 -> 36858.282 | 1.603x |
+
+  Save **2.479 s / 17.7%** and **22.236 s / 37.6%** of median cold TTFT. All four chronological pairs improve and both cells pass the predeclared **>=1.08x / 500 ms** gate.
+- Following warm/fork TTFT, Full-origin -> CED-origin state:
+
+  | Cold depth | Warm append ms | Fork ms | Fork restored / new rows |
+  | --- | ---: | ---: | ---: |
+  | 16460 | 1750.099 -> 1750.732 | 3501.912 -> 3390.301 | 12631 / 3828 |
+  | 64932 | 2256.183 -> 1745.733 | 3412.728 -> 3417.431 | 61783 / 3148 |
+
+  All remain **Full**; warm headers fold normally. No measured regression under the predeclared **5% / 100 ms** investigation threshold. Folded tips **18149 / 66621** restore with **zero prefill**, **48.416 / 82.238 ms TTFT**. Repeated forks reproduce their first replies exactly. Across all cold arms, and primary warm/fork pairs, input hashes and reply contents match, excluding generated IDs.
+- An independent 16K agent root through the default server restores only the **343-token shared prelude** and runs CED for **16120 new rows**. This covers later new sessions in an already-running server, as well as a zero-prefix first request. Warm appends and forks retain the preceding ladder/header-folding behavior.
+- Validation on **`5e07952c`**: full M5 **`cargo test --release -p qwen-llm --lib`**, **2464 passed / 0 failed / 743 ignored**, **135.57 s**, serial, Metal debug layer and required GPU tests. Full **`cargo test --release -p qwen-cli`**, **1666 passed / 0 failed / 73 ignored**, including integration fixtures and doctests. **85 focused serve tests** pass, including shared-prelude restoration, optional Full fallback, preserved cuts and loaded scheduling. Two explicit reduced native GPU tests pass at **`6aa6b0a7`**, with unchanged V4.1 source after rebase: mixed **4096/512** episodes, genuine scalar tails, causal-state/restore bit comparisons, and cancellation at a yield. Final **`scripts/check-contracts.sh` passes**, **567 CPU acceptance tests + 10 tripwires**, no skips.
+- Canonical Metal leases/wait, build lock and nice 10 for timing; **25 s cool plus three nominal readings five seconds apart** before each request, sampled thermal pressure **0 before/during/after** accepted packets. Numeric-only probes may overlap CPU compilation and make no timing claim. All samples, requests/events/replies, conditions, source/binary identities, strict counterexample and failed checks retained at **`$HOME/qwen-runs/2026-11-08-v41-serve-ced`** on metagross. See **`summary.json`**, **`native-ced.log`**, **`contracts-rebased.log`** and complete test logs. Clean series on main; no merge or owned worker left running.
+
 ## 2026-11-07 - GLM IQ Arbitrary Rows: Signed Qualification and Default Widening
 
 - Main base **`97488b35`**, code **`9d795d60`**, M5 Ultra, unchanged

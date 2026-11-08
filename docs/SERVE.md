@@ -207,8 +207,9 @@ partition-dependent arithmetic as a cold-canonical execution. The existing
 canonical guards remain in place.
 
 Up to five optional points per conversation family are thinned to preserve
-spaced older history. The live tip and recent transcript/completed snapshot pair
-remain available. The deepest pair also survives an older-message fork, so
+spaced older history. The live tip and recent transcript/completed coverage
+remain available. Flash-Next keeps its healthy completed tip in the resident
+workspace and copies it into RAM on branch departure. The deepest pair also survives an older-message fork, so
 returning to the deeper branch keeps its hot tip. Superseded turn-tip snapshots
 are pruned where an older anchor
 covers them; a budget too small for coverage preserves the legacy fallback.
@@ -533,15 +534,19 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   (`serve/backend_ds4.rs`) with a startup-fixed forward budget and a
   serve-owned snapshot cache (`serve/snapshot_cache.rs`; DS4 has no
   engine-side RAM prefix cache). Flash-Next (`serve/backend_qwen4exp.rs`, since 2026-09-17) holds
-  one text-session workspace sized at load and hands it back reset after
-  every request: the Qwen3.8 contract (effort levels, thinking, tools).
+  one text-session workspace sized at load: the Qwen3.8 contract (effort levels,
+  thinking, tools).
   Absent sampling fields take the release `generation_config.json` (temperature
   1.0, top-p 0.95, top-k 20, min-p 0; a fresh seed) at every effort, `no_thinking`
   included, and are echoed (see the wire subset's sampling defaults).
-  Without a drafter, it reuses prefixes through the shared serve snapshot
-  cache (since 2026-09-23): a request restores the longest cached strictly-shorter
-  token prefix into the reset workspace and prefills the rest, with the Qwen
-  transcript-boundary split below. A snapshot holds only state later tokens
+  Without a drafter, a healthy resident workspace continues when the prompt
+  extends its entire consumed token key; the final sampled, unforwarded token
+  is excluded from that key. Other requests use immutable exact-prefix RAM
+  checkpoints or reset and cold-prefill. Completed state is copied on branch
+  departure, and failures/aborts return a reset workspace. State-only cache hits
+  require a strictly shorter prefix; an exact hit must carry its own endpoint
+  logits. `QWEN_SERVE_FN_TURNS=0` restores the prior lifecycle and captures.
+  A raw state snapshot holds only state later tokens
   read — 36 GDN conv+delta states, PLE conv and n-gram history, and per QSA
   layer its pending index-key block, `n/4` compressed index keys, and `n` F16
   K/V rows: `118,063,104 + 24,576·n + 3,072·⌊n/4⌋` bytes (≈113 MiB + 24.75
@@ -1481,9 +1486,17 @@ because client model-pickers probe it).
   few columns early so the transcript snapshot also carries the drafter's window
   ending at the boundary, then rebases onto the full-prompt window; restored thinking turns
   keep speculating (27B + DFlash2, turn 2: 1559/1628 tokens reused, 1.83 s vs
-  8.41 s before, greedy output unchanged). Without a drafter, Flash-Next applies
-  the same split, resend handling and pin; its drafter mode always cold-prefills
-  without snapshots. DS4 captures prompt and completed boundaries and
+  8.41 s before, greedy output unchanged). Without a drafter, Flash-Next keeps
+  the same body/header arithmetic split and pinning. Reused 512..2048-row
+  appends fitting packed scratch, with a terminal header of at most eight tokens,
+  capture the actual post-header state and its logits instead of the transcript
+  cut. An exact retry can then use the cached head without replaying the header;
+  a changed header or replay that drops reasoning may need an earlier ladder
+  checkpoint. Head bytes count
+  toward the cache budget. `QWEN_SERVE_FN_ENDPOINT=0` restores pre-header
+  checkpoints; `QWEN_SERVE_FN_LIVE=0` restores reset/restore and eager completed
+  copies. These controls are read at backend creation. Flash-Next drafter mode
+  always cold-prefills without snapshots. DS4 captures prompt and completed boundaries and
   skips a completed boundary with no transition or a truncation inside open
   reasoning. Eligible boundaries enter the **RAM** prefix cache (8–42 ms each
   per S0). Evidence: PERF-LOG 2026-09-23 transcript-boundary entry.

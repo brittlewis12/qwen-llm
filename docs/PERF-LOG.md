@@ -6,6 +6,74 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - Flash-Next Serve: Resident Turns And Exact Endpoint Retries
+
+- Base **`d960dc77`**, clean implementation **`b157d847` / `5548c202`**,
+  contract inventory **`05bfdc76`**. M5 Ultra, unchanged **GSQ-RCO IQ3_S**.
+  **Default on:** retain a healthy workspace under its entire consumed token
+  key; compatible appends skip reset and RAM restore. Copy completed state
+  only on branch departure. Short reused 512..2048-row appends retain the
+  original body/header arithmetic, but cache the actual post-header state
+  and its separately accounted logits. Exact retries need no header replay.
+  Cold requests and interior ladder cuts keep their schedule. Aborts reset;
+  foreign workspace owners and state-only exact hits are refused.
+  **`QWEN_SERVE_FN_TURNS=0`** rolls back everything; independent
+  **`QWEN_SERVE_FN_LIVE=0` / `QWEN_SERVE_FN_ENDPOINT=0`** controls remain.
+- Actual `/v1/responses`, frozen serve-study fourth-turn prime, **64961 input /
+  64 sampled**, then **65024 reused** tokens; context 98304, ordinary 2048-row
+  scratch, tools/low effort, greedy seed 1, **200 sampled tokens** per append.
+  Fresh server per size, 25-second cooling plus three zero readings before
+  each request; all accepted before/after readings zero. One before/after
+  pair per size: a short screen, **no confidence-interval claim**.
+
+  | New tokens | Before TTFT ms | Default TTFT ms | Before response ms | Default response ms |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 1117 | 1489.747 | **1327.814** | 4618.617 | **4361.468** |
+  | 1630 | 1783.368 | **1676.100** | 4920.843 | **4717.243** |
+  | 1886 | 1946.391 | **1832.872** | 5076.876 | **4880.960** |
+
+- TTFT improves **6–11%**; whole responses save **196–257 ms**. Restore is
+  **0 ms**, completed-copy time **0 ms**, prompt capture **92–93 ms**.
+  New appends still make **two** native prefill calls. Bounded same-binary
+  1630-row controls: rollback **1887.921 / 5091.828 ms** TTFT/response;
+  live-only with pre-header capture **1794.988 / 4870.789 ms**. Capture varies
+  **109–223 ms** in those controls; retain all samples without pooling them.
+- Edited-history fork keeps the identical **63491-token** ladder prefix and
+  **1469 new rows**. TTFT **1607.029 -> 1740.077 ms**, including the now-deferred
+  **110.7 ms** completed copy. Repeated fork **370.287 -> 162.856 ms**;
+  return to the original append **359.331 -> 70.247 ms**. Both retries restore
+  actual prompt endpoints, **0 new rows / 0 prefill calls**. Every final
+  append/fork reply matches the old baseline exactly; fork/repeat and
+  append/return contents also match, excluding generated IDs. Changed headers
+  can require an earlier checkpoint; no post-header state is aliased to a
+  pre-header key.
+- **Rejected:** merging the five-token header into the append saves roughly
+  200 ms of native work, but reaches **dNLL +0.028537 / KL 0.012589**.
+  Five scalar header forwards save about **140 ms**, but reach
+  **dNLL +0.026516**. Both fail the unchanged **|dNLL| <= 0.005 / KL <= 0.01**
+  gate and are absent from the final series. The remaining gap is chiefly
+  the tiny packed header path plus the roughly 100 ms prompt-state copy;
+  improving either needs another kernel or snapshot-transfer change.
+- Final distribution/restore witness: actual served 64K prefix and all three
+  append geometries, frozen code/prose, **128 targets/cell**. RAM restore with
+  pre-header capture versus retain/rebind plus post-header capture, dirtying
+  two forwards and restoring the endpoint/head: **768 paired full-vocabulary
+  vectors bitwise equal**, finite, **dNLL = KL = 0** in all six cells. Separate
+  ownership/logit/persistent-state/PLE-history witnesses pass on **M5 IQ3_S**
+  and **M4 UD-Q3_K_XL**; the committed-observer ladder witness and both serve
+  abort/retry/restore GPU tests pass on M5.
+- Validation: full M5 release library **2462 passed / 742 ignored / 0 failed**,
+  serial, Metal validation and required GPU tests, **142.75 s**. Its library
+  sources are identical to final code. Final full main CLI suite **1041 passed /
+  50 ignored / 0 failed**; **`scripts/check-contracts.sh` passes at `05bfdc76`**,
+  **566 CPU acceptance tests** plus **10 tripwires**. Subsequent edits are
+  maintained documentation only. All builds/timings use the shared build lock,
+  nice 10; GPU work uses canonical leases, with zero pressure throughout the
+  numerical campaigns. Requests, events, replies, all failed experiments,
+  fixed protocols, sources/binaries and check receipts:
+  **`~/qwen-runs/2026-11-08-fn-serve-turns/`**, metagross and local mirror.
+  No merge or owned worker remains running.
+
 ## 2026-11-08 - V4.1 Serve: Exact Cold CED With Checkpoint Reuse
 
 - **Default on**, same M5 Ultra production four-shard **GSQ-RCO IQ2_XS + IQ4_NL Engram**, all **384 experts/top-6**: matches the serve standing and preceding append work. **`QWEN_SERVE_V41_COLD_CED=0`** restores cold Full. Ordinary serve mapping, idle residency, header folding and checkpoint ladder stay at their defaults.

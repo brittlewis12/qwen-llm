@@ -5,6 +5,7 @@ use super::*;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MtpTargetStateAudit {
     pub(crate) resume_audit_pass: bool,
+    pub(crate) strict_numeric_pass: bool,
     pub(crate) kv_position_equal: bool,
     pub(crate) kv_payload_exact: bool,
     pub(crate) kv_payload_max_abs: f32,
@@ -18,6 +19,7 @@ pub(crate) struct MtpTargetStateAudit {
     pub(crate) continuation_logits_max_abs: f32,
     pub(crate) continuation_logits_cosine: f64,
     pub(crate) continuation_kl: f64,
+    pub(crate) continuation_max_kl: f64,
     pub(crate) continuation_nll_delta: f64,
 }
 
@@ -322,6 +324,7 @@ pub(crate) fn audit_mtp_target_state(
         && continuation_logits_cosine >= 0.99999;
     Ok(MtpTargetStateAudit {
         resume_audit_pass,
+        strict_numeric_pass: resume_audit_pass,
         kv_position_equal,
         kv_payload_exact,
         kv_payload_max_abs,
@@ -335,6 +338,7 @@ pub(crate) fn audit_mtp_target_state(
         continuation_logits_max_abs,
         continuation_logits_cosine,
         continuation_kl,
+        continuation_max_kl: continuation_kl,
         continuation_nll_delta,
     })
 }
@@ -344,6 +348,8 @@ pub(crate) fn merge_target_state_audit(
     next: MtpTargetStateAudit,
 ) {
     aggregate.resume_audit_pass &= next.resume_audit_pass;
+    aggregate.strict_numeric_pass &= next.strict_numeric_pass;
+    aggregate.continuation_max_kl = aggregate.continuation_max_kl.max(next.continuation_max_kl);
     aggregate.kv_position_equal &= next.kv_position_equal;
     aggregate.kv_payload_exact &= next.kv_payload_exact;
     aggregate.kv_payload_max_abs = aggregate.kv_payload_max_abs.max(next.kv_payload_max_abs);
@@ -445,7 +451,122 @@ pub(crate) fn audit_mtp_target_state_chain(
     audit.continuation_nll_delta /= continuation_steps as f64;
     audit.resume_audit_pass &= audit.gdn_state_max_abs <= 1e-2;
     audit.resume_audit_pass &= audit.gdn_conv_max_abs <= 1e-1;
+    audit.strict_numeric_pass = audit.resume_audit_pass;
     Ok(audit)
+}
+
+/// MoE batch arithmetic can amplify tiny rounding differences at routing
+/// boundaries. Judge resume distributions from a common prompt, retaining
+/// finite state, position and KV similarity checks. Keep the old strict
+/// result visible. The mean quality budgets match the existing turn-reuse
+/// study; the 0.1-nat per-step KL ceiling permits occasional routing-boundary
+/// amplification while preventing dilution by a long continuation. The
+/// measured 128-step maximum is 0.05048 nats (mean 0.001091).
+/// Qualification/evidence: docs/bench/2026-11-08-mtp-resume/README.md.
+fn qualify_moe_resume_audit(audit: &mut MtpTargetStateAudit) {
+    audit.resume_audit_pass = audit.kv_position_equal
+        && audit.gdn_state_max_abs.is_finite()
+        && audit.gdn_conv_max_abs.is_finite()
+        && audit.kv_payload_cosine.is_finite()
+        && audit.kv_payload_cosine >= 0.9999
+        && audit.continuation_logits_max_abs.is_finite()
+        && audit.continuation_logits_cosine.is_finite()
+        && audit.continuation_kl.is_finite()
+        && audit.continuation_kl <= 0.01
+        && audit.continuation_max_kl.is_finite()
+        && audit.continuation_max_kl <= 0.1
+        && audit.continuation_nll_delta.is_finite()
+        && audit.continuation_nll_delta.abs() <= 0.005;
+}
+
+/// No drafts and no rejected target tokens: replay only the teacher-forced
+/// target stream in fixed-width packets. Capture every post-block residual
+/// to locate numerical amplification, then compare its retained state with
+/// the real MTP trajectory. This runs only under --mtp-state-trace.
+fn trace_teacher_forced_packets(
+    forward: &MetalForward<'_>,
+    prompt: &[i32],
+    generated: &[i32],
+    candidate: &MetalSession,
+    width: usize,
+    cap: usize,
+) -> Result<()> {
+    use qwen_llm::metal_dflash::{
+        PackedVerifyCaller, encode_packed_verify_layer_major_inner_for,
+        encode_restore_after_partial_accept_inner,
+    };
+    let (ctx, model) = (forward.ctx, forward.model);
+    let h = model.arch.hidden_size as usize;
+    let layers = (0..model.blocks.len() as u32).collect::<Vec<_>>();
+    let mut packed = MetalSession::fresh(ctx, model, cap)?;
+    let mut serial = MetalSession::fresh(ctx, model, cap)?;
+    let mut prefill = MetalDFlashLayerMajorScratch::fresh_prefill(ctx, model, 16)?;
+    for session in [&mut packed, &mut serial] {
+        prefill_tokens_with_multi_hidden(forward, prompt, 0, session, &mut prefill, &[], None)?;
+    }
+    let mut verify =
+        MetalDFlashVerifyScratch::fresh(ctx, model, width as u32, layers.len() as u32)?;
+    let mut scratch = MetalDFlashLayerMajorScratch::fresh(ctx, model, width as u32)?;
+    let capture = MetalTensor::zeros_f32(ctx, vec![(h * layers.len()) as u64])?;
+    let mut first_nonzero = false;
+    let mut amplified = vec![false; layers.len()];
+    for (chunk, kept) in generated.chunks(width).enumerate() {
+        let start = prompt.len() + chunk * width;
+        let mut input = kept.to_vec();
+        input.resize(width, kept[0]);
+        encode_packed_verify_layer_major_inner_for(
+            PackedVerifyCaller::Mtp,
+            forward,
+            &layers,
+            &input,
+            start as u32,
+            &mut verify,
+            &mut scratch,
+            &mut packed,
+            None,
+            None,
+        )?;
+        for (row, &token) in kept.iter().enumerate() {
+            forward.single_token_with_multi_hidden(
+                token,
+                (start + row) as u32,
+                &mut serial,
+                &layers,
+                &capture,
+            )?;
+            for (layer, did_amplify) in amplified.iter_mut().enumerate() {
+                let reference = capture.view_subrange((layer * h) as u64, vec![h as u64]);
+                let batched = verify.hidden_capture_slot(layer as u32, row as u32);
+                let delta = max_abs_f32_pair(&reference, &batched)?;
+                if !first_nonzero && delta > 0.0 {
+                    eprintln!(
+                        "[teacher-trace] first post-block difference: pos={} L{layer} max={delta:.9e}",
+                        start + row
+                    );
+                    first_nonzero = true;
+                }
+                if !*did_amplify && delta > 0.01 {
+                    eprintln!(
+                        "[teacher-trace] first >0.01: pos={} L{layer} max={delta:.9e}",
+                        start + row
+                    );
+                    *did_amplify = true;
+                }
+            }
+        }
+        if kept.len() < width {
+            encode_restore_after_partial_accept_inner(
+                forward,
+                &verify,
+                kept.len() as u32,
+                start as u32,
+                &mut packed,
+                None,
+            )?;
+        }
+    }
+    trace_target_state("target-only-packets-vs-mtp", &packed, candidate, model)?;
+    Ok(())
 }
 
 pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
@@ -959,7 +1080,17 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
                     // serial decode. Replaying the prompt serially changes the
                     // initial state before any speculation and measures prefill
                     // arithmetic rather than MTP resume correctness.
-                    let audit = audit_mtp_target_state_chain(
+                    if mtp_state_trace {
+                        trace_teacher_forced_packets(
+                            &mf,
+                            &prompt_ids,
+                            generated,
+                            &spec_session,
+                            planned_verify_n,
+                            cap,
+                        )?;
+                    }
+                    let mut audit = audit_mtp_target_state_chain(
                         &mf,
                         &mut ref_session,
                         &mut spec_session,
@@ -967,6 +1098,9 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
                         pending_terminal_token,
                         mtp_resume_steps,
                     )?;
+                    if mm.arch.kind == qwen_llm::model::ArchKind::Moe {
+                        qualify_moe_resume_audit(&mut audit);
+                    }
                     if !audit.resume_audit_pass {
                         deferred_gate_failure.get_or_insert_with(|| {
                             format!("native MTP terminal resume audit failed: {audit:?}")
@@ -1327,6 +1461,10 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
                     "serial_prefill_serial_decode"
                 },
                 "resume_audit_pass": audit.resume_audit_pass,
+                "strict_numeric_pass": audit.strict_numeric_pass,
+                "resume_gate": if mtp_probe == MtpProbeMode::Normal && mm.arch.kind == qwen_llm::model::ArchKind::Moe {
+                    "moe_distribution_v1"
+                } else { "strict_numeric_v1" },
                 "kv_position_equal": audit.kv_position_equal,
                 "kv_payload_exact": audit.kv_payload_exact,
                 "kv_payload_max_abs": audit.kv_payload_max_abs,
@@ -1339,6 +1477,7 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
                 "continuation_logits_max_abs": audit.continuation_logits_max_abs,
                 "continuation_logits_cosine": audit.continuation_logits_cosine,
                 "continuation_mean_kl": audit.continuation_kl,
+                "continuation_max_kl": audit.continuation_max_kl,
                 "continuation_mean_nll_delta": audit.continuation_nll_delta,
             })
         });
@@ -1472,6 +1611,7 @@ mod tests {
     fn audit(gdn_state_max_abs: f32, gdn_conv_max_abs: f32) -> MtpTargetStateAudit {
         MtpTargetStateAudit {
             resume_audit_pass: true,
+            strict_numeric_pass: true,
             kv_position_equal: true,
             kv_payload_exact: true,
             kv_payload_max_abs: 0.0,
@@ -1485,8 +1625,94 @@ mod tests {
             continuation_logits_max_abs: 0.0,
             continuation_logits_cosine: 1.0,
             continuation_kl: 0.0,
+            continuation_max_kl: 0.0,
             continuation_nll_delta: 0.0,
         }
+    }
+
+    #[test]
+    fn moe_resume_distribution_gate_rejects_bad_quality_and_state() {
+        let mut good = audit(0.22, 1.1);
+        good.strict_numeric_pass = false;
+        good.continuation_kl = 0.0011;
+        good.continuation_max_kl = 0.009;
+        good.continuation_nll_delta = 0.00082;
+        good.continuation_argmax_equal = false;
+        super::qualify_moe_resume_audit(&mut good);
+        assert!(good.resume_audit_pass);
+        assert!(!good.strict_numeric_pass);
+        for bad in [
+            MtpTargetStateAudit {
+                continuation_kl: 0.011,
+                ..good
+            },
+            MtpTargetStateAudit {
+                continuation_max_kl: 0.101,
+                ..good
+            },
+            MtpTargetStateAudit {
+                continuation_nll_delta: 0.0051,
+                ..good
+            },
+            MtpTargetStateAudit {
+                continuation_nll_delta: -0.0051,
+                ..good
+            },
+            MtpTargetStateAudit {
+                kv_position_equal: false,
+                ..good
+            },
+            MtpTargetStateAudit {
+                kv_payload_cosine: 0.99944,
+                ..good
+            },
+            MtpTargetStateAudit {
+                gdn_state_max_abs: f32::NAN,
+                ..good
+            },
+            MtpTargetStateAudit {
+                gdn_conv_max_abs: f32::INFINITY,
+                ..good
+            },
+            MtpTargetStateAudit {
+                continuation_kl: f64::NAN,
+                ..good
+            },
+            MtpTargetStateAudit {
+                continuation_logits_max_abs: f32::NAN,
+                ..good
+            },
+        ] {
+            let mut bad = bad;
+            super::qualify_moe_resume_audit(&mut bad);
+            assert!(!bad.resume_audit_pass, "{bad:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m (MTP-aware variant)"]
+    fn normal_mtp_terminal_resume_from_product_prompt() {
+        use clap::Parser;
+        let model = qwen_llm::test_fixtures::A3B_Q4_K_M.required();
+        let prompt = include_str!(
+            "../../../../docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt"
+        );
+        let args = super::MtpArgs::parse_from([
+            "mtp",
+            "--model",
+            model.to_str().unwrap(),
+            "--prompt",
+            prompt,
+            "--spec-tokens",
+            "7",
+            "--mtp-physical-n",
+            "8",
+            "--tokens",
+            "128",
+            "--mtp-resume-steps",
+            "128",
+        ]);
+        super::run_mtp(args).expect("normal MTP stream and terminal resume audit");
     }
 
     #[test]

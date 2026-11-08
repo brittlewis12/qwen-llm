@@ -6,7 +6,7 @@ fn cpu_kda_half_scope_restores_nested_panics_and_other_threads() {
     let runtime = memory::kda_half_inputs_enabled();
     assert_eq!(
         runtime,
-        crate::env_flag::read_default_off("QWEN_GLM53_KDA_HALF_INPUTS")
+        crate::env_flag::read_default_on("QWEN_GLM53_KDA_HALF_INPUTS")
     );
     let _off = memory::KdaHalfInputsScope::new(false);
     assert!(!memory::kda_half_inputs_enabled());

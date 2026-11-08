@@ -24,8 +24,8 @@ pub const DYNAMIC_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 pub const APPLE_16K_GRANULE: u64 = 16 * 1024;
 
 crate::env_flag!(
-    /// Opt-in once-per-KDA-block half activation staging; never enables TensorOps.
-    default_off kda_half_inputs_flag,
+    /// Default-on M5 Fast/Half KDA activation staging, once per block for eligible tensor consumers. Reuses the routed gate/up Half buffer; each owner refreshes it before use. Never enables TensorOps or changes Exact/F32 operands; 0 restores per-projection staging.
+    default_on kda_half_inputs_flag,
     "QWEN_GLM53_KDA_HALF_INPUTS"
 );
 

@@ -226,7 +226,12 @@ fn small_preflight_witness(ctx: &MetalContext) {
         assert!(plan.encode(0, ctx, enc).unwrap());
     });
     assert_eq!(census.len(), 2);
-    assert_eq!(census[1].kernel, "kernel_mat_mat_q6_K_f16act_tensor");
+    assert_eq!(
+        Some(census[1].kernel.as_str()),
+        Tile::selected_for_rows(GgmlType::Q6_K, 1024)
+            .pipeline_for(GgmlType::Q6_K, metal::TensorActivation::F16)
+            .as_deref()
+    );
     assert_same(&f.y, &y);
     f.validate(&read(&y), &f.half, 2e-3);
     assert_eq!(x_hash, hash(&f.x));
@@ -309,7 +314,7 @@ fn m5_kda_half_complete_eight_op_fanout_bitwise_and_full_copy_cost() {
     let _wide = Q8WideScope::new(true);
     let _q5 = Q5Scope::new(true);
     assert!(
-        crate::env_flag::read_default_off("QWEN_GLM53_KDA_HALF_INPUTS"),
+        crate::env_flag::read_default_on("QWEN_GLM53_KDA_HALF_INPUTS"),
         "launch with feature storage reserved in both arms"
     );
     let dtype = GgmlType::Q8_0;

@@ -206,7 +206,7 @@ fn cpu_gate_up_default_rollback_never_enables_kda_or_non_tensor_ownership() {
     assert_eq!(memory::tensor_gate_up_enabled(), global);
     assert_eq!(
         memory::kda_half_inputs_enabled(),
-        crate::env_flag::read_default_off("QWEN_GLM53_KDA_HALF_INPUTS")
+        crate::env_flag::read_default_on("QWEN_GLM53_KDA_HALF_INPUTS")
     );
     let _kda_off = memory::KdaHalfInputsScope::new(false);
     for enabled in [false, true] {

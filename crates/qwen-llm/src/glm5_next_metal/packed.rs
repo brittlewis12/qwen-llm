@@ -72,6 +72,10 @@ mod latent_mma_ab;
 mod prefill_cost;
 
 #[cfg(test)]
+#[path = "tests/kda_half_composed.rs"]
+mod kda_half_composed;
+
+#[cfg(test)]
 #[path = "tests/packet_policy.rs"]
 mod packet_policy;
 

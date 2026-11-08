@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn cpu_kda_half_live_non_tensor_and_default_off_footprints_are_unchanged() {
+fn cpu_kda_half_live_non_tensor_and_rollback_footprints_are_unchanged() {
     let c = config();
     let price = memory::apple_16k_price;
     for enabled in [false, true] {

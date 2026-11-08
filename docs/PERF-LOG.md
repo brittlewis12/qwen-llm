@@ -6,6 +6,91 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - V4.1: Exact Sorted Native-IQ Expert Tiles
+
+- **Default on**, implementation **`29e49325`** on main **`8883a612`**.
+  M5 Ultra, unchanged four-shard **DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS**
+  with IQ4_NL disk Engram, all **384 experts/top-6**: the production artifact
+  and the mlx-serve comparison artifact. **`QWEN_V41_SORTED_EXPERT=0`** restores
+  rectangular expert tiles. Eligible native IQ2_XXS/XS/S and IQ3_XXS banks use
+  sorted runs at **1024..4096 rows**, H5120/F2304/E384/top-6, on the tensor
+  tier. Decode, 512-row commands and telemetry keep their previous paths.
+- Adapt mlx-serve **v26.11.2** (`4e231cee`) sorted-run TensorOps dataflow,
+  with MIT attribution in the shader. Plan compact expert panels on GPU;
+  pack activations into existing dead scratch; fuse gate/up, clipped SwiGLU,
+  weighting and half storage; scatter sorted down results into existing slots.
+  **64 routed rows/K64**, 64 gate/up or 128 down output columns, direct device
+  activation reads, native quantized banks, incumbent **F16 operands/F32
+  accumulators**. No extra workspace allocation or host route readback.
+  Preserve both original F32 activation storage rounding points in shared
+  memory before narrowing. Initially eliding those points failed the frozen
+  natural-text quality gate; restoring them makes the qualified outputs exact.
+- Ordinary **`qwen-bench suite`**, pp4096/depth 0, one warmup and one measured
+  CED prefill per process: rollback **2221.677/2227.402 ms**, default
+  **2140.470/2132.314 ms**, balanced ABBA. Mean **2224.539 -> 2136.392 ms**,
+  **1841 -> 1917 tok/s**, **1.041x**. This is a measured local increment;
+  it does not close the mlx-serve standing's larger prefill gap.
+- **Fresh first appends**, new process/state per arm, identical untimed CED
+  prefix with sorted experts disabled, ordinary Full append with only this
+  control changed. P4 **4 GiB soft mapping target**. An **untimed residency
+  pulse/settle**, using the existing serve keep-alive primitive, aligns mapped
+  weight residency immediately before the first append; no append warmup.
+  Non-split command profiling and dispatch census are enabled in both arms.
+  Means below; two arms/policy except the 512-row controls (one) and
+  2048@32K (four, ABBA plus reverse BAAB).
+
+  | Depth / new rows | Rollback wall ms | Default wall ms | Ratio | Rollback -> default GPU ms |
+  | --- | ---: | ---: | ---: | ---: |
+  | 32K / 512 | 610.047 | 609.282 | control | 538.323 -> 537.927 |
+  | 32K / 1300 | 1219.085 | **1199.298** | **1.016x** | 1085.331 -> 1048.237 |
+  | 32K / 2048 | 1820.616 | **1779.543** | **1.023x** | 1525.838 -> 1451.951 |
+  | 128K / 512 | 653.996 | 661.912 | control | 602.968 -> 603.348 |
+  | 128K / 1300 | 1388.298 | **1341.884** | **1.035x** | 1248.488 -> 1205.801 |
+  | 128K / 2048 | 2136.252 | **2008.244** | **1.064x** | 1772.797 -> 1700.223 |
+
+- Active append GPU time falls **3.4–4.8%**; wall savings are **20–128 ms**.
+  Keep the broad spread: the first 2048@32K block saves only **11 ms**, the
+  reverse block **71 ms**; no confidence-interval claim. Both 512-row controls
+  have **identical full dispatch censuses, zero sorted calls and identical
+  heads**, so claim no improvement there. Engram reads and inter-command
+  gaps limit the whole-call return on the expert-kernel gain.
+- The initial whole-policy fresh grid is retained separately, not pooled:
+  even an **identical-path placebo** at 1300@128K swings **1622 -> 2363 ms**,
+  GPU **1246/1262 ms**, driver scheduling **276/1078 ms**. Pulsing residency
+  reduces the four placebo walls to **1383/1399/1378/1384 ms** with identical
+  kernel censuses. This attributes the large apparent regressions to mapped
+  weight residency rather than the new arithmetic. The prefix is never
+  included in append latency; all controlled prefix heads match by depth.
+- Accuracy: frozen code/prose at **cold 4096, 1300@32K and 2048@128K**,
+  **128 teacher-forced full-vocabulary heads/cell/policy**. All **768 paired
+  vectors / 99,287,040 F32 components** are finite and **bitwise equal**;
+  **dNLL = mean/max KL = 0**. Two strict GPU witnesses cover all four IQ
+  formats, mixed down types, sparse/hot/empty/shifted tail runs, aliased dead
+  scratch, output guards and binding refusals, with Metal debug and shader
+  validation. Exact Full/CED current-pair qualification at **8192 and 4097**
+  compares every head and every existing causal-state-region SHA256 at all
+  **514 positions**, including a genuine scalar tail; both complete exactly.
+- Final **`29e49325`**: full release library **2467 passed / 0 failed /
+  747 ignored**, serial, required GPU tests and Metal validation, **135.71 s**.
+  **`scripts/check-contracts.sh` passes**, **574 CPU acceptance tests + 10
+  tripwires**. Actual greedy **`qwen run`**, **3790 input / 26 output / EOS**,
+  rollback/default replies and generated-token fingerprints match exactly.
+  Timings use `665126ca` (cold) and `a7c39599` (controlled appends); final
+  native V4.1/Metal/kernel sources are byte-identical to `a7c39599` after the
+  main rebase. All accepted timing/qualification packets have sampled
+  thermal pressure **0**, with build locks, nice 10, canonical GPU leases and
+  cooling gaps. The first final-suite driver dropped the inherited lease FD;
+  all 229 refusals and the corrected passing rerun are retained.
+- Killed: slower scalar-dequant and old-K32 variants; the 512-row sorted
+  chain's roughly **1% operator gain** does not justify enabling it. PV store
+  folding is only a syntax-probed prototype and is outside this increment.
+  Raw sources/binary identities, all arms, failed experiments, distribution
+  dumps, state proofs and checks: **`~/qwen-runs/2026-11-08-v41-routed-tiles/`**
+  on metagross (small evidence mirrored locally), especially
+  **`final-matrix.json`**, **`resident-real-*.summary.json`**,
+  **`quality-final-*.summary.json`**, **`ced-causal-*-v1.json`**,
+  **`final-validation-v2.log`** and **`contracts-rebased.log`**.
+
 ## 2026-11-08 - Flash-Next: Recover Full-Session Snapshot Capture Cost
 
 - Base **`6c53d956`**, implementation/qualification **`62ecfcfd`**, M5 Ultra /

@@ -6,6 +6,50 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - Tier-1 Serve Agents: Current Main Versus First Standing
+
+- Clean source **`3a36b6e8`**, M5 Ultra / 256 GiB, same three production
+  artifacts and frozen Rust/tool-shaped protocol as **`dabb9702`**. Four ~16K
+  buildup turns to ~64K; three 1.1–1.9K appends; older-question fork at ~48K;
+  GLM/Flash-Next return-without-reasoning controls. Greedy/seed 1, no drafter,
+  context 98304, default serve policies, 64/200 output tokens, faithful replay.
+  [Per-turn before/after, processed/reused tokens, routes and next gaps](bench/2026-11-08-tier1-serve-agents.md).
+- One retained observation/turn, not a switch qualification. TTFT seconds,
+  **old → current**; append means average the three different suffix sizes:
+
+  | Model | Cold ~16K | Deep append mean | Older-message fork |
+  | --- | ---: | ---: | ---: |
+  | V4.1 | 14.666 → **11.172** | 2.967 → **1.728** | 15.116 → **3.853** |
+  | GLM | 17.240 → **16.105** | 2.887 → **1.873** | 34.339 → **2.159** |
+  | FN | 9.526 → **9.543** | 1.640 → **1.708** | 9.037 → **1.907** |
+
+- V4.1 cold CED is active; short appends fold the header into one Full call.
+  GLM partial IQ/KDA/Q6 predicates apply, with live-trajectory fork coverage.
+  Flash-Next retains live workspaces and exact endpoints; appends still make
+  two calls. Per-kernel dispatch counters remain unavailable in ordinary serve.
+- Flash-Next deep-append TTFT is **4.1% higher** than the original standing; the separate
+  same-binary **6–11% off/on** receipt uses a different baseline. Preserve both.
+  A2 prompt capture **98.7 → 178.3 ms** offsets the **37.6 ms** restore saving;
+  native pp is unchanged at **1.249 s** versus the original **1.252 s**.
+- Six fresh same-build native A2 pp/tg200 controls have clean matching
+  identities. Native synthetic IDs differ from served code/replies; descriptive
+  serve-minus-native pp excess, not isolated transport cost:
+  **V4.1 1712 → 78 ms**;
+  **GLM 91 → 43 ms**;
+  **FN 447 → 504 ms**.
+- **26 accepted API turns + six native cells**, every output limit reached,
+  pressure **0 before/during/after**. Separate per-model Metal leases with wait,
+  shared build lock/nice 10, 25-second cooling plus repeated zero checks. One
+  unrelated CPU-contended Flash-Next attempt is archived/excluded; full quiet
+  repeat also monitors that worker's absence.
+- Highest conditional gap: deployed-client reasoning replay; then Flash-Next's
+  prompt copy/tiny header, large warm V4.1 CED, tighter fork replay and GLM
+  partial-row attention. Savings/costs and already-running routed-tile work are
+  ranked in the packet. No code changes or code-test rerun; docs/path/link/data
+  checks pass. Raw evidence and manifest: **`$HOME/qwen-runs/2026-11-08-serve-agents/`**
+  on metagross and local mirror. Owned servers/workers stopped/reaped, source/
+  target scratch removed, local docs worktree removed after commit; no merge.
+
 ## 2026-11-08 - A3B MTP Resume Audit: Numerical Qualification
 
 - **INF-KHTK**, M4 Max, code **`cfd1d27f`**. The normal D7/N8 audit failure

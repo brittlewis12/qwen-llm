@@ -17,6 +17,8 @@ pub(crate) struct MtpTargetStateAudit {
     pub(crate) continuation_token: i32,
     pub(crate) continuation_logits_max_abs: f32,
     pub(crate) continuation_logits_cosine: f64,
+    pub(crate) continuation_kl: f64,
+    pub(crate) continuation_nll_delta: f64,
 }
 
 pub(crate) fn max_abs_f32_pair(a: &MetalTensor, b: &MetalTensor) -> Result<f32> {
@@ -166,6 +168,61 @@ pub(crate) fn kv_bytes_metrics(
     Ok((max_abs, cosine))
 }
 
+/// Diagnostic only: report persistent state by model layer and live KV row.
+fn trace_target_state(
+    label: &str,
+    reference: &MetalSession,
+    candidate: &MetalSession,
+    model: &MetalModel,
+) -> Result<()> {
+    let (mut gdn, mut attn) = (0, 0);
+    for (layer, block) in model.blocks.iter().enumerate() {
+        match block {
+            MetalBlock::Gdn(_) => {
+                let state = max_abs_f32_pair(&reference.gdn_state[gdn], &candidate.gdn_state[gdn])?;
+                let conv = max_abs_f32_pair(&reference.gdn_conv[gdn], &candidate.gdn_conv[gdn])?;
+                eprintln!("[state-trace] {label} L{layer} gdn={state:.9e} conv={conv:.9e}");
+                gdn += 1;
+            }
+            MetalBlock::Attn(_) => {
+                for (name, a, b) in [
+                    ("K", &reference.kv_k[attn], &candidate.kv_k[attn]),
+                    ("V", &reference.kv_v[attn], &candidate.kv_v[attn]),
+                ] {
+                    let row_bytes = a.n_bytes() as usize / reference.kv_capacity;
+                    let n = reference.kv_n_pos[attn].min(candidate.kv_n_pos[attn]);
+                    let bytes = |t: &MetalTensor| unsafe {
+                        std::slice::from_raw_parts(
+                            (t.buffer.contents().as_ptr() as *const u8).add(t.offset as usize),
+                            n * row_bytes,
+                        )
+                    };
+                    let (aa, bb) = (bytes(a), bytes(b));
+                    let mut first = None;
+                    let (mut worst, mut worst_pos) = (0.0f32, 0);
+                    for pos in 0..n {
+                        let range = pos * row_bytes..(pos + 1) * row_bytes;
+                        let (delta, _) = kv_bytes_metrics(&aa[range.clone()], &bb[range], a.dtype)?;
+                        if delta > 0.0 && first.is_none() {
+                            first = Some(pos);
+                        }
+                        if delta > worst {
+                            worst = delta;
+                            worst_pos = pos;
+                        }
+                    }
+                    let (_, cosine) = kv_bytes_metrics(aa, bb, a.dtype)?;
+                    eprintln!(
+                        "[state-trace] {label} L{layer} {name} first={first:?} worst_pos={worst_pos} max={worst:.9e} cos={cosine:.12} live={n}"
+                    );
+                }
+                attn += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn audit_mtp_target_state(
     forward: &MetalForward<'_>,
     reference: &mut MetalSession,
@@ -251,6 +308,11 @@ pub(crate) fn audit_mtp_target_state(
         dot / (reference_norm.sqrt() * candidate_norm.sqrt() + f64::MIN_POSITIVE);
     let continuation_argmax_equal = argmax_i32(&reference_logits) == argmax_i32(&candidate_logits);
     let continuation_token = argmax_i32(&reference_logits);
+    let (continuation_kl, continuation_nll_delta) = continuation_distribution_metrics(
+        &reference_logits,
+        &candidate_logits,
+        continuation_token as usize,
+    )?;
     let resume_audit_pass = gdn_state_max_abs.is_finite()
         && gdn_conv_max_abs.is_finite()
         && kv_position_equal
@@ -272,6 +334,8 @@ pub(crate) fn audit_mtp_target_state(
         continuation_token,
         continuation_logits_max_abs,
         continuation_logits_cosine,
+        continuation_kl,
+        continuation_nll_delta,
     })
 }
 
@@ -290,6 +354,8 @@ pub(crate) fn merge_target_state_audit(
     aggregate.gdn_conv_max_abs = sticky_max(aggregate.gdn_conv_max_abs, next.gdn_conv_max_abs);
     aggregate.continuation_argmax_equal &= next.continuation_argmax_equal;
     aggregate.continuation_token = next.continuation_token;
+    aggregate.continuation_kl += next.continuation_kl;
+    aggregate.continuation_nll_delta += next.continuation_nll_delta;
     aggregate.continuation_logits_max_abs = aggregate
         .continuation_logits_max_abs
         .max(next.continuation_logits_max_abs);
@@ -304,6 +370,45 @@ fn sticky_max(left: f32, right: f32) -> f32 {
     } else {
         f32::NAN
     }
+}
+
+/// Full-vocabulary KL(reference || candidate) and teacher-forced candidate
+/// minus reference NLL, using f64 log-sum-exp to avoid softmax underflow.
+fn continuation_distribution_metrics(
+    reference: &[f32],
+    candidate: &[f32],
+    target: usize,
+) -> Result<(f64, f64)> {
+    anyhow::ensure!(
+        reference.len() == candidate.len() && target < reference.len(),
+        "invalid continuation vectors"
+    );
+    anyhow::ensure!(
+        reference.iter().chain(candidate).all(|x| x.is_finite()),
+        "non-finite continuation logits"
+    );
+    let log_z = |values: &[f32]| {
+        let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+        max + values
+            .iter()
+            .map(|&x| (x as f64 - max).exp())
+            .sum::<f64>()
+            .ln()
+    };
+    let (zr, zc) = (log_z(reference), log_z(candidate));
+    let kl = reference
+        .iter()
+        .zip(candidate)
+        .map(|(&r, &c)| {
+            let lp = r as f64 - zr;
+            lp.exp() * (lp - (c as f64 - zc))
+        })
+        .sum::<f64>()
+        .max(0.0);
+    Ok((
+        kl,
+        (zc - candidate[target] as f64) - (zr - reference[target] as f64),
+    ))
 }
 
 pub(crate) const MTP_CONTINUATION_AUDIT_STEPS: usize = 16;
@@ -333,6 +438,8 @@ pub(crate) fn audit_mtp_target_state_chain(
         )?;
         merge_target_state_audit(&mut audit, next);
     }
+    audit.continuation_kl /= MTP_CONTINUATION_AUDIT_STEPS as f64;
+    audit.continuation_nll_delta /= MTP_CONTINUATION_AUDIT_STEPS as f64;
     audit.resume_audit_pass &= audit.gdn_state_max_abs <= 1e-2;
     audit.resume_audit_pass &= audit.gdn_conv_max_abs <= 1e-1;
     Ok(audit)
@@ -762,6 +869,46 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
             spec.set_base_hidden_variant(mtp_base_hidden.into());
             spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
             spec.set_history_mode(mtp_history.into());
+            if mtp_state_trace && use_packed_verify {
+                let mut shadow = MetalSession::fresh(&ctx, &mm, cap)?;
+                let mut shadow_scratch =
+                    MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, 16)?;
+                prefill_tokens_with_multi_hidden(
+                    &mf,
+                    &prompt_ids,
+                    0,
+                    &mut shadow,
+                    &mut shadow_scratch,
+                    &[],
+                    None,
+                )?;
+                let mut serial_prompt = MetalSession::fresh(&ctx, &mm, cap)?;
+                for (i, &tok) in prompt_ids.iter().enumerate() {
+                    mf.single_token(tok, i as u32, &mut serial_prompt)?;
+                }
+                trace_target_state("serial-vs-packed-prefill", &serial_prompt, &shadow, &mm)?;
+                let mf_probe = &mf;
+                let model = &mm;
+                spec.set_step_probe(Box::new(move |ev: &PackedStepProbe<'_>| {
+                    for (i, &tok) in ev.committed.iter().enumerate() {
+                        mf_probe
+                            .single_token(tok, ev.start_position + i as u32, &mut shadow)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    let label = format!(
+                        "{:?} step={} pos={} acc={} keep={} restore={} stop={}",
+                        ev.phase,
+                        ev.step_idx,
+                        ev.start_position,
+                        ev.n_accepted,
+                        ev.n_keep,
+                        ev.restore_fired,
+                        ev.stop_now
+                    );
+                    trace_target_state(&label, &shadow, ev.session, model)
+                        .map_err(|e| e.to_string())
+                }));
+            }
             let output = if !use_packed_verify {
                 spec.decode(&prompt_ids, tokens, &stops, &mut spec_session)
                     .context("spec decode")?
@@ -1175,6 +1322,8 @@ pub(crate) fn run_mtp(args: MtpArgs) -> Result<()> {
                 "continuation_argmax_equal": audit.continuation_argmax_equal,
                 "continuation_logits_max_abs": audit.continuation_logits_max_abs,
                 "continuation_logits_cosine": audit.continuation_logits_cosine,
+                "continuation_mean_kl": audit.continuation_kl,
+                "continuation_mean_nll_delta": audit.continuation_nll_delta,
             })
         });
         let semantics = serde_json::json!({
@@ -1319,6 +1468,8 @@ mod tests {
             continuation_token: 0,
             continuation_logits_max_abs: 0.0,
             continuation_logits_cosine: 1.0,
+            continuation_kl: 0.0,
+            continuation_nll_delta: 0.0,
         }
     }
 

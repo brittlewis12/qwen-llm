@@ -2657,6 +2657,27 @@ impl<'a> SpeculativeDecoder<'a> {
         let mut processed_pos = (n_prompt - 1) as u32;
         let mut emitted_count: usize = 0;
 
+        if let Some(probe) = self.step_probe.as_mut() {
+            probe(&PackedStepProbe {
+                phase: PackedStepProbePhase::Prefill,
+                step_idx: 0,
+                start_position: n_prompt as u32,
+                n_eff: 0,
+                n_accepted: 0,
+                n_keep: 0,
+                restore_fired: false,
+                stop_now: false,
+                committed: &[],
+                session: base_session,
+            })
+            .map_err(|detail| {
+                MtpError::Metal(MetalError::BadShape {
+                    kernel: "mtp_decode_packed_n.step_probe",
+                    detail,
+                })
+            })?;
+        }
+
         'outer: loop {
             tokens.push(emit_tok);
             emitted_count += 1;
@@ -2848,6 +2869,29 @@ impl<'a> SpeculativeDecoder<'a> {
                     None,
                 )?;
                 stats.restore_ms += t_restore.elapsed().as_secs_f64() * 1e3;
+            }
+
+            if let Some(probe) = self.step_probe.as_mut() {
+                let mut committed = vec![carry_tok];
+                committed.extend_from_slice(&drafts[..canonical_accepted]);
+                probe(&PackedStepProbe {
+                    phase: PackedStepProbePhase::Packet,
+                    step_idx: stats.steps as usize,
+                    start_position,
+                    n_eff: physical_verify_n as u32,
+                    n_accepted,
+                    n_keep,
+                    restore_fired: n_keep < physical_verify_n as u32,
+                    stop_now,
+                    committed: &committed,
+                    session: base_session,
+                })
+                .map_err(|detail| {
+                    MtpError::Metal(MetalError::BadShape {
+                        kernel: "mtp_decode_packed_n.step_probe",
+                        detail,
+                    })
+                })?;
             }
 
             let t_bridge = std::time::Instant::now();

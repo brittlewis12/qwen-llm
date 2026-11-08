@@ -15958,3 +15958,97 @@ fn verify_status_checks_both_session_and_packed_buffers() {
     let error = super::check_verify_route_statuses(&session_ready, &packed_bad, 4).unwrap_err();
     assert!(error.to_string().contains("overflow"), "{error}");
 }
+
+/// Causal/rollback witness for the production MTP verifier. Change every
+/// rejected token while retaining the same physical width: arithmetic for
+/// the accepted rows is identical, so this checks state ownership without
+/// conflating packed-vs-scalar reduction order with a rollback error.
+#[test]
+#[ignore = "model witness: qwen3.6-35b-a3b-ud-q4_k_m"]
+fn mtp_layer_major_rejected_suffix_is_unobservable() {
+    let path = crate::test_fixtures::A3B_Q4_K_M.required();
+    let ctx = MetalContext::new().expect("Metal context");
+    let g = GgufFile::open(path).expect("open fixture");
+    let m = Model::from_gguf(&g).expect("load model");
+    let mm = MetalModel::load(&ctx, &g, &m).expect("Metal model");
+    let mf = MetalForward::new(&ctx, &mm);
+    let n = 8;
+    let prefix = [9419, 1, 5];
+    let packet = [1234, 7, 999, 42, 555, 18, 74, 220];
+    let layers = [(mm.blocks.len() - 1) as u32];
+    let mut scratch = MetalDFlashVerifyScratch::fresh(&ctx, &mm, n, 1).unwrap();
+    let mut layer_scratch = MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, n).unwrap();
+    for keep in 1..=n {
+        let mut a = MetalSession::fresh(&ctx, &mm, 32).unwrap();
+        let mut b = MetalSession::fresh(&ctx, &mm, 32).unwrap();
+        for (pos, &tok) in prefix.iter().enumerate() {
+            mf.single_token(tok, pos as u32, &mut a).unwrap();
+            mf.single_token(tok, pos as u32, &mut b).unwrap();
+        }
+        let mut changed = packet;
+        changed[keep as usize..].fill(1510);
+        for (session, input) in [(&mut a, &packet), (&mut b, &changed)] {
+            encode_packed_verify_layer_major_inner_for(
+                PackedVerifyCaller::Mtp,
+                &mf,
+                &layers,
+                input,
+                prefix.len() as u32,
+                &mut scratch,
+                &mut layer_scratch,
+                session,
+                None,
+                None,
+            )
+            .unwrap();
+            if keep < n {
+                encode_restore_after_partial_accept_inner(
+                    &mf,
+                    &scratch,
+                    keep,
+                    prefix.len() as u32,
+                    session,
+                    None,
+                )
+                .unwrap();
+            }
+        }
+        let position = prefix.len() + keep as usize;
+        assert!(a.kv_n_pos.iter().all(|&p| p == position));
+        assert_eq!(a.kv_n_pos, b.kv_n_pos);
+        let bytes = |t: &MetalTensor, len: usize| unsafe {
+            std::slice::from_raw_parts(
+                (t.buffer.contents().as_ptr() as *const u8).add(t.offset as usize),
+                len,
+            )
+        };
+        for (name, aa, bb) in [
+            ("gdn", &a.gdn_state, &b.gdn_state),
+            ("conv", &a.gdn_conv, &b.gdn_conv),
+            ("K", &a.kv_k, &b.kv_k),
+            ("V", &a.kv_v, &b.kv_v),
+        ] {
+            for (layer, (x, y)) in aa.iter().zip(bb).enumerate() {
+                let len = if name == "K" || name == "V" {
+                    x.n_bytes() as usize / a.kv_capacity * position
+                } else {
+                    x.n_bytes() as usize
+                };
+                assert_eq!(
+                    bytes(x, len),
+                    bytes(y, len),
+                    "{name} layer={layer} keep={keep}"
+                );
+            }
+        }
+        // Resume serially and overwrite the first stale KV row. This also
+        // catches any verifier scratch accidentally treated as live state.
+        for offset in 0..3 {
+            let pos = (position + offset) as u32;
+            let la = mf.single_token(709, pos, &mut a).unwrap();
+            let lb = mf.single_token(709, pos, &mut b).unwrap();
+            assert_eq!(la, lb, "resume offset={offset} keep={keep}");
+        }
+        eprintln!("[mtp-suffix] keep={keep}/{n}: state and resumed logits bitwise equal");
+    }
+}

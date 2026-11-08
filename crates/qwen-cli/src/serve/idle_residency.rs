@@ -4,7 +4,7 @@
 //! re-wire them. Family-neutral scheduling; each backend names its eligible
 //! buffers (`retained_buffers()`). Every family whose serve backend names its
 //! no-copy GGUF windows normally defaults to a 60 s window ([`DEFAULT_WINDOW`]);
-//! V4.1 remains opt-in. Qwen eligibility follows its selected weight storage.
+//! Qwen eligibility follows its selected weight storage.
 //!
 //! Window: closed until the first activity (a warm-up, or the first request
 //! that submitted GPU compute work, so a cold model is never faulted in by a
@@ -40,7 +40,7 @@ use qwen_llm::metal::{
 use std::time::{Duration, Instant};
 
 /// Idle keep-alive window in seconds, overridden by the CLI flag. Default 60
-/// for eligible storage, except V4.1 defaults to 0 (opt-in); 0 disables.
+/// for eligible storage; 0 disables.
 pub(crate) const IDLE_RESIDENCY_ENV: &str = "QWEN_SERVE_IDLE_RESIDENCY_SECS";
 /// The shared default for no-copy families: a 1 GiB kill check of ordinary
 /// command-buffer wiring recovered in every case (PERF-LOG 2026-10-05), and

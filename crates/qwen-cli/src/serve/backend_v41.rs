@@ -48,6 +48,12 @@ const SAMPLE_WORKERS_ENV: &str = "QWEN_SERVE_V41_SAMPLE_WORKERS";
 /// Driver scheduling can overlap GPU and commit/wait; wait minus GPU is not
 /// pure queue time. Read for each native prefill call.
 const PREFILL_TIMING_ENV: &str = "QWEN_SERVE_V41_PREFILL_TIMING";
+/// Fold a terminal recipe header of at most eight tokens into a reused
+/// 512..2048-token append when the owner has a full prefill quantum. Keep
+/// earlier shared-prefix cuts; publish the header checkpoint at the prompt
+/// end with logits instead. Default on; 0 restores the separate header call.
+/// Read once when preparing the server.
+const FUSE_HEADER_ENV: &str = "QWEN_SERVE_V41_FUSE_HEADER";
 
 /// Agent workloads keep about three conversations busy at once. M5 Ultra, GSQ
 /// IQ2_XS, three agents x three turns (greedy, 128 tokens per turn, fresh
@@ -284,6 +290,7 @@ pub(crate) struct Settings {
     eos: u32,
     model_id: String,
     headroom: fn() -> Option<HostMemoryHeadroom>,
+    fuse_header: bool,
 }
 
 impl Settings {
@@ -317,6 +324,7 @@ impl Settings {
             eos,
             model_id,
             headroom: qwen_llm::metal::host_memory_headroom,
+            fuse_header: qwen_llm::env_flag::read_default_on(FUSE_HEADER_ENV),
         })
     }
 

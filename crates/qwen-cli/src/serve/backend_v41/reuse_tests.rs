@@ -148,6 +148,7 @@ struct Recorded {
     live: Option<reuse::Live<Vec<u32>>>,
     checkpoint: Option<Vec<u32>>,
     checkpoint_logits: Vec<f32>,
+    checkpoint_heads: std::collections::HashMap<Vec<u32>, Vec<f32>>,
     checkpoint_positions: Vec<usize>,
     cache: SnapshotCache<Vec<u32>>,
     restore_checkpoint: bool,
@@ -162,6 +163,7 @@ impl Default for Recorded {
             live: None,
             checkpoint: None,
             checkpoint_logits: vec![],
+            checkpoint_heads: Default::default(),
             checkpoint_positions: vec![],
             cache: SnapshotCache::new(1 << 20, Default::default()),
             restore_checkpoint: false,
@@ -195,12 +197,25 @@ impl reuse::Reuse<Vec<u32>> for Recorded {
             if !self.restore_checkpoint {
                 return None;
             }
-            let (length, checkpoint) = self.cache.best_prefix(ids)?;
+            // Match production: an exact snapshot is usable when it carries
+            // endpoint logits; a body-only snapshot needs a shorter prefix.
+            let heads = &self.checkpoint_heads;
+            let hit = self
+                .cache
+                .peek_exact_in(&(), ids)
+                .filter(|_| heads.contains_key(ids))
+                .or_else(|| self.cache.peek_best_prefix_in(&(), ids))?;
+            self.cache.touch(hit.id);
+            let length = hit.prefix_len;
             Some(reuse::Restored {
                 live: reuse::Live {
-                    state: (*checkpoint).clone(),
+                    state: (*hit.value).clone(),
                     tokens: ids[..length].to_vec(),
-                    logits: vec![],
+                    logits: self
+                        .checkpoint_heads
+                        .get(&ids[..length])
+                        .cloned()
+                        .unwrap_or_default(),
                 },
                 source: "snapshot_ram",
             })
@@ -226,7 +241,9 @@ impl reuse::Reuse<Vec<u32>> for Recorded {
         self.checkpoint_positions.push(ids.len());
         let bytes =
             SnapshotCache::<Vec<u32>>::entry_bytes(ids.len(), (state.len() * 4) as u64).unwrap();
-        self.cache.insert_strict(ids.to_vec(), state.clone(), bytes);
+        if self.cache.insert_strict(ids.to_vec(), state.clone(), bytes) && !logits.is_empty() {
+            self.checkpoint_heads.insert(ids.to_vec(), logits.to_vec());
+        }
     }
     fn ladder_enabled(&self) -> bool {
         self.cache.ladder_enabled()
@@ -1371,6 +1388,136 @@ fn headless_and_final_prefill_memory_refusals_stay_typed() {
             assert_eq!(calls, [(16, false)]);
             assert!(recorded.checkpoint.is_none());
         }
+    }
+}
+
+#[test]
+fn folded_header_tips_advance_ladder_and_restore_exact_prompt_logits() {
+    struct Sink;
+    impl GenerationSink for Sink {
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    for fold in [false, true] {
+        let mut settings = Settings::new(
+            tokenizer(),
+            100000,
+            1,
+            SamplingConfig::default(),
+            tokenizer_fixture::EOS,
+            "fixture".into(),
+        )
+        .unwrap();
+        settings.fuse_header = fold;
+        settings.headroom = || finite_headroom(1 << 30);
+        let request = settings
+            .profile()
+            .parse(&json!({"model":"fixture","input":"same root","max_output_tokens":1}))
+            .unwrap();
+        let mut reuse = Recorded {
+            restore_checkpoint: true,
+            ..Default::default()
+        };
+        reuse.cache = reuse
+            .cache
+            .with_checkpoint_ladder(super::super::checkpoint_ladder::Config::testing(500000));
+        let run = |reuse: &mut Recorded, prompt: &str, calls: &mut Vec<(usize, bool)>| {
+            settings
+                .execute(
+                    &request,
+                    prompt,
+                    Some(PromptBoundaries {
+                        shared_prefix_end: Some(12000),
+                        generation_header_start: Some(prompt.len() - 2),
+                    }),
+                    &mut Sink,
+                    |_, _, _| Ok(()),
+                    |_| Ok(vec![]),
+                    reuse,
+                    |state, ids, _, head| {
+                        state.extend_from_slice(ids);
+                        calls.push((ids.len(), head));
+                        let mut logits = vec![0.; 257];
+                        logits[0] = -0.0;
+                        logits[1] = f32::from_bits(0x3f800001);
+                        logits[256] = 100.;
+                        Ok(logits)
+                    },
+                    |_, _, _| panic!("EOS has no forward"),
+                    || Duration::ZERO,
+                )
+                .unwrap()
+        };
+        let mut calls = Vec::new();
+        let first = format!("{}{}hh", "s".repeat(12000), "u".repeat(16000));
+        run(&mut reuse, &first, &mut calls);
+        let ids: Vec<u32> = first.bytes().map(u32::from).collect();
+        assert!(reuse.cache.entry_for(&ids[..24288]).is_some());
+        assert_eq!(reuse.retained_tips, [28000]);
+        assert_eq!(reuse.cache.ladder_status().0, 1);
+
+        let appended = format!("{first}{}hh", "a".repeat(1022));
+        calls.clear();
+        run(&mut reuse, &appended, &mut calls);
+        assert_eq!(
+            calls,
+            if fold {
+                vec![(1024, true)]
+            } else {
+                vec![(1022, false), (2, true)]
+            }
+        );
+        let tip = appended.len() - if fold { 0 } else { 2 };
+        let ids: Vec<u32> = appended.bytes().map(u32::from).collect();
+        assert!(reuse.cache.entry_for(&ids[..tip]).is_some());
+        assert_eq!(reuse.retained_tips.last(), Some(&tip));
+        assert_eq!(
+            reuse.cache.ladder_status().0,
+            2,
+            "promote the already-paid tip"
+        );
+        if fold {
+            assert!(reuse.cache.entry_for(&ids[..ids.len() - 2]).is_none());
+        }
+
+        let original = format!("{appended}{}hh", "b".repeat(1022));
+        run(&mut reuse, &original, &mut calls);
+        let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let original_logits = bits(&reuse.live.as_ref().unwrap().logits);
+        // A mutable live state must not alias the independently retained copy.
+        reuse.live.as_mut().unwrap().state.fill(999);
+        let mut fork = original.clone().into_bytes();
+        fork[original.len() - 3] = b'c';
+        let fork = String::from_utf8(fork).unwrap();
+        calls.clear();
+        let outcome = run(&mut reuse, &fork, &mut calls);
+        assert_eq!(outcome.usage.cached_tokens, tip);
+        assert_eq!(
+            reuse.live.as_ref().unwrap().state,
+            fork.bytes().map(u32::from).collect::<Vec<_>>()
+        );
+        assert_eq!(bits(&reuse.live.as_ref().unwrap().logits), original_logits);
+
+        calls.clear();
+        let outcome = run(&mut reuse, &original, &mut calls);
+        assert_eq!(
+            outcome.usage.cached_tokens,
+            original.len() - if fold { 0 } else { 2 }
+        );
+        assert_eq!(calls, if fold { vec![] } else { vec![(2, true)] });
+        assert_eq!(
+            reuse.live.as_ref().unwrap().state,
+            original.bytes().map(u32::from).collect::<Vec<_>>()
+        );
+        assert_eq!(bits(&reuse.live.as_ref().unwrap().logits), original_logits);
+        assert_eq!(
+            reuse.retained_tips.last(),
+            Some(&(original.len() - if fold { 0 } else { 2 }))
+        );
     }
 }
 

@@ -5223,6 +5223,13 @@
   },
   {
     "target": "qwen",
+    "name": "serve::backend_v41::tests::warm_header_fold_keeps_shared_cuts_and_publishes_endpoint_logits",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only warm-prefix prefill controller with scripted state: header folding, rollback, shared cuts, loaded quanta, endpoint logits and failure publication; no Metal or real model."
+  },
+  {
+    "target": "qwen",
     "name": "serve::backend_v41::tokenizer_fixture::fixture_uses_native_joyai_encoding_and_exact_piece_bytes",
     "class": "cpu",
     "ignored": false,
@@ -5619,6 +5626,13 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed pure checkpoint retention/planning or fake-state execution; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse_tests::folded_header_tips_advance_ladder_and_restore_exact_prompt_logits",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fake native states and real snapshot-cache retention verify folded/rollback tip keys, ladder promotion, immutable fork restore and exact-prompt logits; no Metal context or model."
   },
   {
     "target": "qwen",

@@ -129,7 +129,7 @@ static DEEPSEEK_V41: FamilyProfile = FamilyProfile {
     serve_warmth: ServeWarmth::SnapshotsRam,
     durable_idle_publish: false,
     idle_residency_eligible: true,
-    idle_residency_default_secs: Some(0),
+    idle_residency_default_secs: None,
     upstream_template_style: false,
     capabilities: crate::deepseek_v41::capabilities,
 };
@@ -528,14 +528,7 @@ mod tests {
         ] {
             let profile = profile(family);
             assert_eq!(profile.idle_residency_eligible, idle_residency);
-            assert_eq!(
-                profile.idle_residency_default_secs,
-                if family == ModelFamily::DeepSeekV41 {
-                    Some(0)
-                } else {
-                    None
-                }
-            );
+            assert_eq!(profile.idle_residency_default_secs, None);
             assert_eq!(profile.upstream_template_style, upstream_template);
         }
     }

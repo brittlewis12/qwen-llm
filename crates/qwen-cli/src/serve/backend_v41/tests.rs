@@ -12,6 +12,183 @@ use std::time::{Duration, Instant};
 const WAIT: Duration = Duration::from_secs(5);
 thread_local! { static OUTPUT_HEADROOM: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 
+#[test]
+fn warm_header_fold_keeps_shared_cuts_and_publishes_endpoint_logits() {
+    use super::reuse::{Live, Restored, Reuse};
+
+    struct Cache {
+        matched: usize,
+        cuts: Vec<(usize, usize)>,
+        committed: bool,
+    }
+    impl Reuse<usize> for Cache {
+        fn take(
+            &mut self,
+            ids: &[u32],
+            _: usize,
+            _: u64,
+        ) -> Result<Option<Restored<usize>>, ServeError> {
+            Ok((self.matched > 0).then(|| Restored {
+                live: Live {
+                    state: self.matched,
+                    tokens: ids[..self.matched].to_vec(),
+                    logits: vec![],
+                },
+                source: "live",
+            }))
+        }
+        fn checkpoint(&mut self, state: &usize, ids: &[u32], logits: &[f32], _: u64) {
+            assert_eq!(*state, ids.len());
+            self.cuts.push((ids.len(), logits.len()));
+        }
+        fn commit(&mut self, _: Live<usize>) {
+            self.committed = true;
+        }
+        fn capacity(&self, _: &usize, required: usize) -> usize {
+            required
+        }
+    }
+    struct Sink;
+    impl GenerationSink for Sink {
+        fn piece(&mut self, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+        fn tick(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    struct Probe<'a> {
+        calls: &'a mut Vec<(usize, bool)>,
+        fail: bool,
+    }
+    impl execution::Engine<usize> for Probe<'_> {
+        fn admit(&mut self, _: usize, _: usize, _: u64) -> Result<(), StateError> {
+            Ok(())
+        }
+        fn new_state(&mut self, _: usize) -> Result<usize, ServeError> {
+            Ok(0)
+        }
+        fn prefill(
+            &mut self,
+            state: &mut usize,
+            tokens: &[u32],
+            _: &AtomicBool,
+            with_logits: bool,
+        ) -> Result<Vec<f32>, ServeError> {
+            *state += tokens.len();
+            self.calls.push((tokens.len(), with_logits));
+            if self.fail {
+                return Err(ServeError::server_error("synthetic prefill failure"));
+            }
+            let mut logits = if with_logits { vec![0.; 257] } else { vec![] };
+            if with_logits {
+                logits[tokenizer_fixture::EOS as usize] = 100.;
+            }
+            Ok(logits)
+        }
+        fn step(&mut self, _: &mut usize, _: u32, _: &AtomicBool) -> Result<Vec<f32>, String> {
+            panic!("EOS must not be consumed")
+        }
+        fn now(&mut self) -> Duration {
+            Duration::ZERO
+        }
+    }
+
+    for (fold, matched, append, header, shared, quantum, fail, expected_fold) in [
+        (true, 32, 1118, 2, None, 4096, false, true),
+        (true, 32, 1629, 2, None, 4096, false, true),
+        (true, 32, 1886, 2, None, 4096, false, true),
+        (true, 32, 512, 2, None, 4096, false, true),
+        (true, 32, 2048, 2, None, 4096, false, true),
+        (true, 32, 511, 2, None, 4096, false, false),
+        (true, 32, 1629, 2, Some(800), 4096, false, false),
+        (false, 32, 1629, 2, None, 4096, false, false),
+        (true, 0, 1629, 2, None, 4096, false, false),
+        (true, 32, 2049, 2, None, 4096, false, false),
+        (true, 32, 1629, 9, None, 4096, false, false),
+        (true, 32, 1629, 2, None, 512, false, false),
+        (true, 32, 1629, 2, Some(1627), 4096, false, false),
+        (true, 32, 1629, 2, None, 4096, true, false),
+    ] {
+        let prompt = "p".repeat(matched + append);
+        let header_cut = prompt.len() - header;
+        let shared_cut = shared.map(|cut| matched + cut);
+        let mut settings = Settings::new(
+            tokenizer_fixture::tokenizer(None),
+            8192,
+            1,
+            SamplingConfig::default(),
+            tokenizer_fixture::EOS,
+            "test".into(),
+        )
+        .unwrap();
+        settings.headroom = || finite_headroom(1 << 40);
+        settings.fuse_header = fold;
+        let request = settings
+            .profile()
+            .parse(&json!({"model":"test", "input":"x", "max_output_tokens":1}))
+            .unwrap();
+        let mut cache = Cache {
+            matched,
+            cuts: vec![],
+            committed: false,
+        };
+        let mut calls = Vec::new();
+        let mut engine = Probe {
+            calls: &mut calls,
+            fail,
+        };
+        let ceiling =
+            super::super::output_memory::OutputByteCeiling::from_tokens_and_piece(1, 64).unwrap();
+        let mut run = settings
+            .begin(
+                ceiling,
+                &request,
+                &prompt,
+                Some(super::super::http::PromptBoundaries {
+                    shared_prefix_end: shared_cut,
+                    generation_header_start: Some(header_cut),
+                }),
+                &mut Sink,
+                0,
+                &mut engine,
+                &mut cache,
+            )
+            .unwrap();
+        let mut failed = false;
+        while !run.prefilled() {
+            if settings
+                .prefill_slice(&mut run, quantum, &mut Sink, &mut engine, &mut cache)
+                .is_err()
+            {
+                failed = true;
+                break;
+            }
+        }
+        drop(engine);
+        if fail {
+            assert!(failed);
+            assert!(cache.cuts.is_empty());
+            assert!(!cache.committed);
+            continue;
+        }
+        assert!(!failed);
+        assert_eq!(run.position, prompt.len());
+        assert!(calls.last().unwrap().1);
+        if let Some(cut) = shared_cut {
+            assert!(cache.cuts.contains(&(cut, 0)), "shared cut was crossed");
+        }
+        if expected_fold {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(cache.cuts.last(), Some(&(prompt.len(), 257)));
+            assert!(!cache.cuts.iter().any(|&(cut, _)| cut == header_cut));
+        } else {
+            assert_eq!(calls.last(), Some(&(header, true)));
+            assert_eq!(cache.cuts.last(), Some(&(header_cut, 0)));
+        }
+    }
+}
+
 fn prompt_len(backend: &Stub, input: &str) -> usize {
     let request = backend
         .settings

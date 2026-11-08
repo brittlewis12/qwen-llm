@@ -758,7 +758,7 @@ mod tests {
             family_profile::DrafterSupport::Unsupported(_)
         ));
         assert!(profile.idle_residency_eligible);
-        assert_eq!(profile.idle_residency_default_secs, Some(0));
+        assert_eq!(profile.idle_residency_default_secs, None);
     }
 }
 

@@ -169,6 +169,7 @@ impl Settings {
         )?;
         let mut checkpoint_cuts = Vec::new();
         let mut generation_cut = None;
+        let mut shared_cut = None;
         if let Some(boundaries) = boundaries {
             for (name, offset) in [
                 ("shared_prefix", boundaries.shared_prefix_end),
@@ -186,6 +187,8 @@ impl Settings {
                 }) {
                     if name == "generation_header" {
                         generation_cut = Some(prefix.len());
+                    } else {
+                        shared_cut = Some(prefix.len());
                     }
                     checkpoint_cuts.push(prefix.len());
                 } else {
@@ -198,6 +201,8 @@ impl Settings {
         }
         checkpoint_cuts.sort_unstable();
         checkpoint_cuts.dedup();
+        // An aliased generation boundary still owns the shared-prefix cut.
+        let fuse_header = self.fuse_header && generation_cut != shared_cut;
         let vocab = self.tokenizer.n_vocab() as usize;
         let required =
             super::super::decode_loop::required_forwards("V4.1", ids.len(), maximum, self.context)?;
@@ -264,6 +269,8 @@ impl Settings {
             ids,
             checkpoint_cuts,
             generation_cut,
+            fuse_header,
+            header_fused: false,
             conversation: super::super::checkpoint_ladder::conversation(request),
             ladder_attempted: false,
             ladder_capture_ms: 0.0,
@@ -308,6 +315,9 @@ impl Settings {
         check(sink, cancel)?;
         admit_output(reuse, run.reserve, self.headroom)?;
         let endpoint = run.next_endpoint(max_rows);
+        let fused_header = run
+            .generation_cut
+            .is_some_and(|header| position < header && header < endpoint);
         let with_logits = endpoint == ids.len();
         run.logits = engine
             .prefill(
@@ -334,6 +344,7 @@ impl Settings {
         run.prefill_ranges
             .extend(report.chunk_ranges().map(|range| [range.start, range.end]));
         run.position = endpoint;
+        run.header_fused |= fused_header;
         let segment_end = run
             .checkpoint_cuts
             .iter()
@@ -353,8 +364,9 @@ impl Settings {
             reuse.ladder_checkpoint(conversation, &run.state, &ids[..endpoint], run.reserve);
             run.ladder_capture_ms += (engine.now() - start).as_secs_f64() * 1e3;
         }
-        if run.checkpoint_cuts.contains(&endpoint) {
-            reuse.checkpoint(&run.state, &ids[..endpoint], &[], run.reserve);
+        if run.checkpoint_cuts.contains(&endpoint) || fused_header {
+            let logits = if fused_header { &run.logits[..] } else { &[] };
+            reuse.checkpoint(&run.state, &ids[..endpoint], logits, run.reserve);
         }
         Ok(())
     }
@@ -399,6 +411,7 @@ impl Settings {
             conversation,
             generation_cut,
             checkpoint_cuts,
+            header_fused,
             prefill_rows,
             prefill_chunks,
             prefill_calls,
@@ -412,9 +425,15 @@ impl Settings {
             ..
         } = run;
         let retention_start = Instant::now();
-        if let Some(tip) =
+        // Folding captures the completed prompt, never a state labelled as its
+        // pre-header prefix. Exact prompt hits restore that endpoint and logits
+        // without a new prefill, so they must retain the same key as well.
+        let tip = if header_fused || matched == ids.len() {
+            Some(ids.len())
+        } else {
             generation_cut.or_else(|| checkpoint_cuts.is_empty().then_some(ids.len()))
-        {
+        };
+        if let Some(tip) = tip {
             reuse.retain_tip(conversation, &ids[..tip]);
         }
         let retention_ms = retention_start.elapsed().as_secs_f64() * 1e3;
@@ -434,6 +453,7 @@ impl Settings {
             "prefill_rows_max":crate::family_options::V41_PREFILL_ROWS,
             "prefill_selected_rows":selected_rows, "prefill_calls":prefill_calls,
             "prefill_chunk_ranges":prefill_ranges,
+            "prefill_header_fused":header_fused,
             "decode_ms":generation.wall_ms, "generated_tokens":generation.tokens.len(),
             "transitions":transitions, "transition_ms":transition_ms,
             "required_forwards":required, "capacity":capacity, "reused_tokens":matched, "reuse_source":reuse_source, "restore_ms":restore_ms, "ced":false,
@@ -542,6 +562,8 @@ pub(super) struct Run<S> {
     pub(super) ids: Vec<u32>,
     checkpoint_cuts: Vec<usize>,
     generation_cut: Option<usize>,
+    fuse_header: bool,
+    header_fused: bool,
     conversation: Option<super::super::checkpoint_ladder::Conversation>,
     ladder_attempted: bool,
     ladder_capture_ms: f64,
@@ -570,16 +592,25 @@ pub(super) struct Run<S> {
 }
 
 impl<S> Run<S> {
-    /// Where a prefill call of at most `max_rows` from here would end.
+    /// Keep earlier cuts and loaded 512-row quanta. An idle owner's short
+    /// append may include its terminal header in the first Full call.
     pub(super) fn next_endpoint(&self, max_rows: usize) -> usize {
+        let cut = self
+            .checkpoint_cuts
+            .iter()
+            .copied()
+            .find(|&cut| cut > self.position)
+            .unwrap_or(self.ids.len());
+        let fold = self.fuse_header
+            && self.matched > 0
+            && self.position == self.matched
+            && (512..=2048).contains(&(self.ids.len() - self.matched))
+            && max_rows == crate::family_options::V41_PREFILL_ROWS
+            && self.generation_cut == Some(cut)
+            && (1..=8).contains(&(self.ids.len() - cut))
+            && self.ids.len() - self.position <= max_rows;
         (self.position + max_rows)
-            .min(
-                self.checkpoint_cuts
-                    .iter()
-                    .copied()
-                    .find(|&cut| cut > self.position)
-                    .unwrap_or(self.ids.len()),
-            )
+            .min(if fold { self.ids.len() } else { cut })
             .min(self.ids.len())
     }
     pub(super) fn prefilled(&self) -> bool {

@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-07 - V4.1 Serve: 64K Appends, Idle Residency And Header Folding
+
+- **Default on**, M5 Ultra, production four-shard **DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS + IQ4_NL disk Engram**, all **384 experts/top-6**: matches the serve standing's artifact, without REAP. Primary grid: **`dbde303c`** on **`eb02cb0b`**, archived on **`perf/v41-serve-append-evidence`**. Final source **`3eb0c9ce`** rebases the same feature onto main **`896ece2f`**; retains main's ordinary loader and removal of the P4 override.
+- Actual **`qwen serve` / `/v1/responses`**, one measured append per fresh server, one active request (default max-active 4). Untimed cold prime: study's frozen fourth-turn transcript, **64932 input / 64 generated**; then **64995-token live reuse**, no append warmup or snapshot replay. Original source chunks, greedy/seed 1, **200 output tokens**, context 98304, normal Full / **4096-row** ceiling. Cool **25 s plus three nominal readings five seconds apart** before each timed append.
+- Existing-control screen on unmodified **`dabb9702`**, identical request and served-text hashes across controls, 1626 new rows. GPU work remains **1.62-1.64 s**. Driver intervals are diagnostic spans, not an additive wall budget.
+
+  | Historical mapping / idle window | TTFT ms | Driver interval ms |
+  | --- | ---: | ---: |
+  | Ordinary / 0 s | 3181.636 | 1335.627 |
+  | P4 / 0 s | 3227.815 | 1387.357 |
+  | Ordinary / 60 s | 1890.073 | 48.935 |
+  | P4 / 60 s | 2836.421 | 993.974 |
+
+  **P4 does not pay**; do not restore the override retired by main. Retain the baseline bookend too: **9156.252 ms**, body driver **7139.465 ms**, body GPU **1507.540 ms**, Engram wait **101.005 ms**.
+- V4.1 now inherits the shared **60-second** idle-residency window. Existing read-only ordinary-command pulses every **500 ms**, host-pressure suspension, fault closure and bounded shutdown stay in place. **`QWEN_SERVE_IDLE_RESIDENCY_SECS=0`** or **`--idle-residency-secs 0`** rolls back.
+- **`QWEN_SERVE_V41_FUSE_HEADER`** defaults on; **`=0`** restores the separate header call. Fold a terminal recipe header of at most eight tokens into a reused **512..2048-row** suffix that fits the idle owner's Full quantum. Cold requests, loaded 512-row quanta, earlier shared cuts and aliased cuts retain their partition. The terminal checkpoint moves past the header and stores logits. Same-header retries can reuse those logits; changing the reasoning header can require an earlier snapshot. Existing admission and cancellation checks precede publication.
+- Isolated header kill, residency fixed at 60 s: retain the initial **1869.895 -> 1928.874 ms** failure (GPU **1614.435 -> 1500.974 ms**, but **144.352 ms** scratch release). One bounded ABBA confirmation, declared before results: **2512.038 -> 2048.059 ms (1.227x)**, both pairs positive. Pooled including the initial pair: **2457.223 -> 1934.556 ms (1.270x)**. Both pass **>=1.03x / 50 ms**; no further header reruns.
+- Same-binary **ABBA four per size**, rollback versus defaults/unset, identical input hashes within each cell. All six TTFT pairs and all six complete-response pairs improve. Each cell passes the predeclared **median >=1.05x / 100 ms TTFT** gate and both chronological pairs positive. All samples below, including idle tails:
+
+  | Append rows / reused | Rollback TTFT arms ms | Default TTFT arms ms |
+  | --- | ---: | ---: |
+  | 1114 / 64995 | 2484.756, 2475.325 | 1310.762, 1325.594 |
+  | 1626 / 64995 | 3470.978, 10090.306 | 2309.351, 2224.725 |
+  | 1882 / 64995 | 3607.132, 61796.429 | 2375.385, 2322.024 |
+
+  Against the **fastest rollback / slowest default**, full 200-token response times are **5209.597 / 4058.011**, **6206.378 / 5356.968**, **6346.226 / 5452.784 ms**: **13.7-22.1%** lower wall time, without relying on tails. Medium/large greedy decode is about **73 -> 65-66 tok/s** with different continuations; this qualifies the measured 200-token agent workload.
+- In the archived 1.6K grid, GPU work is **1501-1506 ms**, with **448-525 ms** of driver intervals concentrated before the last submission; scratch release is **2.6-3.1 ms**. The 61.8-second rollback tail has GPU **1809.341 ms**, driver **59781.276 ms**. These measurements reduce scheduling stalls; they do not establish their exact OS mechanism or eliminate them.
+- Distribution check: native Full body advance plus the real two-token **`<｜Assistant｜></think>`** header versus combined prefill, depth **64995**, full-vocabulary **129280-logit** vectors, **128 teacher-forced targets/cell/policy**, code/prose plus unseen suffix. Representative rows around the served sizes and both 512/2048 boundaries; every cell passes **|dNLL| <=0.005 / mean KL <=0.01**, finite full heads. Greedy text need not match after a partition change.
+
+  | Rows / corpus | dNLL | Mean KL |
+  | --- | ---: | ---: |
+  | 512 / code | -0.001362 | 0.001453 |
+  | 1115 / prose | +0.000892 | 0.0000196 |
+  | 1626 / code | +0.003771 | 0.000697 |
+  | 1883 / prose | -0.000593 | 0.0000889 |
+  | 2048 / prose | -0.000306 | 0.000233 |
+
+- Integration on **`cb0cee32`** / main **`1bc0feb1`**, fresh 1626-row serve pair: **3421.807 -> 2080.981 ms TTFT (1.644x)**; full 200-token response **6143.702 -> 5101.003 ms (17.0% lower)**. Same request hash and reused 64995; **two Full calls -> one**. GPU **1633.397 -> 1501.194 ms**, driver **1544.562 -> 373.568 ms**. Rebuilt native numeric anchor passes and both policies' complete 128-vector outputs are **bitwise identical to the archived same-policy outputs**.
+- Validation at **`cb0cee32`**: M5 full **`cargo test --release -p qwen-llm --lib`**, **2457 passed / 0 failed / 739 ignored**, **124.39 s**, thermal 0. **`scripts/check-contracts.sh` passes** on M4 CPU only: **552 acceptance tests**, no skips, plus **10 comparison tripwires**. The corrected profile-default assertion is included in the single implementation commit. Qualified source preserved on **`perf/v41-serve-append-integration`**.
+- Final rebase onto GLM-only main **`896ece2f`**: all feature Rust files and the acceptance inventory are **byte-identical to `cb0cee32`**; the V4.1 engine folder and **all kernel sources are unchanged**. Final M5 **`cargo check --release -p qwen-cli --bin qwen --tests`** passes (**19.62 s**), as do formatting and the generated environment reference. The full-test/serve receipts above remain attributed to `cb0cee32`; no prototype/revert pairs remain.
+- Builds and timing hold the build lock, nice 10; every GPU packet uses the canonical Metal lease with wait enabled. Numeric-only pairs may overlap CPU compilation; their timing fields make no performance claim. Sampled thermal pressure **0 before/during/after** accepted GPU packets. Raw requests/responses/events, all samples and failed checks, complete profiles, source/binary identities and frozen probes: **`$HOME/qwen-runs/2026-11-07-v41-serve-append`** on metagross.
+
+
 ## 2026-11-07 - Tier-1 Serve Checkpoint Ladder: Older-Message Forks
 
 - **Default-on RAM checkpoint coverage** for GLM-5.3, V4.1 and Flash-Next.

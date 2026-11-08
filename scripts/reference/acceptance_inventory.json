@@ -5731,5 +5731,40 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed pure shared publication selector thresholds and rollback flags; no Metal context."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_qwen4exp::reuse::tests::resident_key_requires_the_entire_consumed_prefix_and_a_ready_owner",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure admission predicate or immutable fake-state checkpoint lifecycle; no Metal context, model import or GPU allocation."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_qwen4exp::reuse::tests::endpoint_checkpoint_is_bounded_and_preserves_cold_and_header_only_cuts",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure admission predicate or immutable fake-state checkpoint lifecycle; no Metal context, model import or GPU allocation."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_qwen4exp::reuse::tests::endpoint_forks_and_retries_keep_actual_state_and_logit_bits",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure admission predicate or immutable fake-state checkpoint lifecycle; no Metal context, model import or GPU allocation."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_qwen4exp::reuse::tests::failed_exact_restore_is_removed_before_cold_reset",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure admission predicate or immutable fake-state checkpoint lifecycle; no Metal context, model import or GPU allocation."
+  },
+  {
+    "target": "lib",
+    "name": "qwen4exp_runtime::retained_tests::released_retained_workspace_preserves_state_and_rejects_foreign_owner",
+    "class": "model",
+    "ignored": true,
+    "reason": "Exclusive real-model Metal witness: retained workspace owner identity, exact logits, persistent state and PLE history across runner release; explicit leased execution only."
   }
 ]

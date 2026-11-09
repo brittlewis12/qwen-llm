@@ -111,6 +111,7 @@ struct Active<R> {
     parked: Option<Instant>,
     parked_ms: f64,
     steps: usize,
+    feedback_steps: usize,
     width_sum: usize,
     width_max: usize,
     batched: usize,
@@ -235,6 +236,7 @@ impl<R> Driver<R> {
         .unwrap_or_else(|| runtime.advance(run, cursor, &mut sink, reserve));
         let extra = cursor.completed_transitions().saturating_sub(before);
         a.steps += extra;
+        a.feedback_steps += extra;
         a.width_sum += extra;
         if extra > 0 {
             a.width_max = a.width_max.max(1);
@@ -251,7 +253,7 @@ impl<R> Driver<R> {
                 }
                 let run = a.run.take().expect("run");
                 a.cursor = None;
-                let stats = serde_json::json!({"max_active":self.max_active,"queue_ms":a.queue_ms,"parked_ms":a.parked_ms,"stepped_transitions":a.steps,"width_max":a.width_max,"width_mean":(a.steps>0).then(||a.width_sum as f64/a.steps as f64),"batched_transitions":a.batched,"prefill_loaded_rows":if self.prefill_fair {runtime.rows(&run)} else {512},"prefill_fair":self.prefill_fair,"decode_percent":self.prefill_fair.then_some(self.decode_percent),"prefill_loaded_calls":a.loaded_prefills});
+                let stats = serde_json::json!({"max_active":self.max_active,"queue_ms":a.queue_ms,"parked_ms":a.parked_ms,"stepped_transitions":a.steps,"gpu_feedback_transitions":a.feedback_steps,"width_max":a.width_max,"width_mean":(a.steps>0).then(||a.width_sum as f64/a.steps as f64),"batched_transitions":a.batched,"prefill_loaded_rows":if self.prefill_fair {runtime.rows(&run)} else {512},"prefill_fair":self.prefill_fair,"decode_percent":self.prefill_fair.then_some(self.decode_percent),"prefill_loaded_calls":a.loaded_prefills});
                 match runtime.finish(*run, &generation, stats) {
                     Ok(out) => {
                         self.active[index].finished = Some(out);
@@ -424,6 +426,7 @@ impl<R> Driver<R> {
                             parked: None,
                             parked_ms: 0.0,
                             steps: 0,
+                            feedback_steps: 0,
                             width_sum: 0,
                             width_max: 0,
                             batched: 0,

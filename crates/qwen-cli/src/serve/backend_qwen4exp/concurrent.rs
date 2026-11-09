@@ -621,8 +621,9 @@ impl<'a> Owner<'a> {
         &mut self,
         mut run: Run<'a>,
         generation: &crate::GenerationResult,
-        batch: serde_json::Value,
+        mut batch: serde_json::Value,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        batch["sampler_version"] = serde_json::json!(run.sampler.algorithm_version());
         crate::derive_completed_checkpoint_boundary(
             run.tokens.len(),
             &generation.tokens,

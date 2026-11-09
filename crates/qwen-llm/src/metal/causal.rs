@@ -1,6 +1,7 @@
 //! Dependency waves for a caller-owned compute pass. Recording owns bindings,
 //! never tensor contents; normal Metal buffer barriers order successive waves.
 use super::*;
+use objc2_metal::MTLBinding;
 
 #[derive(Clone)]
 pub(crate) enum Binding {

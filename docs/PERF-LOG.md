@@ -45,6 +45,77 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   invalid preflight/checker attempts as rejected evidence; prototype full-test
   build was interrupted, not a passing qualification. Regenerable bulk deleted.
 
+## 2026-11-09 - Flash-Next Member-Grid Decode Screen: Gate Passed, Qualification Pending
+
+- **Work in progress, not a rollout.** Base `22046c76`, M5 Ultra, GSQ-RCO
+  IQ3_S. The first increment crossed the **4 ms/B4-round gate**: native expert
+  token grids with R4 tiles, grouped GDN recurrence/gated norm and grouped QSA
+  attention take **42.619 -> 37.657 ms at 8K**, saving **4.962 ms**. Adding QSA
+  score/selector/ID-expansion grids reaches **36.671 ms**; at 32K the same
+  subset takes **43.909 -> 37.061 ms**, saving **6.848 ms**.
+- Independent code/prose histories at depths `D+[0,17,34,51]`, B4, 64
+  teacher-forced rounds, first eight excluded; full-head readback included,
+  prefill/RAM restore outside the timer. Retained arms start/end at thermal 0:
+
+  | Increment | 8K round ms | 32K round ms | Aggregate vs four serial steps, 8K / 32K |
+  | --- | ---: | ---: | ---: |
+  | Landed native baseline | 42.619 | 43.909 | 1.253x / 1.231x |
+  | Expert tiles + GDN/QSA attention axes | 37.657 | not measured | 1.417x / — |
+  | + QSA selection axes | 36.671 | 37.061 | 1.454x / 1.472x |
+  | + full-F32 Q6 dense/head MMA | 34.617 | 34.953 | 1.540x / 1.535x |
+  | + exact member-grid projection copies | 33.333 | not measured | **1.599x** / — |
+
+- The copy increment's fresh paired control is **35.082 -> 33.333 ms**
+  (serial controls 53.857 / 53.312 ms), with identical head hashes. The
+  profiled predecessor issued **1,204 copy dispatches/B4 round**, ~3.75 ms
+  of sampled spans. Profile spans are diagnostic, not additive wall-time
+  attribution; that older profile follows a fork, so two members are related.
+  The updated vehicle restores/warms four independent histories before profiling.
+- Every retained cell checks 256 full-vocabulary distributions and 32 exact
+  repeated-serial noise heads. The expert/causal subset has signed dNLL
+  **+7.911e-5 / +1.588e-5 nats/token** and mean KL **3.202e-6 / 3.653e-6**
+  at 8K/32K. Adding Q6/head F32 MMA gives **+1.830e-6 / -2.547e-5** and
+  **4.888e-8 / 3.316e-8**. Serial noise is zero; every cell's 32 snapshot-fork
+  continuation heads match exactly after member-order changes. The newer
+  vehicle also gates each member separately. These pass |dNLL| <= .005 and
+  mean KL <= .01. F32 MMA changes reduction order: the prior operator-level
+  no-worse-F64 decision is superseded here by the requested distribution bar;
+  this is not a new no-worse-F64 claim or Half-operand route.
+- **Dropped:** the plain generic expert grid saved only 1.83 ms; leader-scan
+  duplicate-expert unpack reuse regressed **42.496 -> 47.579 ms** and was
+  deleted. The shipped-shape token grid still unpacks separately per selected
+  token; it does not claim duplicate-expert dequantization once per group.
+- Unmeasured candidates are preserved on **`perf/fn-batch-unmeasured`**,
+  removed from this landing series: remaining Q4/Q5/IQ4/Q8 mixer sharing,
+  QSA norms, HC injection and guarded router member grids. The next isolated
+  side-branch candidate is remaining-format mixer sharing. The existing
+  owner/admission/poison/retirement contracts and private causal states remain
+  the seam; no factory, feedback-loop or serve-owner edits.
+  M4 serving remains serial. `QWEN_SERVE_FN_MAX_ACTIVE=1` is the owner rollback;
+  `QWEN_FN_BATCH_*` stage knobs supply narrower controls.
+- Sources/commands: `7b0042dd` (first axes), `22907d68` (selection/Q6 MMA),
+  `11dd28f9` (copies), and **`c4b16a71`** (next probe vehicle; source retained
+  by tag `fn-batch-experts-screen-20261109`). Build on M5 with
+  `nice -n 10 cargo build --release -p qwen-llm --example fn_native_batch_check`;
+  under `scripts/bench/with-metal-lease`, run
+  `target/release/examples/fn_native_batch_check MODEL CODE PROSE 8192|32768 64 4`.
+  Enable the measured `QWEN_FN_BATCH_EXPERT_GRID/EXPERT_TILES/GDN/QSA_ATTENTION/
+  QSA_SELECTION/DENSE_MMA/PROJECTION_COPY` flags; enable selection/MMA/copy only
+  for their respective increments. Next paired probe sets
+  `QWEN_FN_BATCH_OTHER_DENSE_MMA=0|1`, holding `QSA_NORMS`, `HC_INJECTION`,
+  and `ROUTER` off. A thermal-2 attempt stopped before running and is excluded.
+- **Resume decision 08:46 UTC:** fresh lock-free M5 vehicle builds took
+  **46.33 s** (diagnostic assertion type error, fixed) and **10.04 s** (success).
+  The GPU probe queued **186.36 s**, then was stopped because an outside job
+  advertised a 50-minute lease. No new performance/accuracy result was produced.
+  Zero global-build-lock wait since resuming. CPU steady-harness checks **8 pass**;
+  its serial arm now correctly sets the FN cap to one. Full lib/CLI/contracts
+  are deferred to ship, once, after rebasing onto current main. Still required:
+  the remaining-format kill, B2/3/4 distributions at 8K/32K, and same-binary
+  steady serve before/after using the default 180 s continuous-loop window.
+  The **1.8x B4 target remains open**. No frozen executables or disk snapshots
+  are retained; build concurrently under nice, with no custom build lock.
+
 ## 2026-11-09 - GLM M4 Prompt Workspace Lifetime: Default On
 
 - Branch **`perf/m4-glm-decode`**, base **`2b9fe91c`**, code **`a5ff2a0e`**;

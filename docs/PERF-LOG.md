@@ -6,6 +6,74 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-09 - V4.1 Expert Grouping Killed; Calibrated Overlap Bounds
+
+- **No production change.** M5 Ultra, production GSQ-RCO IQ2_XS artifact,
+  B=3 at 32K. IQ2_XXS threadgroups of 64/128/256 retain two output rows per
+  SIMD and the same arithmetic. Whole-round order 128/256/64/64/256/128,
+  32 teacher steps each: **30.813 / 28.582 / 28.633 / 28.602 / 28.589 /
+  28.542 ms**. The first control was cold; neither candidate beats the warm
+  closing control. All full-vocabulary hashes match. **Kill** the grouping
+  path and knob; source retained at `perf/v41-expert-group-kill`
+  (**`2c2bd135`**). This does not turn the old 2-ms decision aid into a
+  per-item kill rule.
+- Adapt the Flash-Next predictor to V4.1's real **2,186 dispatches,
+  689 encoders and three command buffers**, retaining each command's CPU
+  uploads and original encoder cuts. Calibration **`0d3b36e5`**, thermal
+  **0 throughout**; exclude repetition zero consistently and retain it in
+  compact evidence. Medians:
+
+  | Control / predictor | GPU ms |
+  | --- | ---: |
+  | Native fixed frame, before / after | **27.505 / 27.277** |
+  | Replay with native encoder cuts | 33.729 |
+  | Conservative causal barriers | 31.795 |
+  | Frozen independent dispatches, serial | 33.925 |
+  | Frozen with HC-post cuts | 25.636 |
+  | Frozen global overlap | 23.757 |
+
+- Native wall medians are **28.571 / 28.542 ms**. Replay has a **6.225-ms
+  control penalty** relative to native; its savings cannot be subtracted
+  directly from native wall time. Conservative replay saves **1.935 ms**;
+  removing causality saves **8.289 / 10.168 ms** in matched frozen controls.
+  The frozen graph retains 19.65 GB of private bindings and checks **733.99 MB
+  of reflected output bytes**, including state/cache writes. Native,
+  causal replay and frozen oracle heads match bitwise; all frozen dispatch
+  outputs match. These are scheduling bounds, not an achieved 20-ms round
+  or a production replay policy.
+- **Next by value:** adapt the executor now on main to V4.1's StageEncoder,
+  initially with layer-sized scopes and unchanged kernels. Budget **<=60 min
+  to the first native whole-round screen**, with **1–2 ms an initial
+  hypothesis**, then roughly half a day for qualification if it pays.
+  Approaching the larger frozen ceiling likely needs scratch lifetime/layout
+  changes and broader scheduling, a multi-day move. HC/I/O fusion remains
+  marginal (~1.2-ms realistic combined recovery); expert grouping recovered
+  no measurable native time.
+- Reproduce grouping at `2c2bd135` with
+  `nice -n 10 cargo build --offline --locked --release -p qwen-llm
+  --features perf-ablations --example v41_batch_depth`, then lease through
+  `python3 scripts/research/v41-batch/run.py --binary BINARY --model MODEL
+  --out RUNS --groups --steps 32 --depth 32768 --batch 3`.
+  At `0d3b36e5`, use the same build and `--waves` instead of `--groups`.
+  GPU lease holds **52.84 s** initial predictor and **82.20 s** calibrated
+  predictor, including model preparation. No sealed binaries/source copies;
+  compact evidence at `~/qwen-runs/2026-11-09-v41-expert-wave/summary.json`.
+- Qualification after integration with main **`b3fbf7a12`**, tested source
+  **`9798db341`**: full library **2,491 passed**, CLI library **122 passed**.
+  **Full CLI, contracts and a post-integration perf-feature compile remain
+  pending at the 60-minute cap**; do not treat this as a fully qualified
+  landing. The shared-encoder conflict preserves production causal recording
+  before the feature-gated ablation hook. An earlier contracts run rejected
+  a changed tree; the fixed-tree retry and remaining CLI build were stopped.
+- Waits: **about 24 minutes of GPU queue wall time** (overlapping CPU work),
+  **zero build-lock wait**. M5 builds accumulated roughly **33 minutes**
+  including overlapping and stopped builds; library harness links took
+  **7m11s / 7m39s** across the late main integration. One avoidable old-ref
+  build cost **1m25s** and supplied no timing evidence. Normal Cargo cache is
+  retained for unfinished qualification; regenerable run bulk is deleted.
+  **Nothing left running.** Next: finish cached qualification (~5–10 min,
+  plus any lease wait), then the bounded executor screen.
+
 ## 2026-11-09 - GLM M4 Peak-Before-Warm: KILL Under Build Load
 
 - Rebased onto **`d3087f8d3`**. GPU experiment **`7f1c01ef6`**

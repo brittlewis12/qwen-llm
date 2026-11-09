@@ -212,7 +212,7 @@ def main():
                     result["turns"] = [{"usage": row["usage"], "x_qwen": row.get("x_qwen"),
                                         "status": row["status"]} for row in [first, second, third]]
                 child.terminate()
-                child.wait(timeout=20)
+                child.wait()
             stop.set()
             watcher.join()
             sample()
@@ -223,15 +223,13 @@ def main():
             result["diagnostics"] = [line for line in text.splitlines()
                 if any(key in line for key in ["glm workspace:", "glm peak:", "serve idle residency:", "glm5_next stats:",
                                                 "glm native:", "serve native:",
-                                                "serve phases:", "serve stats:"])]
+                                                "serve phases:", "serve stats:", "serve startup:"])]
     finally:
         if child is not None and child.poll() is None:
             child.terminate()
-            try:
-                child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait()
+            # Model-scale memory must unwind cooperatively. A supervisor's
+            # hard kill previously stranded wired pages (PERF-LOG Aug 13).
+            child.wait()
         stop.set()
         watcher.join()
         thermal()

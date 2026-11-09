@@ -55,6 +55,7 @@ use std::time::Instant;
 mod chunk_checkpoint;
 mod dflash;
 mod execution;
+mod gpu;
 mod prefill_plan;
 mod scheduler;
 
@@ -837,19 +838,50 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         while !self.prefill_run(&mut run, usize::MAX, sink)? {}
         self.finish_prefill(&mut run, sink)?;
         let session = self.session.as_mut().expect("prepared session");
-        let generation = decode_loop::decode_serial(
-            decode_loop::DecodeRequest {
+        let generation = (|| {
+            use super::decode_cursor::{Advance, DecodeCursor};
+            let mut cursor = DecodeCursor::new(decode_loop::DecodeRequest {
                 family: FAMILY,
                 logits: std::mem::take(&mut run.logits),
                 max_tokens: run.maximum,
                 stop_tokens: &CHAT_STOPS,
                 vocab_size: run.vocab_size,
-            },
-            &mut run.sampler,
-            self.prepared.artifact.tokenizer(),
-            sink,
-            |token| Ok(session.forward(self.ctx, token)?),
-        );
+            })?;
+            loop {
+                let advance = gpu::advance(
+                    self.ctx,
+                    self.prepared.artifact.tokenizer(),
+                    session,
+                    &mut run.sampler,
+                    &mut cursor,
+                    sink,
+                    usize::MAX,
+                )
+                .unwrap_or_else(|| {
+                    cursor.advance(
+                        &mut run.sampler,
+                        None,
+                        self.prepared.artifact.tokenizer(),
+                        sink,
+                        crate::shutdown::checkpoint,
+                    )
+                })?;
+                match advance {
+                    Advance::Done(generation) => break Ok(generation),
+                    Advance::Forward(token) => {
+                        let started = Instant::now();
+                        let row = session
+                            .forward(self.ctx, token)
+                            .map_err(anyhow::Error::from);
+                        cursor.on_logits(
+                            row,
+                            started.elapsed().as_secs_f64() * 1e3,
+                            crate::shutdown::checkpoint,
+                        )?;
+                    }
+                }
+            }
+        })();
         let generation = match generation {
             Ok(g) => g,
             Err(error) => {

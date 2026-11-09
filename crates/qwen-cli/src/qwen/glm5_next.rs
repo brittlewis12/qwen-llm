@@ -27,6 +27,79 @@ mod dflash;
 #[path = "glm5_next/residency.rs"]
 pub(crate) mod residency;
 
+pub(crate) fn try_generate_glm_gpu(
+    session: &mut Glm5NextSession<'_>,
+    ctx: &qwen_llm::metal::MetalContext,
+    logits: &[f32],
+    max_tokens: usize,
+    stop_tokens: &[i32],
+    sampler: &mut Sampler,
+    mut on_token: impl FnMut(i32) -> Result<()>,
+) -> Result<Option<GenerationResult>> {
+    if !qwen_llm::glm5_next_metal::gpu_token_loop_enabled(ctx) || max_tokens < 32 {
+        return Ok(None);
+    }
+    ensure!(max_tokens > 0, "max_tokens must be >= 1");
+    shutdown::checkpoint()?;
+    let draws = sampler.draws();
+    let mut tokens = Vec::with_capacity(max_tokens);
+    let mut callback_error = None;
+    let result =
+        session.generate_gpu_tokens(ctx, logits, sampler, max_tokens, stop_tokens, |token| {
+            tokens.push(token);
+            let result = (|| {
+                shutdown::checkpoint()?;
+                on_token(token)?;
+                shutdown::checkpoint()
+            })();
+            match result {
+                Ok(()) => true,
+                Err(error) => {
+                    callback_error = Some(error);
+                    false
+                }
+            }
+        });
+    if let Some(error) = callback_error {
+        return Err(error);
+    }
+    let stats = match result {
+        Ok(stats) => stats,
+        Err(error) if !session.is_poisoned() && tokens.is_empty() && sampler.draws() == draws => {
+            tracing::info!(target:"qwen_diag","GLM GPU loop declined before generation: {error}");
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if stats.stopped_on_eos {
+        tokens.push(
+            stats
+                .terminal_token
+                .context("GPU EOS result omitted token")?,
+        );
+    }
+    ensure!(
+        tokens.len() == stats.sampled_tokens,
+        "GPU token accounting disagrees"
+    );
+    tracing::debug!(target:"qwen_diag","GLM GPU loop: sampler_version={} stats={stats:?}",sampler.algorithm_version());
+    Ok(Some(GenerationResult {
+        tokens,
+        wall_ms: stats.wall_ms,
+        first_token_selection_ms: stats.first_token_selection_ms,
+        first_token_ready_ms: stats.first_token_ready_ms,
+        first_token_callback_ms: stats.first_token_callback_ms,
+        transitions: stats.forwarded_tokens,
+        transition_ms: stats.transition_ms,
+        first_transition_ms: stats.first_transition_ms,
+        stop_reason: if stats.stopped_on_eos {
+            StopReason::Eos
+        } else {
+            StopReason::TokenLimit
+        },
+    }))
+}
+
 const FAMILY: &str = "GLM-5.3-Flash";
 
 /// Request phases of the GLM run lane. Setup (artifact, tokenizer, chat
@@ -681,7 +754,7 @@ pub(crate) fn run(
         })
         .transpose()?;
     let mut wrote = false;
-    let on_token = |token| {
+    let mut on_token = |token| {
         let bytes = prepared.tokenizer().try_decode_piece_bytes_exact(token)?;
         match &mut output {
             Some(output) => output.piece(bytes, &mut stdout)?,
@@ -719,18 +792,29 @@ pub(crate) fn run(
             session.prepare_decode(&ctx)?;
             let prefill_ms = resident_t0.elapsed().as_secs_f64() * 1e3;
             residency::sample(&ctx, gguf, "after_prefill");
-            let generation = generate_serial(
-                logits,
+            let generation = match try_generate_glm_gpu(
+                &mut session,
+                &ctx,
+                &logits,
                 args.tokens,
                 &stops,
                 &mut sampler,
-                on_token,
-                |token| {
-                    shutdown::checkpoint()?;
-                    let token = checked_token_id(token, vocab_size, "generated")?;
-                    session.forward(&ctx, token).map_err(anyhow::Error::from)
-                },
-            )?;
+                &mut on_token,
+            )? {
+                Some(generation) => generation,
+                None => generate_serial(
+                    logits,
+                    args.tokens,
+                    &stops,
+                    &mut sampler,
+                    on_token,
+                    |token| {
+                        shutdown::checkpoint()?;
+                        let token = checked_token_id(token, vocab_size, "generated")?;
+                        session.forward(&ctx, token).map_err(anyhow::Error::from)
+                    },
+                )?,
+            };
             residency::sample(&ctx, gguf, "after_decode");
             Ok((generation, prefill_ms))
         })();

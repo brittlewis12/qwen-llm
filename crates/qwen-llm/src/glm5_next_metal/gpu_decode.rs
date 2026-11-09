@@ -8,6 +8,16 @@ use crate::metal::{
 use crate::sampling::Sampler;
 use objc2_metal::MTLSize;
 use std::time::Instant;
+crate::env_flag!(
+    /// Default-on M5 GLM single-stream GPU token feedback with asynchronous streaming and native-batch handoff. Set 0 to restore CPU sampling and token-at-a-time submission. Scalar model arithmetic and native B>1 rounds are unchanged.
+    default_on gpu_token_loop_requested,
+    "QWEN_GLM53_GPU_TOKEN_LOOP"
+);
+/// Frontend policy for the measured M5 token-feedback path. Explicit generation
+/// APIs remain available for qualification independently of this rollback.
+pub fn gpu_token_loop_enabled(ctx: &MetalContext) -> bool {
+    gpu_token_loop_requested() && ctx.device_facts().gpu_families.apple10
+}
 struct Driver<'a, 'w> {
     ctx: &'a MetalContext,
     session: &'a mut Glm5NextSession<'w>,

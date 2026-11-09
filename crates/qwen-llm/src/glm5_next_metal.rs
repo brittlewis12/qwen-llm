@@ -2633,6 +2633,7 @@ mod capture;
 mod checkpoint;
 mod dflash;
 mod gpu_decode;
+pub use gpu_decode::gpu_token_loop_enabled;
 mod interventions;
 mod kda_half_inputs;
 mod kda_value4;

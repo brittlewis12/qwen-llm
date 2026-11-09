@@ -263,6 +263,24 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
             crate::shutdown::checkpoint,
         )
     }
+    fn advance_single(
+        &mut self,
+        run: &mut Self::Run,
+        cursor: &mut DecodeCursor,
+        sink: &mut dyn GenerationSink,
+        reserve: u64,
+    ) -> Option<Result<Advance, BackendFailure>> {
+        run.reserve = reserve;
+        gpu::advance(
+            self.0.ctx,
+            self.0.prepared.artifact.tokenizer(),
+            run.session.as_mut().expect("request owns session"),
+            &mut run.sampler,
+            cursor,
+            sink,
+            16,
+        )
+    }
     fn state(run: &mut Self::Run) -> &mut Self::State {
         run.session.as_mut().expect("request owns session")
     }

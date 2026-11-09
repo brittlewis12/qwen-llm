@@ -113,6 +113,10 @@ pub(crate) struct DecodeCursor {
 }
 
 impl DecodeCursor {
+    /// A completed head exists only before selection, including after native resume.
+    pub(crate) fn available_logits(&self) -> Option<&[f32]> {
+        (!self.awaiting_logits && !self.logits.is_empty()).then_some(&self.logits)
+    }
     pub(crate) fn remaining_tokens(&self) -> usize {
         self.max_tokens - self.tokens.len()
     }

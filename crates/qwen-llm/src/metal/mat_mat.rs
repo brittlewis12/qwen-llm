@@ -4585,6 +4585,7 @@ mod tests {
                 .collect();
             let mut mse = [0.0; 3];
             let mut serial = Vec::new();
+            let mut f32_mma = Vec::new();
             for (route, error) in (0..3).zip(&mut mse) {
                 let y = offset_tensor(
                     &ctx,
@@ -4636,6 +4637,9 @@ mod tests {
                 if route == 2 {
                     serial = got.to_vec();
                 }
+                if route == 1 {
+                    f32_mma = got.to_vec();
+                }
                 *error = got
                     .iter()
                     .zip(&expected)
@@ -4683,10 +4687,16 @@ mod tests {
                         y.buffer.length(),
                     )
                 };
+                // The default native route now uses F32 MMA (E1). Preserve
+                // the bitwise serial check when its exact-NC rollback is set;
+                // otherwise compare transport against the independent direct
+                // MMA invocation already checked against the F64 oracle above.
+                let uses_mma = crate::qwen4exp_metal::decode_projection::test_uses_mma();
+                let selected = if uses_mma { &f32_mma } else { &serial };
                 assert_eq!(
                     &bytes[y.offset as usize..y.offset as usize + b * m * 4],
-                    bytemuck::cast_slice::<f32, u8>(&serial),
-                    "Q6 native versus current serial K={k} M={m} B={b}"
+                    bytemuck::cast_slice::<f32, u8>(selected),
+                    "Q6 native transport versus selected operator K={k} M={m} B={b}"
                 );
                 assert!(bytes[..16].iter().all(|&v| v == 0xa5));
                 assert!(
@@ -4694,7 +4704,9 @@ mod tests {
                         .iter()
                         .all(|&v| v == 0x5a)
                 );
-                eprintln!("[native-q6-f64] K={k} M={m} B={b}: serial bits and F64 error identical");
+                eprintln!(
+                    "[native-q6-f64] K={k} M={m} B={b}: selected operator bits match; F64 errors above"
+                );
             }
             let reference_energy = expected.iter().map(|v| v * v).sum::<f64>();
             assert!(

@@ -12,6 +12,10 @@ crate::env_flag!(
 pub(crate) fn mma_enabled() -> bool {
     mma_flag()
 }
+#[cfg(test)]
+pub(crate) fn test_uses_mma() -> bool {
+    enabled() && mma_enabled()
+}
 crate::env_flag!(
     /// Gather/scatter independent dense projection columns with one member-axis launch each. 0 keeps ordinary per-member copies. Arithmetic, buffers and causal state are unchanged.
     default_on copy_enabled, "QWEN_FN_BATCH_PROJECTION_COPY"

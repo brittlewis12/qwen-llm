@@ -213,9 +213,9 @@ impl GpuInputs {
         feedback: &MetalTensor,
         position: usize,
     ) -> Result<(), Qwen4ExpTextSessionError> {
-        // This prefix uses a serial pass. Argument-buffer pointees must be
-        // explicitly resident with the appropriate access mode.
-        assert!(!enc.causal_mode);
+        // Ordered direct prefix, before any recorded model scopes. Argument
+        // pointees need explicit residency and fences on a concurrent pass.
+        assert!(enc.recording.borrow().is_none());
         let args = Args {
             position: u32::try_from(position).map_err(|_| {
                 Qwen4ExpTextSessionError::Invalid("GPU position exceeds u32".into())
@@ -245,6 +245,9 @@ impl GpuInputs {
                 depth: 1,
             },
         );
+        if enc.causal_mode {
+            enc.buffer_barrier();
+        }
         enc.set_pipeline(&ctx.pipeline("kernel_qwen4exp_gpu_input_controls")?);
         enc.set_buffer(0, &self.controls_arg, 0);
         enc.set_buffer(1, &self.kinds, 0);
@@ -270,6 +273,9 @@ impl GpuInputs {
                 depth: 1,
             },
         );
+        if enc.causal_mode {
+            enc.buffer_barrier();
+        }
         Ok(())
     }
 }

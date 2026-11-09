@@ -33,18 +33,25 @@ impl Driver<'_, '_, '_, '_> {
             Qwen4ExpTextSessionError::Invalid("GPU loop command allocation failed".into())
         })?;
         let position = input.map(|(_, p)| p);
+        let mut body = if input.is_some() && self.workspace.causal_executor {
+            KernelEncoder::begin_causal(&command)
+        } else {
+            KernelEncoder::begin(&command)
+        };
         if let Some((token, position)) = input {
-            let prefix = KernelEncoder::begin(&command);
+            // The indirect control writes are ordered explicitly; reflection
+            // cannot see argument-buffer pointees. Keep this prefix outside
+            // the recorder and fence it before the first model wave.
+            if body.causal_mode {
+                body.cancel_causal_scope();
+            }
             self.inputs
                 .as_ref()
                 .expect("forward frame has GPU inputs")
-                .encode(self.ctx, &prefix, token, position)?;
-            prefix.end();
-            let mut body = if self.workspace.causal_executor {
-                KernelEncoder::begin_causal(&command)
-            } else {
-                KernelEncoder::begin(&command)
-            };
+                .encode(self.ctx, &body, token, position)?;
+            if body.causal_mode {
+                body.begin_causal_scope();
+            }
             // The adapter owns the full workspace until the reusable driver's
             // in-flight guard drains. Inputs/control writes are GPU dispatches;
             // preparing another command writes no in-flight tensor on the CPU.
@@ -66,13 +73,17 @@ impl Driver<'_, '_, '_, '_> {
             if body.causal_mode {
                 body.finish_causal_scope(self.ctx, false)?;
             }
-            body.end();
         }
         let token = MetalTensor::zeros_i32(self.ctx, vec![1])?;
-        let tail = KernelEncoder::begin(&command);
+        if body.causal_mode {
+            body.begin_causal_scope();
+        }
         self.sampling
-            .encode(self.ctx, &tail, &self.workspace.logits, &token, uniform)?;
-        tail.end();
+            .encode(self.ctx, &body, &self.workspace.logits, &token, uniform)?;
+        if body.causal_mode {
+            body.finish_causal_scope(self.ctx, false)?;
+        }
+        body.end();
         Ok(PreparedTokenStep::new(command, token, position)?)
     }
     fn logits(&self) -> &[f32] {

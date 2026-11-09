@@ -53,7 +53,14 @@ fn watch_source_files(manifest_dir: &Path) {
         &["ls-files", "-z"][..],
         &["ls-files", "--others", "--exclude-standard", "-z"][..],
     ] {
-        let Ok(output) = Command::new("git").args(args).current_dir(root).output() else {
+        // `git ls-files` is read-only, but keep git from taking optional locks
+        // so it can never rewrite the index the build script watches.
+        let Ok(output) = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .output()
+        else {
             return;
         };
         if !output.status.success() {

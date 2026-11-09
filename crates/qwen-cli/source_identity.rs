@@ -8,9 +8,13 @@ use std::process::Command;
 pub const SOURCE_STATE_PREFIX: &str = "git-source-sha256-v2:";
 
 fn git_bytes(repo: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    // These are read-only queries, but `git status` otherwise refreshes and
+    // rewrites the index. The build script watches `.git/.../index`, so that
+    // write would mark the crate dirty on the next build, forever.
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .ok()?;
     output.status.success().then_some(output.stdout)

@@ -198,9 +198,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if i > 0 {
                     runners[1].forward_token(tokens[i - 1] as u32)?;
                 }
-                for (&a, &b) in row.iter().zip(runners[1].logits()?.as_slice()) {
-                    maximum = maximum.max((f64::from(a) - f64::from(b)).abs());
-                }
+                let error = qwen_llm::compare::report_max_abs_diff_f64(
+                    row,
+                    runners[1].logits()?.as_slice(),
+                );
+                assert!(error.is_finite(), "invalid GPU/native comparison");
+                maximum = maximum.max(error);
             }
             assert_eq!(
                 maximum, 0.,

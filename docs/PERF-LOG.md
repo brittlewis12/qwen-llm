@@ -47,6 +47,48 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   this session **14 s**; the prior session's overlapping requests waited
   17-41 min each. Compact evidence (M5):
   `~/qwen-runs/2026-11-09-v41-waves-widths-final/summary.json`.
+## 2026-11-09 - GLM Batch IQ: Two-Simdgroup Geometry Ships, Decoder Rewrites Killed
+
+- **Keep, default on for GLM batch decode**, rollback
+  **`QWEN_GLM53_IQ_TG64=0`**. The two-simdgroup (`_tg64`) instances of the
+  routed IQ2_S gate/up K=4096 and IQ3_S down K=2048 kernels keep the shipped
+  lane map, decoder, F32 chain and SIMD reduction; only the threadgroup is
+  narrower (64 threads). Outputs are **bitwise equal**. Evidence and protocol:
+  [bench note](bench/2026-11-09-glm-batch-iq-schedule.md).
+- M5 Ultra, stock **UD-IQ3_XXS**, whole-round paired arms in both orders, 16
+  timed rounds/arm:
+
+  | Cell | shipped ms | `tg64` ms | saved, fwd / rev |
+  | --- | ---: | ---: | ---: |
+  | 8K B=4 | 31.555 | 31.337 | +0.097 / +0.339 |
+  | 8K B=4 repeat | 32.264 | 32.191 | +0.196 / -0.050 |
+  | 32K B=4 | 32.470 | 32.311 | +0.130 / +0.190 |
+  | 8K B=3 | 27.237 | 27.162 | -0.078 / +0.228 |
+  | 32K B=3 | 27.327 | 27.286 | +0.022 / +0.060 |
+  | 8K B=2 | 22.888 | 22.788 | +0.096 / +0.105 |
+
+  Every cell is non-negative in the drift-balanced mean; 10 of 12 order-halves
+  are positive. About **0.2% of a B=3 round** and **0.5% of a B=4 round**.
+  All retained arms thermal **0**; two 32K B=3 acquisitions were rejected hot
+  (level 2 then level 1) and redone. Full-vocabulary 16-step witnesses are
+  bitwise across all cells.
+- **Killed and deleted:** `sb`/`sb64` byte-mask signs (-0.44/-0.53 ms) and `sx`
+  sign-bit signs (-2.63 ms) are coefficient-bitwise but slower; the vectorized
+  `v4` decoder (64 weights/lane, wide control loads) is **-6.8/-7.1 ms** because
+  four lanes per superblock scatter 2-byte pieces across each sector; `vf`
+  (float4 FMA accumulation, shipped loads) is -0.17/-0.28 ms with dNLL up to
+  **1.2e-2** and KL **1.5e-4**, so rejected on cost and accuracy. No arithmetic
+  change ships.
+- Why the priced 3.2-ms IQ "excess" is largely unreachable: the `dalu`
+  cache-resident diagnostic saved only **0.75-0.85 ms**, so removing full-range
+  weight traffic exposes at most about 0.8 ms; `sb`/`sx`/`vf` show the FMA
+  chain is not the limiter, and `v4` shows the shipped access is already a
+  contiguous per-row stream. The 1.175 TB/s anchor is a large-vector read, not
+  a ceiling for the 82/110-byte superblock stride.
+- Reproduce: build `--features perf-ablations --example glm_batch_iq` at nice
+  10, then the `glm-batch-next/run.py` IQ mode with `--variants 0,1 --width N`
+  and `summarize_iq.py`. Raw packets under
+  `~/qwen-runs/2026-11-09-glm-batch-28/` on the M5. No merge or push.
 
 ## 2026-11-09 - V4.1 B3 Causal Waves Default On
 

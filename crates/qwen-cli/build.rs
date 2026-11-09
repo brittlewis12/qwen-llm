@@ -26,12 +26,12 @@ fn git_path(manifest_dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 fn watch_git_metadata(manifest_dir: &Path) {
-    // Do not watch `index`: read-only git queries (`status`, `diff`) refresh
-    // its stat cache and rewrite it, which would invalidate every build even
-    // though `ls-files --stage` (the staged content the stamp hashes) is
-    // unchanged. Staging a real edit also changes a watched source file, so
-    // the build still re-stamps when the staged content can matter.
-    for name in ["HEAD", "packed-refs", "refs", "reftable"] {
+    // Watch only per-worktree metadata here. `index` is skipped because
+    // read-only git queries refresh and rewrite it without changing the staged
+    // content the stamp hashes; `refs` is the shared repository directory, so
+    // another lane's commit would otherwise invalidate this worktree's build.
+    // The symbolic-ref target below watches this branch specifically.
+    for name in ["HEAD", "packed-refs", "reftable"] {
         if let Some(path) = git_path(manifest_dir, name)
             && path.exists()
         {

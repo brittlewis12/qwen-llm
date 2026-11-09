@@ -15,6 +15,11 @@ mod projection;
 #[path = "batch_selection.rs"]
 mod selection;
 
+#[cfg(feature = "perf-ablations")]
+pub fn with_batch_waves<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+    projection::with_batch_waves(enabled, f)
+}
+
 crate::env_flag!(
     /// Default-on four-output-channel IQ2_S gate/up and IQ3_S down grids for qualified M5 Fast/Half independent decode batches of two to four members. Zero restores the original F32 token grids; single-token, Exact/F32 and other primitive policies are unchanged.
     default_on batch_expert_rows_enabled,
@@ -338,7 +343,12 @@ impl Glm5NextSession<'_> {
             .queue
             .commandBuffer()
             .ok_or_else(|| Glm5NextMetalError::Invalid("no command buffer".into()))?;
-        let mut enc = KernelEncoder::begin(&command);
+        let waves = projection::waves() && seqs.iter().all(|s| s.stage_recorder.borrow().is_none());
+        let mut enc = if waves {
+            KernelEncoder::begin_causal(&command)
+        } else {
+            KernelEncoder::begin(&command)
+        };
         encode_get_rows_f32(
             ctx,
             &enc,
@@ -619,6 +629,10 @@ impl Glm5NextSession<'_> {
                 &v(&p.comb),
                 &a,
             )?;
+            if waves {
+                enc.finish_causal_scope(ctx, false)?;
+                enc.begin_causal_scope();
+            }
         }
         for (r, seq) in seqs.iter().enumerate() {
             let s = &seq.s;
@@ -652,6 +666,9 @@ impl Glm5NextSession<'_> {
             c.vocab_size as usize,
             rows,
         )?;
+        if waves {
+            enc.finish_causal_scope(ctx, false)?;
+        }
         enc.end();
         #[cfg(test)]
         let encode_ms = encode_started.elapsed().as_secs_f64() * 1e3;

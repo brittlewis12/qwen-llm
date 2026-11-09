@@ -275,6 +275,7 @@ impl KernelEncoder {
             #[cfg(feature = "perf-ablations")]
             if self.replay.borrow().is_some() {
                 dispatch_profile::decode_wave::capture_encoder_end(&self.parent);
+                dispatch_profile::decode_graph::capture_encoder_end();
             }
             self.ended = true;
             self.raw.borrow().endEncoding();

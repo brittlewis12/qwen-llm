@@ -588,3 +588,9 @@ pub use dispatch_profile::decode_wave::{DecodeGraph, decode_capture_begin, decod
 
 #[cfg(feature = "perf-ablations")]
 pub mod fn_batch_probe;
+
+#[cfg(feature = "perf-ablations")]
+pub use dispatch_profile::decode_graph::{
+    DecodeGraph as GlmDecodeGraph, decode_capture_begin as glm_decode_capture_begin,
+    decode_capture_finish as glm_decode_capture_finish,
+};

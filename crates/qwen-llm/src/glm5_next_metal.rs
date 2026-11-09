@@ -2663,6 +2663,8 @@ pub use interventions::{
 mod snapshot;
 mod workspace;
 pub use lens::Glm5NextCapture;
+#[cfg(feature = "perf-ablations")]
+pub use packed::batch::with_batch_waves;
 pub use packed::batch::{GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch};
 pub use packed::{FastPrecision, PackedLineage};
 pub use snapshot::{Glm5NextSnapshot, SNAPSHOT_POLICY_VERSION, snapshot_bytes};

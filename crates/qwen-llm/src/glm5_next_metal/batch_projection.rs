@@ -97,3 +97,29 @@ pub(super) fn record_timing(encode_ms: f64, gpu_ms: f64) {
 pub(super) fn timing() -> (f64, f64) {
     TIMING.with(|v| v.get())
 }
+
+crate::env_flag!(
+    /// Default-on causal dependency waves for M5 Fast/Half independent decode batches. No arithmetic fusion; zero restores serial dispatch ordering. Singleton, prefill and Exact/F32 routes are unchanged.
+    default_on waves_requested,
+    "QWEN_GLM53_BATCH_WAVES"
+);
+#[cfg(feature = "perf-ablations")]
+thread_local! {static WAVES:std::cell::Cell<Option<bool>>=const{std::cell::Cell::new(None)};}
+pub(super) fn waves() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    if let Some(v) = WAVES.with(|c| c.get()) {
+        return v;
+    }
+    waves_requested()
+}
+#[cfg(feature = "perf-ablations")]
+pub(super) fn with_batch_waves<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            WAVES.with(|c| c.set(self.0));
+        }
+    }
+    let _reset = Reset(WAVES.with(|c| c.replace(Some(enabled))));
+    f()
+}

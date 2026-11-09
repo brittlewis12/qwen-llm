@@ -173,7 +173,7 @@ pub(crate) fn dispatch_profile_records() -> bool {
     let profiling =
         ACTIVE_THREADS.load(Ordering::Relaxed) != 0 && PROFILE.with(|p| p.borrow().is_some());
     #[cfg(feature = "perf-ablations")]
-    if decode_wave::active() {
+    if decode_wave::active() || decode_graph::active() {
         return true;
     }
     profiling
@@ -275,6 +275,26 @@ impl Replay {
 pub(crate) fn split_for_dispatch(enc: &KernelEncoder, grid: MTLSize, threads: MTLSize) {
     #[cfg(feature = "perf-ablations")]
     if decode_wave::capture(enc, grid, threads) {
+        return;
+    }
+    #[cfg(feature = "perf-ablations")]
+    if decode_graph::active() {
+        decode_graph::CAPTURE.with(|c| {
+            if let Some(c) = c.borrow_mut().as_mut() {
+                c.steps.push(decode_graph::CapturedStep {
+                    kernel: enc
+                        .bound_pipeline_name
+                        .borrow()
+                        .as_deref()
+                        .unwrap()
+                        .to_string(),
+                    grid,
+                    threads,
+                    state: enc.replay.borrow().as_ref().unwrap().as_ref().clone(),
+                    concurrent: enc.concurrent,
+                });
+            }
+        });
         return;
     }
     PROFILE.with(|p| {
@@ -421,3 +441,7 @@ mod tests {
 #[cfg(feature = "perf-ablations")]
 #[path = "decode_wave.rs"]
 pub(crate) mod decode_wave;
+
+#[cfg(feature = "perf-ablations")]
+#[path = "dispatch_profile/decode_graph.rs"]
+pub(crate) mod decode_graph;

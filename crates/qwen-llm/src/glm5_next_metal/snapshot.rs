@@ -78,9 +78,9 @@ impl Glm5NextSnapshot {
             .sum()
     }
 
-    /// Same position, lineage and captured bytes (tests).
-    #[cfg(test)]
-    pub(crate) fn same_state(&self, other: &Self) -> bool {
+    /// Diagnostic comparison of position, lineage and captured bytes.
+    #[cfg(any(test, feature = "perf-ablations"))]
+    pub fn same_state(&self, other: &Self) -> bool {
         self.position == other.position
             && self.lineage == other.lineage
             && self.fast_precision == other.fast_precision

@@ -119,7 +119,10 @@ uv run --no-project python scripts/reference/deepseek_v41/check.py
 # The inventory refuses an inherited GPU lease: it runs CPU-only tests.
 uv run scripts/reference/acceptance_inventory.py
 if [ "$full" -eq 1 ]; then
-  cargo test --offline --locked --release --workspace --no-run
+  # Test targets use the optimized `test` profile (it inherits release), not
+  # `--release`: `--release` applies fat LTO + one codegen unit to every test
+  # link, which costs minutes per binary for under a second of execution.
+  cargo test --offline --locked --workspace --no-run
   release_qwen=$(
     cargo build --offline --locked --release -p qwen-cli --bin qwen --message-format=json |
       uv run --no-project python -c '
@@ -174,11 +177,11 @@ print(executables[0])
   fi
 fi
 
-cargo test --offline --locked --release -p qwen-llm --test comparison_tripwire
+cargo test --offline --locked -p qwen-llm --test comparison_tripwire
 if [ "$full" -eq 1 ]; then
   readme_test=family_profile::tests::readme_family_table_matches_profiles
   status=0
-  output=$(cargo test --offline --locked --release -p qwen-cli --bin qwen -- --exact "$readme_test" 2>&1) ||
+  output=$(cargo test --offline --locked -p qwen-cli --bin qwen -- --exact "$readme_test" 2>&1) ||
     status=$?
   printf '%s\n' "$output"
   [ "$status" -eq 0 ] || exit "$status"

@@ -262,13 +262,17 @@ def self_test() -> None:
 
 
 def binary(target: str) -> Path:
+    # Use the optimized `test` profile (it inherits release), not `--release`.
+    # `--release` applies fat LTO + one codegen unit to each test link; four
+    # CPU acceptance targets then take ~12 minutes to link for seconds of
+    # execution. The test profile keeps the same opt-level and catches more
+    # (debug assertions and overflow checks stay on).
     result = subprocess.run(
         [
             "cargo",
             "test",
             "--offline",
             "--locked",
-            "--release",
             *TARGETS[target],
             "--no-run",
             "--message-format=json",

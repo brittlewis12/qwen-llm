@@ -301,6 +301,11 @@ Other documents:
 `release`: numerical tolerances and timing-sensitive tests depend on it. Lint
 configuration is in `[workspace.lints]` in `Cargo.toml` and in `clippy.toml`.
 
+Use plain `cargo test` for the edit loop and for CPU acceptance. Reserve
+`cargo test --release` for a deliberate release-codegen check: `--release`
+applies the production fat-LTO/single-CGU link to every test binary, which can
+cost minutes per link for seconds of test execution.
+
 `cargo test` reads no model files. Tests that need a model or reference output
 are ignored by default; `scripts/model-witnesses.py [NAME_FILTER]` runs them,
 finding models by file name in the directories listed in

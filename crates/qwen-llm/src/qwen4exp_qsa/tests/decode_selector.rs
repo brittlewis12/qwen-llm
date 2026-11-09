@@ -75,14 +75,19 @@ fn singleton_compact_selector_preserves_ids_status_and_guards() {
                 write_i32_tensor(&vis_store, &[-777; 9]);
                 write_i32_tensor(&vis, &[visible]);
                 let frozen = read_tensor_bytes(&scores_store);
-                // Every wide variant whose bound covers the row, at its PSO width.
+                // Every wide variant whose bound covers the row, at the exact
+                // production width and at the widest PSO width.
                 let wide: Vec<_> = prefill_reuse::WIDE_SELECTOR_KEYS
                     .into_iter()
-                    .filter_map(|keys| {
+                    .flat_map(|keys| {
                         let name = format!("kernel_qwen4exp_qsa_select_decode{keys}_f32");
                         let pso = ctx.pipeline(&name).unwrap();
-                        let threads = pso.maxTotalThreadsPerThreadgroup().min(1024) / 32 * 32;
-                        (keys * threads >= cap).then_some((pso, threads))
+                        let widest = pso.maxTotalThreadsPerThreadgroup().min(1024) / 32 * 32;
+                        let exact = prefill_reuse::wide_selector_threads(keys, cap);
+                        [exact, widest]
+                            .into_iter()
+                            .filter(move |&t| t <= widest && keys * t >= cap)
+                            .map(move |t| (pso.clone(), t))
                     })
                     .collect();
                 assert!(!wide.is_empty(), "cap={cap}");

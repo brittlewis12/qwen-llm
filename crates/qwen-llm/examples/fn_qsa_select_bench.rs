@@ -48,7 +48,7 @@ mod probe {
                 ),
                 ("kernel_qwen4exp_qsa_select_scan_f32".into(), 256, 1024),
             ];
-            for keys in [8usize, 16, 32, 64] {
+            for keys in [16usize, 32] {
                 // Exact sizing: the fewest whole SIMD groups covering the row.
                 let threads = n.div_ceil(keys).div_ceil(32).max(1) * 32;
                 if threads <= 1024 {

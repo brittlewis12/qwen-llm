@@ -37,7 +37,7 @@ pub(super) fn decode_selector_shape(
 }
 
 crate::env_flag!(
-    /// Default-on M5 singleton QSA decode selector holding each thread's contiguous score chunk in registers across radix passes, up to 1024 threads and 32768 visible blocks. Same radix-4 threshold, index-order compaction, IDs, ties, counts and statuses as QWEN_FN_QSA_DECODE_SELECT; one barrier per radix pass and one packed compaction scan. No added device buffers or dispatches. Set 0 for the existing decode selector; QWEN_FN_QSA_DECODE_SELECT=0 still restores radix4.
+    /// Default-on M5 singleton QSA decode selector holding each thread's contiguous 16- or 32-score chunk in registers across radix passes, with the fewest SIMD groups covering the row (up to 1024 threads, 32768 visible blocks; longer rows keep the existing selector). Same radix-4 threshold, index-order compaction, IDs, ties, counts and statuses as QWEN_FN_QSA_DECODE_SELECT; one barrier per radix pass and one packed compaction scan. No added device buffers or dispatches. Set 0 for the existing decode selector; QWEN_FN_QSA_DECODE_SELECT=0 still restores radix4.
     default_on wide_decode_selector_enabled,
     "QWEN_FN_QSA_DECODE_SELECT_WIDE"
 );
@@ -70,9 +70,15 @@ fn wide_decode_selector_active() -> bool {
     wide_decode_selector_enabled()
 }
 
-/// Keys per thread compiled for the wide selector, smallest first.
-pub(super) const WIDE_SELECTOR_KEYS: [usize; 3] = [8, 16, 32];
+/// Keys per thread compiled for the wide selector, smallest first. Larger
+/// register chunks measured slower on M5 at every row length they cover.
+pub(super) const WIDE_SELECTOR_KEYS: [usize; 2] = [16, 32];
 const WIDE_SELECTOR_MAX_THREADS: usize = 1024;
+
+/// Fewest whole SIMD groups whose `keys`-key chunks cover `visible` blocks.
+pub(super) fn wide_selector_threads(keys: usize, visible: usize) -> usize {
+    visible.div_ceil(keys).div_ceil(32).max(1) * 32
+}
 
 /// Pipeline and width whose `keys * width` covers `visible` blocks.
 pub(super) fn wide_selector_for(
@@ -80,21 +86,19 @@ pub(super) fn wide_selector_for(
     visible: usize,
 ) -> Result<Option<(Pipeline, usize)>, MetalError> {
     for keys in WIDE_SELECTOR_KEYS {
+        let threads = wide_selector_threads(keys, visible);
+        if threads > WIDE_SELECTOR_MAX_THREADS {
+            continue;
+        }
         let name = format!("kernel_qwen4exp_qsa_select_decode{keys}_f32");
         let pso = match ctx.pipeline(&name) {
             Ok(p) => p,
             Err(MetalError::NoFunction(_) | MetalError::Pipeline(_, _)) => return Ok(None),
             Err(e) => return Err(e),
         };
-        let threads = pso
-            .maxTotalThreadsPerThreadgroup()
-            .min(WIDE_SELECTOR_MAX_THREADS)
-            / 32
-            * 32;
         if pso.threadExecutionWidth() == 32
-            && threads > 0
+            && threads <= pso.maxTotalThreadsPerThreadgroup()
             && pso.staticThreadgroupMemoryLength() <= ctx.device.maxThreadgroupMemoryLength()
-            && keys * threads >= visible
         {
             return Ok(Some((pso, threads)));
         }

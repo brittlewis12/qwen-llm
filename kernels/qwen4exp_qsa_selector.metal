@@ -287,10 +287,8 @@ kernel void kernel_qwen4exp_qsa_select_decode##N##_f32(                         
     qsa_select_decode<N>(a, scores, visible, ids, counts, status, bins, scan, errors, lane,     \
                          width, sg, sl);                                                        \
 }
-QSA_SELECT_DECODE(8)
 QSA_SELECT_DECODE(16)
 QSA_SELECT_DECODE(32)
-QSA_SELECT_DECODE(64)
 #undef QSA_SELECT_DECODE
 
 kernel void kernel_fn_batch_qsa_select(

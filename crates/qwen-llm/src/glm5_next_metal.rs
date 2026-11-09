@@ -1044,6 +1044,16 @@ struct StageRecorder {
     command_gpu_ms: f64,
 }
 
+/// Ordinary unsampled decode timings. CPU intervals do not change the GPU graph.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct Glm5NextDecodeTiming {
+    pub wall_ms: f64,
+    pub encode_ms: f64,
+    pub gpu_ms: f64,
+    pub commit_wait_ms: f64,
+    pub readback_ms: f64,
+}
+
 pub struct Glm5NextSession<'w> {
     weights: &'w Glm5NextWeights,
     instance: u64,
@@ -1063,6 +1073,7 @@ pub struct Glm5NextSession<'w> {
     observed_allocation_delta: u64,
     /// Set only by [`Self::forward_stage_profiled`] for one step.
     stage_recorder: std::cell::RefCell<Option<StageRecorder>>,
+    decode_timing: std::cell::Cell<Option<Glm5NextDecodeTiming>>,
     /// Test hook: the next packed chunk sees zero visible pools for this
     /// chunk row, so its sparse selection fails in every MLA block.
     #[cfg(test)]
@@ -1190,6 +1201,7 @@ impl<'w> Glm5NextSession<'w> {
             ledger,
             observed_allocation_delta,
             stage_recorder: std::cell::RefCell::new(None),
+            decode_timing: std::cell::Cell::new(None),
             #[cfg(test)]
             corrupt_sparse_row: None,
         })
@@ -1340,6 +1352,22 @@ impl<'w> Glm5NextSession<'w> {
     /// Decode one token at the next position; returns full-vocabulary logits.
     pub fn forward(&mut self, ctx: &MetalContext, token: u32) -> Result<Vec<f32>> {
         self.forward_observed(ctx, token, &[], &mut |_, _, _| {})
+    }
+
+    /// Time the existing one-command decode without sampled encoders or extra
+    /// submissions. Errors retain the ordinary session poisoning contract.
+    pub fn forward_timed(
+        &mut self,
+        ctx: &MetalContext,
+        token: u32,
+    ) -> Result<(Vec<f32>, Glm5NextDecodeTiming)> {
+        self.decode_timing
+            .set(Some(Glm5NextDecodeTiming::default()));
+        let started = std::time::Instant::now();
+        let result = self.forward(ctx, token);
+        let mut timing = self.decode_timing.take().unwrap_or_default();
+        timing.wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        result.map(|row| (row, timing))
     }
 
     /// Like [`Self::forward`] (same kernels, same state), encoding the step
@@ -1618,7 +1646,13 @@ impl<'w> Glm5NextSession<'w> {
                 });
             }
         }
+        let readback_started = self.decode_timing.get().map(|_| std::time::Instant::now());
         let logits = logits.then(|| read_f32(&self.s.logits)).transpose()?;
+        if let Some(started) = readback_started {
+            let mut timing = self.decode_timing.get().unwrap();
+            timing.readback_ms += started.elapsed().as_secs_f64() * 1e3;
+            self.decode_timing.set(Some(timing));
+        }
         self.position += 1;
         self.poisoned = false;
         Ok(logits)
@@ -1634,6 +1668,7 @@ impl<'w> Glm5NextSession<'w> {
         hooks: &mut interventions::Hooks<'_, '_>,
         output: Option<&capture::RowOutput<'_>>,
     ) -> Result<()> {
+        let encode_started = self.decode_timing.get().map(|_| std::time::Instant::now());
         let w = self.weights;
         let c = &w.config;
         let s = &self.s;
@@ -1875,8 +1910,17 @@ impl<'w> Glm5NextSession<'w> {
             self.encode_output_tail(ctx, &enc, &s.residual[0], &dst)?;
         }
         enc.end();
+        let encode_ms = encode_started.map(|started| started.elapsed().as_secs_f64() * 1e3);
+        let wait_started = self.decode_timing.get().map(|_| std::time::Instant::now());
         command.commit();
         wait_completed(&command)?;
+        if let Some(started) = wait_started {
+            let mut timing = self.decode_timing.get().unwrap();
+            timing.encode_ms += encode_ms.unwrap();
+            timing.commit_wait_ms += started.elapsed().as_secs_f64() * 1e3;
+            timing.gpu_ms += (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+            self.decode_timing.set(Some(timing));
+        }
         if let Some(recorder) = self.stage_recorder.borrow_mut().as_mut() {
             recorder.command_gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
         }

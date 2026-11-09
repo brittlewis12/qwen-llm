@@ -1605,8 +1605,12 @@ impl Workspace {
         };
         self.commands = 0;
         self.trace_copies = 0;
-        let embedding = decode_rows(model.embedding, token, 1)?;
-        write(&self.x, &embedding.repeat(4))?;
+        {
+            let _embedding =
+                profile::Wall("decode_embedding", [position, 0, 0, 0], profile::start());
+            let embedding = decode_rows(model.embedding, token, 1)?;
+            write(&self.x, &embedding.repeat(4))?;
+        }
         if split_submission()
             && prepared.is_none()
             && trace.is_none()
@@ -1618,6 +1622,7 @@ impl Workspace {
             if !with_logits {
                 return Ok(Vec::new());
             }
+            let _readback = profile::Wall("decode_readback", [position, 0, 0, 0], profile::start());
             let logits = f32_slice(&self.logits)?;
             op::require(logits.iter().all(|v| v.is_finite()), "non-finite logits")?;
             return Ok(logits.to_vec());
@@ -1855,6 +1860,7 @@ impl Workspace {
         if !with_logits {
             return Ok(Vec::new());
         }
+        let _readback = profile::Wall("decode_readback", [position, 0, 0, 0], profile::start());
         let logits = f32_slice(&self.logits)?;
         op::require(logits.iter().all(|v| v.is_finite()), "non-finite logits")?;
         Ok(logits.to_vec())

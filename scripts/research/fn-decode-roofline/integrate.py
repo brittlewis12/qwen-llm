@@ -20,10 +20,11 @@ def main():
     root = Path(__file__).resolve().parents[3]
     thermal = lambda: subprocess.check_output(['notifyutil', '-g', 'com.apple.system.thermalpressurelevel'], text=True).strip()
     a.out.mkdir(parents=True, exist_ok=True)
+    thermal_file = 'thermal-'+'-'.join(map(str, a.depths))+'.jsonl'
     done = threading.Event()
 
     def monitor():
-        with (a.out / 'thermal.jsonl').open('w') as f:
+        with (a.out / thermal_file).open('w') as f:
             while not done.is_set():
                 f.write(json.dumps({'unix': time.time(), 'thermal': thermal()})+'\n')
                 f.flush()
@@ -42,7 +43,7 @@ def main():
             else:
                 raise RuntimeError('thermal pressure did not settle')
             command = [str(a.binary.resolve()), str(a.model.resolve()), str(depth), str(a.steps)]
-            manifest = {'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(), 'command': command, 'thermal_before': thermal()}
+            manifest = {'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(), 'command': command, 'thermal_before': thermal(), 'thermal_file': thermal_file}
             with (a.out / f'{depth}.jsonl').open('w') as stdout, (a.out / f'{depth}.log').open('w') as stderr:
                 result = subprocess.run([str(root/'scripts/bench/with-metal-lease'), '--task', 'FN-5M7T-integration', '--for', '8m', '--', 'nice', '-n', '10', *command], stdout=stdout, stderr=stderr, env={**os.environ, 'QWEN_METAL_LEASE_WAIT': '1'}, timeout=7200)
             manifest.update(returncode=result.returncode, thermal_after=thermal())

@@ -64,6 +64,7 @@ SCOPES = {
         "paired_startup_tests::",
     ],
     "qwen": [
+        "serve::decode_cursor::gpu_burst_tests::",
         "family_options::tests::qwen4exp_decode_flags_follow_the_documented_contract",
         "deepseek_v41::tests::",
         "serve::backend_v41::",

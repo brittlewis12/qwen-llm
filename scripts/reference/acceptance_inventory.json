@@ -6186,5 +6186,19 @@
     "class": "gpu",
     "ignored": false,
     "reason": "GPU sampler rejects concurrent dependent dispatches and aliased output before encoding; requires a Metal context."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::decode_cursor::gpu_burst_tests::bursts_keep_the_unconsumed_tail_across_native_resume_and_limit",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "GPU-burst cursor protocol tested with completed host metadata: native resumption, unconsumed tail, token limit and unpublished EOS; no Metal context."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::decode_cursor::gpu_burst_tests::flush_yield_and_eos_consume_no_extra_token",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "GPU-burst cursor protocol tested with completed host metadata: native resumption, unconsumed tail, token limit and unpublished EOS; no Metal context."
   }
 ]

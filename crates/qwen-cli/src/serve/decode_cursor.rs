@@ -25,6 +25,76 @@ pub(crate) enum Advance {
     Done(crate::GenerationResult),
 }
 
+#[cfg(test)]
+mod gpu_burst_tests {
+    use super::*;
+    use qwen_llm::metal::GpuTokenLoopStats;
+    fn cursor(max: usize) -> DecodeCursor {
+        DecodeCursor::new(DecodeRequest {
+            family: "test",
+            logits: vec![0.; 3],
+            max_tokens: max,
+            stop_tokens: &[2],
+            vocab_size: 3,
+        })
+        .unwrap()
+    }
+    fn stats(n: usize, eos: bool) -> GpuTokenLoopStats {
+        GpuTokenLoopStats {
+            sampled_tokens: n,
+            forwarded_tokens: n - 1,
+            emitted_tokens: n - usize::from(eos),
+            stopped_on_eos: eos,
+            first_token_ready_ms: Some(0.1),
+            first_token_callback_ms: (!eos || n > 1).then_some(0.2),
+            transition_ms: (n - 1) as f64,
+            first_transition_ms: (n > 1).then_some(1.),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn bursts_keep_the_unconsumed_tail_across_native_resume_and_limit() {
+        let mut c = cursor(6);
+        assert!(matches!(
+            c.append_gpu_burst(&[1, 0, 1], stats(3, false), 0.5),
+            Advance::Forward(1)
+        ));
+        assert_eq!(c.completed_transitions(), 2);
+        c.on_logits(Ok(vec![0.; 3]), 4., || Ok(())).unwrap();
+        let Advance::Done(g) = c.append_gpu_burst(&[0, 1, 0], stats(3, false), 9.) else {
+            panic!("limit not finished");
+        };
+        assert_eq!(g.tokens, vec![1, 0, 1, 0, 1, 0]);
+        assert_eq!(g.transitions, 5);
+        assert_eq!(g.transition_ms, 8.);
+        assert_eq!(g.first_token_ready_ms, Some(0.6));
+        assert_eq!(g.first_token_callback_ms, Some(0.7));
+        assert!(matches!(g.stop_reason, crate::StopReason::TokenLimit));
+    }
+    #[test]
+    fn flush_yield_and_eos_consume_no_extra_token() {
+        let mut c = cursor(8);
+        assert!(matches!(
+            c.append_gpu_burst(&[1], stats(1, false), 0.),
+            Advance::Forward(1)
+        ));
+        assert_eq!(c.transitions, 0);
+        c.on_logits(Ok(vec![0.; 3]), 2., || Ok(())).unwrap();
+        let Advance::Done(g) = c.append_gpu_burst(&[2], stats(1, true), 4.) else {
+            panic!("EOS not finished");
+        };
+        assert_eq!(g.tokens, vec![1, 2]);
+        assert_eq!(g.transitions, 1);
+        assert!(matches!(g.stop_reason, crate::StopReason::Eos));
+        let mut c = cursor(8);
+        let Advance::Done(g) = c.append_gpu_burst(&[2], stats(1, true), 0.) else {
+            panic!("EOS not finished");
+        };
+        assert_eq!(g.transitions, 0);
+        assert!(g.first_token_callback_ms.is_none());
+    }
+}
+
 pub(crate) struct DecodeCursor {
     family: &'static str,
     logits: Vec<f32>,

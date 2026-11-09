@@ -174,6 +174,7 @@ fn flash_next_tensor_routed_production_f64() {
         let mut old = Vec::new();
         let mut actual = Vec::new();
         let mut reference = Vec::new();
+        let mut staged_reference = Vec::new();
         for slot in sample_slots {
             let e = r.slot_expert[slot];
             let gw = cpu_expert(dtype, &gate, H, F, e);
@@ -183,11 +184,32 @@ fn flash_next_tensor_routed_production_f64() {
                 let a = dot64(&gw[row * H..(row + 1) * H], input);
                 let b = dot64(&uw[row * H..(row + 1) * H], input);
                 reference.push(a / (1.0 + (-a).exp()) * b);
+                let gd: Vec<f32> = gw[row * H..(row + 1) * H]
+                    .iter()
+                    .map(|&v| half::f16::from_f32(v).to_f32())
+                    .collect();
+                let ud: Vec<f32> = uw[row * H..(row + 1) * H]
+                    .iter()
+                    .map(|&v| half::f16::from_f32(v).to_f32())
+                    .collect();
+                let xd: Vec<f32> = input
+                    .iter()
+                    .map(|&v| half::f16::from_f32(v).to_f32())
+                    .collect();
+                let ga = dot64(&gd, &xd);
+                let ua = dot64(&ud, &xd);
+                staged_reference.push(ga / (1. + (-ga).exp()) * ua);
                 old.push(baseline[slot * F + row]);
                 actual.push(values[slot * F + row]);
             }
         }
         check(&format!("gate_up {dtype:?}"), &old, &actual, &reference);
+        staged_f64(
+            &format!("gate_up {dtype:?}"),
+            &old,
+            &actual,
+            &staged_reference,
+        );
     }
     for dtype in [GgmlType::IQ4_NL, GgmlType::Q2_0] {
         let bank = bank(dtype, "ffn_down_exps.weight");
@@ -234,6 +256,7 @@ fn flash_next_tensor_routed_production_f64() {
         let mut old = Vec::new();
         let mut actual = Vec::new();
         let mut reference = Vec::new();
+        let mut staged_reference = Vec::new();
         for slot in sample_slots {
             let weights = cpu_expert(dtype, &bank, F, H, r.slot_expert[slot]);
             for row in [0, 1, 31, 32, 63, 64, 127, 1279, 2559] {
@@ -241,12 +264,36 @@ fn flash_next_tensor_routed_production_f64() {
                     &weights[row * F..(row + 1) * F],
                     &x[slot * F..(slot + 1) * F],
                 ));
+                staged_reference.push(
+                    (0..F)
+                        .map(|j| {
+                            f64::from(half::f16::from_f32(weights[row * F + j]).to_f32())
+                                * f64::from(half::f16::from_f32(x[slot * F + j]).to_f32())
+                        })
+                        .sum(),
+                );
                 old.push(baseline[slot * H + row]);
                 actual.push(values[slot * H + row]);
             }
         }
         check(&format!("down {dtype:?}"), &old, &actual, &reference);
+        staged_f64(&format!("down {dtype:?}"), &old, &actual, &staged_reference);
     }
+}
+
+fn staged_f64(label: &str, a: &[f32], b: &[f32], reference: &[f64]) {
+    let mut squared = [0f64; 2];
+    let mut peak = [0f64; 2];
+    for (arm, values) in [a, b].into_iter().enumerate() {
+        for (&v, &r) in values.iter().zip(reference) {
+            let error = (f64::from(v) - r).abs();
+            squared[arm] += error * error;
+            peak[arm] = peak[arm].max(error);
+        }
+    }
+    eprintln!("ROUTED_STAGED_F64 {label} SSE={squared:?} max={peak:?}");
+    assert!(squared[1] <= squared[0], "{label}: staged F64 SSE");
+    assert!(peak[1] <= peak[0], "{label}: staged F64 peak");
 }
 
 #[test]
@@ -353,4 +400,105 @@ fn flash_next_tensor_dense_production_f64() {
         }
         check(&format!("dense {key}"), &av, &bv, &reference);
     }
+}
+
+#[test]
+#[ignore = "production lease; FLASH_PREFILL_MODEL; Flash-Next Q5 append error screen"]
+fn flash_next_q5_append_f64() {
+    let _policy = crate::qwen4exp_prefill_tensor::shapes::scope(true);
+    let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+    let ctx = MetalContext::new().unwrap();
+    assert!(moe_grouped_tensor_available(&ctx));
+    let gguf =
+        crate::gguf::GgufFile::open(std::env::var_os("FLASH_PREFILL_MODEL").unwrap()).unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    for d in &gguf.tensors {
+        if d.dtype != GgmlType::Q5_K
+            || d.shape.len() != 2
+            || !matches!(
+                (d.shape[0], d.shape[1]),
+                (2560, 512 | 640 | 6144 | 10240 | 12288) | (6144, 2560)
+            )
+            || !seen.insert(d.shape.clone())
+        {
+            continue;
+        }
+        let (k, n) = (d.shape[0] as usize, d.shape[1] as usize);
+        let w = MetalTensor::from_bytes(&ctx, gguf.try_slice(d).unwrap(), d.shape.clone(), d.dtype)
+            .unwrap();
+        let weights = crate::codec::dequant_to_f32(d, gguf.try_slice(d).unwrap()).unwrap();
+        for rows in [400, 2000, 2048] {
+            let mut rng = Lcg(0x7311);
+            let x: Vec<f32> = (0..k * rows).map(|_| rng.signed(0.25)).collect();
+            let xt = f32_tensor(&ctx, &x);
+            let mut values = Vec::new();
+            for tensor in [false, true] {
+                let out = offset_tensor(
+                    &ctx,
+                    16,
+                    bytemuck::cast_slice(&vec![f32::NAN; n * rows]),
+                    16,
+                    vec![n as u64, rows as u64],
+                    GgmlType::F32,
+                );
+                one_shot(&ctx, |enc| {
+                    if tensor {
+                        crate::metal::dispatch_census_begin();
+                        // Qualify the owning adapter, including the N12288
+                        // incumbent retained after its failed peak screen.
+                        crate::metal_forward::encode_qwen4exp_prefill_mat_mat(
+                            &ctx, enc, &w, &xt, &out, k, n, rows,
+                        )
+                        .unwrap();
+                        let routes = crate::metal::dispatch_census_take();
+                        assert_eq!(
+                            routes
+                                .iter()
+                                .any(|r| r.kernel == "kernel_mat_mat_q5_K_f32_tensor"),
+                            n != 12288 && rows != 2048
+                        );
+                        Ok(())
+                    } else {
+                        crate::metal_forward::encode_mat_mat_dispatch_without_fewrow(
+                            &ctx, enc, &w, &xt, &out, k, n, rows,
+                        )
+                        .unwrap();
+                        Ok(())
+                    }
+                })
+                .unwrap();
+                let actual = tensor_f32_at_offset(&out);
+                assert!(actual.iter().all(|v| v.is_finite()));
+                assert_offset_guards(&out, 16, 16);
+                values.push(actual);
+            }
+            if n == 12288 || rows == 2048 {
+                assert_eq!(
+                    bytemuck::cast_slice::<f32, u8>(&values[0]),
+                    bytemuck::cast_slice::<f32, u8>(&values[1])
+                );
+            }
+            let mut sse = [0f64; 2];
+            let mut peak = [0f64; 2];
+            for sample in 0..256 {
+                let row = sample * (rows - 1) / 255;
+                let col = sample * 7919 % n;
+                let reference: f64 = (0..k)
+                    .map(|j| {
+                        f64::from(half::f16::from_f32(weights[col * k + j]).to_f32())
+                            * f64::from(half::f16::from_f32(x[row * k + j]).to_f32())
+                    })
+                    .sum();
+                for arm in 0..2 {
+                    let error = (f64::from(values[arm][row * n + col]) - reference).abs();
+                    sse[arm] += error * error;
+                    peak[arm] = peak[arm].max(error);
+                }
+            }
+            eprintln!("Q5_APPEND_F64 rows={rows} k={k} n={n} SSE={sse:?} max={peak:?}");
+            assert!(sse[1] <= sse[0], "Q5 append F64 SSE");
+            assert!(peak[1] <= peak[0], "Q5 append F64 peak");
+        }
+    }
+    assert!(!seen.is_empty());
 }

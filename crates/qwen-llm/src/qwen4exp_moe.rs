@@ -82,9 +82,9 @@ pub(crate) mod singleton_observe;
 #[path = "qwen4exp_moe/router_capture.rs"]
 pub(crate) mod router_capture;
 const MAX_PACKED_TOKENS: usize = 2_048;
-/// Default-on Metal 4 half-operand tensor tiles for Flash-Next routed IQ2_S/IQ3_S/IQ3_XXS/IQ4_XS prefill gate/up at 2048 rows (or 512..2047 with QWEN_FN_SHORT_APPEND_TENSOR) and the screened 2560/640/512/top-10 geometry. Set to 0 for A/B or rollback; other shapes, dtypes and unavailable tensor pipelines retain incumbent dispatch. Also respects QWEN_EXPERT_TENSOR_TILE=0.
+/// Default-on half-operand tensor gate/up for Flash-Next IQ2_S/IQ3_S/IQ3_XXS/IQ4_XS at M2048, short rows with SHORT_APPEND_TENSOR and M128..M511 with APPEND_SHAPES, in the 2560/640/512/top-10 geometry. Zero restores the incumbent; unsupported dtypes/shapes/PSOs fall back. Also respects QWEN_EXPERT_TENSOR_TILE=0.
 const PREFILL_TENSOR_GATE_UP_ENV: &str = "QWEN_FN_PREFILL_TENSOR_GATE_UP";
-/// Default-on Metal 4 half-operand tensor tiles for Flash-Next routed IQ4_NL/Q2_0 prefill down at exactly 2048 rows and the screened 2560/640/512/top-10 geometry. Set to 0 for A/B or rollback; Q8_0, other shapes and unavailable tensor pipelines retain incumbent dispatch. Also respects QWEN_EXPERT_TENSOR_TILE=0.
+/// Default-on half-operand tensor IQ4_NL/Q2_0 down for Flash-Next at M2048, plus M128..M2047 under APPEND_SHAPES/APPEND_TENSOR_DOWN, in the 2560/640/512/top-10 geometry. Zero restores the incumbent; Q8_0 and unsupported shapes/PSOs fall back. Also respects QWEN_EXPERT_TENSOR_TILE=0.
 const PREFILL_TENSOR_DOWN_ENV: &str = "QWEN_FN_PREFILL_TENSOR_DOWN";
 
 fn packed_tensor_scope(geometry: Qwen4ExpMoeMetalGeometry, tokens: usize, gate_up: bool) -> bool {
@@ -93,8 +93,10 @@ fn packed_tensor_scope(geometry: Qwen4ExpMoeMetalGeometry, tokens: usize, gate_u
         && geometry.expert_count == 512
         && geometry.experts_per_token == 10
         && crate::qwen4exp_prefill_tensor::rows_qualified(tokens)
-        // The composed short-append NLL screen retains the incumbent down.
-        && (gate_up || tokens == 2048)
+        // The shape-complete down expansion has its own rollback.
+        && (gate_up || tokens == 2048
+            || (crate::qwen4exp_prefill_tensor::shapes::selected(tokens)
+                && crate::qwen4exp_prefill_tensor::shapes::tensor_down()))
 }
 
 fn packed_tensor_selected(
@@ -337,6 +339,7 @@ fn parallel_bucket_qualified(
                     .supportsFamily(objc2_metal::MTLGPUFamily::Apple10)))
         && (g.hidden_size, g.expert_count, g.experts_per_token) == (2560, 512, 10)
         && crate::qwen4exp_prefill_tensor::rows_qualified(tokens)
+        && (tokens >= 512 || ctx.tensor_ops_status().is_available())
         && pipeline_supports(ctx, "kernel_moe_route_bucket_slots_parallel_f32", 256, 0)
 }
 crate::env_flag!(
@@ -643,12 +646,14 @@ fn encode_qwen4exp_moe_route_count_capture(
 /// limit), on a pipeline that can run it. Other counts use the generic path.
 fn packed_router_e8p32_strict_scope_qualified(
     pipeline_capable: bool,
+    append_capable: bool,
     hidden_size: usize,
     expert_count: usize,
     router_dtype: GgmlType,
     tokens: usize,
 ) -> bool {
-    let width_qualified = PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS.contains(&tokens);
+    let width_qualified = PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS.contains(&tokens)
+        || (append_capable && crate::qwen4exp_prefill_tensor::shapes::selected(tokens));
     #[cfg(test)]
     let width_qualified = if tokens == 2045 {
         QWEN4EXP_PACKED_ROUTER_N2045_OVERRIDE.with(|slot| slot.get().unwrap_or(width_qualified))
@@ -716,6 +721,7 @@ fn packed_router_e8p32_strict_qualified(
     qwen4exp_packed_router_e8p32_strict_enabled()
         && packed_router_e8p32_strict_scope_qualified(
             true,
+            ctx.tensor_ops_status().is_available(),
             geometry.hidden_size,
             geometry.expert_count,
             router_dtype,
@@ -728,6 +734,7 @@ fn packed_router_e8p32_strict_qualified(
 /// the token counts it was measured faster on, on a pipeline that can run it.
 fn packed_iq4_down_m128_n16_scope_qualified(
     pipeline_capable: bool,
+    append_capable: bool,
     geometry: Qwen4ExpMoeMetalGeometry,
     dtype: GgmlType,
     tokens: usize,
@@ -738,7 +745,8 @@ fn packed_iq4_down_m128_n16_scope_qualified(
         && geometry.expert_count == PACKED_IQ4_DOWN_M128_N16_EXPERTS
         && geometry.experts_per_token == PACKED_IQ4_DOWN_M128_N16_TOP_K
         && dtype == GgmlType::IQ4_NL
-        && PACKED_IQ4_DOWN_M128_N16_TOKEN_COUNTS.contains(&tokens)
+        && (PACKED_IQ4_DOWN_M128_N16_TOKEN_COUNTS.contains(&tokens)
+            || (append_capable && crate::qwen4exp_prefill_tensor::shapes::selected(tokens)))
 }
 
 fn packed_iq4_down_m128_n16_qualified(
@@ -748,7 +756,13 @@ fn packed_iq4_down_m128_n16_qualified(
     tokens: usize,
 ) -> bool {
     qwen4exp_moe_iq4_down_m128_n16_enabled()
-        && packed_iq4_down_m128_n16_scope_qualified(true, geometry, dtype, tokens)
+        && packed_iq4_down_m128_n16_scope_qualified(
+            true,
+            ctx.tensor_ops_status().is_available(),
+            geometry,
+            dtype,
+            tokens,
+        )
         && packed_iq4_down_m128_n16_supported(ctx)
 }
 

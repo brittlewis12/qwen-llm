@@ -5,7 +5,7 @@ use crate::{
 };
 use objc2_metal::{MTLComputePipelineState, MTLDevice, MTLSize};
 crate::env_flag!(
-    /// Flash-Next HC injection at H10240/N4 and 128-aligned M512..M2048 on tensor-tier devices: coalesced F32 four-output dot products with SIMD reduction. No narrowing or new buffers. Set 0 to restore the original tensor tile. QWEN_FN_SHORT_SMALL_F32=0 or QWEN_FN_SMALL_F32_TILES=0 also disables this route.
+    /// Flash-Next HC injection at H10240/N4 on tensor-tier devices: coalesced F32 four-output dots with SIMD reduction, at aligned M512..M2048 or APPEND_SHAPES rows M128..M2048. No narrowing or new buffers. Zero restores prior dispatch, including scalar fallback for new tails. SHORT_SMALL_F32=0 or SMALL_F32_TILES=0 also disables it.
     default_on enabled,
     "QWEN_FN_PREFILL_HC_DOT"
 );
@@ -22,14 +22,18 @@ pub(super) fn try_encode(
     if !enabled()
         || !ctx.tensor_ops_status().is_available()
         || w.dtype != GgmlType::F32
-        || !(512..=2048).contains(&m)
-        || !m.is_multiple_of(128)
+        || !((512..=2048).contains(&m) && m.is_multiple_of(128) || super::shapes::selected(m))
         || (k, n) != (10240, 4)
         || [w, x, y].iter().any(|t| !t.offset.is_multiple_of(16))
     {
         return Ok(false);
     }
-    let p = match ctx.pipeline("kernel_qwen4exp_hc_inject_dot4_f32") {
+    let name = if m.is_multiple_of(4) {
+        "kernel_qwen4exp_hc_inject_dot4_f32"
+    } else {
+        "kernel_qwen4exp_hc_inject_dot4_f32_tail"
+    };
+    let p = match ctx.pipeline(name) {
         Ok(p)
             if p.threadExecutionWidth() == 32
                 && p.maxTotalThreadsPerThreadgroup() >= 128
@@ -89,7 +93,7 @@ pub(super) fn try_encode(
 
     enc.dispatch(
         MTLSize {
-            width: m / 4,
+            width: m.div_ceil(4),
             height: 1,
             depth: 1,
         },
@@ -123,8 +127,8 @@ mod tests {
         let enc = KernelEncoder::begin(&command);
         crate::metal::dispatch_census_begin();
         for (bad_k, bad_n, bad_m) in [
-            (k, n, 511),
-            (k, n, 513),
+            (k, n, 127),
+            (k, n, 2049),
             (k, n, 2176),
             (k, 5, m),
             (k - 128, n, m),

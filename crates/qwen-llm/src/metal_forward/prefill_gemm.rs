@@ -190,6 +190,18 @@ fn flash_next_eligible(
         && crate::qwen4exp_prefill_tensor::rows_qualified(m)
         && match dtype {
             GgmlType::Q4_K => matches!((k, n), (2560, 640 | 6144 | 10240 | 12288) | (6144, 2560)),
+            GgmlType::Q5_K => {
+                crate::qwen4exp_prefill_tensor::shapes::selected(m)
+                    // The paired 2048-row control regressed by 7.6 ms; its
+                    // aligned incumbent stays faster and bitwise unchanged.
+                    && m < 2048
+                    && matches!(
+                        (k, n),
+                        // N12288's native tensor reduced RMS but increased
+                        // sampled F64 peak error. Keep its incumbent.
+                        (2560, 512 | 640 | 6144 | 10240) | (6144, 2560)
+                    )
+            }
             GgmlType::Q6_K => matches!(
                 (k, n),
                 (2560, 512 | 640 | 6144 | 10240 | 12288) | (6144, 2560)
@@ -245,7 +257,7 @@ pub(crate) fn encode_qwen4exp_prefill_mat_mat(
             u32::MAX,
             x,
         );
-        if flash_next_dense_wide_enabled() {
+        if flash_next_dense_wide_enabled() && weight.dtype != GgmlType::Q5_K {
             crate::metal::encode_mat_mat_tensor_f32_flash_next_wide(
                 ctx, enc, weight, x, y, k, n, m,
             )?;
@@ -260,6 +272,7 @@ pub(crate) fn encode_qwen4exp_prefill_mat_mat(
 
 #[test]
 fn flash_next_prefill_tensor_gate_preserves_fallbacks() {
+    let _legacy = crate::qwen4exp_prefill_tensor::shapes::scope(false);
     for (dtype, shapes) in [
         (
             GgmlType::Q4_K,
@@ -304,7 +317,13 @@ fn flash_next_prefill_tensor_gate_preserves_fallbacks() {
                     crate::qwen4exp_prefill_tensor::rows_qualified(m)
                 );
             }
-            for m in [0, 1, 16, 127, 128, 511, 2049, 4096] {
+            for m in [128, 129, 399, 400, 401, 511] {
+                assert_eq!(
+                    flash_next_eligible(true, true, dtype, k, n, m),
+                    crate::qwen4exp_prefill_tensor::rows_qualified(m)
+                );
+            }
+            for m in [0, 1, 16, 127, 2049, 4096] {
                 assert!(!flash_next_eligible(true, true, dtype, k, n, m));
             }
         }
@@ -328,6 +347,63 @@ fn flash_next_prefill_tensor_gate_preserves_fallbacks() {
         (2560, 248320),
     ] {
         assert!(!flash_next_eligible(true, true, GgmlType::Q6_K, k, n, 2048));
+    }
+}
+
+#[test]
+fn flash_next_append_shapes_keep_hardware_dtype_and_decode_fallbacks() {
+    for policy in [false, true] {
+        let _scope = crate::qwen4exp_prefill_tensor::shapes::scope(policy);
+        for m in [
+            0, 1, 3, 4, 32, 127, 128, 129, 400, 511, 2000, 2047, 2048, 2049,
+        ] {
+            assert!(!flash_next_eligible(
+                true,
+                false,
+                GgmlType::Q5_K,
+                2560,
+                6144,
+                m
+            ));
+            assert!(!flash_next_eligible(
+                false,
+                true,
+                GgmlType::Q5_K,
+                2560,
+                6144,
+                m
+            ));
+            assert!(!flash_next_eligible(
+                true,
+                true,
+                GgmlType::BF16,
+                2560,
+                6144,
+                m
+            ));
+            assert!(!flash_next_eligible(
+                true,
+                true,
+                GgmlType::Q5_K,
+                2560,
+                2560,
+                m
+            ));
+            assert!(!flash_next_eligible(
+                true,
+                true,
+                GgmlType::Q5_K,
+                2560,
+                12288,
+                m
+            ));
+            assert_eq!(
+                flash_next_eligible(true, true, GgmlType::Q5_K, 2560, 6144, m),
+                policy
+                    && (128..2048).contains(&m)
+                    && crate::qwen4exp_prefill_tensor::rows_qualified(m)
+            );
+        }
     }
 }
 

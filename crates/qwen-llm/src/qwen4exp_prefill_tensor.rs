@@ -2,11 +2,12 @@
 
 mod hc_dot;
 pub(crate) mod qsa_index_mma;
+pub(crate) mod shapes;
 pub(crate) mod small_f32;
 pub(crate) mod small_f32_mma;
 
 crate::env_flag!(
-    /// Extend Flash-Next tensor dense and routed gate/up projections and parallel bucketing to 512..2047-row appends, plus BF16 HC at multiples of 128 rows, default on when their existing controls and hardware gates allow them. Set to 0 to restore the 2048-row-only qualification. No new operand precision or allocated buffers; routed down, wide expert gate/up and the tensor router retain their 2048-row qualification.
+    /// Default-on Flash-Next short tensor dense/gate-up projections, parallel bucketing and aligned BF16 HC at M512..M2047. APPEND_SHAPES also admits M128..M511 on the tensor tier; separate shape controls complete ragged HC and routed down. Zero restores M2048-only qualification for these routes. No new precision or buffers. Wide experts and the tensor router retain M2048 qualification.
     default_on short_enabled,
     "QWEN_FN_SHORT_APPEND_TENSOR"
 );
@@ -16,7 +17,7 @@ fn qualifies(short: bool, rows: usize) -> bool {
 }
 
 pub(crate) fn rows_qualified(rows: usize) -> bool {
-    qualifies(short_enabled(), rows)
+    qualifies(short_enabled(), rows) || (short_enabled() && shapes::selected(rows))
 }
 
 #[cfg(test)]

@@ -1,0 +1,110 @@
+diff --git b/crates/qwen-llm/src/qwen4exp_metal/hc_device.rs a/crates/qwen-llm/src/qwen4exp_metal/hc_device.rs
+index 775c884c6..8eded3476 100644
+--- b/crates/qwen-llm/src/qwen4exp_metal/hc_device.rs
++++ a/crates/qwen-llm/src/qwen4exp_metal/hc_device.rs
+@@ -33,7 +33,10 @@ pub(super) fn try_encode(
+         return Ok(false);
+     }
+     let split = new_rows && !legacy_rows;
+-    let name = if split {
++    let up2 = split && k == 320 && crate::qwen4exp_prefill_tensor::shapes::hc_up2();
++    let name = if up2 {
++        "kernel_qwen4exp_hc_bf16_device_split2"
++    } else if split {
+         "kernel_qwen4exp_hc_bf16_device_split4"
+     } else {
+         "kernel_qwen4exp_hc_bf16_device"
+@@ -132,7 +135,13 @@ pub(super) fn try_encode(
+     enc.set_threadgroup_memory(0, 0);
+     enc.dispatch(
+         MTLSize {
+-            width: m.div_ceil(if split { 32 } else { 128 }),
++            width: m.div_ceil(if up2 {
++                64
++            } else if split {
++                32
++            } else {
++                128
++            }),
+             height: n.div_ceil(64),
+             depth: 1,
+         },
+@@ -250,6 +259,12 @@ mod tests {
+                 [
+                     "kernel_qwen4exp_hc_convert_bf16",
+                     if crate::qwen4exp_prefill_tensor::shapes::hc_split()
++                        && crate::qwen4exp_prefill_tensor::shapes::hc_up2()
++                        && k == 320
++                        && (m < 512 || !m.is_multiple_of(128))
++                    {
++                        "kernel_qwen4exp_hc_bf16_device_split2"
++                    } else if crate::qwen4exp_prefill_tensor::shapes::hc_split()
+                         && (m < 512 || !m.is_multiple_of(128))
+                     {
+                         "kernel_qwen4exp_hc_bf16_device_split4"
+diff --git b/crates/qwen-llm/src/qwen4exp_prefill_tensor/shapes.rs a/crates/qwen-llm/src/qwen4exp_prefill_tensor/shapes.rs
+index 96e49b8c2..3ed4d10ba 100644
+--- b/crates/qwen-llm/src/qwen4exp_prefill_tensor/shapes.rs
++++ a/crates/qwen-llm/src/qwen4exp_prefill_tensor/shapes.rs
+@@ -26,6 +26,16 @@ pub(crate) fn hc_split() -> bool {
+     configured_hc_split()
+ }
+ 
++crate::env_flag!(
++    /// Experimental BF16 HC up projection under APPEND_SHAPES/HC_SPLIT: two 160-wide K partitions and 64-query tiles instead of four 80-wide partitions and 32-query tiles. Same BF16 operands and F32 sums; zero keeps the four-part reduction.
++    default_off configured_hc_up2,
++    "QWEN_FN_APPEND_HC_UP2"
++);
++
++pub(crate) fn hc_up2() -> bool {
++    configured_hc_up2()
++}
++
+ #[cfg(test)]
+ thread_local! {
+     static OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+diff --git b/kernels/tensor/qwen4exp_hc_device.metal a/kernels/tensor/qwen4exp_hc_device.metal
+index 333317607..3b0bb9a0b 100644
+--- b/kernels/tensor/qwen4exp_hc_device.metal
++++ a/kernels/tensor/qwen4exp_hc_device.metal
+@@ -63,3 +63,27 @@ kernel void kernel_qwen4exp_hc_bf16_device_split4(constant hc_device_args&a [[bu
+     auto dst=tensor(y+ulong(m0)*a.n+n0,dextents<int,2>(min(64u,a.n-n0),live),array<int,2>({1,int(a.n)}));
+     s0.store(dst);
+ }
++
++// The short up projection has K=320: two aligned 160-wide partitions avoid
++// the K=80 internal tail and halve repeated weight traversal across queries.
++[[max_total_threads_per_threadgroup(128)]]
++kernel void kernel_qwen4exp_hc_bf16_device_split2(constant hc_device_args&a [[buffer(0)]],
++        device const bfloat*w [[buffer(1)]],device const bfloat*x [[buffer(2)]],
++        device float*y [[buffer(3)]],uint2 group [[threadgroup_position_in_grid]]) {
++#pragma METAL fp math_mode(safe)
++    const uint m0=group.x*64u,n0=group.y*64u,live=min(64u,a.m-m0),part=a.k/2u;
++    constexpr auto d=tensor_ops::matmul2d_descriptor(64,64,static_cast<int>(dynamic_extent),
++        false,true,false,tensor_ops::matmul2d_descriptor::mode::multiply);
++    tensor_ops::matmul2d<d,execution_simdgroups<4>> mm;
++    auto xt=tensor((device bfloat*)x+ulong(m0)*a.k,dextents<int,2>(part,live),array<int,2>({1,int(a.k)}));
++    auto wt=tensor((device bfloat*)w+ulong(n0)*a.k,dextents<int,2>(part,min(64u,a.n-n0)),array<int,2>({1,int(a.k)}));
++    auto s0=mm.template get_destination_cooperative_tensor<decltype(xt),decltype(wt),float>();
++    auto s1=mm.template get_destination_cooperative_tensor<decltype(xt),decltype(wt),float>();
++    mm.run(xt,wt,s0);
++    auto x1=tensor((device bfloat*)x+ulong(m0)*a.k+part,dextents<int,2>(part,live),array<int,2>({1,int(a.k)}));
++    auto w1=tensor((device bfloat*)w+ulong(n0)*a.k+part,dextents<int,2>(part,min(64u,a.n-n0)),array<int,2>({1,int(a.k)}));
++    mm.run(x1,w1,s1);
++    for(ushort i=0;i<s0.get_capacity();++i)s0[i]=s0[i]+s1[i];
++    auto dst=tensor(y+ulong(m0)*a.n+n0,dextents<int,2>(min(64u,a.n-n0),live),array<int,2>({1,int(a.n)}));
++    s0.store(dst);
++}
+diff --git b/scripts/research/fn-append-shapes/run.py a/scripts/research/fn-append-shapes/run.py
+index b29472716..f4c056122 100644
+--- b/scripts/research/fn-append-shapes/run.py
++++ a/scripts/research/fn-append-shapes/run.py
+@@ -36,7 +36,7 @@ def main():
+    if child.poll() is None:os.killpg(child.pid,signal.SIGKILL);child.wait()
+    done.set();watcher.join()
+  samples.append(dict(time=time.time(),thermal=pressure()))
+- keys=['QWEN_FN_APPEND_SHAPES','QWEN_FN_APPEND_EXPERT_PANELS','QWEN_FN_APPEND_PANEL_FUSED','QWEN_FN_APPEND_TENSOR_DOWN','QWEN_FN_APPEND_HC_SPLIT','FLASH_PREFILL_MODEL','FLASH_PREFILL_OUT','FLASH_APPEND_PLAN','MTL_DEBUG_LAYER','QWEN_REQUIRE_METAL_TESTS']
++ keys=['QWEN_FN_APPEND_SHAPES','QWEN_FN_APPEND_EXPERT_PANELS','QWEN_FN_APPEND_PANEL_FUSED','QWEN_FN_APPEND_TENSOR_DOWN','QWEN_FN_APPEND_HC_SPLIT','QWEN_FN_APPEND_HC_UP2','FLASH_PREFILL_MODEL','FLASH_PREFILL_OUT','FLASH_APPEND_PLAN','MTL_DEBUG_LAYER','QWEN_REQUIRE_METAL_TESTS']
+  receipt=dict(commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),command=cmd,env={k:os.environ[k] for k in keys if k in os.environ},returncode=code,wall_s=time.time()-start,thermal_max=max(s['thermal'] for s in samples),aborts=aborts)
+  (a.out/'launch.json').write_text(json.dumps(receipt,indent=2)+'\n');(a.out/'thermal.json').write_text(json.dumps(samples,indent=2)+'\n')
+  print(json.dumps(receipt),flush=True);return int(bool(code or aborts or receipt['thermal_max']))

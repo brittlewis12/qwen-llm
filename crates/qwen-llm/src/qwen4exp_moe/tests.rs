@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 
 #[test]
 fn flash_next_tensor_scope_is_bounded() {
+    // Pin the rollback contract independently of the default append policy.
+    let _legacy = crate::qwen4exp_prefill_tensor::shapes::scope(false);
     let production =
         Qwen4ExpMoeMetalGeometry::from_config(&Qwen4ExpConfig::flash_next_reference()).unwrap();
     for gate_up in [false, true] {
@@ -42,6 +44,23 @@ fn flash_next_tensor_scope_is_bounded() {
         ] {
             assert!(!packed_tensor_scope(geometry, 2048, gate_up));
         }
+    }
+}
+
+#[test]
+fn append_width_completion_preserves_non_tensor_scopes() {
+    let _shapes = crate::qwen4exp_prefill_tensor::shapes::scope(true);
+    let geometry =
+        Qwen4ExpMoeMetalGeometry::from_config(&Qwen4ExpConfig::flash_next_reference()).unwrap();
+    for n in 0..=2049 {
+        assert_eq!(
+            packed_router_e8p32_strict_scope_qualified(true, false, 2560, 512, GgmlType::F32, n),
+            PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS.contains(&n)
+        );
+        assert_eq!(
+            packed_iq4_down_m128_n16_scope_qualified(true, false, geometry, GgmlType::IQ4_NL, n),
+            PACKED_IQ4_DOWN_M128_N16_TOKEN_COUNTS.contains(&n)
+        );
     }
 }
 
@@ -256,8 +275,9 @@ fn read_tensor_bytes(tensor: &MetalTensor) -> Vec<u8> {
 
 #[test]
 fn packed_router_n2045_scope_and_restore() {
+    let _legacy = crate::qwen4exp_prefill_tensor::shapes::scope(false);
     let qualified = |pipeline, hidden, experts, dtype, n| {
-        packed_router_e8p32_strict_scope_qualified(pipeline, hidden, experts, dtype, n)
+        packed_router_e8p32_strict_scope_qualified(pipeline, true, hidden, experts, dtype, n)
     };
     let width = |n| qualified(true, 2560, 512, GgmlType::F32, n);
     let original = width(2045);
@@ -298,7 +318,7 @@ fn packed_router_n2045_scope_and_restore() {
 #[test]
 fn packed_router_e8p32_strict_scope_is_exact() {
     let qualified = |device, hidden, experts, dtype, tokens| {
-        packed_router_e8p32_strict_scope_qualified(device, hidden, experts, dtype, tokens)
+        packed_router_e8p32_strict_scope_qualified(device, true, hidden, experts, dtype, tokens)
     };
     for &tokens in &PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS {
         assert!(tokens <= MAX_PACKED_TOKENS);
@@ -312,7 +332,8 @@ fn packed_router_e8p32_strict_scope_is_exact() {
                 GgmlType::F32,
                 tokens,
             ),
-            PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS.contains(&tokens),
+            PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS.contains(&tokens)
+                || crate::qwen4exp_prefill_tensor::shapes::selected(tokens),
             "strict E8P32 token scope at N={tokens}",
         );
     }
@@ -358,12 +379,13 @@ fn packed_iq4_down_m128_n16_scope_is_exact_and_rollbackable() {
     assert_eq!(exact.expert_count, PACKED_IQ4_DOWN_M128_N16_EXPERTS);
     assert_eq!(exact.experts_per_token, PACKED_IQ4_DOWN_M128_N16_TOP_K);
     let qualified = |device, geometry, dtype, tokens| {
-        packed_iq4_down_m128_n16_scope_qualified(device, geometry, dtype, tokens)
+        packed_iq4_down_m128_n16_scope_qualified(device, true, geometry, dtype, tokens)
     };
     for tokens in 1..=MAX_PACKED_TOKENS + 1 {
         assert_eq!(
             qualified(true, exact, GgmlType::IQ4_NL, tokens,),
-            PACKED_IQ4_DOWN_M128_N16_TOKEN_COUNTS.contains(&tokens),
+            PACKED_IQ4_DOWN_M128_N16_TOKEN_COUNTS.contains(&tokens)
+                || crate::qwen4exp_prefill_tensor::shapes::selected(tokens),
             "tokens={tokens}",
         );
     }
@@ -466,6 +488,7 @@ fn packed_iq4_down_m128_n16_scope_is_exact_and_rollbackable() {
 
 #[test]
 fn packed_router_e8p32_strict_matches_generic_route_bits() {
+    let _shapes = crate::qwen4exp_prefill_tensor::shapes::scope(true);
     let Some(ctx) = packed_test_context() else {
         return;
     };
@@ -477,7 +500,12 @@ fn packed_router_e8p32_strict_matches_generic_route_bits() {
         return;
     }
 
-    check_packed_router_e8p32_bits(ctx, &PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS);
+    check_packed_router_e8p32_bits(
+        ctx,
+        &[
+            128, 129, 399, 400, 401, 511, 512, 513, 1009, 2000, 2045, 2047, 2048,
+        ],
+    );
 }
 
 #[test]
@@ -1707,6 +1735,20 @@ fn grouped_iq4_nl_down_m128_n16_is_bit_exact_and_guarded() {
         Some(527),
         &n527_topk10,
     );
+    for n in [128, 129, 399, 400, 401, 2000, 2001, 2047] {
+        let assignments = (0..10)
+            .flat_map(|expert| std::iter::repeat_n(expert, n))
+            .collect::<Vec<_>>();
+        run_case(
+            &ctx,
+            &format!("append N={n} top10"),
+            640,
+            129,
+            10,
+            Some(n),
+            &assignments,
+        );
+    }
 }
 
 #[test]

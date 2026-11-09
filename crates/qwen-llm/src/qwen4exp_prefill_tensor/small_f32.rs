@@ -6,13 +6,13 @@ use crate::{
 use objc2_metal::{MTLComputePipelineState, MTLDevice, MTLSize};
 
 crate::env_flag!(
-    /// Device-input F32 tensor HC injection and GDN alpha/beta projections at 128-aligned 512..2047 rows, default on with the Metal 4 tier. QWEN_FN_SMALL_F32_TILES also includes M2048. Original F32 operands and sums, no relaxed precision, conversion or new buffers. Set to 0 for the scalar-ordered incumbent. Independent of QWEN_FN_SHORT_APPEND_TENSOR.
+    /// Device-input F32 HC injection and GDN alpha/beta short projections at aligned 512..2047 rows, default on; APPEND_SHAPES admits additional tensor-tier rows at 128..2048. QWEN_FN_SMALL_F32_TILES also includes M2048. Original F32 operands and sums, no conversion or new buffers. Zero restores the scalar-ordered incumbent. Independent of QWEN_FN_SHORT_APPEND_TENSOR.
     default_on enabled,
     "QWEN_FN_SHORT_SMALL_F32"
 );
 
 crate::env_flag!(
-    /// Flash-Next F32 HC injection/GDN alpha-beta tensor projections: use 32-row tiles at 128-aligned M512..M2048, default on with the tensor tier. No narrowing, relaxed precision or new buffers. Set 0 to restore M128 tiles below 2048 and the scalar-ordered M2048 incumbent; QWEN_FN_SHORT_SMALL_F32=0 disables both routes. Unsupported PSOs retain the prior route.
+    /// Flash-Next F32 HC injection/GDN alpha-beta projections: prefer coalesced HC dots and 32-row tensor tiles, including APPEND_SHAPES tails. No narrowing or new buffers. Zero restores the prior aligned M128 tiles below 2048 and scalar-ordered M2048; SHORT_SMALL_F32=0 disables both. Missing tail PSOs retain the incumbent.
     default_on small_tiles_enabled,
     "QWEN_FN_SMALL_F32_TILES"
 );
@@ -27,16 +27,24 @@ pub(crate) fn try_encode(
     n: usize,
     m: usize,
 ) -> Result<bool, MfError> {
+    let legacy_rows = (512..=2048).contains(&m) && m.is_multiple_of(128);
+    let extra_rows = ctx.tensor_ops_status().is_available()
+        && small_tiles_enabled()
+        && super::shapes::selected(m);
     if !enabled()
         || w.dtype != GgmlType::F32
-        || !(512..=2048).contains(&m)
-        || !m.is_multiple_of(128)
+        || !(legacy_rows || extra_rows)
         || !matches!((k, n), (10240, 4) | (2560, 48))
     {
         return Ok(false);
     }
     if small_tiles_enabled() && super::hc_dot::try_encode(ctx, enc, w, x, y, k, n, m)? {
         return Ok(true);
+    }
+    // Extra N4 rows were qualified with the coalesced F32 dot. Disabling or
+    // losing that PSO restores their incumbent, rather than an unscreened tile.
+    if n == 4 && !legacy_rows {
+        return Ok(false);
     }
     if small_tiles_enabled() && super::small_f32_mma::try_encode(ctx, enc, w, x, y, k, n, m)? {
         return Ok(true);
@@ -56,12 +64,19 @@ pub(crate) fn try_encode(
     };
     let choices = [(small_name, 32), (name, 128)];
     let choices = if small_tiles_enabled() {
-        &choices[..if m == 2048 { 1 } else { 2 }]
+        &choices[..if m == 2048 || !legacy_rows { 1 } else { 2 }]
     } else {
         &choices[1..]
     };
     let mut chosen = None;
     for &(name, tile) in choices {
+        let tail;
+        let name = if m.is_multiple_of(tile) {
+            name
+        } else {
+            tail = format!("{name}_tail");
+            &tail
+        };
         match ctx.tensor_pipeline(name) {
             Ok(p)
                 if p.threadExecutionWidth() == 32
@@ -128,7 +143,7 @@ pub(crate) fn try_encode(
     enc.set_threadgroup_memory(0, 0);
     enc.dispatch(
         MTLSize {
-            width: m / tile,
+            width: m.div_ceil(tile),
             height: 1,
             depth: 1,
         },
@@ -147,6 +162,7 @@ mod tests {
     use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
     #[test]
     fn small_f32_short_projections_match_f64_and_preserve_guards() {
+        let _shapes = super::super::shapes::scope(true);
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
@@ -172,10 +188,20 @@ mod tests {
             )
             .to_vec()
         };
-        for (m, k, n) in [512usize, 1024, 1536, 1920, 2048]
-            .into_iter()
-            .flat_map(|m| [(m, 10240, 4), (m, 2560, 48)])
+        for (m, k, n) in [
+            128usize, 129, 399, 400, 401, 511, 512, 513, 1009, 2000, 2047, 2048,
+        ]
+        .into_iter()
+        .flat_map(|m| [(m, 10240, 4), (m, 2560, 48)])
         {
+            let legacy_rows = (512..=2048).contains(&m) && m.is_multiple_of(128);
+            if !legacy_rows
+                && (!ctx.tensor_ops_status().is_available()
+                    || !small_tiles_enabled()
+                    || (n == 4 && !crate::env_flag::read_default_on("QWEN_FN_PREFILL_HC_DOT")))
+            {
+                continue;
+            }
             if (!ctx.tensor_ops_status().is_available()
                 && (!small_tiles_enabled()
                     || !crate::env_flag::read_default_on("QWEN_FN_PREFILL_F32_MMA")))
@@ -204,16 +230,19 @@ mod tests {
             let census = crate::metal::dispatch_census_take();
             assert_eq!(census.len(), 1);
             assert_eq!(census[0].threads_width, 128);
-            let tile = if census[0].kernel == "kernel_qwen4exp_hc_inject_dot4_f32" {
+            let tile = if census[0]
+                .kernel
+                .starts_with("kernel_qwen4exp_hc_inject_dot4_f32")
+            {
                 4
-            } else if census[0].kernel.ends_with("_m32")
+            } else if census[0].kernel.contains("_m32")
                 || census[0].kernel == "kernel_qwen4exp_small_f32_mma_k128_s4"
             {
                 32
             } else {
                 128
             };
-            assert_eq!(census[0].grid_width, (m / tile) as u64);
+            assert_eq!(census[0].grid_width, m.div_ceil(tile) as u64);
             enc.end();
             cmd.commit();
             crate::metal::wait_completed(&cmd).unwrap();
@@ -222,6 +251,7 @@ mod tests {
             assert!(a.iter().chain(&b).all(|v| v.is_finite()));
             let mut errors = [0.0f64; 2];
             let mut maximum = 0.0f64;
+            let mut maximum_pair = [0.0f64; 2];
             for i in 0..256 {
                 let row = i * (m - 1) / 255;
                 let col = i * 7919 % n;
@@ -236,6 +266,8 @@ mod tests {
                 );
                 errors[0] += (f64::from(a[row * n + col]) - r).powi(2);
                 errors[1] += (v - r).powi(2);
+                maximum_pair[0] = maximum_pair[0].max((f64::from(a[row * n + col]) - r).abs());
+                maximum_pair[1] = maximum_pair[1].max((v - r).abs());
             }
             assert!(errors[1] <= 2.25 * errors[0] + 1e-12);
             for t in [&wt, &xt, &yt, &old] {
@@ -256,6 +288,7 @@ mod tests {
                 "small F32 M{m} K{k} N{n}: F64 max_abs={maximum:.9e}, RMS error ratio={:.9}",
                 (errors[1] / errors[0]).sqrt()
             );
+            eprintln!("F32_TAIL_F64 rows={m} k={k} n={n} sse={errors:?} max={maximum_pair:?}");
         }
     }
 }

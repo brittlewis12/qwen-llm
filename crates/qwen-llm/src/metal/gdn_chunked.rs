@@ -5,8 +5,30 @@ use super::*;
 const CHUNKED_PREFILL_ENV: &str = "QWEN_GDN_CHUNKED_PREFILL";
 
 fn enabled() -> bool {
+    #[cfg(test)]
+    if let Some(value) = NUMERIC_CONTROL.with(|s| s.get()) {
+        return value;
+    }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| crate::env_flag::read_default_on(CHUNKED_PREFILL_ENV))
+}
+
+#[cfg(test)]
+thread_local! {
+    static NUMERIC_CONTROL: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Test-only F32 arithmetic control, without changing the normal chunk policy.
+#[cfg(test)]
+pub(crate) fn with_gdn_prefill_numeric_control<R>(enabled: bool, work: impl FnOnce() -> R) -> R {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            NUMERIC_CONTROL.with(|s| s.set(self.0));
+        }
+    }
+    let _restore = Restore(NUMERIC_CONTROL.with(|s| s.replace(Some(enabled))));
+    work()
 }
 
 fn chunk_size(

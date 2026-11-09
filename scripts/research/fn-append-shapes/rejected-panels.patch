@@ -1,0 +1,619 @@
+diff --git b/crates/qwen-llm/src/metal/moe_grouped_generic/tensor.rs a/crates/qwen-llm/src/metal/moe_grouped_generic/tensor.rs
+index 5c003881d..10d96cf1a 100644
+--- b/crates/qwen-llm/src/metal/moe_grouped_generic/tensor.rs
++++ a/crates/qwen-llm/src/metal/moe_grouped_generic/tensor.rs
+@@ -109,6 +109,184 @@ pub fn moe_grouped_tensor_selected(ctx: &MetalContext) -> bool {
+ const TENSOR_THREADGROUP_BYTES: usize = 8192;
+ const TENSOR_THREADGROUP_BYTES_WIDE: usize = 16384;
+ 
++/// FN-only 16/32-slot count ranges. All passes are preflighted before mutation.
++#[allow(clippy::too_many_arguments)]
++pub(crate) fn try_encode_fn_append_expert_panels(
++    ctx: &MetalContext,
++    enc: &KernelEncoder,
++    gate: &MetalTensor,
++    up: &MetalTensor,
++    input: &MetalTensor,
++    counts: &MetalTensor,
++    ids: &MetalTensor,
++    inner: &MetalTensor,
++    fused: bool,
++    h: usize,
++    f: usize,
++    e: usize,
++    top: usize,
++    rows: usize,
++) -> Result<bool, MetalError> {
++    use crate::metal::checks::{check_disjoint, require_serial};
++    const K: &str = "fn_append_expert_panels";
++    if !moe_grouped_tensor_selected(ctx)
++        || input.dtype != GgmlType::F32
++        || gate.dtype != up.dtype
++        || !(128..2048).contains(&rows)
++        || !matches!(
++            gate.dtype,
++            GgmlType::IQ2_S | GgmlType::IQ3_S | GgmlType::IQ3_XXS | GgmlType::IQ4_XS
++        )
++    {
++        return Ok(false);
++    }
++    require_serial(K, enc)?;
++    check_disjoint(
++        K,
++        inner,
++        &[
++            (gate, "gate"),
++            (up, "up"),
++            (input, "input"),
++            (counts, "counts"),
++            (ids, "ids"),
++        ],
++    )?;
++    let ga = generic_mm_args(
++        K, gate, input, counts, ids, inner, h, f, e, rows, top, 1, 16,
++    )?;
++    let ua = generic_mm_args(K, up, input, counts, ids, inner, h, f, e, rows, top, 1, 16)?;
++    let suffix = moe_grouped_generic_layout(gate.dtype).unwrap().suffix;
++    let names = if fused {
++        vec![
++            format!("kernel_fn_moe_gate_up_{suffix}_panel16"),
++            moe_grouped_tensor_pipeline_name(
++                MoeGroupedTensorRole::Down,
++                gate.dtype,
++                TensorActivation::F32,
++            )
++            .unwrap(),
++            moe_grouped_tensor_pipeline_name(
++                MoeGroupedTensorRole::UpSiluMul,
++                up.dtype,
++                TensorActivation::F32,
++            )
++            .unwrap(),
++        ]
++    } else {
++        vec![
++            format!("kernel_fn_moe_down_{suffix}_panel16"),
++            moe_grouped_tensor_pipeline_name(
++                MoeGroupedTensorRole::Down,
++                gate.dtype,
++                TensorActivation::F32,
++            )
++            .unwrap(),
++            format!("kernel_fn_moe_up_{suffix}_panel16"),
++            moe_grouped_tensor_pipeline_name(
++                MoeGroupedTensorRole::UpSiluMul,
++                up.dtype,
++                TensorActivation::F32,
++            )
++            .unwrap(),
++        ]
++    };
++    let mut psos = Vec::new();
++    for (index, name) in names.into_iter().enumerate() {
++        let p = match ctx.tensor_pipeline(&name) {
++            Ok(p) => p,
++            Err(MetalError::NoFunction(_) | MetalError::Pipeline(_, _)) => return Ok(false),
++            Err(e) => return Err(e),
++        };
++        if p.threadExecutionWidth() != 32
++            || p.maxTotalThreadsPerThreadgroup() < 128
++            || p.staticThreadgroupMemoryLength()
++                + if fused && index == 0 {
++                    9216
++                } else {
++                    TENSOR_THREADGROUP_BYTES
++                }
++                > ctx.device.maxThreadgroupMemoryLength()
++        {
++            return Ok(false);
++        }
++        psos.push(p);
++    }
++    for (index, p) in psos.into_iter().enumerate() {
++        if fused && index == 0 {
++            enc.set_pipeline(&p);
++            enc.set_bytes(0, &ga);
++            for (slot, t) in [
++                (1, gate),
++                (2, up),
++                (3, input),
++                (4, counts),
++                (5, ids),
++                (6, inner),
++            ] {
++                enc.set_tensor(slot, t);
++            }
++            enc.set_threadgroup_memory(0, 9216);
++            enc.dispatch(
++                MTLSize {
++                    width: 1,
++                    height: f.div_ceil(64),
++                    depth: e,
++                },
++                MTLSize {
++                    width: 128,
++                    height: 1,
++                    depth: 1,
++                },
++            );
++            continue;
++        }
++        let gate_role = if fused { index == 1 } else { index < 2 };
++        let mut a = if gate_role { ga } else { ua };
++        let panel = if !fused && index % 2 == 0 { 16 } else { 32 };
++        if panel == 32 {
++            a.min_count = 17;
++            a.max_count = i32::MAX as u32;
++        }
++        enc.set_pipeline(&p);
++        enc.set_bytes(0, &a);
++        for (slot, t) in [
++            (1, if gate_role { gate } else { up }),
++            (2, input),
++            (3, counts),
++            (4, ids),
++            (5, inner),
++        ] {
++            enc.set_tensor(slot, t);
++        }
++        // Weight slab 64*32*2 plus live activation slab PANEL*32*2;
++        // the 16-slot F32 output (4096 bytes) fits in the same storage.
++        enc.set_threadgroup_memory(
++            0,
++            if panel == 16 {
++                5120
++            } else {
++                TENSOR_THREADGROUP_BYTES
++            },
++        );
++        enc.dispatch(
++            MTLSize {
++                // This pass only accepts counts <=16: there is exactly one
++                // live tile per expert. Do not launch rows/16 empty tiles.
++                width: if panel == 16 { 1 } else { rows.div_ceil(panel) },
++                height: f.div_ceil(64),
++                depth: e,
++            },
++            MTLSize {
++                width: 128,
++                height: 1,
++                depth: 1,
++            },
++        );
++    }
++    Ok(true)
++}
++
+ #[allow(clippy::too_many_arguments)]
+ pub(super) fn dispatch_tensor_mm(
+     ctx: &MetalContext,
+diff --git b/crates/qwen-llm/src/metal/moe_grouped_generic/tests.rs a/crates/qwen-llm/src/metal/moe_grouped_generic/tests.rs
+index 16bfc6101..6a5f94b04 100644
+--- b/crates/qwen-llm/src/metal/moe_grouped_generic/tests.rs
++++ a/crates/qwen-llm/src/metal/moe_grouped_generic/tests.rs
+@@ -1,6 +1,7 @@
+ use super::*;
+ use crate::metal::test_support::*;
+ 
++mod append_panels;
+ mod flash_next;
+ mod iq1;
+ mod sorted_experts;
+diff --git b/crates/qwen-llm/src/metal/moe_grouped_generic/tests/append_panels.rs a/crates/qwen-llm/src/metal/moe_grouped_generic/tests/append_panels.rs
+new file mode 100644
+index 000000000..8a7951c3b
+--- /dev/null
++++ a/crates/qwen-llm/src/metal/moe_grouped_generic/tests/append_panels.rs
+@@ -0,0 +1,133 @@
++use super::*;
++
++#[test]
++fn fn_append_panels_preserve_values_bounds_and_operand_error() {
++    let Some(ctx) = metal_test_context() else {
++        return;
++    };
++    if !moe_grouped_tensor_available(&ctx) {
++        return;
++    }
++    let (h, f, e, top, rows) = (256usize, 128usize, 32usize, 2usize, 128usize);
++    let slots = rows * top;
++    let assignments: Vec<usize> = (0..rows)
++        .flat_map(|t| {
++            [
++                if t < 65 { 0 } else { 4 + t % 24 },
++                if t < 16 {
++                    2
++                } else if t < 33 {
++                    1
++                } else if t == 33 {
++                    3
++                } else {
++                    4 + (t + 7) % 24
++                },
++            ]
++        })
++        .collect();
++    let mut counts = vec![0i32; e];
++    let mut ids = vec![-1i32; e * rows];
++    for (slot, &expert) in assignments.iter().enumerate() {
++        ids[expert * rows + counts[expert] as usize] = slot as i32;
++        counts[expert] += 1;
++    }
++    assert_eq!(&counts[..4], &[65, 17, 16, 1]);
++    let ct = i32_typed_tensor(&ctx, &counts);
++    let it = i32_typed_tensor(&ctx, &ids);
++    for dtype in [
++        GgmlType::IQ2_S,
++        GgmlType::IQ3_S,
++        GgmlType::IQ3_XXS,
++        GgmlType::IQ4_XS,
++    ] {
++        let gb = synthetic_bank(dtype, h, f, e, 0x9911 ^ dtype as u64);
++        let ub = synthetic_bank(dtype, h, f, e, 0x2a77 ^ dtype as u64);
++        let g = bank_tensor(&ctx, dtype, &gb, h, f, e);
++        let u = bank_tensor(&ctx, dtype, &ub, h, f, e);
++        let x: Vec<f32> = (0..h * rows)
++            .map(|i| ((i * 37 + 7) % 1009) as f32 / 1009.0 - 0.5)
++            .collect();
++        let xt = f32_tensor(&ctx, &x);
++        let guarded = || {
++            offset_tensor(
++                &ctx,
++                16,
++                bytemuck::cast_slice(&vec![f32::NAN; slots * f]),
++                16,
++                vec![(slots * f) as u64],
++                GgmlType::F32,
++            )
++        };
++        let a = guarded();
++        let b = guarded();
++        let c = guarded();
++        one_shot(&ctx, |enc| {
++            encode_moe_swiglu_f32_grouped_slots_tensor(
++                &ctx, enc, &g, &u, &xt, &ct, &it, &a, h, f, e, top, rows, None,
++            )?;
++            assert!(try_encode_fn_append_expert_panels(
++                &ctx, enc, &g, &u, &xt, &ct, &it, &b, false, h, f, e, top, rows
++            )?);
++            assert!(try_encode_fn_append_expert_panels(
++                &ctx, enc, &g, &u, &xt, &ct, &it, &c, true, h, f, e, top, rows
++            )?);
++            Ok(())
++        })
++        .unwrap();
++        let av = tensor_f32_at_offset(&a);
++        let bv = tensor_f32_at_offset(&b);
++        let cv = tensor_f32_at_offset(&c);
++        assert!(av.iter().chain(&bv).chain(&cv).all(|v| v.is_finite()));
++        let mut errors = [0f64; 3];
++        let mut maxima = [0f64; 3];
++        let gate: Vec<_> = (0..e).map(|i| cpu_expert(dtype, &gb, h, f, i)).collect();
++        let up: Vec<_> = (0..e).map(|i| cpu_expert(dtype, &ub, h, f, i)).collect();
++        for sample in 0..128 {
++            let slot = sample * (slots - 1) / 127;
++            let col = sample * 7919 % f;
++            let expert = assignments[slot];
++            let mut gv = 0f64;
++            let mut uv = 0f64;
++            for j in 0..h {
++                let input = f64::from(half::f16::from_f32(x[slot / top * h + j]).to_f32());
++                gv += f64::from(half::f16::from_f32(gate[expert][col * h + j]).to_f32()) * input;
++                uv += f64::from(half::f16::from_f32(up[expert][col * h + j]).to_f32()) * input;
++            }
++            let reference = gv / (1. + (-gv).exp()) * uv;
++            for (arm, v) in [av[slot * f + col], bv[slot * f + col], cv[slot * f + col]]
++                .into_iter()
++                .enumerate()
++            {
++                let error = (f64::from(v) - reference).abs();
++                errors[arm] += error * error;
++                maxima[arm] = maxima[arm].max(error);
++            }
++        }
++        for arm in 1..=2 {
++            assert!(errors[arm] <= errors[0], "{dtype:?} SSE {errors:?}");
++            assert!(maxima[arm] <= maxima[0], "{dtype:?} max {maxima:?}");
++        }
++        assert_offset_guards(&a, 16, 16);
++        assert_offset_guards(&b, 16, 16);
++        assert_offset_guards(&c, 16, 16);
++        eprintln!(
++            "APPEND_PANEL_F64 dtype={dtype:?} SSE={errors:?} max={maxima:?} bitwise={}",
++            bytemuck::cast_slice::<f32, u8>(&av) == bytemuck::cast_slice::<f32, u8>(&bv)
++        );
++        let cmd = ctx.queue.commandBuffer().unwrap();
++        let enc = KernelEncoder::begin(&cmd);
++        crate::metal::dispatch_census_begin();
++        let alias = xt.view_subrange(0, vec![(h * rows) as u64]);
++        assert!(
++            try_encode_fn_append_expert_panels(
++                &ctx, &enc, &g, &u, &xt, &ct, &it, &alias, true, h, f, e, top, rows
++            )
++            .is_err()
++        );
++        assert!(crate::metal::dispatch_census_take().is_empty());
++        enc.end();
++        cmd.commit();
++        wait_completed(&cmd).unwrap();
++    }
++}
+diff --git b/crates/qwen-llm/src/qwen4exp_moe.rs a/crates/qwen-llm/src/qwen4exp_moe.rs
+index a10d94801..81b390676 100644
+--- b/crates/qwen-llm/src/qwen4exp_moe.rs
++++ a/crates/qwen-llm/src/qwen4exp_moe.rs
+@@ -50,6 +50,7 @@ use objc2_metal::{
+ #[path = "metal/qwen4exp_expert_compat.rs"]
+ mod qwen4exp_expert_compat;
+ 
++mod append_panels;
+ mod expert_mapped;
+ mod expert_wide;
+ mod router_tensor;
+@@ -2147,6 +2148,21 @@ impl Qwen4ExpMoePackedExecution<'_, '_> {
+                     layer,
+                     self.input,
+                 );
++                if append_panels::try_encode(
++                    ctx,
++                    enc,
++                    self.weights.routed_gate,
++                    self.weights.routed_up,
++                    self.input,
++                    &self.views.route_counts,
++                    &self.views.route_slots,
++                    &self.views.routed_inner,
++                    g,
++                    self.tokens,
++                )? {
++                    end_optional(&mut profile, enc, marker)?;
++                    return Ok(());
++                }
+                 if expert_wide::try_encode(
+                     ctx,
+                     enc,
+diff --git b/crates/qwen-llm/src/qwen4exp_moe/append_panels.rs a/crates/qwen-llm/src/qwen4exp_moe/append_panels.rs
+new file mode 100644
+index 000000000..54dc688fe
+--- /dev/null
++++ a/crates/qwen-llm/src/qwen4exp_moe/append_panels.rs
+@@ -0,0 +1,57 @@
++use super::*;
++
++crate::env_flag!(
++    /// Experimental Flash-Next append expert panels: 16 slots for buckets through 16 entries, 32 otherwise, at 128..2047 rows with QWEN_FN_APPEND_SHAPES. Same native quantization, half operands and F32 accumulators; no new buffers. Zero keeps the original 32-slot tile, and 2048-row/decode/other-family policies stay unchanged.
++    default_off enabled,
++    "QWEN_FN_APPEND_EXPERT_PANELS"
++);
++
++crate::env_flag!(
++    /// Experimental shared-staging gate/up fusion for <=16-slot buckets under QWEN_FN_APPEND_EXPERT_PANELS: one 9-KiB tile stages both weights and the shared activation, halving per-K barriers. Larger buckets retain two 32-slot passes. Same half values, F32 sums and K traversal, no new buffers. Zero uses separate 16/32 count-range passes.
++    default_off fused,
++    "QWEN_FN_APPEND_PANEL_FUSED"
++);
++
++pub(super) fn try_encode(
++    ctx: &MetalContext,
++    enc: &KernelEncoder,
++    gate: &MetalTensor,
++    up: &MetalTensor,
++    input: &MetalTensor,
++    counts: &MetalTensor,
++    ids: &MetalTensor,
++    inner: &MetalTensor,
++    g: Qwen4ExpMoeMetalGeometry,
++    tokens: usize,
++) -> Result<bool, MetalError> {
++    if !enabled()
++        || !crate::qwen4exp_prefill_tensor::shapes::selected(tokens)
++        || tokens == 2048
++        || (
++            g.hidden_size,
++            g.routed_intermediate_size,
++            g.expert_count,
++            g.experts_per_token,
++        ) != (2560, 640, 512, 10)
++        || gate.dtype != up.dtype
++        || !ROUTED_GATE_UP_DTYPES.contains(&gate.dtype)
++    {
++        return Ok(false);
++    }
++    crate::metal::try_encode_fn_append_expert_panels(
++        ctx,
++        enc,
++        gate,
++        up,
++        input,
++        counts,
++        ids,
++        inner,
++        fused(),
++        g.hidden_size,
++        g.routed_intermediate_size,
++        g.expert_count,
++        g.experts_per_token,
++        tokens,
++    )
++}
+diff --git b/kernels/tensor/moe_grouped_slots_tensor.metal a/kernels/tensor/moe_grouped_slots_tensor.metal
+index ceb2fd92f..620fbe308 100644
+--- b/kernels/tensor/moe_grouped_slots_tensor.metal
++++ a/kernels/tensor/moe_grouped_slots_tensor.metal
+@@ -63,7 +63,7 @@ inline float tt_silu(float x) {
+ // instead of F32; the staged operand is the same half value either way.
+ template <int BYTES, short NL,
+           void (*DEQ)(device const uchar *, short, thread half4x4 &),
+-          short EPI, bool DENSE, bool HALF_ACT>
++          short EPI, bool DENSE, bool HALF_ACT, short PANEL=TT_NR1>
+ inline void moe_grouped_slots_mm_tensor_body(
+         constant moe_group_generic_mm_args & args,
+         device const uchar * srcA,
+@@ -77,18 +77,18 @@ inline void moe_grouped_slots_mm_tensor_body(
+         float limit) {
+     const ushort tiitg = ushort(tiitg_wide);
+     threadgroup half * sa = (threadgroup half *)(shmem);          // [TT_NR0][TT_NK]
+-    threadgroup half * sb = (threadgroup half *)(shmem + 4096);   // [TT_NR1][TT_NK]
++    threadgroup half * sb = (threadgroup half *)(shmem + 4096);   // [PANEL][TT_NK]
+ 
+     const int im = DENSE ? 0 : tgpig.z;
+     const int r0 = tgpig.y * TT_NR0;
+-    const int r1 = tgpig.x * TT_NR1;
++    const int r1 = tgpig.x * PANEL;
+ 
+     const int count = DENSE ? int(args.N) : counts[im];
+     if (count < 0 || uint(count) > args.N
+         || count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
+ 
+     const short nr0 = ((int)args.M - r0 < TT_NR0) ? (short)((int)args.M - r0) : TT_NR0;
+-    const short nr1 = (count - r1 < TT_NR1) ? (short)(count - r1) : TT_NR1;
++    const short nr1 = (count - r1 < PANEL) ? (short)(count - r1) : PANEL;
+ 
+     // Clamp source rows only; every physical fragment has one writer, including
+     // zero-filled tails consumed by the full tensor operation.
+@@ -124,19 +124,19 @@ inline void moe_grouped_slots_mm_tensor_body(
+         *(threadgroup half4 *)(stage_a + 8)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+         *(threadgroup half4 *)(stage_a + 12) = half4(0.0h, 0.0h, 0.0h, 0.0h);
+     }
+-    if (!slot_valid) {
++    if (!slot_valid && pr1 < PANEL) {
+         *(threadgroup half2x4 *)(stage_b) = half2x4(0.0h);
+     }
+ 
+     // left = activations [32 slots x 32 k], right = weights [64 rows x 32 k]
+     // read transposed; destination [32 slots x 64 rows] in registers.
+     constexpr auto desc = tensor_ops::matmul2d_descriptor(
+-        TT_NR1, TT_NR0, TT_NK, false, true, false,
++        PANEL, TT_NR0, TT_NK, false, true, false,
+         tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+     tensor_ops::matmul2d<desc, execution_simdgroups<4>> op;
+-    using left_t = tensor<threadgroup half, extents<int, TT_NK, TT_NR1>, tensor_inline>;
++    using left_t = tensor<threadgroup half, extents<int, TT_NK, PANEL>, tensor_inline>;
+     using right_t = tensor<threadgroup half, extents<int, TT_NK, TT_NR0>, tensor_inline>;
+-    left_t left(sb, extents<int, TT_NK, TT_NR1>());
++    left_t left(sb, extents<int, TT_NK, PANEL>());
+     right_t right(sa, extents<int, TT_NK, TT_NR0>());
+     auto acc = op.template get_destination_cooperative_tensor<left_t, right_t, float>();
+ #pragma clang loop unroll(full)
+@@ -172,9 +172,9 @@ inline void moe_grouped_slots_mm_tensor_body(
+     }
+ 
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+-    threadgroup float * temp_str = (threadgroup float *)shmem;   // [TT_NR1][TT_NR0]
+-    tensor<threadgroup float, extents<int, TT_NR0, TT_NR1>, tensor_inline> out_tile(
+-        temp_str, extents<int, TT_NR0, TT_NR1>());
++    threadgroup float * temp_str = (threadgroup float *)shmem;   // [PANEL][TT_NR0]
++    tensor<threadgroup float, extents<int, TT_NR0, PANEL>, tensor_inline> out_tile(
++        temp_str, extents<int, TT_NR0, PANEL>());
+     acc.store(out_tile);
+     threadgroup_barrier(mem_flags::mem_threadgroup);
+ 
+@@ -337,7 +337,7 @@ kernel void kernel_moe_wide_probe_f16act(
+ 
+ template <int BYTES, short NL,
+           void (*DEQ)(device const uchar *, short, thread half4x4 &),
+-          short EPI>
++          short EPI, short PANEL=TT_NR1>
+ kernel void kernel_moe_grouped_slots_mm_tensor(
+         constant moe_group_generic_mm_args & args [[buffer(0)]],
+         device const uchar * srcA         [[buffer(1)]],
+@@ -348,10 +348,73 @@ kernel void kernel_moe_grouped_slots_mm_tensor(
+         threadgroup  uchar * shmem        [[threadgroup(0)]],
+         uint3  tgpig [[threadgroup_position_in_grid]],
+         uint tiitg_wide [[thread_index_in_threadgroup]]) {
+-    moe_grouped_slots_mm_tensor_body<BYTES, NL, DEQ, EPI, false, false>(
++    moe_grouped_slots_mm_tensor_body<BYTES, NL, DEQ, EPI, false, false, PANEL>(
+         args, srcA, (device const uchar *)srcB, counts, ids, dst, shmem, tgpig, tiitg_wide, 0.0f);
+ }
+ 
++// Small buckets share one activation and stage both weight slabs. Two barriers
++// per K step instead of four across independent gate/up kernels. All physical
++// fragments consumed by either matmul are initialized, including slot tails.
++template<int BYTES, short NL, void (*DEQ)(device const uchar*,short,thread half4x4&)>
++kernel void kernel_fn_gate_up_panel16(
++        constant moe_group_generic_mm_args&a [[buffer(0)]],
++        device const uchar*gw [[buffer(1)]],device const uchar*uw [[buffer(2)]],
++        device const float*x [[buffer(3)]],device const int*counts [[buffer(4)]],
++        device const int*ids [[buffer(5)]],device float*dst [[buffer(6)]],
++        threadgroup uchar*storage [[threadgroup(0)]],
++        uint3 group [[threadgroup_position_in_grid]],uint tid [[thread_index_in_threadgroup]]) {
++    const int e=group.z,count=counts[e],r0=group.y*64;
++    if(count<1||count>16||uint(count)>a.N||group.x!=0)return;
++    const short nr=min(int(a.M)-r0,64),pr0=tid/2,il0=tid%2,lr0=min(int(pr0),int(nr)-1);
++    const short pr1=tid/4,iy=8*(tid%4),lr1=min(int(pr1),count-1);
++    const int slot=ids[ulong(e)*a.N+lr1];
++    const bool valid=pr1<count&&slot>=0&&uint(slot)<a.slot_limit;
++    const ulong off=ulong(a.nb01)*a.M*e+ulong(a.nb01)*(r0+lr0)+ulong(il0/NL)*BYTES;
++    device const uchar*gp=gw+off;device const uchar*up=uw+off;
++    device const float*xp=x+ulong(a.stride_b)*((valid?slot:0)/int(a.b_div))+iy;
++    threadgroup half*sg=(threadgroup half*)storage;
++    threadgroup half*su=(threadgroup half*)(storage+4096);
++    threadgroup half*sb=(threadgroup half*)(storage+8192);
++    threadgroup half*pg=sg+pr0*32+il0*16;
++    threadgroup half*pu=su+pr0*32+il0*16;
++    threadgroup half*pb=sb+pr1*32+iy;
++    if(pr0>=nr){*(threadgroup half4x4*)pg=half4x4(0.0h);*(threadgroup half4x4*)pu=half4x4(0.0h);}
++    if(pr1<16&&!valid)*(threadgroup half2x4*)pb=half2x4(0.0h);
++    constexpr auto d=tensor_ops::matmul2d_descriptor(16,64,32,false,true,false,
++        tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
++    tensor_ops::matmul2d<d,execution_simdgroups<4>> mm;
++    using lt=tensor<threadgroup half,extents<int,32,16>,tensor_inline>;
++    using rt=tensor<threadgroup half,extents<int,32,64>,tensor_inline>;
++    lt left(sb,extents<int,32,16>());rt rightg(sg,extents<int,32,64>()),rightu(su,extents<int,32,64>());
++    auto ag=mm.template get_destination_cooperative_tensor<lt,rt,float>();
++    auto au=mm.template get_destination_cooperative_tensor<lt,rt,float>();
++    for(ushort i=0;i<ag.get_capacity();++i){ag[i]=0.0f;au[i]=0.0f;}
++    short il=il0;
++    for(uint k=0;k<a.K;k+=32){
++        half4x4 vg,vu;DEQ(gp,il,vg);DEQ(up,il,vu);
++        const half2x4 xv=(half2x4)(*(device const float2x4*)xp);
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++        if(pr0<nr){
++            for(short j=0;j<4;++j){*(threadgroup half4*)(pg+j*4)=vg[j];*(threadgroup half4*)(pu+j*4)=vu[j];}
++        }
++        if(valid)*(threadgroup half2x4*)pb=xv;
++        il=(il+2<NL)?il+2:il%2;
++        if(il<2){gp+=BYTES*((2+NL-1)/NL);up+=BYTES*((2+NL-1)/NL);}xp+=32;
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++        mm.run(left,rightg,ag);mm.run(left,rightu,au);
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    auto out=tensor((threadgroup float*)storage,extents<int,64,16>());
++    auto outu=tensor((threadgroup float*)(storage+4096),extents<int,64,16>());
++    ag.store(out);au.store(outu);threadgroup_barrier(mem_flags::mem_threadgroup);
++    const short j=tid/4,c0=(tid%4)*16;
++    if(j<count){const int s=ids[ulong(e)*a.N+j];if(s>=0&&uint(s)<a.slot_limit){
++        for(short c=c0;c<min(int(c0)+16,int(nr));++c)
++            dst[ulong(s)*a.M+r0+c]=tt_silu(((threadgroup float*)storage)[j*64+c])
++                *((threadgroup float*)(storage+4096))[j*64+c];
++    }}
++}
++
+ // Half-activation twin (srcB is half).
+ template <int BYTES, short NL,
+           void (*DEQ)(device const uchar *, short, thread half4x4 &),
+@@ -612,6 +675,25 @@ typedef decltype(kernel_mat_mat_tensor_f16act<QT_Q4_K_BYTES, QT_Q4_K_NL, qt_dequ
+     template [[host_name("kernel_moe_up_clamped_" #suffix "_f16act_grouped_slots_tensor")]] kernel moe_up_clamped_grouped_slots_tensor_f16act_t kernel_moe_up_clamped_grouped_slots_tensor_f16act<BYTES, NL, DEQ>; \
+     template [[host_name("kernel_mat_mat_" #suffix "_f16act_tensor")]] kernel mat_mat_tensor_f16act_t kernel_mat_mat_tensor_f16act<BYTES, NL, DEQ>;
+ 
++// Flash-Next small expert buckets: same K traversal/half values, 16 slots.
++#define TT_FN_PANEL16(suffix,BYTES,NL,DEQ) \
++ template [[host_name("kernel_fn_moe_down_" #suffix "_panel16")]] kernel moe_grouped_slots_mm_tensor_t kernel_moe_grouped_slots_mm_tensor<BYTES,NL,DEQ,0,16>; \
++ template [[host_name("kernel_fn_moe_up_" #suffix "_panel16")]] kernel moe_grouped_slots_mm_tensor_t kernel_moe_grouped_slots_mm_tensor<BYTES,NL,DEQ,1,16>;
++TT_FN_PANEL16(iq2_s,QT_IQ2_S_BYTES,QT_IQ2_S_NL,qt_dequantize_iq2_s)
++TT_FN_PANEL16(iq3_s,QT_IQ3_S_BYTES,QT_IQ3_S_NL,qt_dequantize_iq3_s)
++TT_FN_PANEL16(iq3_xxs,QT_IQ3_XXS_BYTES,QT_IQ3_XXS_NL,qt_dequantize_iq3_xxs)
++TT_FN_PANEL16(iq4_xs,QT_IQ4_XS_BYTES,QT_IQ4_XS_NL,qt_dequantize_iq4_xs)
++#undef TT_FN_PANEL16
++
++typedef decltype(kernel_fn_gate_up_panel16<QT_IQ2_S_BYTES,QT_IQ2_S_NL,qt_dequantize_iq2_s>) fn_gate_up_panel16_t;
++#define TT_FN_FUSED(suffix,BYTES,NL,DEQ) \
++ template [[host_name("kernel_fn_moe_gate_up_" #suffix "_panel16")]] kernel fn_gate_up_panel16_t kernel_fn_gate_up_panel16<BYTES,NL,DEQ>;
++TT_FN_FUSED(iq2_s,QT_IQ2_S_BYTES,QT_IQ2_S_NL,qt_dequantize_iq2_s)
++TT_FN_FUSED(iq3_s,QT_IQ3_S_BYTES,QT_IQ3_S_NL,qt_dequantize_iq3_s)
++TT_FN_FUSED(iq3_xxs,QT_IQ3_XXS_BYTES,QT_IQ3_XXS_NL,qt_dequantize_iq3_xxs)
++TT_FN_FUSED(iq4_xs,QT_IQ4_XS_BYTES,QT_IQ4_XS_NL,qt_dequantize_iq4_xs)
++#undef TT_FN_FUSED
++
+ TT_INSTANTIATE(q2_0,    QT_Q2_0_BYTES,    QT_Q2_0_NL,    qt_dequantize_q2_0)
+ TT_INSTANTIATE(q2_K,    QT_Q2_K_BYTES,    QT_Q2_K_NL,    qt_dequantize_q2_K)
+ TT_INSTANTIATE(q3_K,    QT_Q3_K_BYTES,    QT_Q3_K_NL,    qt_dequantize_q3_K)

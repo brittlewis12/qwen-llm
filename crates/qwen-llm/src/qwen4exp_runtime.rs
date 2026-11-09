@@ -2904,6 +2904,7 @@ fn select_prefill_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod append_shapes;
     mod prefill_map;
     mod snapshot;
     mod split_decode;

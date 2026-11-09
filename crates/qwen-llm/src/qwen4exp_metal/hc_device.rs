@@ -1,7 +1,7 @@
 use super::*;
 
 crate::env_flag!(
-    /// BF16 device-input HC prompt projections for Flash-Next at M2048 (or 128-aligned M512..M2047 with QWEN_FN_SHORT_APPEND_TENSOR) on the Metal 4 tier, default on. Preserves the incumbent BF16 activation conversion and F32 sums; reuses dead raw-gate/mixed storage. Set to 0 to restore the incumbent. QWEN_MATMAT_BF16_BFLOAT_ACT=0 disables this route too.
+    /// Default-on BF16 device-input HC prompt projections on the tensor tier: M2048 or aligned M512..M2047 with SHORT_APPEND_TENSOR, plus bounded M128..M2047 with APPEND_SHAPES/HC_SPLIT. Preserves BF16 activation conversion and F32 sums; reuses dead storage. Zero restores the incumbent. MATMAT_BF16_BFLOAT_ACT=0 also disables it.
     default_on enabled,
     "QWEN_FN_PREFILL_HC_DEVICE"
 );
@@ -17,19 +17,28 @@ pub(super) fn try_encode(
     n: usize,
     m: usize,
 ) -> Result<bool, MfError> {
+    let legacy_rows = (512..=2048).contains(&m) && m.is_multiple_of(128);
+    let new_rows = crate::qwen4exp_prefill_tensor::shapes::selected(m)
+        && crate::qwen4exp_prefill_tensor::shapes::hc_split();
     if !enabled()
         || !ctx.tensor_ops_status().is_available()
         || !crate::metal_forward::matmat_bf16_bfloat_act_enabled()
         || weight.dtype != GgmlType::BF16
         || !crate::qwen4exp_prefill_tensor::rows_qualified(m)
-        || !m.is_multiple_of(128)
+        || !(legacy_rows || new_rows)
         || !matches!((k, n), (10240, 320) | (320, 10240))
         || !dead.offset.is_multiple_of(16)
         || !weight.offset.is_multiple_of(16)
     {
         return Ok(false);
     }
-    let p = match ctx.tensor_pipeline("kernel_qwen4exp_hc_bf16_device") {
+    let split = new_rows && !legacy_rows;
+    let name = if split {
+        "kernel_qwen4exp_hc_bf16_device_split4"
+    } else {
+        "kernel_qwen4exp_hc_bf16_device"
+    };
+    let p = match ctx.tensor_pipeline(name) {
         Ok(p)
             if p.threadExecutionWidth() == 32
                 && p.maxTotalThreadsPerThreadgroup() >= 128
@@ -123,7 +132,7 @@ pub(super) fn try_encode(
     enc.set_threadgroup_memory(0, 0);
     enc.dispatch(
         MTLSize {
-            width: m / 128,
+            width: m.div_ceil(if split { 32 } else { 128 }),
             height: n.div_ceil(64),
             depth: 1,
         },
@@ -143,6 +152,7 @@ mod tests {
 
     #[test]
     fn hc_device_bf16_matches_f64_and_preserves_offset_guards() {
+        let _shapes = crate::qwen4exp_prefill_tensor::shapes::scope(true);
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
@@ -177,11 +187,18 @@ mod tests {
             )
             .to_vec()
         };
-        for (m, k, n) in [512usize, 1024, 1536, 2048]
-            .into_iter()
-            .flat_map(|m| [(m, 10240, 320), (m, 320, 10240)])
+        for (m, k, n) in [
+            128usize, 129, 399, 400, 401, 511, 512, 513, 1009, 2000, 2047, 2048,
+        ]
+        .into_iter()
+        .flat_map(|m| [(m, 10240, 320), (m, 320, 10240)])
         {
             if !crate::qwen4exp_prefill_tensor::rows_qualified(m) {
+                continue;
+            }
+            if !((512..=2048).contains(&m) && m.is_multiple_of(128))
+                && !crate::qwen4exp_prefill_tensor::shapes::hc_split()
+            {
                 continue;
             }
             let mut state = 0x12345678abcdefffu64;
@@ -232,7 +249,13 @@ mod tests {
                 census.iter().map(|r| r.kernel.as_str()).collect::<Vec<_>>(),
                 [
                     "kernel_qwen4exp_hc_convert_bf16",
-                    "kernel_qwen4exp_hc_bf16_device"
+                    if crate::qwen4exp_prefill_tensor::shapes::hc_split()
+                        && (m < 512 || !m.is_multiple_of(128))
+                    {
+                        "kernel_qwen4exp_hc_bf16_device_split4"
+                    } else {
+                        "kernel_qwen4exp_hc_bf16_device"
+                    }
                 ]
             );
             enc.end();
@@ -242,6 +265,8 @@ mod tests {
             let b = read(&yt);
             assert!(a.iter().chain(&b).all(|v| v.is_finite()));
             let mut errors = [0.0f64; 2];
+            let mut staged_errors = [0.0f64; 2];
+            let mut staged_max = [0.0f64; 2];
             let mut maximum = 0.0f64;
             for i in 0..128 {
                 let row = i * (m - 1) / 127;
@@ -261,8 +286,30 @@ mod tests {
                 );
                 errors[0] += (f64::from(a[row * n + column]) - original).powi(2);
                 errors[1] += (actual - original).powi(2);
+                for (arm, value) in [f64::from(a[row * n + column]), actual]
+                    .into_iter()
+                    .enumerate()
+                {
+                    staged_errors[arm] += (value - rounded).powi(2);
+                    staged_max[arm] = staged_max[arm].max((value - rounded).abs());
+                }
             }
             assert!(errors[1] <= 2.25 * errors[0] + 1e-12);
+            if crate::qwen4exp_prefill_tensor::shapes::hc_split()
+                && (m < 512 || !m.is_multiple_of(128))
+            {
+                // Both routes consume these identical BF16 operand values.
+                // Gate the new reduction against their independent F64 dot;
+                // report the unchanged input-conversion floor separately.
+                assert!(
+                    staged_errors[1] <= staged_errors[0],
+                    "HC M{m} K{k}: F64 SSE {staged_errors:?}"
+                );
+                assert!(
+                    staged_max[1] <= staged_max[0],
+                    "HC M{m} K{k}: F64 peak {staged_max:?}"
+                );
+            }
             for t in [&wt, &xt, &yt, &old, &dead] {
                 let bytes = unsafe {
                     std::slice::from_raw_parts(
@@ -288,6 +335,9 @@ mod tests {
             eprintln!(
                 "HC device M{m} K{k} N{n}: BF16-operand F64 max_abs={maximum:.9e}, original-input RMS error ratio={:.9}",
                 (errors[1] / errors[0]).sqrt()
+            );
+            eprintln!(
+                "HC_TAIL_F64 rows={m} k={k} n={n} staged_sse={staged_errors:?} staged_max={staged_max:?} original_sse={errors:?}"
             );
         }
     }

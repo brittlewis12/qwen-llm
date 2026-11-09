@@ -1617,6 +1617,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 "rows": selected_rows,
             }));
         }
+        tracing::info!(target: "qwen_diag",
+            "serve native: family=glm5_next transitions={} transition_ms={:.3} first_transition_ms={:.3}",
+            generation.transitions, generation.transition_ms, generation.first_transition_ms.unwrap_or(0.0));
         tracing::info!(
             target: "qwen_diag",
             "serve phases: family=glm5_next prefill_ms={prefill_ms:.1} reused_tokens={matched} reuse_source={reuse_source} restore_origin={restore_origin} restore_ms={restore_ms:.1} boundary_ms={boundary_ms:.1} prefill_tokens={} decode_ms={:.1} required_forwards={required} capacity={} transitions={} lineage={} snapshot_schedule={} cuts={cuts:?} captures=[{}] snapshot_capture_ms={capture_ms:.1} snapshot_cache_bytes={} snapshot_cache_entries={} checkpoint_target={} checkpoint_captures=[{}] checkpoint_capture_ms={chunk_capture_ms:.1} ladder={:?} ladder_capture=[{}] ladder_tip_position={} ladder_tip_capture={} ladder_tip_capture_ms={ladder_tip_ms:.3}",

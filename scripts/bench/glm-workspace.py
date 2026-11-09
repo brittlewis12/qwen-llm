@@ -179,6 +179,7 @@ def main():
             text = re.sub(r"\x1b\[[0-9;]*m", "", log.read_text())
             result["diagnostics"] = [line for line in text.splitlines()
                 if any(key in line for key in ["glm workspace:", "glm5_next stats:",
+                                                "glm native:", "serve native:",
                                                 "serve phases:", "serve stats:"])]
     finally:
         if child is not None and child.poll() is None:

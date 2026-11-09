@@ -834,6 +834,12 @@ pub(crate) fn run(
         prefetch.wall.as_secs_f64() * 1e3,
         report.loaded_request_ms,
     );
+    eprintln!(
+        "glm native: transitions={} transition_ms={:.3} first_transition_ms={:.3}",
+        generation.transitions,
+        generation.transition_ms,
+        generation.first_transition_ms.unwrap_or(0.0),
+    );
     if let Some(path) = args.request_stats_jsonl.as_ref() {
         let measured = RequestStatsMeasured {
             input_tokens: tokens.len() as u64,

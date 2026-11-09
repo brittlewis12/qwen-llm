@@ -1535,6 +1535,10 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         Ok(())
     }
 
+    pub(crate) fn gpu_inputs_ready(&self) -> bool {
+        self.gpu_inputs.is_some()
+    }
+
     pub(crate) fn install_snapshot_logits(
         &mut self,
         logits: &[f32],

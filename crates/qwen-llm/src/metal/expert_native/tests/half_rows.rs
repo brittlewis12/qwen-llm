@@ -470,7 +470,7 @@ const TOP: usize = 8;
 #[test]
 #[ignore = "serialized Metal validation fixture; parent schedules device access"]
 fn native_half_rows_metal_preflight_is_atomic() {
-    let _lease = production_lease();
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().unwrap();
     let (k, m, top, n) = (256, 7, 6, 2);
     let make_bank = |dtype, seed| bank(&ctx, &bank_bytes(dtype, k, m, seed), dtype, k, m);
@@ -699,7 +699,7 @@ fn route_ids(rows: usize) -> Vec<i32> {
 #[test]
 #[ignore = "characterize native SIMD versus grouped MMA; parent schedules GPU execution"]
 fn native_half_rows_metal_grouped_reduction_deltas() {
-    let _lease = production_lease();
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().unwrap();
     let (k, m, top) = (768, 7, 2);
     for (g, u, down) in [
@@ -1025,7 +1025,7 @@ fn half_case(
 #[test]
 #[ignore = "serialized model-free Metal primitive; parent schedules GPU execution"]
 fn native_half_rows_metal_oracle_partitions_routes_and_guards() {
-    let _lease = production_lease();
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().unwrap();
     for (g, u, down) in [
         (GgmlType::IQ2_S, GgmlType::IQ2_S, false),
@@ -1055,7 +1055,7 @@ fn native_half_rows_metal_oracle_partitions_routes_and_guards() {
 #[test]
 #[ignore = "serialized model-free Metal primitive; parent schedules GPU execution"]
 fn native_half_rows_metal_half_operand_basis() {
-    let _lease = production_lease();
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().unwrap();
     let (k, m) = (256, 7);
     for dtype in [GgmlType::IQ2_S, GgmlType::IQ3_S, GgmlType::IQ4_XS] {
@@ -1107,7 +1107,7 @@ fn native_half_rows_metal_half_operand_basis() {
 #[test]
 #[ignore = "serialized model-free Metal primitive; parent schedules GPU execution"]
 fn native_half_rows_metal_old_f32_basis_regression() {
-    let _lease = production_lease();
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().unwrap();
     let (k, m) = (256, 7);
     for dtype in [GgmlType::IQ2_S, GgmlType::IQ3_S, GgmlType::IQ4_XS] {

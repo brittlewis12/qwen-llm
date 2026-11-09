@@ -360,11 +360,12 @@ fn route_probe(ctx: &MetalContext) {
 }
 
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn routed_decode_attribution_probe() {
     if std::env::var_os("QWEN_EXPERT_DECODE_PROBE").is_none() {
         return;
     }
-    let _lease = production_lease();
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };

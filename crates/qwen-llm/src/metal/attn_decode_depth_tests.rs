@@ -1,5 +1,5 @@
 use super::*;
-use crate::metal::context::acquire_metal_benchmark_lease;
+use crate::metal::context::acquire_metal_test_lease;
 use crate::metal::test_support::{
     cpu_matrix_attn_reference, f32_differential, metal_test_context, tensor_f32_at_offset,
 };
@@ -48,7 +48,7 @@ fn depth_layout_keeps_unqualified_routes() {
 
 #[test]
 fn depth_register_queries_and_fallback_are_bitwise() {
-    let _lease = acquire_metal_benchmark_lease().unwrap();
+    let _lease = acquire_metal_test_lease().unwrap();
     let Some(ctx) = metal_test_context() else {
         return;
     };

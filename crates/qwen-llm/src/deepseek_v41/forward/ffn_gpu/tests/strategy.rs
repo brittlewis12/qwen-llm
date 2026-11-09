@@ -259,7 +259,7 @@ fn iq1_selected_strategy_native_singleton_half_grouped_prefill_release_cohorts()
 }
 
 fn selected_strategy_cases(types: &[(GgmlType, GgmlType, GgmlType, bool, bool, bool)]) {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     const H: usize = 256;
     const E: usize = 8;

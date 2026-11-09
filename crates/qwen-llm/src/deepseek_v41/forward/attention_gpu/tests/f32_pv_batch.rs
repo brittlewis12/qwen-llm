@@ -1019,6 +1019,7 @@ fn mma_sink_tile_invalid_visibility_and_finite_guards() {
 /// Opt-in timing of each sink-tile dispatch, old path versus MMA, at the
 /// production tile shape. `QWEN_V41_SINK_TIMING=1`; prints, asserts nothing.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn mma_sink_tile_dispatch_timing() {
     if std::env::var_os("QWEN_V41_SINK_TIMING").is_none() {
         return;

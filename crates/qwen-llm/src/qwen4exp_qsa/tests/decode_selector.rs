@@ -19,7 +19,7 @@ fn guarded(ctx: &MetalContext, count: usize, dtype: GgmlType) -> (MetalTensor, M
 
 #[test]
 fn singleton_compact_selector_preserves_ids_status_and_guards() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+    let _lease = crate::metal::acquire_metal_test_lease().unwrap();
     let ctx = MetalContext::new().unwrap();
     for cap in [513usize, 2048, 2112, 8192, 32768] {
         for mode in 0..5 {

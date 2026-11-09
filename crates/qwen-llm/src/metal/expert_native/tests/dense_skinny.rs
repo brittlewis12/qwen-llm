@@ -502,11 +502,12 @@ const DENSE_SKINNY_PROBE_ENV: &str = "QWEN_DENSE_SKINNY_PROBE";
 /// interleaved after warming every copy. Medians of per-dispatch GPU time go
 /// to stderr; nothing is asserted beyond completion.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn dense_skinny_q5_k_decode_probe() {
     if std::env::var_os(DENSE_SKINNY_PROBE_ENV).is_none() {
         return;
     }
-    let _lease = production_lease();
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = metal_test_context().expect("Metal device");
     let run = |encode: &dyn Fn(&KernelEncoder)| -> f64 {
         let cmd = ctx.queue.commandBuffer().unwrap();
@@ -610,11 +611,12 @@ fn dense_skinny_q5_k_decode_probe() {
 /// decode path's Q8_0 pair is the split-K pair kernel instead), over
 /// rotating weight copies, interleaved. Medians to stderr; nothing asserted.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn grouped_and_pair_skinny_decode_probe() {
     if std::env::var_os(DENSE_SKINNY_PROBE_ENV).is_none() {
         return;
     }
-    let _lease = production_lease();
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = metal_test_context().expect("Metal device");
     let run = |encode: &dyn Fn(&KernelEncoder)| -> f64 {
         let cmd = ctx.queue.commandBuffer().unwrap();

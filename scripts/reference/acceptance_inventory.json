@@ -6214,5 +6214,12 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Fake feedback/runtime with nonblocking sinks: bounded lone-member bursts yield to peers and park before forwarding on backpressure; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::score_keys::score_keys_timing",
+    "class": "timing",
+    "ignored": true,
+    "reason": "Ignored GPU timing witness; canonical production lease and wired-memory gate; excluded from CPU acceptance."
   }
 ]

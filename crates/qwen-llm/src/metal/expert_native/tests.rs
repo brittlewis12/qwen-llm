@@ -17,8 +17,8 @@ mod iq2_spec;
 mod rows;
 mod tokens;
 
-fn production_lease() -> impl Sized {
-    crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease")
+fn test_lease() -> impl Sized {
+    crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease")
 }
 
 #[test]
@@ -32,7 +32,7 @@ fn native_iq2_xxs_high_ids_generic_geometry_and_dispatch() {
 }
 
 fn large_banks_case(dtype: GgmlType, widths: &[usize]) {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -127,7 +127,7 @@ fn large_banks_case(dtype: GgmlType, widths: &[usize]) {
 
 #[test]
 fn native_mxfp4_ggml_scale_edges_f32_precision_and_clamp_asymmetry() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -494,7 +494,7 @@ fn gate_up_case(
 
 #[test]
 fn native_mixed_gate_up_cpu_oracles_and_route_rejection() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -536,7 +536,7 @@ fn native_mixed_gate_up_cpu_oracles_and_route_rejection() {
 
 #[test]
 fn native_all_down_formats_cpu_oracle_offsets_and_slot_isolation() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -616,7 +616,7 @@ fn native_validation_rejects_before_any_dispatch() {
 }
 
 fn native_validation_case(gate_type: GgmlType, up_type: GgmlType) {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -761,7 +761,7 @@ fn native_validation_case(gate_type: GgmlType, up_type: GgmlType) {
 
 #[test]
 fn native_dense_preserves_f32_operands_and_range() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -836,7 +836,7 @@ fn native_dense_preserves_f32_operands_and_range() {
 /// invalid IDs, and an odd channel count (half-filled last threadgroup).
 #[test]
 fn native_fused_gate_up_equals_two_passes_bitwise() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };

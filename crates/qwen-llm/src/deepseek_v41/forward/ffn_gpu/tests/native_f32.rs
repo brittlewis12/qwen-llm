@@ -529,7 +529,7 @@ fn witness(
 
 #[test]
 fn new_dtype_triples_v41_widths_frozen_composition_and_dispatch() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     for (gate, down) in [
         (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS),
@@ -544,7 +544,7 @@ fn new_dtype_triples_v41_widths_frozen_composition_and_dispatch() {
 
 #[test]
 fn new_dtype_triples_384_top6_frozen_routes_and_partition() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     for gate in [GgmlType::IQ3_XXS, GgmlType::Q3_K] {
         with_grouped_rows(|| witness(&ctx, gate, GgmlType::MXFP4, 256, 256, 384, 6, 33));

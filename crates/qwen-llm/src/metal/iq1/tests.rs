@@ -265,7 +265,7 @@ impl Fixture {
 
 #[test]
 fn iq1_all_grid_scale_delta_positions_match_codec_basis() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -358,7 +358,7 @@ fn iq1_all_grid_scale_delta_positions_match_codec_basis() {
 
 #[test]
 fn iq1_f32_paths_match_f64_tails_offsets_and_real_k() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -398,7 +398,7 @@ fn iq1_f32_paths_match_f64_tails_offsets_and_real_k() {
 
 #[test]
 fn iq1_f32_scale_extremes_do_not_stage_half() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -507,7 +507,7 @@ fn iq1_apple7_support_contract_and_scoped_injection() {
 
 #[test]
 fn iq1_unsupported_apple7_falls_back_before_pipeline_lookup() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -546,7 +546,7 @@ fn iq1_unsupported_apple7_falls_back_before_pipeline_lookup() {
 
 #[test]
 fn iq1_auto_preflights_capability_and_alignment_fallback() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -630,7 +630,7 @@ fn iq1_capacity_device_ids_and_dimensions() {
 
 #[test]
 fn iq1_concurrent_shared_inputs_distinct_outputs_match_serial() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -710,7 +710,7 @@ fn iq1_concurrent_shared_inputs_distinct_outputs_match_serial() {
 
 #[test]
 fn iq1_invalid_bindings_do_not_dispatch_on_serial_or_concurrent() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -792,7 +792,7 @@ fn iq1_invalid_bindings_do_not_dispatch_on_serial_or_concurrent() {
 
 #[test]
 fn iq1_foreign_device_bindings_and_encoder_are_rejected_when_available() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -836,7 +836,7 @@ fn iq1_foreign_device_bindings_and_encoder_are_rejected_when_available() {
 
 #[test]
 fn iq1_layout_grid_scale_delta_coverage() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production CPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     assert_eq!(std::mem::size_of::<Args>(), 20);
     assert_eq!(GgmlType::IQ1_S.storage_layout(), Some((256, 50)));
     assert_eq!(GgmlType::IQ1_M.storage_layout(), Some((256, 56)));
@@ -923,7 +923,7 @@ fn iq1_layout_grid_scale_delta_coverage() {
 
 #[test]
 fn iq1_m_reconstructed_half_scale_all_finite_encodings_match_codec() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production CPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     // Bounded batches: all four scale nibbles, signed zero, subnormals and
     // maximal finite half values, with no large persistent F32 test bank.
     let mut bytes = vec![0u8; 256 * 56];
@@ -978,7 +978,7 @@ fn gather_run(
 
 #[test]
 fn iq1_m_gather_codec_offsets_vocab_edges_invalid_ids_and_immutability() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -1056,7 +1056,7 @@ fn iq1_m_gather_codec_offsets_vocab_edges_invalid_ids_and_immutability() {
 
 #[test]
 fn iq1_m_gather_reconstructed_scale_nibbles_and_extremes_match_codec() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -1115,7 +1115,7 @@ fn iq1_m_gather_reconstructed_scale_nibbles_and_extremes_match_codec() {
 
 #[test]
 fn iq1_m_gather_rejects_invalid_bindings_devices_and_capabilities_before_dispatch() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };

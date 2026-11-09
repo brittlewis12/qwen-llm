@@ -899,7 +899,9 @@ const SELECT_TIMING_ENV: &str = "QWEN_V41_SELECT_TIMING";
 /// buffer, median of five buffers. Prints; asserts only that the kernels
 /// agree. `QWEN_V41_SELECT_TIMING=1`.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn select_kernels_timing() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     if std::env::var_os(SELECT_TIMING_ENV).is_none() {
         return;
     }

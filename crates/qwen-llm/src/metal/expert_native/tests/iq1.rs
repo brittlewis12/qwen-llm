@@ -3,7 +3,7 @@ use crate::metal::admit_iq1_expert_fixture;
 
 #[test]
 fn iq1_native_cpu_codec_real_k_and_route_contract() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = metal_test_context().expect("IQ1 expert GPU proof requires Metal");
     admit_iq1_expert_fixture(&ctx);
     for dtype in [GgmlType::IQ1_S, GgmlType::IQ1_M] {
@@ -17,7 +17,7 @@ fn iq1_native_cpu_codec_real_k_and_route_contract() {
 
 #[test]
 fn iq1_native_rows_are_scalar_lineage_not_compact_packed() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = metal_test_context().expect("IQ1 expert GPU proof requires Metal");
     admit_iq1_expert_fixture(&ctx);
     for dtype in [GgmlType::IQ1_S, GgmlType::IQ1_M] {

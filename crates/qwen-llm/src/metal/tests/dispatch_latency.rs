@@ -33,6 +33,7 @@ fn timed(
 }
 
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn dispatch_chain_latency_timing() {
     if std::env::var_os("QWEN_DISPATCH_LATENCY").is_none() {
         return;
@@ -106,6 +107,7 @@ fn dispatch_chain_latency_timing() {
 /// a chain of heavy copies, the same chain with a tiny copy after each heavy
 /// one, and the difference per tiny dispatch. `QWEN_DISPATCH_LATENCY=1`.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn dispatch_chain_tiny_marginal_timing() {
     if std::env::var_os("QWEN_DISPATCH_LATENCY").is_none() {
         return;

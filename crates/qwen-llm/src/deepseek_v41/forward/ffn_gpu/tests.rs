@@ -125,8 +125,8 @@ fn native_rows_selector_is_scoped_nested_and_unwind_safe() {
     assert!(!NATIVE_ROWS_ONLY.with(|flag| flag.get()));
 }
 
-fn production_lease() -> impl Sized {
-    crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease")
+fn test_lease() -> impl Sized {
+    crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease")
 }
 
 fn close(a: &[f32], b: &[f32]) {
@@ -141,7 +141,7 @@ fn close(a: &[f32], b: &[f32]) {
 
 #[test]
 fn stages_lagged_pre_weight_before_down_and_nonalias() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let mut model = weights.model(&ctx);
@@ -217,7 +217,7 @@ fn stages_lagged_pre_weight_before_down_and_nonalias() {
 
 #[test]
 fn routing_ties_bias_absorption_temperature_extremes_and_top1() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     for (logits, bias, topk, temperature, scale) in [
         (
@@ -318,7 +318,7 @@ fn parallel_router_is_bitwise_equal_to_the_serial_reference() {
     // Random rows with ties, duplicates, extreme logits and non-finite
     // entries at varying indices (logits and bias, same and different
     // indices), across REAP and 1017 expert counts and top-k widths.
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     let mut seed = 0x9e37_79b9u32;
     let mut next = || {
@@ -416,7 +416,7 @@ fn parallel_router_is_bitwise_equal_to_the_serial_reference() {
 
 #[test]
 fn asymmetric_clamps_preserve_negative_gate_tail() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     let gate = [-20.0, -2.0, -0.2, 0.2, 2.0, 20.0];
     let up = [-20.0, 20.0, -2.0, 2.0, -20.0, 20.0];
@@ -436,7 +436,7 @@ fn asymmetric_clamps_preserve_negative_gate_tail() {
 
 #[test]
 fn ordered_slots_then_shared_sum() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     let slots = upload(&ctx, &[1e20, -1e20, 3.0], vec![1, 3]).unwrap();
     let shared = upload(&ctx, &[4.0], vec![1]).unwrap();
@@ -471,7 +471,7 @@ fn grouped_mxfp4_rows_match_scalar_weight_before_down() {
 }
 
 fn grouped_mxfp4_rows_match_scalar_weight_before_down_body() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let model = weights.model(&ctx);

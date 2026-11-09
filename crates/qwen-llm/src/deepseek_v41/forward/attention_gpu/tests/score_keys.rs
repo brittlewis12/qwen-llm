@@ -1,6 +1,6 @@
 use super::*;
 
-/// Opt-in switch for the timing half of `score_keys_match_score_bitwise`: any
+/// Opt-in switch for ignored `score_keys_timing`: any
 /// value prints `attention_score` vs `attention_score_keys` microseconds per
 /// dispatch at decode geometry; unset, only exactness runs.
 const SCORE_TIMING_ENV: &str = "QWEN_V41_SCORE_TIMING";
@@ -29,6 +29,20 @@ fn score_us(ctx: &MetalContext, iters: usize, f: &dyn Fn(&KernelEncoder)) -> f64
 /// selected IDs past the visible length, whose slots neither kernel writes.
 #[test]
 fn score_keys_match_score_bitwise() {
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
+    score_keys_case(false);
+}
+
+#[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
+fn score_keys_timing() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    if std::env::var_os(SCORE_TIMING_ENV).is_some() {
+        score_keys_case(true);
+    }
+}
+
+fn score_keys_case(timing: bool) {
     let ctx = MetalContext::new().unwrap();
     let (window, k, length, rows) = (128usize, 512usize, 1500u32, 2048usize);
     let make = |n: usize, seed: usize| {
@@ -107,7 +121,7 @@ fn score_keys_match_score_bitwise() {
             let visible = nr + ids[..nk].iter().filter(|&&id| id < length).count();
             assert_eq!(written, heads * visible, "{heads}x{dim} {nr}+{nk}");
         }
-        if heads == 64 && std::env::var_os(SCORE_TIMING_ENV).is_some() {
+        if heads == 64 && timing {
             let out = up(&vec![0.0; heads * stride]);
             for (nr, nk) in [(1, 0), (128, 0), (128, 256), (128, 512)] {
                 let old = score_us(&ctx, 200, &|enc| encode(enc, false, nr, nk, &out));

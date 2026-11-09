@@ -10,7 +10,7 @@ fn parallel_pool_geometry_retains_unqualified_shapes() {
 
 #[test]
 fn parallel_pool_matches_scalar_with_shifted_buffers() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+    let _lease = crate::metal::acquire_metal_test_lease().unwrap();
     let ctx = MetalContext::new().unwrap();
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]

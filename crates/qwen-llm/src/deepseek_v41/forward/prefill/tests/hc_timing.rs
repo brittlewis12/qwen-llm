@@ -20,6 +20,7 @@ fn gpu_us(ctx: &MetalContext, f: &dyn Fn(&KernelEncoder)) -> f64 {
 }
 
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn hc_rows_kernel_timing() {
     if std::env::var_os("QWEN_V41_HC_TIMING").is_none() {
         return;

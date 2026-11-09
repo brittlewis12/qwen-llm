@@ -915,7 +915,7 @@ mod tests {
 
     #[test]
     fn a3b_dense_prefill_tensor_gpu_regression() {
-        let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+        let _lease = crate::metal::acquire_metal_test_lease().unwrap();
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
@@ -1100,7 +1100,7 @@ mod tests {
 
     #[test]
     fn a3b_grouped_expert_tensor_gpu_regression() {
-        let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+        let _lease = crate::metal::acquire_metal_test_lease().unwrap();
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
@@ -1317,7 +1317,7 @@ mod tests {
 
     #[test]
     fn qwen27b_q5_ragged_gpu_regression() {
-        let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+        let _lease = crate::metal::acquire_metal_test_lease().unwrap();
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
@@ -1407,7 +1407,7 @@ mod tests {
     fn qwen27b_prefill_tensor_gpu_regression() {
         // Unit contexts have isolated test locks; also retain the normal
         // production lease so this value test cannot overlap another lane.
-        let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+        let _lease = crate::metal::acquire_metal_test_lease().unwrap();
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };
@@ -1566,7 +1566,7 @@ mod tests {
 
     #[test]
     fn qwen_ffn128_gpu_regression() {
-        let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+        let _lease = crate::metal::acquire_metal_test_lease().unwrap();
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;
         };

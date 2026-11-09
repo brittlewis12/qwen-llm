@@ -419,7 +419,9 @@ fn timed(ctx: &MetalContext, iters: usize, f: &dyn Fn(&KernelEncoder, usize)) ->
 /// layer) rotated, each with its own query, raw ring and 512 selected rows
 /// of a 64K-row compressed bank.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn flash_decode_kill_test_timing() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     if std::env::var_os(FLASH_TIMING_ENV).is_none() {
         return;
     }

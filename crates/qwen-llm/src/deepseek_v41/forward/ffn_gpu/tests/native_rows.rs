@@ -172,7 +172,7 @@ fn native_rows_live_route_witness_with_chunks(
     types: &[(GgmlType, GgmlType, GgmlType)],
     chunks: &[usize],
 ) {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     const H: usize = 256;
     const E: usize = 384;
@@ -407,7 +407,7 @@ fn native_rows_live_route_witness_with_chunks(
 
 #[test]
 fn native_rows_v41_eligibility_keeps_grouped_and_deferred_paths() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     let weights = toy::Weights::new(&ctx);
     let base = weights.model(&ctx);

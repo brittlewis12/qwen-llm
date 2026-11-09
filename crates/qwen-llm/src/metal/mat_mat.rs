@@ -3945,7 +3945,7 @@ mod tests {
 
     #[test]
     fn glm_batch_q6_tiles_keep_bits_offsets_and_guards() {
-        let _lease = crate::metal::acquire_metal_benchmark_lease().expect("GPU lease");
+        let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
         let Some(ctx) = metal_test_context() else {
             return;
         };
@@ -4717,7 +4717,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "loads real 27B GGUF weights; production GPU lease"]
     fn fewrow_gen_real_weights_logit_and_margin() {
+        let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
         let Some(path) = fewrow_gen_real_model_path() else {
             eprintln!("[fewrow-gen-real] skipped: no 27B Q4_K_M model in QWEN_MODEL_SEARCH_PATH");
             return;

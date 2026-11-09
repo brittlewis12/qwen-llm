@@ -14,9 +14,9 @@ use super::*;
 
 const CLAMP: f32 = 10.0;
 
-// Bind before the context so the production lease outlives all GPU resources.
-fn production_lease() -> impl Sized {
-    crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease")
+// Bind before the context so campaign adoption outlives all GPU resources.
+fn test_lease() -> impl Sized {
+    crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease")
 }
 
 struct Banks {
@@ -220,7 +220,7 @@ fn widen(v: &[f32]) -> Vec<f64> {
 /// with IQ4_XS down (GLM block 11).
 #[test]
 fn grouped_f32x_experts_track_decode_and_f64_beyond_half() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -287,7 +287,7 @@ fn grouped_f32x_experts_track_decode_and_f64_beyond_half() {
 /// the token's outputs.
 #[test]
 fn grouped_f32x_experts_token_outputs_do_not_depend_on_the_dispatch() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -346,7 +346,7 @@ fn grouped_f32x_experts_token_outputs_do_not_depend_on_the_dispatch() {
 /// DOWN capability is covered directly by the child tests.
 #[test]
 fn grouped_f32x_experts_refuse_types_without_a_tile() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -413,7 +413,7 @@ fn grouped_f32x_experts_refuse_types_without_a_tile() {
 /// dequantized expert within 1e-5 relative RMS; guards intact.
 #[test]
 fn down_f32x_tile_buckets_edges_and_invalid_slots() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -496,7 +496,7 @@ fn down_f32x_tile_buckets_edges_and_invalid_slots() {
 /// output, an output aliasing its activations, and I32 ids given as F32.
 #[test]
 fn f32x_expert_encoders_refuse_bad_bindings() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -613,7 +613,7 @@ fn f32x_expert_encoders_refuse_bad_bindings() {
 /// inner width past `i32`.
 #[test]
 fn down_f32x_refuses_oversized_geometry() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };

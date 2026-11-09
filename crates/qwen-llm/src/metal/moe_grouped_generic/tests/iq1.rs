@@ -325,7 +325,7 @@ impl Fixture {
 
 #[test]
 fn iq1_grouped_half_codec_real_k_tails_unaligned_offsets_and_invalid_routes() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let ctx = metal_test_context().expect("IQ1 expert GPU proof requires Metal");
     for dtype in [GgmlType::IQ1_S, GgmlType::IQ1_M] {
         for (k, m) in [(256, 5), (2304, 67), (5120, 65)] {
@@ -406,7 +406,7 @@ fn iq1_shared_count_guards_precede_ids_and_barriers() {
 
 #[test]
 fn iq1_shared_generic_roles_reject_capacity_and_count_ranges_with_valid_ids() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let ctx = metal_test_context().expect("count-bound GPU proof requires Metal");
     for dtype in [
         GgmlType::IQ1_S,
@@ -521,7 +521,7 @@ fn iq1_m5_tensor_half_codec_real_k_tails_and_wide() {
 
 #[test]
 fn iq1_actual_product_pso_preflight() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let ctx = metal_test_context().expect("IQ1 PSO proof requires Metal");
     eprintln!(
         "IQ1_DEVICE name={} tensor_status={:?}",
@@ -544,7 +544,7 @@ fn iq1_actual_product_pso_preflight() {
 
 #[test]
 fn iq1_grouped_clamped_refuses_invalid_bindings_without_dispatch() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let ctx = metal_test_context().expect("IQ1 expert GPU proof requires Metal");
     for dtype in [GgmlType::IQ1_S, GgmlType::IQ1_M] {
         let f = Fixture::new(&ctx, dtype, 256, 5, false, false);
@@ -616,7 +616,7 @@ fn iq1_grouped_clamped_refuses_invalid_bindings_without_dispatch() {
 
 #[test]
 fn iq1_grouped_release_mixed_down_is_independent() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let ctx = metal_test_context().expect("IQ1 expert GPU proof requires Metal");
     for (layer, gate_up, down) in [
         (7, GgmlType::IQ1_M, GgmlType::IQ2_XXS),

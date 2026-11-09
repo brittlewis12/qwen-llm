@@ -1184,7 +1184,7 @@ impl GroupedFixture {
 }
 
 fn run_grouped(dtype: GgmlType) {
-    let _lease = acquire_metal_benchmark_lease().expect("staging witness production lease");
+    let _lease = acquire_metal_test_lease().expect("GPU test campaign lease");
     let ctx = require_tensor_context();
     let mut fixtures = 0;
     let mut output_releases = 0;
@@ -1232,7 +1232,7 @@ fn run_grouped(dtype: GgmlType) {
 }
 
 fn run_dense(dtype: GgmlType) {
-    let _lease = acquire_metal_benchmark_lease().expect("staging dense witness production lease");
+    let _lease = acquire_metal_test_lease().expect("GPU test campaign lease");
     let ctx = require_tensor_context();
     let mut dispatches = 0;
     for (rows, m) in boundary_shapes() {

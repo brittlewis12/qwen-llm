@@ -56,7 +56,7 @@ fn bits(t: &MetalTensor) -> Vec<u32> {
 /// generic kernels.
 #[test]
 fn native_iq2_spec_kernels_equal_generic_bitwise() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -308,11 +308,12 @@ fn encode_named(
 /// 8-dispatch command buffers. Extra IQ2_XS / IQ2_S rows-per-simdgroup
 /// variants are timed by name when instantiated. Nothing is asserted.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn native_iq2_spec_decode_probe() {
     if std::env::var_os(IQ2_SPEC_PROBE_ENV).is_none() {
         return;
     }
-    let _lease = production_lease();
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };

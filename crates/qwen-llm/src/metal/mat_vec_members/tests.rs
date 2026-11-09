@@ -3,7 +3,7 @@ use crate::metal::test_support::*;
 
 #[test]
 fn members_match_cooperative_bits_shifted_buffers_and_odd_outputs() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };

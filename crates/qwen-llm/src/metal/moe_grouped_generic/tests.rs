@@ -647,7 +647,7 @@ fn cpu_swiglu_with_clamp(
 }
 
 fn run_generic_down_case(dtype: GgmlType) {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -700,7 +700,7 @@ fn run_generic_down_case(dtype: GgmlType) {
 }
 
 fn run_generic_gate_up_case(gate_dtype: GgmlType, up_dtype: GgmlType) {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -889,7 +889,7 @@ fn assert_tile_agreement(label: &str, tensor: &[f32], generic: &[f32]) {
 }
 
 fn run_tensor_down_case(dtype: GgmlType) {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -960,7 +960,7 @@ fn run_tensor_down_case(dtype: GgmlType) {
 }
 
 fn run_tensor_gate_up_case(dtype: GgmlType) {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -1191,7 +1191,7 @@ tensor_grouped_moe_cases! {
 /// `mat_mat` dispatch at a ragged shape (rows not a multiple of 32, M not
 /// a multiple of 64).
 fn run_tensor_dense_case(dtype: GgmlType) {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -1264,7 +1264,7 @@ fn run_tensor_dense_case(dtype: GgmlType) {
 /// tile at ragged shapes (partial first and second slot groups, output-row
 /// tails).
 fn run_tensor_dense_wide_case(dtype: GgmlType, n_out: usize, rows: usize, seed: u64) {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -1375,6 +1375,7 @@ fn tensor_dense_wide_flash_next_formats_match_narrow() {
 /// Opt-in narrow/wide dense timing at short batch lengths (the selector
 /// turns wide on at 64 rows). `QWEN_V41_TILE_TIMING=1`.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn tensor_dense_wide_batch_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
@@ -1476,6 +1477,7 @@ tensor_dense_cases! {
 /// dispatch at the V4.1 dense projection shapes (Q8_0, 2048 rows),
 /// interleaved on a heated GPU. `QWEN_V41_TILE_TIMING=1`.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn tensor_dense_production_shape_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
@@ -1555,7 +1557,7 @@ fn tensor_dense_production_shape_timing() {
 /// F16 tensor tile reads. Compare its half bits against the CPU reference.
 #[test]
 fn v41_q5_k_f16_dequant_matches_cpu() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -1642,7 +1644,7 @@ fn generic_grouped_moe_gate_up_mixed_iq4_xs_q8_0_matches_cpu() {
 
 #[test]
 fn generic_grouped_moe_gate_up_mixed_rejects_concurrent_encoder() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -1698,7 +1700,7 @@ fn generic_grouped_moe_gate_up_mixed_rejects_concurrent_encoder() {
 /// Generic Q5_K down vs the hand-tuned Q5_K grouped down (same tile math).
 #[test]
 fn generic_grouped_moe_down_q5_k_matches_specialized() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -1752,7 +1754,7 @@ fn generic_grouped_moe_down_q5_k_matches_specialized() {
 /// Generic Q4_K / Q5_K SwiGLU vs the hand-tuned grouped n16 kernels.
 #[test]
 fn generic_grouped_moe_gate_up_q4_k_q5_k_match_specialized() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -1867,7 +1869,7 @@ fn generic_grouped_moe_gate_up_q4_k_q5_k_match_specialized() {
 
 #[test]
 fn generic_grouped_moe_rejects_bad_contracts() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };
@@ -2094,6 +2096,7 @@ fn heat(ctx: &MetalContext, rounds: usize, encoders: &[&dyn Fn(&KernelEncoder)])
 /// shape. Prints TFLOPS and effective weight bandwidth; asserts nothing.
 /// `QWEN_V41_TILE_TIMING=1`.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn generic_tile_production_shape_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
@@ -2169,6 +2172,7 @@ fn generic_tile_production_shape_timing() {
 /// tensor) on a heated GPU. `QWEN_V41_TILE_TIMING=1`; skipped where the
 /// tensor tier is absent.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn tensor_tile_production_shape_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
@@ -2814,6 +2818,7 @@ fn wide_narrow_compacted_maya_gate_up_bitwise() {
 /// 64-slot probe panel. Synthetic IQ3_XXS bank, same useful slots; the 4096
 /// count distribution makes the wide panel mostly full. `QWEN_V41_TILE_TIMING=1`.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn expert_wide_panel_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
@@ -2961,6 +2966,7 @@ fn expert_wide_panel_timing() {
 /// the tile shapes the tensor expert tile could use (research kernel, no
 /// device traffic in the loop). `QWEN_V41_TILE_TIMING=1`; prints TFLOPS.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn matmul2d_peak_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;
@@ -3026,6 +3032,7 @@ fn matmul2d_peak_timing() {
 /// Raw simdgroup-MMA ceiling of the device (research kernel, no memory
 /// traffic in the loop). `QWEN_V41_TILE_TIMING=1`; prints TFLOPS.
 #[test]
+#[ignore = "GPU timing; production lease; run explicitly with --ignored"]
 fn simdgroup_mma_peak_timing() {
     if std::env::var_os("QWEN_V41_TILE_TIMING").is_none() {
         return;

@@ -270,7 +270,7 @@ fn snapshot(ctx: &MetalContext, batched: bool) -> BTreeMap<String, Vec<u32>> {
 #[test]
 #[ignore = "capture before shader edits; set QWEN_NATIVE_ROWS_FIXTURE to a new local file"]
 fn capture_native_row_baseline() {
-    let _lease = production_lease();
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().unwrap();
     let path = std::env::var(FIXTURE_ENV).expect("fixture output path");
     let file = std::fs::OpenOptions::new()
@@ -284,7 +284,7 @@ fn capture_native_row_baseline() {
 #[test]
 #[ignore = "requires a pre-change GPU capture in QWEN_NATIVE_ROWS_FIXTURE"]
 fn native_rows_match_saved_prechange_gpu_outputs() {
-    let _lease = production_lease();
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let ctx = MetalContext::new().unwrap();
     let path = std::env::var(FIXTURE_ENV).expect("pre-change fixture path");
     let expected: BTreeMap<String, Vec<u32>> =
@@ -346,7 +346,7 @@ fn native_rows_arithmetic_source_and_capability_contract() {
 
 #[test]
 fn native_rows_bitwise_partitions_high_ids_status_views_and_extremes() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     for (dtype, down, edge) in [
         (GgmlType::IQ3_XXS, false, false),
@@ -370,7 +370,7 @@ fn native_rows_bitwise_partitions_high_ids_status_views_and_extremes() {
 
 #[test]
 fn native_rows_iq2_bitwise_tails_mixed_types_status_and_guards() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     for (gate, up, down) in [
         (GgmlType::IQ2_XS, GgmlType::IQ2_XS, false),
@@ -398,7 +398,7 @@ fn native_rows_iq2_bitwise_tails_mixed_types_status_and_guards() {
 
 #[test]
 fn native_rows_iq2_cpu_codec_f64_oracle() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     let (k, m, n, top) = (768, 7, 7, IDS.len());
     let statuses = [ROUTE_STATUS_READY, 0, -7, 1, 1, 1, 1];
@@ -464,7 +464,7 @@ fn native_rows_iq2_cpu_codec_f64_oracle() {
 
 #[test]
 fn native_rows_bitwise_real_widths_top6() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     assert_eq!(snapshot(&ctx, true), snapshot(&ctx, false));
     for dtype in [
@@ -504,7 +504,7 @@ fn native_rows_iq2_preflight_is_atomic_for_both_passes() {
 }
 
 pub(super) fn preflight_case(gate_type: GgmlType, up_type: GgmlType, down_type: GgmlType) {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     crate::metal::admit_iq1_expert_fixture(&ctx);
     let (k, m, e, top, n) = (256, 7, 3, 6, 3);
@@ -720,7 +720,7 @@ pub(super) fn preflight_case(gate_type: GgmlType, up_type: GgmlType, down_type: 
 
 #[test]
 fn native_rows_gate_and_up_projection_stores_are_bitwise() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let ctx = MetalContext::new().unwrap();
     let (k, m, e, top, n) = (5120, 7, 384, 6, 33);
     let x: Vec<_> = values(k * n, 9).iter().map(|v| v * 131073.0).collect();

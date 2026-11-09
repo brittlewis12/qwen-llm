@@ -16,7 +16,7 @@ mod split_decode;
 #[test]
 fn product_split_route_boundaries() {
     let _benchmark_lease =
-        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
+        crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let ctx = MetalContext::new().unwrap();
     let g = selected_attention_test_geometry(2052);
     let min = super::split_decode::MIN_IDS;

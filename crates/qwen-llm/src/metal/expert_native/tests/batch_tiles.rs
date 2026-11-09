@@ -28,7 +28,7 @@ fn batch_expert_tile_scope_preserves_other_shapes_and_unaligned_inputs() {
 
 #[test]
 fn batch_expert_tiles_match_generic_bits_routes_offsets_and_guards() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };

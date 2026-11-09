@@ -353,6 +353,7 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "reads published K2 GGUF artifacts"]
     fn cpu_k2_chat_artifact_structure_and_native_tokens() {
         for file_fixture in [
             crate::test_fixtures::catalog::K2_HORIZON_7B_Q8_0,

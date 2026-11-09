@@ -8,7 +8,7 @@ use super::*;
 
 #[test]
 fn native_token_rows_equal_one_dispatch_per_token_bitwise() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = metal_test_context() else {
         return;
     };

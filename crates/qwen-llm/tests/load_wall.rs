@@ -8,6 +8,7 @@ use qwen_llm::{
 };
 
 #[test]
+#[ignore = "model-scale A3B load timing; production GPU lease"]
 fn a3b_load_wall_ms() {
     let Some(path) = test_fixtures::A3B_Q4_K_M.path_or_skip() else {
         return;

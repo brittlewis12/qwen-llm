@@ -482,8 +482,25 @@ fn check_host_wired_memory() -> Result<(), MetalError> {
     unreachable!("wired-memory stabilization loop returns on every terminal poll")
 }
 
-/// Unit-test contexts have isolated locks. Model/performance tests must also
-/// retain this production lease until their contexts and GPU resources drop.
+/// Ordinary, model-free GPU tests need no cross-process exclusion or wired
+/// memory gate. Inside a campaign they still validate and adopt its descriptor.
+/// Bind the result before GPU resources so adoption outlives their destruction.
+#[cfg(test)]
+pub(crate) fn acquire_metal_test_lease() -> Result<Option<MetalProcessLease>, MetalError> {
+    let Some(fd) = inherited_metal_process_lease_fd()? else {
+        return Ok(None);
+    };
+    let uid = unsafe { libc::geteuid() };
+    let path = secure_metal_process_lease_path(
+        PathBuf::from("/tmp").join(format!("qwen-llm-{uid}")),
+        uid,
+    )?;
+    let wait = crate::env_flag::read_default_off(METAL_PROCESS_LEASE_WAIT_ENV);
+    adopt_inherited_metal_process_lease(fd, &path, wait).map(Some)
+}
+
+/// Ignored model/performance tests retain this production lease until their
+/// contexts and GPU resources drop, and pass the wired-memory poison gate.
 /// Like production, it waits for a busy lease only when
 /// `QWEN_METAL_LEASE_WAIT=1`; otherwise it refuses at once. Under a campaign
 /// (`QWEN_METAL_LEASE_FD`) it adopts the campaign's lease, one test at a time.
@@ -523,7 +540,7 @@ pub(crate) fn acquire_metal_process_lease() -> Result<Arc<MetalProcessLease>, Me
     let wait = crate::env_flag::read_default_off(METAL_PROCESS_LEASE_WAIT_ENV);
     // Unit-test builds give production contexts an isolated per-process lock
     // (`metal_process_lease_path`); only the canonical lease can belong to a
-    // campaign, so they leave the inherited descriptor to the benchmark lease.
+    // campaign, so they leave the inherited descriptor to the test's lease.
     let inherited = if cfg!(test) {
         None
     } else {
@@ -2059,6 +2076,22 @@ mod tests {
         let second = open_metal_process_lease(&fixture.0, false)
             .expect("lease must recover after owner release");
         drop(second);
+    }
+
+    #[test]
+    fn ordinary_test_lease_is_absent_or_adopts_the_campaign() {
+        let lease = acquire_metal_test_lease().expect("GPU test campaign lease");
+        if inherited_metal_process_lease_fd().unwrap().is_some() {
+            let lease = lease.expect("adopt the inherited campaign");
+            let uid = unsafe { libc::geteuid() };
+            assert_eq!(
+                lease._path,
+                PathBuf::from(format!("/tmp/qwen-llm-{uid}/metal.lock"))
+            );
+            assert!(lease._turn.is_some());
+        } else {
+            assert!(lease.is_none(), "ordinary tests must not acquire a lock");
+        }
     }
 
     #[test]

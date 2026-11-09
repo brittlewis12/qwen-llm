@@ -1,13 +1,13 @@
 //! Retained contracts and numerics for the Apple10 Qwen tensor loop.
 use super::*;
-use crate::metal::context::acquire_metal_benchmark_lease;
+use crate::metal::context::acquire_metal_test_lease;
 use crate::metal::test_support::{cpu_matrix_attn_reference, metal_test_context};
 
 #[path = "attn_tensor_flash_a3b_tests.rs"]
 mod a3b;
 
 fn gpu(tensor_required: bool, f: impl FnOnce(&MetalContext)) {
-    let _lease = acquire_metal_benchmark_lease().expect("canonical correctness GPU lease");
+    let _lease = acquire_metal_test_lease().expect("GPU test campaign lease");
     let Some(ctx) = metal_test_context() else {
         return;
     };

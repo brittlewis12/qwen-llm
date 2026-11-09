@@ -1183,6 +1183,7 @@ fn gguf_no_copy_generic_a3b_q4_is_bit_exact() {
 }
 
 #[test]
+#[ignore = "reads real model GGUF headers"]
 fn load_plan_matches_previous_schedules_when_fixtures_are_present() {
     let cases: [(
         crate::test_fixtures::Fixture,
@@ -1412,7 +1413,9 @@ fn assert_parallel_fixture_is_bit_exact(
 }
 
 #[test]
+#[ignore = "loads real model GGUF weights; production GPU lease"]
 fn gguf_parallel_copied_a3b_q4_is_bit_exact() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     assert_parallel_fixture_is_bit_exact(
         crate::test_fixtures::A3B_Q4_K_M,
         ParallelPopulationMethod::MmapCopy,
@@ -1421,7 +1424,9 @@ fn gguf_parallel_copied_a3b_q4_is_bit_exact() {
 }
 
 #[test]
+#[ignore = "loads real model GGUF weights; production GPU lease"]
 fn gguf_parallel_pread_a3b_q4_is_bit_exact() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     assert_parallel_fixture_is_bit_exact(
         crate::test_fixtures::A3B_Q4_K_M,
         ParallelPopulationMethod::Pread,
@@ -1430,7 +1435,9 @@ fn gguf_parallel_pread_a3b_q4_is_bit_exact() {
 }
 
 #[test]
+#[ignore = "loads real model GGUF weights; production GPU lease"]
 fn gguf_parallel_copied_dense27b_q4_is_bit_exact() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     assert_parallel_fixture_is_bit_exact(
         crate::test_fixtures::QWEN36_27B_Q4_K_M,
         ParallelPopulationMethod::MmapCopy,
@@ -1439,7 +1446,9 @@ fn gguf_parallel_copied_dense27b_q4_is_bit_exact() {
 }
 
 #[test]
+#[ignore = "loads real model GGUF weights; production GPU lease"]
 fn gguf_parallel_pread_dense27b_q4_is_bit_exact() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     assert_parallel_fixture_is_bit_exact(
         crate::test_fixtures::QWEN36_27B_Q4_K_M,
         ParallelPopulationMethod::Pread,
@@ -7935,7 +7944,9 @@ fn h2_packed_arena_snapshot_matches_cold() {
 }
 
 #[test]
+#[ignore = "copies a real GGUF and exercises model loaders; production GPU lease"]
 fn public_metal_loaders_refuse_an_unsafe_half_weight() {
+    let _lease = crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease");
     let Some(source) = crate::test_fixtures::catalog::QWEN3_5_0_8B_Q8_0.path_or_skip() else {
         return;
     };

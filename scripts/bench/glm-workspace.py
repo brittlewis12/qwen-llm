@@ -39,6 +39,7 @@ def main():
     parser.add_argument("--peak-first", choices=["on", "off"], default="off")
     parser.add_argument("--idle-seconds", type=float, default=0)
     parser.add_argument("--corpus-commit", default="74f6709ae")
+    parser.add_argument("--cold-model-cache", action="store_true")
     parser.add_argument("--background-gib", type=int, choices=range(9), default=0,
                         help="bounded incompressible anonymous background, not a compiler simulation")
     args = parser.parse_args()
@@ -89,6 +90,13 @@ def main():
     prompt = cut(corpus, 8192)
     append = cut("Explain the memory admission and snapshot behavior of this code.\n" +
                  corpus_file("crates/qwen-llm/src/glm5_next_metal/snapshot.rs"), 512)
+    cold_reset = None
+    if args.cold_model_cache:
+        from glm_residency import cold_model_cache
+        shards = sorted(model.parent.glob(model.name.replace("00001-of-00003", "*-of-00003")))
+        if len(shards) != 3:
+            raise RuntimeError("expected all three Maya shards for targeted cold-cache reset")
+        cold_reset = cold_model_cache(shards)
     thermals = []
     compiler_samples = []
     decode_ends = []
@@ -140,6 +148,7 @@ def main():
               "command": [str(Path(__file__).relative_to(ROOT)), *sys.argv[1:]],
               "model": model.name, "workload": args.workload, "release": args.release,
               "label": args.label}
+    result["cold_cache_reset"] = cold_reset
     try:
         with tempfile.TemporaryDirectory(prefix="glm-workspace-") as temporary:
             tmp = Path(temporary)

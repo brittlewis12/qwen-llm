@@ -33,6 +33,48 @@ LIB.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
 LIB.proc_pidinfo.restype = ctypes.c_int
 
 
+def cold_model_cache(paths):
+    """Invalidate only these GGUF files, using the cache_probe.rs mechanism.
+
+    Run under the Metal lease before inference; no global purge or settings.
+    This temporary read-only mapping never reads tensor bytes.
+    """
+    system = ctypes.CDLL(None, use_errno=True)
+    system.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+                           ctypes.c_int, ctypes.c_int, ctypes.c_int64]
+    system.mmap.restype = ctypes.c_void_p
+    system.mincore.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+    system.msync.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    system.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    reports = []
+    page = os.sysconf("SC_PAGE_SIZE")
+    for path in paths:
+        with path.open("rb") as file:
+            size = path.stat().st_size
+            address = system.mmap(None, size, 1, 1, file.fileno(), 0)
+            if address == ctypes.c_void_p(-1).value:
+                raise OSError(ctypes.get_errno(), "mmap cache probe")
+            try:
+                pages = (size + page - 1) // page
+                states = (ctypes.c_ubyte * pages)()
+                def resident():
+                    if system.mincore(address, size, states):
+                        raise OSError(ctypes.get_errno(), "mincore cache probe")
+                    return sum(bool(value & 1) for value in states)
+                before = resident()
+                # Darwin sys/mman.h: MS_SYNC=0x10, MS_INVALIDATE=0x02.
+                if system.msync(address, size, 0x12):
+                    raise OSError(ctypes.get_errno(), "targeted msync invalidation")
+                after = resident()
+                reports.append({"shard": path.name, "pages": pages,
+                                "resident_before": before, "resident_after": after})
+                if after:
+                    raise RuntimeError("targeted cold-cache reset left resident pages")
+            finally:
+                system.munmap(address, size)
+    return reports
+
+
 def usage(pid):
     result = Usage()
     if LIB.proc_pid_rusage(pid, 2, ctypes.byref(result)) != 0:

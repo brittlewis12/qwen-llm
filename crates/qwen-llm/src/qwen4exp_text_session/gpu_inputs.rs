@@ -6,6 +6,7 @@ use crate::qwen4exp::PleConfig;
 use objc2_metal::{
     MTLArgumentEncoder, MTLComputeCommandEncoder, MTLFunction, MTLLibrary, MTLResourceUsage,
 };
+use std::sync::{Arc, Mutex, Weak};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -22,10 +23,24 @@ struct Args {
     pad: u32,
 }
 
-pub(super) struct GpuInputs {
+struct GpuPleBanks {
+    source: Arc<memmap2::Mmap>,
+    source_start: usize,
+    source_len: usize,
+    device: u64,
+    table_offset: u64,
+    tail_begin: u64,
     banks: Vec<MetalGgufBacking>,
     tail: Buffer,
     banks_arg: Buffer,
+}
+
+/// Factory siblings share only immutable registrations, never sequence state.
+#[derive(Clone, Default)]
+pub(crate) struct GpuPleBankCache(Arc<Mutex<Weak<GpuPleBanks>>>);
+
+pub(super) struct GpuInputs {
+    ple: Arc<GpuPleBanks>,
     controls_arg: Buffer,
     metadata: Buffer,
     kinds: Buffer,
@@ -36,41 +51,33 @@ pub(super) struct GpuInputs {
     args: Args,
 }
 
-impl GpuInputs {
-    pub(super) fn reset_history(&self, workspace: &Qwen4ExpTextSessionMetalWorkspace) {
-        let prior = workspace.zero_one.prior_tokens();
-        let mut values = vec![0i32; self.args.ngram as usize];
-        values[0] = prior.len() as i32;
-        for (dst, &src) in values[1..].iter_mut().zip(prior) {
-            *dst = src as i32;
-        }
-        // No committed loop command exists while resetting this cached input.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                values.as_ptr(),
-                self.history
-                    .buffer
-                    .contents()
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(self.history.offset as usize)
-                    .cast::<i32>(),
-                values.len(),
-            );
-        }
+impl GpuPleBankCache {
+    pub(super) fn ready(&self) -> bool {
+        self.0.lock().is_ok_and(|cached| cached.upgrade().is_some())
     }
-    pub(super) fn new(
+
+    fn get(
+        &self,
         ctx: &MetalContext,
         table: PleIq4NlTable<'_>,
-        config: &PleConfig,
-        workspace: &Qwen4ExpTextSessionMetalWorkspace,
-    ) -> Result<Self, Qwen4ExpTextSessionError> {
-        if !(2..=16).contains(&config.ngram_size) {
-            return invalid("GPU PLE requires ngram size 2..=16");
-        }
+    ) -> Result<Arc<GpuPleBanks>, Qwen4ExpTextSessionError> {
         let (mmap, shard, start) = table.gpu_backing().ok_or_else(|| {
             Qwen4ExpTextSessionError::Invalid("GPU PLE requires a retained GGUF mapping".into())
         })?;
+        let mut cached = self
+            .0
+            .lock()
+            .map_err(|_| Qwen4ExpTextSessionError::Invalid("GPU PLE bank cache poisoned".into()))?;
+        if let Some(banks) = cached.upgrade() {
+            if banks.device != ctx.device.registryID()
+                || !Arc::ptr_eq(&banks.source, mmap)
+                || banks.source_start != start
+                || banks.source_len != table.gpu_bytes().len()
+            {
+                return invalid("GPU PLE bank cache belongs to another table or device");
+            }
+            return Ok(banks);
+        }
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
         let base = start / page * page;
         let data_end = start + table.gpu_bytes().len();
@@ -117,6 +124,61 @@ impl GpuInputs {
         unsafe {
             bank_encoder.setBuffer_offset_atIndex(Some(&tail), 0, 32);
         }
+        let ple = Arc::new(GpuPleBanks {
+            source: mmap.clone(),
+            source_start: start,
+            source_len: table.gpu_bytes().len(),
+            device: ctx.device.registryID(),
+            table_offset: (start - base) as u64,
+            tail_begin: if has_tail {
+                (end - base) as u64
+            } else {
+                u64::MAX
+            },
+            banks,
+            tail,
+            banks_arg,
+        });
+        // Failed per-member setup and dropped siblings must release their
+        // registrations; the factory itself retains no admitted GPU memory.
+        *cached = Arc::downgrade(&ple);
+        Ok(ple)
+    }
+}
+
+impl GpuInputs {
+    pub(super) fn reset_history(&self, workspace: &Qwen4ExpTextSessionMetalWorkspace) {
+        let prior = workspace.zero_one.prior_tokens();
+        let mut values = vec![0i32; self.args.ngram as usize];
+        values[0] = prior.len() as i32;
+        for (dst, &src) in values[1..].iter_mut().zip(prior) {
+            *dst = src as i32;
+        }
+        // No committed loop command exists while resetting this cached input.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                values.as_ptr(),
+                self.history
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(self.history.offset as usize)
+                    .cast::<i32>(),
+                values.len(),
+            );
+        }
+    }
+    pub(super) fn new(
+        ctx: &MetalContext,
+        table: PleIq4NlTable<'_>,
+        config: &PleConfig,
+        workspace: &Qwen4ExpTextSessionMetalWorkspace,
+    ) -> Result<Self, Qwen4ExpTextSessionError> {
+        if !(2..=16).contains(&config.ngram_size) {
+            return invalid("GPU PLE requires ngram size 2..=16");
+        }
+        let ple = workspace.gpu_ple_banks.get(ctx, table)?;
         let mut controls: Vec<_> = workspace
             .zero_one
             .gpu_route_statuses()
@@ -170,12 +232,8 @@ impl GpuInputs {
         )?;
         let (input, packed) = workspace.zero_one.gpu_input_buffers();
         let args = Args {
-            table_offset: (start - base) as u64,
-            tail_begin: if has_tail {
-                (end - base) as u64
-            } else {
-                u64::MAX
-            },
+            table_offset: ple.table_offset,
+            tail_begin: ple.tail_begin,
             row_bytes: table.row_bytes() as u32,
             ngram: config.ngram_size,
             heads: config.head_count()? as u32,
@@ -192,9 +250,7 @@ impl GpuInputs {
             ctx.pipeline(name)?;
         }
         Ok(Self {
-            banks,
-            tail,
-            banks_arg,
+            ple,
             controls_arg,
             metadata,
             kinds,
@@ -223,16 +279,16 @@ impl GpuInputs {
             ..self.args
         };
         enc.set_pipeline(&ctx.pipeline("kernel_qwen4exp_gpu_ple_rows")?);
-        enc.set_buffer(0, &self.banks_arg, 0);
+        enc.set_buffer(0, &self.ple.banks_arg, 0);
         enc.set_buffer(1, &self.metadata, 0);
         enc.set_bytes(2, &args);
         enc.set_tensor(3, feedback);
         enc.set_tensor(4, &self.history);
         enc.set_tensor(5, &self.packed);
-        for b in &self.banks {
+        for b in &self.ple.banks {
             enc.use_resource_read(&b.buffer);
         }
-        enc.use_resource_read(&self.tail);
+        enc.use_resource_read(&self.ple.tail);
         enc.dispatch(
             objc2_metal::MTLSize {
                 width: args.heads as usize,

@@ -64,6 +64,7 @@ mod gpu_decode;
 mod gpu_inputs;
 pub use gpu_decode::Qwen4ExpGpuDecodeStats;
 pub(crate) use gpu_decode::generate as generate_gpu_tokens;
+pub(crate) use gpu_inputs::GpuPleBankCache;
 mod row_logits;
 mod snapshot;
 mod snapshot_copy;
@@ -1012,6 +1013,7 @@ use crate::qwen4exp_metal::encode_final_gated_residual_mix;
 
 pub struct Qwen4ExpTextSessionMetalWorkspace {
     gpu_inputs: Option<gpu_inputs::GpuInputs>,
+    pub(crate) gpu_ple_banks: GpuPleBankCache,
     pub(crate) causal_executor: bool,
     pub(crate) gpu_token_loop: bool,
     checkpoint_lineage: CheckpointLineage,
@@ -1113,6 +1115,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         };
         let workspace = Self {
             gpu_inputs: None,
+            gpu_ple_banks: GpuPleBankCache::default(),
             causal_executor: true,
             gpu_token_loop: true,
             checkpoint_lineage: CheckpointLineage::fresh()?,
@@ -1536,7 +1539,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
     }
 
     pub(crate) fn gpu_inputs_ready(&self) -> bool {
-        self.gpu_inputs.is_some()
+        self.gpu_inputs.is_some() || self.gpu_ple_banks.ready()
     }
 
     pub(crate) fn install_snapshot_logits(

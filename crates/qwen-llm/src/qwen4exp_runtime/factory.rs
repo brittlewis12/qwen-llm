@@ -8,6 +8,7 @@ pub struct Qwen4ExpSessionFactory<'model, 'gguf> {
     plan: Qwen4ExpTextSessionPlan,
     capacity: Qwen4ExpSessionCapacity,
     decode: Qwen4ExpDecodeOptions,
+    gpu_ple_banks: crate::qwen4exp_text_session::GpuPleBankCache,
     device: u64,
 }
 
@@ -48,6 +49,7 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             plan: self.session_plan.clone(),
             capacity: self.capacity,
             decode,
+            gpu_ple_banks: workspace.gpu_ple_banks.clone(),
             device: self.device_registry_id,
         };
         let runner = Qwen4ExpTextRunner {
@@ -97,6 +99,7 @@ impl<'model, 'gguf> Qwen4ExpSessionFactory<'model, 'gguf> {
             .clone()
             .admit_after_residency(self.resident, ctx.memory_signals())?;
         let mut workspace = Qwen4ExpTextSessionMetalWorkspace::from_admitted(ctx, admitted)?;
+        workspace.gpu_ple_banks = self.gpu_ple_banks.clone();
         workspace.causal_executor = self.decode.causal_executor;
         workspace.gpu_token_loop = self.decode.gpu_token_loop;
         workspace.configure_guarded_topk(ctx, self.decode.guarded_topk)?;

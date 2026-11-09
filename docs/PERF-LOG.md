@@ -84,6 +84,92 @@ default precision/embedding/MTP checks, the product selected-value oracle,
 last-expert regressions and shared state hashing. No GPU timing or inference.
 [Exact deletions, retained cases and validation protocol](bench/2026-11-09-ignored-sweep-batch2.md).
 
+## 2026-11-09 - Flash-Next Paired Mixer Sharing; Price Remaining Native B4 Work
+
+- Main **`b3fbf7a12`**; real independent GSQ-RCO IQ3_S states, B4,
+  depths 8192/32768 plus member offsets 0/17/34/51, code/prose cohorts.
+  Same process, alternating AB/BA every teacher-forced step; 128 steps,
+  first eight excluded. Two runs per depth, all thermal pressure **0**.
+  **Keep remaining Q4_K/Q5_K/IQ4_NL/IQ4_XS/Q8_0 mixer sharing**, default on,
+  rollback **`QWEN_FN_BATCH_OTHER_DENSE_MMA=0`**. Existing full-F32 skinny
+  decoder templates; no new dequantization arithmetic or allocations.
+
+  | Depth | Off/on ms, first pair | Off/on ms, repeat | Throughput gain |
+  | --- | ---: | ---: | ---: |
+  | 8K | 36.141 / 34.757 | 34.574 / 33.338 | **3.71–3.98%** |
+  | 32K | 35.168 / 33.873 | 35.278 / 34.151 | **3.30–3.82%** |
+
+- GPU savings **1.22–1.30 ms/round**. **Every arm overlaps other lanes'
+  compiles**; these are flagged loaded paired results, not quiet-machine
+  absolute standing. Every eight-pair block saves time; descriptive block
+  95% lower bounds remain **2.92–3.44%** of off time. Both repeated head
+  streams match exactly across runs. Direct on-versus-off signed dNLL
+  **+0.000321 / +0.000147**, mean KL **3.06e-5 / 2.22e-6**; worst cohort
+  **+0.00135 / 0.000119**, incumbent-repeat noise **0**. Each repeat has
+  **32 exact fork rounds**. Greedy text identity is not the acceptance bar.
+- **Next priced stage kept:** prepared HC injection now spans members in one
+  grid, **384 -> 96 launches/B4 round**. Source **`893220b0`**, same paired
+  protocol: 8K **33.033 -> 32.439 ms** (**+1.83%**), 32K **32.947 ->
+  32.344 ms** (**+1.86%**), saving **0.594 / 0.602 ms**. All **512 full-head
+  vectors/depth bitwise equal**, dNLL/KL **0**, 32 exact fork rounds/depth.
+  Both intervals thermal **0**, compile overlap flagged. Default on,
+  rollback **`QWEN_FN_BATCH_HC_INJECTION=0`**; reuse existing prepared F32
+  injection arithmetic, no allocation or owner/state-layout changes.
+  Paired example mode **`pair-hc`** keeps mixer sharing enabled in both arms.
+- **Production build standing** (no `perf-ablations`, source `893220b0`,
+  `fn_native_batch_check "$MODEL" "$CODE" "$PROSE" DEPTH 64 4`), no observed
+  compiler overlap, thermal **0**:
+
+  | Depth | Four serial steps ms | Native B4 round ms | Aggregate |
+  | --- | ---: | ---: | ---: |
+  | 8K | 53.086 | 31.989 | **1.660x** |
+  | 32K | 54.315 | 32.357 | **1.679x** |
+
+  Full-model signed dNLL **+4.52e-7 / -3.92e-6**, KL **4.80e-7 / 2.83e-8**;
+  noise **0**, 32 exact forks/depth and GPU/native roundtrip max error **0**.
+  Reaching 1.8x still requires **2.50 / 2.18 ms/round**. This is kernel
+  standing, not a new steady-serve throughput claim.
+- **F32-MMA supersession:** the earlier operator-only rejection is obsolete.
+  At Q6_K K2560/M8192/B4, output RMS **13.0233**, full-F32 RMSE **4.05e-6**,
+  normalized error **3.11e-7**; serial RMSE **1.21e-6**. Half-operand RMSE is
+  **0.00238**, about **586x** larger. This synthetic F64 reference fixes the
+  decoded quantized weights; it does not measure artifact reconstruction
+  error. Q6/head MMA distribution evidence was already clean on main.
+  **Keep it**: a 3.36x ratio between tiny operator errors was not evidence
+  of output harm. Diagnostic command at **`c427bb6e`**:
+  `cargo test --release -p qwen-llm --lib fewrow_f32_weights_match_f64_and_reduce_rounding_error -- --nocapture`.
+- **Whole-round pricing**, source **`52adac48`**, sharing enabled, actual
+  B4 trajectories, two palindromic passes, 24 rounds/cell. Held/omitted
+  work intentionally invalidates outputs; these are non-additive cost
+  bounds, not claimed optimization gains. Broad QSA omission tripped its
+  state controls and was discarded; refined preparation preserves them.
+
+  | Remaining work | Omission saving, 8K / 32K ms | Expected realizable saving | Engineering estimate / priority |
+  | --- | ---: | ---: | --- |
+  | Private HC injection | 0.85 / 1.00 | 0.5–0.7 ms | 0.5 h; **first**, 1.0–1.4 ms/h |
+  | QSA norms, pending/publish | 2.24 / 2.18 | 0.8–1.2 ms | 1–2 h; second, 0.4–1.2 ms/h |
+  | Private copies | 0.96 / 0.79 | 0.4–0.7 ms | 1 h; 0.4–0.7 ms/h |
+  | Router/top-k | 1.00 / 0.88 | 0.4–0.6 ms | 1–2 h; 0.2–0.6 ms/h |
+  | GDN controls/prep | 1.40 / 1.37 | 0.5–0.8 ms | 3–5 h; 0.1–0.3 ms/h; buffer-slot pressure |
+
+  Engineering estimates are judgment, not measured implementation gains.
+- **Concurrency predictor:** whole-round dependency waves reduce GPU time
+  **26.78 -> 24.47 ms at 8K**, **27.18 -> 24.89 ms at 32K**, roughly **8%**.
+  All four members' full-head trajectory hashes equal the normal round.
+  Direct global recording raises encode **4.5 -> 82.5 ms**, wall **~33 ->
+  ~109 ms**: it is a research control, never a production policy. Stock
+  rounds expose another **~4.5 ms encode / ~6 ms total host** ceiling.
+  Cached/GPU-owned or bounded-scope execution is the larger move (roughly
+  2–5 ms potentially available, 8–16 engineering hours); savings overlap,
+  and this is a forecast. Shared the result in **aven FN-5M7T**.
+- Reproduce with source **`52adac48`** and example
+  `fn_batch_counterfactual`, built **on M5** via
+  `nice -n 10 cargo build --release -p qwen-llm --features perf-ablations --example fn_batch_counterfactual`.
+  Under `scripts/bench/with-metal-lease`, invoke
+  `target/release/examples/fn_batch_counterfactual "$MODEL" "$CODE" "$PROSE" 8192 128 4 pair`
+  (also 32768); pricing uses `8192 24 4 fine` (also 32768).
+  Compact metrics/commands: **`~/qwen-runs/2026-11-09-fn-batch-next/`**.
+
 ## 2026-11-09 - GLM M4 Peak-Before-Warm: KILL Under Build Load
 
 - Rebased onto **`d3087f8d3`**. GPU experiment **`7f1c01ef6`**
@@ -1010,6 +1096,9 @@ artifacts remain; dated recipes now point to their historical source.
   validation on M4, hence F64 error is identical. The existing full-F32 MMA
   alternative stayed out: its M4 operator check had roughly 3x serial F64 RMS
   error at production projection dimensions. No new quant dequantizer ships.
+  **Superseded 2026-11-09:** the operator-error ratio was diagnostic, not an
+  acceptance gate. Q6/head full-F32 MMA subsequently shipped after clean
+  distribution checks; see the paired batch-sharing entry above.
 - Same-binary realistic warm-agent protocol, harness
   **`bench/realistic-concurrency@1abcd236`**, same seeded plan as below, three
   distinct 48K warm roots and 14 turns with each arm's own replies:

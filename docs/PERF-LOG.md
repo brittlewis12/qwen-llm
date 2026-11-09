@@ -448,6 +448,67 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Helpers, source/binary identities, every retained arm and receipts:
   **`~/qwen-runs/2026-11-08-v41-batch-depth/`** on both hosts.
 
+## 2026-11-09 - Flash-Next Production Causal Executor And GPU Token Feedback
+
+- Rebased onto **`2e2f14e6`** (after `9b193b38`), preserving native FN
+  batching and the fair serve owner. Production runtime **`36a3ac46`**,
+  qualification **`8c53f22e`**, normal-priority harness **`d4546b80`**;
+  normal release features, M5 Ultra, unchanged GSQ-RCO IQ3_S, width 1.
+  Both wins default **on** in this branch; **unmerged**.
+- Whole-model generation, median of three alternating 64-token trials,
+  temperature 0.8 / K20 / p0.95 / minP0.02. Rate is
+  `(tokens - 1) / (wall - first_token_ready)`, after 64 warm forwards at
+  the requested depth. Timing runs at normal process priority outside the
+  build lock; builds use nice 10. Every timing-window thermal sample was
+  **0** (50 at 8K, 69 at 32K).
+
+  | Production path | 8K tok/s | 32K tok/s |
+  | --- | ---: | ---: |
+  | Incumbent executor + host sampling | 70.36 | 72.16 |
+  | Causal waves + FFN epilogue/copy fusion, host sampling | 70.54 | 73.24 |
+  | Incumbent executor + GPU feedback | 79.81 | 79.89 |
+  | Causal executor + GPU feedback | **86.72** | **86.45** |
+  | Same, bounded 16-token bursts with native resumption | **85.02** | **85.19** |
+
+- The **82 / 92 projections are not achieved**. Causal execution removes
+  about **0.97 ms GPU/token**, but CPU recording adds **0.74–0.92 ms**;
+  feedback overlaps that work. The combined path improves the paired control
+  **23.2% / 19.8%**; bursts improve **20.8% / 18.1%**. Host cost varies:
+  an earlier pressure-0 packet on the same runtime measured
+  **74.49 / 75.80 / 89.09 / 87.90** at 8K (control / executor / combined /
+  bursts). Retain that packet, but use the normal-priority table above as
+  primary. An intervening 32K host comparison with 66.47–73.54 tok/s spread
+  was replaced; an older pressure-1/2 timing packet is excluded.
+- The reusable prepared-command driver includes GPU greedy/sampling, dynamic
+  input arguments, PLE gathers and completion-based token readback. EOS,
+  cancellation and stream backpressure discard uncommitted work. The owner
+  uses at most 16 tokens when alone, yields to peers, and resumes native B>1
+  without consuming the last selection twice. Positive-temperature GPU
+  sampling reports version 2 (FP32 compensated CDF; CPU version 1 uses FP64).
+  Cold budgets below 128 tokens keep the host path to amortize the measured
+  **~0.23 s** first PLE registration; live sibling registrations count as warm.
+- Factory siblings share **read-only PLE registrations**, with weak cache
+  ownership and source/device checks; histories and controls remain per
+  member. This fixes duplicate-registration admission failure in four-member
+  warm-up. M5 GPU→native B2/B3/B4→GPU passes: **144** heads match serial,
+  signed dNLL/KL **0**, **32** fork rounds exact, final continuation error **0**.
+  Whole-model full/burst feedback at both depths has signed dNLL **0**, KL
+  equal to incumbent-repeat noise, and max logit delta **0**; natural dense
+  QSA, PLE EOS history, continuation and stop witnesses pass. Fused-leaf F64
+  error is no worse. All **23** library/CLI suites pass (library **2,481**),
+  doctests and CPU contracts pass. Actual CLI/HTTP smoke covers host/GPU
+  generation, GPU bursts, concurrent native requests and disconnect/recovery.
+- Roll back independently with **`QWEN4EXP_CAUSAL_EXECUTOR=0`** and
+  **`QWEN4EXP_GPU_TOKEN_LOOP=0`**; the library options and factory preserve
+  both. **All prefetch remains dropped**, including HC; no prefetch knob.
+  Remember the **96–128 MiB / ~1.9 TB/s** cache knee only for later designs.
+- Compact commands/metrics: **`~/qwen-runs/2026-11-09-fn-decode-integration/`**,
+  especially `whole-model-normal-priority`, `native-roundtrip-shared-ple-m5`,
+  `cli-shared-ple-smoke`, `shared-ple-tests` and `validation.json`; mirrored
+  locally. Reproduce via `scripts/research/fn-decode-roofline/README.md` and
+  the recorded source commits/commands; no frozen executables or source
+  snapshots. Next single-stream target remains banked, **not started**:
+  QSA attention/cache plus selection/index **~97 us/layer, ~1.2 ms/token**.
 
 ## 2026-11-09 - Agent Append Decomposition: Real Rows Expose Matrix/Attention Cliffs
 

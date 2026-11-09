@@ -40,23 +40,28 @@ No captured future values, alternative model arithmetic or runtime policy is
 used. The route-copy and dispatch-profile outputs must match native bits.
 
 Per-dispatch profiling deliberately splits encoders and removes concurrency.
-Its attention/non-GEMM shares are diagnostic allocations, not exclusive
-measurements of ordinary GPU time. Normalize their completion-increment shares
-to ordinary GPU time, retain the perturbation ratio, and leave an explicit
-residual. Checked 1-GiB loads give current bandwidth; a dependent checked
-empty-launch curve gives a command/control **model**, not recoverable hardware
-time. The tensor peak reuses the measured 131.676 TFLOP/s F16/F32 calibration.
-Do not add overlapping predictor savings.
+Separate uncovered transition gaps from interval cores; charge profile-minus-
+native inflation to gaps first, then distribute the native kernel budget by
+core shares. The maximum of residual gaps and checked dependent empty launches
+is a command/serialization **model**, not exclusive hardware attribution.
+Do not add those overlapping costs. This matters especially for GLM2000, where
+instrumentation adds 21% GPU time, predominantly in uncovered transition gaps.
+Keep the perturbation ratio and explicit kernel residual. The short 1-GiB
+load control can still ramp its clock (retain all samples); hardware roofs use
+the established warmed measured 1175.47 GB/s / 131.676 TFLOP/s calibrations.
 
 The physical roof is `max(useful FLOPs / peak, useful bytes / bandwidth)`.
 Keep that whole-call bound separate from the additive diagnostic ledger:
-learned-matrix compute/weight floor, context attention, non-GEMM, synthetic
-command/control, nonoverlapping host, then remaining kernel excess. Attention
+sum of per-projection learned compute/weight floors, context attention,
+non-GEMM, command/serialization model, nonoverlapping host, then remaining
+kernel excess. This stronger stage floor assumes the incumbent phase order.
+Attention
 arithmetic appears in the whole-call bound, not a second time in that ledger's
 learned-matrix floor. Weight reuse/padding/quant unpack, extra scratch traffic
 and occupancy belong to the excess. Any proposed runtime change still needs
 the usual teacher-forced NLL/KL qualification; historical ragged IQ/attention
-gate failures are not overturned by a timing profile.
+gate failures are not overturned by a timing profile. The later signed-IQ
+qualification already widened >=1024 rows; sparse attention remains restricted.
 
 Keep compact per-kernel aggregates, route histograms, ordinary timings,
 thermals and commit + command. Delete regenerable per-dispatch bulk, binaries,

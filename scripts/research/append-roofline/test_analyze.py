@@ -25,6 +25,7 @@ class Floors(unittest.TestCase):
         inv,routes=self.fixture(400)
         a=analysis.weight_floor(inv,routes,400,'glm')
         routes[0]['bank_bytes']=[1e12]*3
+        for t in inv[:3]:t['bytes']=1e12
         b=analysis.weight_floor(inv,routes,400,'glm')
         self.assertEqual(a['useful_flops'],b['useful_flops'])
         self.assertGreater(b['useful_bytes']/1175e9,b['useful_flops']/analysis.PEAK)
@@ -37,5 +38,19 @@ class Floors(unittest.TestCase):
         self.assertEqual(analysis.category('kernel_qwen4exp_qsa_selected_value_vec8_f32'),'context')
         self.assertEqual(analysis.category('kernel_mat_mat_q6_K_f32'),'learned')
         self.assertEqual(analysis.category('kernel_moe_route_bucket_slots_f32'),'non_gemm')
+
+    def test_overlapping_counter_starts_and_gaps_partition_the_timeline(self):
+        rows=[dict(kernel='a',gpu_start=1,gpu_end=101,gpu_ns=100),
+              dict(kernel='b',gpu_start=51,gpu_end=201,gpu_ns=150),
+              dict(kernel='c',gpu_start=251,gpu_end=301,gpu_ns=50)]
+        p=analysis.interval_parts(rows)
+        self.assertAlmostEqual(sum(x['core_ms'] for x in p.values()),250/1e6)
+        self.assertAlmostEqual(sum(x['gap_ms'] for x in p.values()),50/1e6)
+        self.assertAlmostEqual(sum(x['increment_ms'] for x in p.values()),300/1e6)
+
+    def test_profile_inflation_and_empty_launch_are_not_added_as_native_stalls(self):
+        residual,total=analysis.control_allocation(547,2822,2336,14)
+        self.assertEqual((residual,total),(61,61))
+        self.assertEqual(analysis.control_allocation(1,550,576,9),(1,9))
 
 if __name__=='__main__':unittest.main()

@@ -6,6 +6,62 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-09 - Agent Append Decomposition: Real Rows Expose Matrix/Attention Cliffs
+
+- Main **`2bad80c4`**, M5 Ultra, unchanged FN GSQ-RCO IQ3_S / GLM UD-IQ3_XXS.
+  Real Rust **400/2000-row appends at 64K**, one untimed prefix/model,
+  snapshot restores outside timers, full endpoint copies, excluded warm plus
+  three retained calls/shape. Scratch-only diagnostic recipe **`3023708c`**;
+  no runtime/shader changes ship. [Decomposition, record audit and design](bench/2026-11-09-append-decomposition.md),
+  [numeric packet](bench/2026-11-09-append-decomposition.csv).
+
+  | Family / rows | Native ms | Touched native weights GB | Compute / byte floor ms | Global useful roof fraction |
+  | --- | ---: | ---: | ---: | ---: |
+  | FN / 400 | 580.2 | 37.05 | 39.1 / 31.8 | 6.7% |
+  | FN / 2000 | 1522.4 | 48.91 | 195.6 / 41.9 | 12.8% |
+  | GLM / 400 | 1089.3 | 106.41 | 111.3 / 90.8 | 10.2% |
+  | GLM / 2000 | 2341.8 | 115.04 | 556.9 / 98.2 | 23.8% |
+
+- Roof is **max(useful matmul FLOPs / measured tensor peak, useful bytes /
+  measured BW)**, **131.676 TFLOP/s / 1175.47 GB/s** warmed calibrations.
+  Actual per-layer route counts give weight unions, not active bytes times
+  rows or whole GGUF size. At 400, experts alone are **byte-bound**:
+  **27.8/84.4 ms FN/GLM bytes**, versus **14.3/51.4 ms** compute. The global
+  aggregate remains compute-bound. Learned stage floors sum per-projection
+  maxima; attention/non-GEMM/host and explicit kernel excess are separate.
+- **Shape cliffs:** 512 rows takes **386.9/708.6 ms FN/GLM**; 2048 takes
+  **1063.0/2073.1**, both faster than their smaller target calls. About
+  **80%/78%** of touched 400-row expert buckets have <=16 slots; N32 padding
+  is **3.02x/2.83x**. FN400 misses dense/expert short routes; HC alignment,
+  quant-down and partial internal tails remain. GLM >=1K IQ widening already
+  engages; sparse attention still excludes irregular rows. Do not repeat
+  the later signed-IQ qualification or promote the failed Half attention.
+- Diagnostic ledger in the packet separates learned useful floor, context,
+  non-GEMM, command/serialization model, host and residual kernel excess.
+  **GLM2000 profiling adds 486 ms GPU**, concentrated in uncovered encoder
+  gaps, not ordinary mHC arithmetic. Strip that inflation before allocating
+  native shares; the resulting context allocation is about **790 ms**.
+  Pure empty-launch models are only **5–24 ms**, native host **2–8 ms**.
+  Component allocations are models, not exclusive counters or additive
+  promises of recoverable performance. All native after-controls match bits.
+- Design swing: **shape-complete native-quant/HC panels** for FN, small-row
+  matrices plus **F32-query/F32-probability selected QK/PV** for GLM. Preserve
+  incumbent operand rounding, full history and state; no padded model steps.
+  Conditional native TTFT contributions at 400/2000: **FN 0.33–0.39 /
+  1.05–1.15 s**, **GLM 0.55–0.70 / 1.9–2.0 s**. These are engineering
+  budgets, anchored by controls and the attention allocation, not candidate
+  timings. Roughly a week/family plus signed NLL/noise, no-worse F64 and
+  whole-append qualification. Serve bookkeeping/queueing remain outside.
+- Six accounting tests, seven existing harness tests, syntax/format/docs
+  checks and M5 release probe build pass. Timing takes only the canonical
+  Metal lease/wait + nice 10; builds alone use the build lock. Cooling and
+  one-second monitoring, all pressure samples **0**. About **230 seconds**
+  owned lease time including cooling; shared build/GPU waits are separate.
+  Commit + command and compact aggregates in
+  `$HOME/qwen-runs/2026-11-09-append-roofline/` on both hosts. M5 worktree,
+  target, bundle and regenerable dispatch bulk removed; no owned worker,
+  merge or client/server changes. V4.1 deferred for its separate Engram roof.
+
 ## 2026-11-09 - Flash-Next Native Independent Decode And Concurrent Serve
 
 - **Default on for M5 ordinary serving**, base `0bdb9ca5`, native core
@@ -101,6 +157,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   script's serial switch only knew GLM/V4.1). Analyze/compare with `--history
   own`. Evidence summaries/commands: `$RUNS_ROOT/2026-11-09-fn-serve-batch/`;
   no frozen executables or on-disk model checkpoints are required.
+
 
 ## 2026-11-09 - Steady Agent Concurrency: V4.1 1.308x, GLM 1.730x; 128K Rooflines
 

@@ -4,12 +4,28 @@ import argparse,collections,json,math,re,statistics as st
 from pathlib import Path
 
 PEAK=131.676e12
+BW_REFERENCE=1175.47e9
+
+def interval_parts(rows):
+    bykernel=collections.defaultdict(lambda:dict(calls=0,increment_ms=0.,isolated_ms=0.,gap_ms=0.,core_ms=0.))
+    previous=min(x['gpu_start'] for x in rows)
+    for x in rows:
+        k=bykernel[x['kernel']];k['calls']+=1;k['isolated_ms']+=x['gpu_ns']/1e6
+        k['increment_ms']+=max(0,x['gpu_end']-previous)/1e6
+        k['gap_ms']+=max(0,x['gpu_start']-previous)/1e6
+        k['core_ms']+=max(0,x['gpu_end']-max(x['gpu_start'],previous))/1e6
+        previous=max(previous,x['gpu_end'])
+    return bykernel
+
+def control_allocation(profile_gap,profile_gpu,native_gpu,empty_launch):
+    residual=max(0,profile_gap-max(0,profile_gpu-native_gpu))
+    return residual,max(empty_launch,residual)
 
 def category(kernel):
     k=kernel.lower()
     if any(x in k for x in ('selected','sparse','_qsa_','_indexer_','mla_qk','mla_pv','mla_softmax','radix','select_top','attention_partial','attention_qk','attention_pv')):
         return 'context'
-    if any(x in k for x in ('matmul','mat_mat','mat_vec','gemm','gemv','moe_swiglu','moe_down','moe_gate_up','moe_expert','iq3_s_down','iq4_nl_down','q6_k_dense','hc_inject_dot','hc_up_mix','hc_down_silu')):
+    if any(x in k for x in ('matmul','mat_mat','mat_vec','gemm','gemv','moe_swiglu','moe_down','moe_gate_up','moe_expert','moe_up_','moe_wide_probe','iq3_s_down','iq4_nl_down','q6_k_dense','hc_inject_dot','hc_up_mix','hc_down_silu','mhc4_pre_mix_partial','grouped_mapped','grouped_down')):
         return 'learned'
     return 'non_gemm'
 
@@ -17,9 +33,11 @@ def weight_floor(inventory,routes,rows,family):
     route_by_layer={int(r['layer']):r for r in routes}
     top=10 if family=='fn' else 8
     weight_bytes=0.;matrix_parameters=0.;head_parameters=0.;bank_bytes=0.;dense_bytes=0.;unknown=[]
-    details=[]
+    staged_roof_s=0.;expert_flops=0.;inventory_bank_bytes=0
+    details=[];all_counts=[]
     for layer,r in route_by_layer.items():
         counts=r['counts'];assert sum(counts)==rows*top
+        all_counts.extend(c for c in counts if c>0)
         active=sum(c>0 for c in counts);full=sum(r['bank_bytes'])
         useful=full*active/len(counts);weight_bytes+=useful;bank_bytes+=useful
         details.append(dict(layer=layer,active_experts=active,experts=len(counts),touched_bank_bytes=useful,
@@ -30,14 +48,21 @@ def weight_floor(inventory,routes,rows,family):
         bank='_exps.' in name or role in ('ExpertGateUp','ExpertDown')
         if bank:
             e=shape[-1];matrix_parameters+=n/e*top
+            layer=t.get('layer',int(re.match(r'blk\.(\d+)\.',name)[1]))
+            active=sum(c>0 for c in route_by_layer[layer]['counts'])
+            flops=2*n/e*top*rows;expert_flops+=flops;inventory_bank_bytes+=t['bytes']
+            staged_roof_s+=max(flops/PEAK,t['bytes']*active/e/BW_REFERENCE)
             continue
         if role=='Embedding' or 'token_embd' in name:continue
         if name=='output.weight':
-            weight_bytes+=t['bytes'];dense_bytes+=t['bytes'];head_parameters+=n;continue
+            weight_bytes+=t['bytes'];dense_bytes+=t['bytes'];head_parameters+=n
+            staged_roof_s+=max(2*n/PEAK,t['bytes']/BW_REFERENCE);continue
         weight_bytes+=t['bytes'];dense_bytes+=t['bytes']
         matrix=role in ('HyperMix','Projection','F32Projection','LatentAbsorb') if family=='glm' else (len(shape)>=2 and 'conv' not in name)
         if matrix:matrix_parameters+=n
-        elif len(shape)>=2 and role not in ('Conv',):unknown.append(name)
+        elif len(shape)>=2 and role not in ('Conv','Vector') and 'conv' not in name:unknown.append(name)
+        staged_roof_s+=max(2*n*rows/PEAK if matrix else 0,t['bytes']/BW_REFERENCE)
+    assert inventory_bank_bytes==sum(sum(r['bank_bytes']) for r in routes)
     matrix_flops=2*matrix_parameters*rows+2*head_parameters
     # Existing fixed recurrent state R/W, pooled key union, minimum selected
     # cache union and new cache rows. Extra/repeated scratch traffic is excess.
@@ -56,18 +81,27 @@ def weight_floor(inventory,routes,rows,family):
                 unique_weight_bytes=weight_bytes,touched_expert_bytes=bank_bytes,dense_weight_bytes=dense_bytes,
                 other_payload_bytes=other_bytes,useful_bytes=weight_bytes+other_bytes,
                 matrix_parameters_per_row=matrix_parameters,head_parameters=head_parameters,
-                expert_layers=details,nonmatrix_multidim=unknown)
+                learned_stage_roof_ms=staged_roof_s*1e3,expert_flops=expert_flops,
+                expert_layers=details,nonmatrix_multidim=unknown,
+                bucket_le16_fraction=sum(c<=16 for c in all_counts)/len(all_counts),
+                slots_padding32=sum(math.ceil(c/32)*32 for c in all_counts)/sum(all_counts),
+                slots_padding16=sum(math.ceil(c/16)*16 for c in all_counts)/sum(all_counts))
 
 def analyze(path):
     records=[json.loads(x) for x in path.read_text().splitlines()]
     family=next(x['family'] for x in records if x['kind']=='identity')
     inventory=next(x['tensors'] for x in records if x['kind']=='inventory')
-    bw=st.median(x['gb_s'] for x in records if x['kind']=='bandwidth' and x['rep']>=2)*1e9
+    stream=[x['gb_s'] for x in records if x['kind']=='bandwidth']
+    # A short post-model load control can still be ramping its clock. Keep all
+    # samples and the prespecified retained median, but use the established
+    # warmed hardware calibration for the roof, as for the tensor denominator.
+    bw=BW_REFERENCE
     counts=sorted(set(x['calls'] for x in records if x['kind']=='launch_floor'))
     ts=[st.median(x['gpu_ms'] for x in records if x['kind']=='launch_floor' and x['calls']==c) for c in counts]
     slope=sum((x-st.mean(counts))*(y-st.mean(ts)) for x,y in zip(counts,ts))/sum((x-st.mean(counts))**2 for x in counts)
     intercept=st.mean(ts)-slope*st.mean(counts)
     result=dict(family=family,bandwidth_gb_s=bw/1e9,tensor_peak_tflops=PEAK/1e12,
+                stream_control_samples_gb_s=stream,stream_control_retained_median_gb_s=st.median(stream[2:]),
                 launch_fit=dict(ms_per_dispatch=slope,intercept_ms=intercept,counts=counts,medians_ms=ts),cells={})
     for n in (400,512,2000,2048):
         native=[x for x in records if x['kind']=='native' and x['rows']==n and not x['warm']]
@@ -77,26 +111,29 @@ def analyze(path):
             routes=next(x['layers'] for x in records if x['kind']=='routes' and x['rows']==n)
             floor=weight_floor(inventory,routes,n,family)
             floor.update(compute_ms=floor['useful_flops']/PEAK*1e3,byte_ms=floor['useful_bytes']/bw*1e3,
-                         learned_roof_ms=max(floor['matrix_flops']/PEAK,floor['unique_weight_bytes']/bw)*1e3)
+                         learned_roof_ms=floor['learned_stage_roof_ms'])
             floor['roof_ms']=max(floor['compute_ms'],floor['byte_ms']);floor['roof_fraction']=floor['roof_ms']/w
             p=next(x for x in records if x['kind']=='profile' and x['rows']==n)
             rows=p['profile']['rows'];assert not p['profile']['overflow']
             assert all(x['gpu_start'] and x['gpu_end'] for x in rows)
-            bykernel=collections.defaultdict(lambda:dict(calls=0,increment_ms=0.,isolated_ms=0.))
-            previous=min(x['gpu_start'] for x in rows)
-            for x in rows:
-                k=bykernel[x['kernel']];k['calls']+=1;k['isolated_ms']+=x['gpu_ns']/1e6
-                k['increment_ms']+=max(0,x['gpu_end']-previous)/1e6;previous=max(previous,x['gpu_end'])
-            total=sum(x['increment_ms'] for x in bykernel.values());shares=collections.defaultdict(float);nc=collections.Counter()
+            bykernel=interval_parts(rows)
+            total=sum(x['core_ms'] for x in bykernel.values());shares=collections.defaultdict(float);nc=collections.Counter()
             for kernel,x in bykernel.items():
-                cat=category(kernel);shares[cat]+=x['increment_ms']/total;nc[cat]+=x['calls'];x['category']=cat
+                cat=category(kernel);shares[cat]+=x['core_ms']/total;nc[cat]+=x['calls'];x['category']=cat
             launch=slope*len(rows)+intercept
-            attention=g*shares['context']-slope*nc['context'];nongemm=g*shares['non_gemm']-slope*nc['non_gemm']
+            profile_gap=sum(x['gap_ms'] for x in bykernel.values())
+            # Attribute profile-minus-native inflation to the uncovered encoder
+            # gaps first. The remainder is an allocation, not a causal proof of
+            # ordinary idle time. Empty launches overlap it: take max, never sum.
+            serialization,launch_serialization=control_allocation(profile_gap,p['gpu_ms'],g,launch)
+            attention=(g-launch_serialization)*shares['context'];nongemm=(g-launch_serialization)*shares['non_gemm']
             ledger=dict(learned_compute_or_byte_floor=floor['learned_roof_ms'],context_attention=attention,
-                        non_gemm=nongemm,launch_control_model=launch,host_nonoverlap=w-g)
+                        non_gemm=nongemm,launch_serialization_model=launch_serialization,host_nonoverlap=w-g)
             ledger['kernel_excess']=w-sum(ledger.values())
             assert abs(sum(ledger.values())-w)<1e-6
             cell.update(floor=floor,decomposition_ms=ledger,profile_gpu_ms=p['gpu_ms'],
+                        profile_gap_ms=profile_gap,profile_core_ms=total,
+                        empty_launch_model_ms=launch,residual_gap_model_ms=serialization,
                         profile_perturbation=p['gpu_ms']/g,dispatches=len(rows),kernels=dict(bykernel),
                         after=next(x for x in records if x['kind']=='after' and x['rows']==n))
         result['cells'][str(n)]=cell

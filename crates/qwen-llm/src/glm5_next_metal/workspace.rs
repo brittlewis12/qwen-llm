@@ -2,90 +2,7 @@
 //! Every re-acquisition admits the original width before any state advances.
 
 use super::*;
-use objc2_foundation::NSRange;
-use objc2_metal::MTLBlitCommandEncoder;
 use objc2_metal::MTLResource;
-use std::cell::RefCell;
-
-crate::env_flag!(
-    /// GPU-fill newly admitted GLM prompt/session scratch before warming weights on memory-tight non-Apple10 devices. Ordinary scratch-only commands; no model residency or pinning. Zero restores lazy allocation and startup prefetch order. Experimental until the residency gate passes.
-    default_on peak_requested,
-    "QWEN_GLM53_PREFILL_PEAK_FIRST"
-);
-
-thread_local! { static COMMIT_BUFFERS: RefCell<Option<Vec<crate::metal::Buffer>>> = const { RefCell::new(None) }; }
-
-pub(super) struct CommitScope {
-    previous: Option<Vec<crate::metal::Buffer>>,
-    maximum_bytes: u64,
-}
-
-impl CommitScope {
-    pub(super) fn new(ctx: &MetalContext, ledger: &Glm5NextMemoryLedger) -> Result<Self> {
-        let buffers = Glm5NextSession::prefill_peak_first(ctx, ledger).then(Vec::new);
-        Ok(Self {
-            previous: COMMIT_BUFFERS.with(|value| value.replace(buffers)),
-            maximum_bytes: ledger.session_buffer_bytes(),
-        })
-    }
-
-    pub(super) fn finish(self, ctx: &MetalContext) -> Result<()> {
-        let buffers = COMMIT_BUFFERS
-            .with(|value| value.borrow_mut().take())
-            .unwrap_or_default();
-        if buffers.is_empty() {
-            return Ok(());
-        }
-        let bytes: u64 = buffers.iter().map(|buffer| buffer.length() as u64).sum();
-        if bytes > self.maximum_bytes {
-            return invalid("scratch commitment exceeds admitted session bytes");
-        }
-        let started = std::time::Instant::now();
-        // Only fresh owned zero-initialized scratch is referenced. Weight
-        // buffers never enter this list. Drain the ordinary completed command
-        // so it cannot retain scratch past the subsequent decode release.
-        objc2::rc::autoreleasepool(|_| -> Result<()> {
-            let command = ctx
-                .queue
-                .commandBuffer()
-                .ok_or_else(|| Glm5NextMetalError::Invalid("no scratch command buffer".into()))?;
-            let encoder = crate::metal::BlitEncoder::try_begin(&command)?;
-            for buffer in &buffers {
-                unsafe {
-                    encoder
-                        .raw
-                        .fillBuffer_range_value(buffer, NSRange::new(0, buffer.length()), 0);
-                }
-            }
-            encoder.end();
-            command.commit();
-            wait_completed(&command)?;
-            Ok(())
-        })?;
-        tracing::info!(target: "qwen_diag", "glm peak: gpu_fill_bytes={bytes} buffers={} fill_ms={:.3}", buffers.len(), started.elapsed().as_secs_f64()*1e3);
-        Ok(())
-    }
-}
-
-impl Drop for CommitScope {
-    fn drop(&mut self) {
-        COMMIT_BUFFERS.with(|value| {
-            value.replace(self.previous.take());
-        });
-    }
-}
-
-/// Register only fresh byte-zeroed buffers; nonzero fills are already physical.
-pub(super) fn commit_new_tensor(tensor: &MetalTensor, fill: f32) {
-    if fill != 0.0 {
-        return;
-    }
-    COMMIT_BUFFERS.with(|buffers| {
-        if let Some(buffers) = buffers.borrow_mut().as_mut() {
-            buffers.push(tensor.buffer.clone());
-        }
-    });
-}
 
 crate::env_flag!(
     /// Default-on release of GLM prompt workspace before ordinary decode when the session peak reaches 75% of physical memory and independent batching is unsupported. The configured prefill width, lineage and F32/Half operand policy survive release; later appends re-admit the same buffers before mutation. Zero retains prompt scratch. Supported M5 independent batches keep their existing workspace and F32-weight contract.
@@ -121,17 +38,6 @@ pub(super) fn release_policy(
 }
 
 impl Glm5NextSession<'_> {
-    /// Whether ordinary prompt setup commits its admitted physical peak first.
-    /// Apple10 paths retain their independent batch allocation contract.
-    pub fn prefill_peak_first(ctx: &MetalContext, ledger: &Glm5NextMemoryLedger) -> bool {
-        peak_requested()
-            && ledger.prefill_rows() > 0
-            && memory_tight(
-                ledger.peak_bytes(),
-                ctx.device_facts().physical_memory_bytes,
-                ctx.device_facts().gpu_families.apple10,
-            )
-    }
     /// The configured prefill ceiling, including while its buffers are released.
     pub fn prefill_rows(&self) -> usize {
         self.prefill_config.map_or(0, |config| config.rows)
@@ -227,7 +133,6 @@ impl Glm5NextSession<'_> {
                 advice: CapacityAdvice::NotEvaluated,
             });
         }
-        let commit = CommitScope::new(ctx, &ledger)?;
         let mut packed = packed::PackedScratch::new_with_options(
             ctx,
             &self.weights.config,
@@ -235,7 +140,6 @@ impl Glm5NextSession<'_> {
             self.capacity,
             ledger.scratch_options(),
         )?;
-        commit.finish(ctx)?;
         packed.lineage = config.arith.lineage;
         packed.precision = config.arith.precision;
         self.packed = Some(packed);
@@ -250,50 +154,6 @@ impl Glm5NextSession<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn scratch_commit_preserves_nonzero_initialization_and_rejects_overbudget() {
-        let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
-        let ctx = MetalContext::new().unwrap();
-        let previous = COMMIT_BUFFERS.with(|buffers| buffers.replace(Some(Vec::new())));
-        let commit = CommitScope {
-            previous,
-            maximum_bytes: 1 << 20,
-        };
-        let specs = [
-            BufferSpec {
-                name: "zero",
-                dtype: BufferType::F32,
-                shape: vec![16385],
-                fill: 0.0,
-            },
-            BufferSpec {
-                name: "nonzero",
-                dtype: BufferType::F32,
-                shape: vec![16385],
-                fill: -1.25,
-            },
-        ];
-        let mut allocated = SpecBuffers::allocate(&ctx, "commit_witness", &specs).unwrap();
-        let zero = allocated.take("zero").unwrap();
-        let nonzero = allocated.take("nonzero").unwrap();
-        allocated.finish().unwrap();
-        commit.finish(&ctx).unwrap();
-        assert!(read_f32(&zero).unwrap().iter().all(|&x| x == 0.0));
-        assert!(read_f32(&nonzero).unwrap().iter().all(|&x| x == -1.25));
-        assert!(COMMIT_BUFFERS.with(|buffers| buffers.borrow().is_none()));
-        let previous =
-            COMMIT_BUFFERS.with(|buffers| buffers.replace(Some(vec![zero.buffer.clone()])));
-        assert!(
-            CommitScope {
-                previous,
-                maximum_bytes: 0
-            }
-            .finish(&ctx)
-            .is_err()
-        );
-        assert!(COMMIT_BUFFERS.with(|buffers| buffers.borrow().is_none()));
-    }
 
     #[test]
     fn cpu_workspace_policy_requires_tight_memory_and_excludes_independent_batches() {

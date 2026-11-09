@@ -50,6 +50,11 @@ def main():
         raise ValueError("engine commit must be a hex object id")
     engine_commit = subprocess.check_output(
         ["git", "rev-parse", "--verify", args.engine_commit + "^{commit}"], cwd=ROOT, text=True).strip()
+    if args.peak_first == "on":
+        supported = subprocess.run(["git", "grep", "-q", "QWEN_GLM53_PREFILL_PEAK_FIRST",
+            engine_commit, "--", "crates/qwen-llm/src/glm5_next_metal/workspace.rs"], cwd=ROOT)
+        if supported.returncode:
+            raise ValueError("peak-first is a historical experiment; selected engine has no such policy")
     if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT):
         raise RuntimeError("commit the measured tree first")
     model = resolve_model("GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf")

@@ -1361,7 +1361,6 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             prefill_ms: 0.0,
             chunk_capture_ms: 0.0,
             ready: false,
-            peak_prepared: false,
         })))
     }
 
@@ -1389,19 +1388,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             .map_err(session_error)?;
         }
         let tokens = &run.tokens;
-        if !run.peak_prepared {
-            crate::glm5_next::residency::sample(ctx, self.prepared.source, "before_model_use");
-            let session = self.session.as_ref().expect("session present");
-            if Glm5NextSession::prefill_peak_first(ctx, session.ledger()) {
-                crate::glm5_next::residency::sample(ctx, self.prepared.source, "before_prefetch");
-                prefetch_retained_with_cancel(ctx, self.prepared.source, 0.98, &|| {
-                    crate::shutdown::checkpoint().is_err()
-                })
-                .map_err(session_error)?;
-                crate::glm5_next::residency::sample(ctx, self.prepared.source, "after_prefetch");
-            }
-            run.peak_prepared = true;
-        }
+        crate::glm5_next::residency::sample(ctx, self.prepared.source, "before_model_use");
         let lineage = run.lineage;
         let namespace = run.namespace;
         let reserve = run.reserve;

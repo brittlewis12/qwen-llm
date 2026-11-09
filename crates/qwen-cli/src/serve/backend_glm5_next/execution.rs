@@ -43,5 +43,4 @@ pub(super) struct Run<'w> {
     pub prefill_ms: f64,
     pub chunk_capture_ms: f64,
     pub ready: bool,
-    pub peak_prepared: bool,
 }

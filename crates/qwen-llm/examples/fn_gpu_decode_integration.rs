@@ -166,9 +166,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             runner.restore_snapshot(&entry)?;
             runner.configure_causal_executor(replay == 2);
             let mut rows = vec![runner.logits()?.to_vec()];
+            let (mut wall_ms, mut gpu_ms, mut encode_ms) = (0., 0., 0.);
             for &t in &selected[..count - 1] {
+                let now = Instant::now();
                 rows.push(runner.forward_token(t as u32)?.to_vec());
+                wall_ms += now.elapsed().as_secs_f64() * 1e3;
+                let timing = runner.last_token_timing().unwrap();
+                gpu_ms += timing.gpu_ms.unwrap_or(0.);
+                encode_ms += timing.encode_cpu_ms;
             }
+            println!(
+                "{}",
+                json!({"kind":"teacher_forced_timing","depth":depth,"gpu_causal":causal,"replay":replay,"causal":replay==2,"forwards":count-1,"wall_ms":wall_ms,"gpu_ms":gpu_ms,"encode_ms":encode_ms,"tps":(count-1) as f64*1e3/wall_ms})
+            );
             if replay == 0 {
                 baseline = rows;
                 continue;

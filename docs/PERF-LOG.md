@@ -6,6 +6,59 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-09 - GLM Small Appends: 400 Rows Beat The 512-Row Control
+
+- M5 Ultra, unchanged UD-IQ3_XXS. Code **`47b48418`**, guards **`d77a7347`**.
+  **Default-on 128..511-row matrix admission** reuses the qualified short
+  Q6_K/Q8_0 dense, IQ2_S/IQ3_S gate/up and IQ3_S down paths. Rollback:
+  **`QWEN_GLM53_PREFILL_SMALL_ROWS=0`**. Existing ANY_ROWS/SHORT_PREFILL,
+  per-stage, tensor-tier and Exact/F32 guards remain authoritative. Actual
+  rows, chunking, admission and allocation terms are unchanged. Sparse
+  attention retains F32 queries/probabilities at the target widths; the
+  rejected Half widening remains excluded.
+- One native 65536-token code prefix, restored outside timers; excluded
+  off/on warm calls then **ABBA + BAAB**, four retained samples/arm/shape,
+  complete endpoint logits/status handling. Means in milliseconds:
+
+  | New rows | Rollback | Default | Ratio |
+  | ---: | ---: | ---: | ---: |
+  | 400 | 1088.91 | **669.84** | **1.626x** |
+  | 512 control | 706.90 | 706.73 | 1.0002x |
+  | 2000 control | 2339.67 | 2340.33 | 0.9997x |
+
+  First-increment timing gate passes: **419 ms / 38.5% less latency**, and
+  400 rows is 37 ms cheaper than 512. The 400-row useful roof fraction moves
+  from 10.2% to **16.6%**; the 2K attention target remains open.
+- Frozen code/prose, eight documents each at **8K / 64K**, 128 real
+  teacher-forced targets/document including the append endpoint. Signed
+  dNLL **+0.00423 / -0.00144**; one-sided 95% upper bounds **+0.01779 /
+  +0.00844**, below the same document-noise rule's **0.02214 / 0.02632**.
+  Mean KL **0.00977 / 0.00595**, versus F32 127-key-partition arithmetic
+  controls **0.00884 / 0.00490**. Document then circular 32-token-block
+  bootstrap, 10,000 resamples; repeated vectors have dNLL/KL zero. This is
+  repository-document evidence, not a general agent-quality claim.
+- Independent real-weight F64 checks, fixed native inputs and poisoned leaf
+  outputs: all five changed matrix families improve RMS error against their
+  **shared incumbent Half operands**, ratios **0.410..0.563**, bootstrap
+  upper95 at most **0.721**. Full unrounded-operand ratios are
+  **0.99875..1.00010**; IQ intervals span one, dominated by shared rounding.
+  No additional operand narrowing is introduced.
+- `serve_realistic.py`, default steady mode, three 48K roots, 180 s/arm:
+  median TTFT per agent **1.056/0.568/0.552 -> 0.679/0.514/0.560 s**;
+  delivered throughput **72.92 -> 73.71 tok/s (+1.07%)**. Natural EOS makes
+  this a descriptive whole-service comparison. Both arms stop at cutoff.
+- Full release lib **2476 passed, 0 failed, 748 ignored**; full CLI **1693 passed, 0 failed, 72 ignored** (all 11 test artifacts).
+  `scripts/check-contracts.sh` passes on **`d77a7347`**; this final update is log-only. Builds use the shared build lock;
+  GPU campaigns use the canonical lease/wait and nice 10, with cooling and
+  thermal pressure **0 throughout accepted timing/numerical packets**.
+  Evidence, frozen inputs, probe sources and exact commands:
+  `$HOME/qwen-runs/2026-11-09-glm-append/`. Native reproduction: build the
+  retained `append_small_native.rs` using `install.py` at `47b48418`, then
+  `QWEN_METAL_LEASE_WAIT=1 scripts/bench/with-metal-lease -- nice -n 10 python3
+  "$RUNS/campaign.py" "$RUNS/native-abba" "$RUNS/native" "$MODEL" "$CORPUS"`;
+  `$MODEL` resolves through `QWEN_MODEL_SEARCH_PATH`. Regenerable binaries,
+  target and serve bulk removed; no merge or owned worker remains.
+
 ## 2026-11-09 - Share V4.1 HC Pre Grids Across Concurrent Decode Sequences
 
 - **Default ON**, rollback **`QWEN_V41_BATCH_HC=0`**. Independent batches of
@@ -72,6 +125,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Source hashes prove the tested HC code unchanged across the main rebase.
   Helpers, source/binary identities, every retained arm and receipts:
   **`~/qwen-runs/2026-11-08-v41-batch-depth/`** on both hosts.
+
 
 ## 2026-11-09 - Agent Append Decomposition: Real Rows Expose Matrix/Attention Cliffs
 

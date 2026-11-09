@@ -46,6 +46,7 @@ mod probe {
         let token = ids(1, c.vocab_size, 13)[0];
         let layers = [1, 2, 3, 4, 7, 15, 31, 47];
         let mut baseline = Vec::new();
+        let mut baseline_logits = Vec::new();
         for layer in layers {
             r.restore_snapshot(&entry)?;
             r.configure_causal_executor(false);
@@ -59,6 +60,7 @@ mod probe {
                 )?
                 .values,
             );
+            baseline_logits = r.logits()?.to_vec();
         }
         for mode in 0..4 {
             let _mode = KernelEncoder::diagnostic_causal_replay(mode);
@@ -72,9 +74,10 @@ mod probe {
                         fixed_add: None,
                     },
                 )?;
+                let logits = r.logits()?.to_vec();
                 println!(
                     "{}",
-                    json!({"kind":"layer_discriminator","mode":mode,"layer":layer,"max_abs":error(&baseline[i],&got.values)})
+                    json!({"kind":"layer_discriminator","mode":mode,"layer":layer,"max_abs":error(&baseline[i],&got.values),"logit_max_abs":error(&baseline_logits,&logits),"tail":KernelEncoder::take_diagnostic_causal_tail()})
                 );
             }
         }

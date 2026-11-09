@@ -4,7 +4,10 @@ use super::*;
 use objc2_metal::MTLBinding;
 
 #[cfg(any(test, feature = "perf-ablations"))]
-thread_local! {static REPLAY_MODE:Cell<u8>=const {Cell::new(3)};}
+thread_local! {
+    static REPLAY_MODE:Cell<u8>=const {Cell::new(3)};
+    static TAIL_TRACE:std::cell::RefCell<Vec<serde_json::Value>>=const {std::cell::RefCell::new(Vec::new())};
+}
 #[inline]
 fn replay_mode() -> u8 {
     #[cfg(any(test, feature = "perf-ablations"))]
@@ -183,6 +186,10 @@ impl MetalContext {
 }
 
 impl KernelEncoder {
+    #[cfg(any(test, feature = "perf-ablations"))]
+    pub fn take_diagnostic_causal_tail() -> Vec<serde_json::Value> {
+        TAIL_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()))
+    }
     /// Research-only control: bit 0 schedules waves, bit 1 fuses scalar leaves.
     /// It changes no normal-build policy and is scoped to the calling thread.
     #[cfg(any(test, feature = "perf-ablations"))]
@@ -243,6 +250,14 @@ impl KernelEncoder {
         } else {
             (0..spans.len()).map(|i| vec![i]).collect()
         };
+        #[cfg(any(test, feature = "perf-ablations"))]
+        if recording.nodes.len() < 10 {
+            let rows:Vec<_>=recording.nodes.iter().zip(&spans).map(|(n,s)|serde_json::json!({"kernel":n.name(),"args":n.state.words(0),"spans":s.iter().map(|a|serde_json::json!({"buffer":a.buffer,"lo":a.lo,"hi":a.hi,"write":a.write})).collect::<Vec<_>>()})).collect();
+            TAIL_TRACE.with(|t| {
+                t.borrow_mut()
+                    .push(serde_json::json!({"rows":rows,"waves":waves}))
+            });
+        }
         for wave in waves {
             self.buffer_barrier();
             for i in wave {

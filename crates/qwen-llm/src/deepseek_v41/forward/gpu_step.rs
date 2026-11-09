@@ -263,6 +263,28 @@ fn split_submission() -> bool {
 /// cover encoding the remaining layers on the host.
 const SPLIT_SUBMIT_MIDDLE_LAYERS: usize = 3;
 
+/// Solo M5 causal-wave screen; explicit 1 opts in until qualified.
+const SOLO_CAUSAL_ENV: &str = "QWEN_V41_CAUSAL_EXECUTOR";
+fn solo_causal_enabled(ctx: &MetalContext) -> bool {
+    if !ctx.device_facts().gpu_families.apple10
+        || metal::dispatch_census_is_active()
+        || metal::dispatch_profile_records()
+    {
+        return false;
+    }
+    #[cfg(feature = "perf-ablations")]
+    {
+        if metal::decode_bounds::is_active() {
+            return false;
+        }
+        if let Some(enabled) = metal::decode_bounds::batch_causal_override() {
+            return enabled;
+        }
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| crate::env_flag::read_default_off(SOLO_CAUSAL_ENV))
+}
+
 crate::env_flag!(
     /// On measured M5 Ultra V4.1 decode layouts, encode the router after mHC
     /// pre, before the shared expert. Top-k and experts follow in their existing
@@ -1442,7 +1464,11 @@ impl Workspace {
                     .queue
                     .commandBuffer()
                     .ok_or("Metal command buffer allocation")?;
-                let mut stages = StageEncoder::begin(&command, None);
+                let mut stages = if solo_causal_enabled(ctx) {
+                    StageEncoder::begin_causal(&command)
+                } else {
+                    StageEncoder::begin(&command, None)
+                };
                 let segment = (|| -> Result<()> {
                     if engram_projection {
                         for slot in &self.engrams {
@@ -1457,6 +1483,7 @@ impl Workspace {
                                 .encode(ctx, stages.enc(), &self.x, &slot.projected, 1)?;
                         }
                         self.layer_staged(model, &mut stages, id, position, None, false)?;
+                        stages.causal_boundary(ctx).map_err(|e| e.to_string())?;
                     }
                     if head && with_logits {
                         metal::encode_mhc4_collapse(
@@ -1486,6 +1513,11 @@ impl Workspace {
                     }
                     Ok(())
                 })();
+                let segment =
+                    segment.and_then(|_| stages.finish_causal(ctx).map_err(|e| e.to_string()));
+                if segment.is_err() {
+                    stages.cancel_causal();
+                }
                 stages.end();
                 segment?;
                 if let (Some(times), Some(started)) = (&mut submit_times, segment_started) {

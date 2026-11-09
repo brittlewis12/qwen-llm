@@ -929,7 +929,7 @@ pub(in super::super) fn run_batch(
                 .queue
                 .commandBuffer()
                 .ok_or("Metal command buffer allocation")?;
-            let causal = workspaces.len() == 3
+            let causal = (2..=4).contains(&workspaces.len())
                 && ctx.device_facts().gpu_families.apple10
                 && batch_causal_enabled();
             let mut stages = if causal {

@@ -148,7 +148,11 @@ fn main() -> Result<()> {
         let is_bounds = args.get(5).is_some_and(|s| s == "bounds");
         let is_waves = args.get(5).is_some_and(|s| s == "waves");
         let is_causal = args.get(5).is_some_and(|s| s == "causal");
-        let members = if is_bounds || is_waves || is_causal {
+        let members = if is_causal {
+            let width: usize = args.get(3).map(|v| v.parse()).transpose()?.unwrap_or(3);
+            ensure!((1..=4).contains(&width), "causal width 1..4");
+            width
+        } else if is_bounds || is_waves {
             3
         } else {
             4
@@ -754,6 +758,7 @@ fn causal_screen(
     n: usize,
 ) -> Result<()> {
     ensure!((32..=256).contains(&n), "bounded causal screen");
+    let width = states.len();
     let mut reference = None;
     for (arm, enabled) in [false, true, true, false].into_iter().enumerate() {
         let thermal_before = thermal_level()?;
@@ -762,8 +767,8 @@ fn causal_screen(
         }
         let guard = metal::decode_bounds::batch_causal_scope(enabled);
         for j in 0..8 {
-            let tokens: Vec<_> = (0..3).map(|i| streams[i][4300 + j]).collect();
-            step(f, states, &tokens, true)?;
+            let tokens: Vec<_> = (0..width).map(|i| streams[i][4300 + j]).collect();
+            step(f, states, &tokens, width > 1)?;
         }
         let unix = || {
             std::time::SystemTime::now()
@@ -775,8 +780,8 @@ fn causal_screen(
         let begin = Instant::now();
         let mut heads = Vec::with_capacity(n);
         for j in 0..n {
-            let tokens: Vec<_> = (0..3).map(|i| streams[i][4310 + j]).collect();
-            heads.push(step(f, states, &tokens, true)?);
+            let tokens: Vec<_> = (0..width).map(|i| streams[i][4310 + j]).collect();
+            heads.push(step(f, states, &tokens, width > 1)?);
         }
         let ms_round = begin.elapsed().as_secs_f64() * 1000. / n as f64;
         let finished_unix = unix();
@@ -796,7 +801,7 @@ fn causal_screen(
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut follow = Vec::new();
         for j in 0..8 {
-            let tokens: Vec<_> = (0..3).map(|i| streams[i][4310 + n + j]).collect();
+            let tokens: Vec<_> = (0..width).map(|i| streams[i][4310 + n + j]).collect();
             follow.push(step(f, states, &tokens, false)?);
         }
         let follow: Vec<_> = follow.iter().map(|h| hashes(h)).collect::<Result<_>>()?;
@@ -811,7 +816,7 @@ fn causal_screen(
         }
         println!(
             "{}",
-            serde_json::json!({"kind":"causal_screen","started_unix":started_unix,"finished_unix":finished_unix,"thermal_before":thermal_before,"thermal_after":thermal_after,"arm":arm,"enabled":enabled,"rounds":n,"ms_round":ms_round,"logits":logits,"state":payload,"follow":follow,"bitwise":true})
+            serde_json::json!({"kind":"causal_screen","width":width,"started_unix":started_unix,"finished_unix":finished_unix,"thermal_before":thermal_before,"thermal_after":thermal_after,"arm":arm,"enabled":enabled,"rounds":n,"ms_round":ms_round,"logits":logits,"state":payload,"follow":follow,"bitwise":true})
         );
     }
     Ok(())

@@ -531,35 +531,7 @@ impl GatedDeltaNetMetalOutput<'_> {
                 return invalid("GDN output must be copied by its owning command buffer");
             }
         }
-        require_f32(
-            "GDN copied output destination",
-            destination,
-            self.workspace.geometry.hidden_size,
-            true,
-        )?;
-        require_same_device(
-            ctx,
-            &[
-                ("GDN output", &self.workspace.output),
-                ("GDN copied output destination", destination),
-            ],
-        )?;
-        require_disjoint(&[
-            ("GDN copied output destination", destination),
-            ("GDN convolution state", &self.workspace.conv_state),
-            ("GDN delta state", &self.workspace.delta_state),
-            ("GDN QKV scratch", &self.workspace.qkv),
-            ("GDN convolved QKV", &self.workspace.qkv_conv),
-            ("GDN gate scratch", &self.workspace.gate),
-            ("GDN beta scratch", &self.workspace.beta),
-            ("GDN alpha scratch", &self.workspace.alpha),
-            ("GDN decay scratch", &self.workspace.decay),
-            ("GDN query norm", &self.workspace.query_norm),
-            ("GDN key norm", &self.workspace.key_norm),
-            ("GDN recurrent output", &self.workspace.recurrent),
-            ("GDN normalized output", &self.workspace.normalized),
-            ("GDN output", &self.workspace.output),
-        ])?;
+        validate_output_destination(ctx, self.workspace, destination)?;
         ctx.pipeline("kernel_copy_offset_f32")?;
         encode_copy_offset_f32(
             ctx,
@@ -579,6 +551,44 @@ impl GatedDeltaNetMetalRead<'_> {
             workspace: self.workspace,
         }
     }
+}
+
+/// The same destination/device/alias contract for copied and native direct outputs.
+fn validate_output_destination(
+    ctx: &MetalContext,
+    workspace: &GatedDeltaNetMetalWorkspace,
+    destination: &MetalTensor,
+) -> Result<(), Qwen4ExpGdnError> {
+    require_f32(
+        "GDN copied output destination",
+        destination,
+        workspace.geometry.hidden_size,
+        true,
+    )?;
+    require_same_device(
+        ctx,
+        &[
+            ("GDN output", &workspace.output),
+            ("GDN copied output destination", destination),
+        ],
+    )?;
+    require_disjoint(&[
+        ("GDN copied output destination", destination),
+        ("GDN convolution state", &workspace.conv_state),
+        ("GDN delta state", &workspace.delta_state),
+        ("GDN QKV scratch", &workspace.qkv),
+        ("GDN convolved QKV", &workspace.qkv_conv),
+        ("GDN gate scratch", &workspace.gate),
+        ("GDN beta scratch", &workspace.beta),
+        ("GDN alpha scratch", &workspace.alpha),
+        ("GDN decay scratch", &workspace.decay),
+        ("GDN query norm", &workspace.query_norm),
+        ("GDN key norm", &workspace.key_norm),
+        ("GDN recurrent output", &workspace.recurrent),
+        ("GDN normalized output", &workspace.normalized),
+        ("GDN output", &workspace.output),
+    ])?;
+    Ok(())
 }
 
 pub fn encode_gated_delta_net<'a>(

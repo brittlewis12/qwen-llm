@@ -17,14 +17,24 @@ struct Args {
     rows: u32,
     pad: u32,
 }
-pub(crate) fn encode<'a>(
+pub(crate) fn encode_into<'a>(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     inputs: &[&MetalTensor],
     weights: Qwen4ExpMoeMetalWeights<'_>,
     mut members: Vec<&'a mut Qwen4ExpMoeMetalWorkspace>,
     scratch: Option<&Qwen4ExpMoePackedMotorScratch>,
-) -> Result<Vec<Qwen4ExpMoeMetalRead<'a>>, Qwen4ExpMoeError> {
+    destinations: &[&MetalTensor],
+    direct: bool,
+) -> Result<(), Qwen4ExpMoeError> {
+    if destinations.len() != members.len() {
+        return invalid("native destination/member count differs");
+    }
+    if direct {
+        for (w, destination) in members.iter().zip(destinations) {
+            validate_output_destination(ctx, w, destination)?;
+        }
+    }
     let g = weights.geometry;
     let rows = members.len();
     let Some(scratch) = scratch.filter(|s| {
@@ -38,11 +48,12 @@ pub(crate) fn encode<'a>(
             )
             && crate::metal::all_slots_down_native_supported(weights.routed_down.dtype)
     }) else {
-        return members
-            .into_iter()
-            .zip(inputs)
-            .map(|(w, x)| encode_qwen4exp_moe(ctx, enc, x, weights, w))
-            .collect();
+        for ((w, x), destination) in members.into_iter().zip(inputs).zip(destinations) {
+            encode_qwen4exp_moe(ctx, enc, x, weights, w)?
+                .output()
+                .encode_copy_to(ctx, enc, destination)?;
+        }
+        return Ok(());
     };
     validate_encoder(ctx, enc)?;
     for (w, x) in members.iter().zip(inputs) {
@@ -207,14 +218,28 @@ pub(crate) fn encode<'a>(
         for (slot, t) in [
             (2 + j, &w.shared_output),
             (6 + j, &w.shared_gate),
-            (10 + j, &w.output),
+            (
+                10 + j,
+                if direct {
+                    destinations[j.min(rows - 1)]
+                } else {
+                    &w.output
+                },
+            ),
         ] {
             enc.set_tensor(slot, t);
         }
     }
     enc.dispatch(grid, threads);
-    Ok(members
-        .into_iter()
-        .map(|workspace| Qwen4ExpMoeMetalRead { workspace })
-        .collect())
+    if direct {
+        #[cfg(feature = "perf-ablations")]
+        crate::metal::fn_batch_probe::observe("direct_outputs", rows);
+    } else {
+        for (workspace, destination) in members.into_iter().zip(destinations) {
+            Qwen4ExpMoeMetalRead { workspace }
+                .output()
+                .encode_copy_to(ctx, enc, destination)?;
+        }
+    }
+    Ok(())
 }

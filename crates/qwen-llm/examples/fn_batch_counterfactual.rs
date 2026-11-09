@@ -116,6 +116,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "QSA candidate engagement"
                     );
                 }
+                if mode == "pair-direct" {
+                    assert_eq!(
+                        fn_batch_probe::observed("direct_outputs") > 0,
+                        arm == 1,
+                        "direct output route engagement"
+                    );
+                }
                 if j >= 8 {
                     ms[arm].push(elapsed);
                     for k in 0..3 {

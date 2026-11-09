@@ -1,13 +1,23 @@
 use super::*;
 use crate::qwen4exp_metal::decode_projection::Scratch;
-pub(crate) fn encode<'a>(
+pub(crate) fn encode_into<'a>(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     inputs: &[&MetalTensor],
     weights: GatedDeltaNetMetalWeights<'_>,
     mut members: Vec<&'a mut GatedDeltaNetMetalWorkspace>,
     scratch: &Scratch,
-) -> Result<Vec<GatedDeltaNetMetalRead<'a>>, Qwen4ExpGdnError> {
+    destinations: &[&MetalTensor],
+    direct: bool,
+) -> Result<(), Qwen4ExpGdnError> {
+    if destinations.len() != members.len() {
+        return invalid("native destination/member count differs");
+    }
+    if direct {
+        for (w, destination) in members.iter().zip(destinations) {
+            validate_output_destination(ctx, w, destination)?;
+        }
+    }
     for (w, x) in members.iter().zip(inputs) {
         validate_decode(ctx, enc, x, weights, w)?;
     }
@@ -26,12 +36,30 @@ pub(crate) fn encode<'a>(
         }
     }
     let normalized: Vec<_> = members.iter().map(|w| &w.normalized).collect();
-    let outputs: Vec<_> = members.iter().map(|w| &w.output).collect();
-    scratch.project(ctx, enc, weights.output, &normalized, &outputs)?;
-    Ok(members
-        .into_iter()
-        .map(|workspace| GatedDeltaNetMetalRead { workspace })
-        .collect())
+    let private: Vec<_> = if direct {
+        Vec::new()
+    } else {
+        members.iter().map(|w| &w.output).collect()
+    };
+    scratch.project(
+        ctx,
+        enc,
+        weights.output,
+        &normalized,
+        if direct { destinations } else { &private },
+    )?;
+    drop(private);
+    if direct {
+        #[cfg(feature = "perf-ablations")]
+        crate::metal::fn_batch_probe::observe("direct_outputs", members.len());
+    } else {
+        for (workspace, destination) in members.into_iter().zip(destinations) {
+            GatedDeltaNetMetalRead { workspace }
+                .output()
+                .encode_copy_to(ctx, enc, destination)?;
+        }
+    }
+    Ok(())
 }
 
 crate::env_flag!(

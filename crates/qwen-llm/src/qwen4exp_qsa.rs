@@ -1957,23 +1957,7 @@ impl QwenSparseAttentionMetalOutput<'_> {
                 return invalid("QSA output must be copied by its owning command buffer");
             }
         }
-        require_tensor(
-            "QSA copied output destination",
-            destination,
-            GgmlType::F32,
-            &[self.workspace.geometry.hidden_size as u64],
-            true,
-        )?;
-        require_same_device(
-            ctx,
-            &[
-                ("QSA output", &self.workspace.output),
-                ("QSA copied output destination", destination),
-            ],
-        )?;
-        let mut tensors = workspace_tensors(self.workspace);
-        tensors.push(("QSA copied output destination", destination));
-        require_disjoint(&tensors)?;
+        validate_output_destination(ctx, self.workspace, destination)?;
         ctx.pipeline("kernel_copy_offset_f32")?;
         encode_copy_offset_f32(
             ctx,
@@ -1985,6 +1969,32 @@ impl QwenSparseAttentionMetalOutput<'_> {
         )?;
         Ok(())
     }
+}
+
+/// The same destination/device/alias contract for copied and native direct outputs.
+fn validate_output_destination(
+    ctx: &MetalContext,
+    workspace: &QwenSparseAttentionMetalWorkspace,
+    destination: &MetalTensor,
+) -> Result<(), Qwen4ExpQsaError> {
+    require_tensor(
+        "QSA copied output destination",
+        destination,
+        GgmlType::F32,
+        &[workspace.geometry.hidden_size as u64],
+        true,
+    )?;
+    require_same_device(
+        ctx,
+        &[
+            ("QSA output", &workspace.output),
+            ("QSA copied output destination", destination),
+        ],
+    )?;
+    let mut tensors = workspace_tensors(workspace);
+    tensors.push(("QSA copied output destination", destination));
+    require_disjoint(&tensors)?;
+    Ok(())
 }
 
 /// Encode one text-only QSA token. Multimodal IMRoPE positions are unsupported.

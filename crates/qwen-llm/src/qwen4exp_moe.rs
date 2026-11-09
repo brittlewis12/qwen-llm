@@ -1540,23 +1540,7 @@ impl Qwen4ExpMoeMetalOutput<'_> {
                 return invalid("MoE output must be copied by its owning command buffer");
             }
         }
-        require_tensor(
-            "MoE copied output destination",
-            destination,
-            GgmlType::F32,
-            &[self.workspace.geometry.hidden_size as u64],
-            true,
-        )?;
-        require_same_device(
-            ctx,
-            &[
-                ("MoE output", &self.workspace.output),
-                ("MoE copied output destination", destination),
-            ],
-        )?;
-        let mut tensors = workspace_tensors(self.workspace);
-        tensors.push(("MoE copied output destination", destination));
-        require_disjoint(&tensors)?;
+        validate_output_destination(ctx, self.workspace, destination)?;
         ctx.pipeline("kernel_copy_offset_f32")?;
         encode_copy_offset_f32(
             ctx,
@@ -1568,6 +1552,32 @@ impl Qwen4ExpMoeMetalOutput<'_> {
         )?;
         Ok(())
     }
+}
+
+/// The same destination/device/alias contract for copied and native direct outputs.
+fn validate_output_destination(
+    ctx: &MetalContext,
+    workspace: &Qwen4ExpMoeMetalWorkspace,
+    destination: &MetalTensor,
+) -> Result<(), Qwen4ExpMoeError> {
+    require_tensor(
+        "MoE copied output destination",
+        destination,
+        GgmlType::F32,
+        &[workspace.geometry.hidden_size as u64],
+        true,
+    )?;
+    require_same_device(
+        ctx,
+        &[
+            ("MoE output", &workspace.output),
+            ("MoE copied output destination", destination),
+        ],
+    )?;
+    let mut tensors = workspace_tensors(workspace);
+    tensors.push(("MoE copied output destination", destination));
+    require_disjoint(&tensors)?;
+    Ok(())
 }
 
 pub fn encode_qwen4exp_moe<'a>(

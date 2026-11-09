@@ -3,14 +3,24 @@ pub(super) mod attention;
 pub(super) mod norms;
 pub(super) mod selection;
 use crate::qwen4exp_metal::decode_projection::Scratch;
-pub(crate) fn encode<'a>(
+pub(crate) fn encode_into<'a>(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     inputs: &[&MetalTensor],
     weights: QwenSparseAttentionMetalWeights<'_>,
     mut members: Vec<&'a mut QwenSparseAttentionMetalWorkspace>,
     scratch: &Scratch,
-) -> Result<Vec<QwenSparseAttentionMetalRead<'a>>, Qwen4ExpQsaError> {
+    destinations: &[&MetalTensor],
+    direct: bool,
+) -> Result<(), Qwen4ExpQsaError> {
+    if destinations.len() != members.len() {
+        return invalid("native destination/member count differs");
+    }
+    if direct {
+        for (w, destination) in members.iter().zip(destinations) {
+            validate_output_destination(ctx, w, destination)?;
+        }
+    }
     validate_encoder(ctx, enc)?;
     for (w, x) in members.iter().zip(inputs) {
         w.require_idle()?;
@@ -84,14 +94,33 @@ pub(crate) fn encode<'a>(
         }
     }
     let attention: Vec<_> = members.iter().map(|w| &w.attention).collect();
-    let outputs: Vec<_> = members.iter().map(|w| &w.output).collect();
-    scratch.project(ctx, enc, weights.output, &attention, &outputs)?;
-    Ok(members
-        .into_iter()
-        .zip(controls)
-        .map(|(workspace, (position, _))| QwenSparseAttentionMetalRead {
-            workspace,
-            position,
-        })
-        .collect())
+    let private: Vec<_> = if direct {
+        Vec::new()
+    } else {
+        members.iter().map(|w| &w.output).collect()
+    };
+    scratch.project(
+        ctx,
+        enc,
+        weights.output,
+        &attention,
+        if direct { destinations } else { &private },
+    )?;
+    drop(private);
+    if direct {
+        #[cfg(feature = "perf-ablations")]
+        crate::metal::fn_batch_probe::observe("direct_outputs", members.len());
+    } else {
+        for ((workspace, (position, _)), destination) in
+            members.into_iter().zip(controls).zip(destinations)
+        {
+            QwenSparseAttentionMetalRead {
+                workspace,
+                position,
+            }
+            .output()
+            .encode_copy_to(ctx, enc, destination)?;
+        }
+    }
+    Ok(())
 }

@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-09 - GLM M4 Peak-Before-Warm: KILL Under Build Load
+
+- Rebased onto **`d3087f8d3`**. GPU experiment **`7f1c01ef6`**
+  (measured pre-rebase **`9fe54d769`**); same frozen Maya-M IQ2_S request,
+  8204 input / 128 output tokens. Verified per-model cold-cache resets;
+  natural build load, no build lock, thermal **0**. Sequential load levels
+  differ: these outcomes are **not a paired speedup/regression estimate**.
+
+  | Policy / observed background | Prefill tok/s | First-chunk physical GB read | Compiler peak RSS GB |
+  | --- | ---: | ---: | ---: |
+  | Rollback, natural builds | 151.23 | 20.57 | 6.18 |
+  | GPU peak first, no compilers observed | 221.03 | 0.001 | 0 |
+  | GPU peak first, real qualification build load | 82.70 | 89.57 | 23.43 |
+
+- One ordinary scratch-only GPU blit committed **2.877 GB** in
+  **54–79 ms**, with no model buffers, residency sets, `mlock` or pinning.
+  Physical commitment before warming was verified, but under load the first
+  shard was already partly absent before inference. **115.279 GB** engine
+  peak plus **23.43 GB** sampled compiler RSS claims roughly **138.71 GB**
+  against **137.439 GB** physical, before OS/apps. These counters are not a
+  distinct-page census; depleted free pages, compression and re-reads confirm
+  the pressure. Ordering did not establish a loaded win.
+- Serve, default **60-s** idle retention and **70-s** pause: pressure caused
+  repeated suspension/resumption. Candidate append prefetch read **1.344 GB**,
+  then GPU prefill still read **21.130 GB**; append **21.232 s**. Rollback
+  stayed warm at **3.537 s**. Added GPU-fill costs: **242 ms** for the append,
+  **602 ms** for the small followup; background/cache states differ.
+- **Removed the peak-first policy, knob and allocation mechanism.** Keep
+  opt-in run/serve phase observability, frozen-corpus/cold-cache benchmark
+  support and cooperative teardown. Admission-first order, ordinary lazy
+  allocation, global host-zero-fill removal, M5 batching and numeric kernels
+  match main. No system settings or model-scale residency work changed.
+- Final code **`ddd0759a5`**: full release lib **2483 passed / 751 ignored**;
+  CLI **1693 passed / 72 ignored**; contracts **pass**. Each full suite ran once.
+  Compact commit/command results, actual memory/IO summaries and excluded
+  superseded attempts: **`~/qwen-runs/2026-11-09-m4-glm-peak-first/summary.json`**.
+  Regenerable run bulk removed; no merge or owned worker remains.
+
 ## 2026-11-09 - GLM Append F32 Tensor Attention: First Screen Killed
 
 - **Kill; no runtime change.** M5 Ultra selected-attention operator screen,

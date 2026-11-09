@@ -330,8 +330,10 @@ class Arm:
         warm, suffix = self.prepare()
         dump(self.out/'plan.json', self.plan)
         time.sleep(args.cool)
+        preflight=[]
         for _ in range(3):
-            if thermal_exceeds_limit(pressure(),args.max_thermal_pressure):
+            level=pressure();preflight.append(dict(time=time.time(),thermal=level))
+            if thermal_exceeds_limit(level,args.max_thermal_pressure):
                 raise RuntimeError('thermal pressure exceeds arm limit before arm')
             time.sleep(3)
         occupied = subprocess.run(['lsof','-nP',f'-iTCP:{args.port}','-sTCP:LISTEN'],stdout=subprocess.DEVNULL)
@@ -346,7 +348,7 @@ class Arm:
              command=command, harness_command=sys.argv, arm=args.arm,
              harness_commit=args.harness_commit,
              cool_seconds=args.cool, ramp_seconds=args.ramp, context=args.context,
-             max_thermal_pressure=args.max_thermal_pressure, thermal_policy='retain flagged level1; abort above limit',
+             preflight_thermal=preflight,max_thermal_pressure=args.max_thermal_pressure, thermal_policy='retain flagged level1; abort above limit',
              runtime_env={k:v for k,v in env.items() if k.startswith('QWEN_')},
              corpus_sha256=digest(args.corpus), protocol='steady-own-history-v2'))
         started = time.time()
@@ -533,7 +535,13 @@ def compare(reference,candidate):
     a=json.loads((reference/'summary.json').read_text());b=json.loads((candidate/'summary.json').read_text())
     if (a['family'],a['seed'],a['window_seconds'],a['metric'])!=(b['family'],b['seed'],b['window_seconds'],b['metric']):
         raise ValueError('different rate protocols')
-    return dict(reference_tps=a['aggregate_tps'],candidate_tps=b['aggregate_tps'],
+    ttft=[]
+    for x,y in zip(a.get('agents',[]),b.get('agents',[])):
+        if x['agent']!=y['agent']:raise ValueError('different agent populations')
+        ttft.append(dict(agent=x['agent'],reference_p50_s=x['ttft_p50_s'],candidate_p50_s=y['ttft_p50_s'],
+                         reference_p95_s=x['ttft_p95_s'],candidate_p95_s=y['ttft_p95_s'],
+                         reference_censored=x.get('censored_ttft',0),candidate_censored=y.get('censored_ttft',0)))
+    return dict(ttft=ttft,reference_tps=a['aggregate_tps'],candidate_tps=b['aggregate_tps'],
                 throughput_ratio=b['aggregate_tps']/a['aggregate_tps'],
                 reference_window_tokens=a['window_tokens'],candidate_window_tokens=b['window_tokens'],
                 reference_thermal_max=a.get('thermal_max',0),candidate_thermal_max=b.get('thermal_max',0),

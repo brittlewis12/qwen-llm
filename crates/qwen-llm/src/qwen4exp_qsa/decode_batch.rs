@@ -1,5 +1,6 @@
 use super::*;
 pub(super) mod attention;
+pub(super) mod norms;
 pub(super) mod selection;
 use crate::qwen4exp_metal::decode_projection::Scratch;
 pub(crate) fn encode<'a>(
@@ -47,11 +48,27 @@ pub(crate) fn encode<'a>(
             .collect();
         scratch.project(ctx, enc, weight, inputs, &outputs)?;
     }
+    let batch_norms = norms::eligible(ctx, weights.geometry, members.len());
+    if batch_norms {
+        norms::encode(ctx, enc, weights, &members, &controls)?;
+    }
     let batch_attention = attention::eligible(weights.geometry, &members, &controls);
     let batch_selection = selection::eligible(ctx, weights.geometry, &controls);
     for ((w, x), &(p, n)) in members.iter_mut().zip(inputs).zip(&controls) {
-        if batch_attention || batch_selection {
-            encode_step_parts(ctx, enc, x, weights, w, p, n, true, false, !batch_selection)?;
+        if batch_attention || batch_selection || batch_norms {
+            encode_step_parts(
+                ctx,
+                enc,
+                x,
+                weights,
+                w,
+                p,
+                n,
+                true,
+                false,
+                !batch_selection,
+                batch_norms,
+            )?;
         } else {
             encode_step_inner(ctx, enc, x, weights, w, p, n, true)?;
         }

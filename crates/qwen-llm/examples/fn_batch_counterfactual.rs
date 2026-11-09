@@ -109,6 +109,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let states = if arm == 0 { &mut runners } else { &mut other };
                 values[arm] = batch.step(&mut states.iter_mut().collect::<Vec<_>>(), &tokens(j))?;
                 let elapsed = t.elapsed().as_secs_f64() * 1000.;
+                if mode == "pair-qsa" {
+                    assert_eq!(
+                        fn_batch_probe::observed("qsa_norm_grids"),
+                        if arm == 1 { 36 } else { 0 },
+                        "QSA candidate engagement"
+                    );
+                }
                 if j >= 8 {
                     ms[arm].push(elapsed);
                     for k in 0..3 {
@@ -171,7 +178,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             serde_json::json!({"kind":"fork","exact_rounds":32,"depth":depth})
         );
     } else {
-        let groups = if mode == "fine" {
+        let groups = if mode == "remaining" {
+            vec![
+                "",
+                "qsa_norm",
+                "qsa_publish",
+                "gdn_prep",
+                "routing",
+                "copies",
+                "",
+            ]
+        } else if mode == "fine" {
             vec![
                 "",
                 "hc_inject",

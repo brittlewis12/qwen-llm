@@ -4390,6 +4390,7 @@ fn encode_step_inner(
         projected,
         true,
         true,
+        false,
     )
 }
 
@@ -4404,6 +4405,7 @@ fn encode_step_parts(
     projected: bool,
     with_attention: bool,
     with_selection: bool,
+    normalized: bool,
 ) -> Result<(), Qwen4ExpQsaError> {
     let g = workspace.geometry;
     #[cfg(test)]
@@ -4428,19 +4430,21 @@ fn encode_step_parts(
             g.index_head_dim,
         )?;
     }
-    encode_norm_rope(
-        ctx,
-        enc,
-        &workspace.index_query_raw,
-        weights.index_query_norm,
-        &workspace.index_query,
-        g.index_query_heads,
-        g.index_head_dim,
-        g.rotary_dim,
-        position,
-        g.theta,
-        g.eps,
-    )?;
+    if !normalized {
+        encode_norm_rope(
+            ctx,
+            enc,
+            &workspace.index_query_raw,
+            weights.index_query_norm,
+            &workspace.index_query,
+            g.index_query_heads,
+            g.index_head_dim,
+            g.rotary_dim,
+            position,
+            g.theta,
+            g.eps,
+        )?;
+    }
 
     encode_write_pending(ctx, enc, workspace, position % g.ratio)?;
     #[cfg(test)]
@@ -4522,20 +4526,22 @@ fn encode_step_parts(
             g.kv_width(),
         )?;
     }
-    encode_qgate_norm_rope(ctx, enc, workspace, weights.query_norm, position)?;
-    encode_norm_rope(
-        ctx,
-        enc,
-        &workspace.key_raw,
-        weights.key_norm,
-        &workspace.key,
-        g.kv_heads,
-        g.head_dim,
-        g.rotary_dim,
-        position,
-        g.theta,
-        g.eps,
-    )?;
+    if !normalized {
+        encode_qgate_norm_rope(ctx, enc, workspace, weights.query_norm, position)?;
+        encode_norm_rope(
+            ctx,
+            enc,
+            &workspace.key_raw,
+            weights.key_norm,
+            &workspace.key,
+            g.kv_heads,
+            g.head_dim,
+            g.rotary_dim,
+            position,
+            g.theta,
+            g.eps,
+        )?;
+    }
 
     encode_publish_kv(ctx, enc, workspace, position)?;
     #[cfg(test)]

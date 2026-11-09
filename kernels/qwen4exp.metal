@@ -1781,3 +1781,31 @@ kernel_fn_batch_hc_inject(constant hc_branch_args &args [[buffer(0)]], device co
     const float injection = 2.0f / (1.0f + exp(-value));
     residual[ulong(p.y) * args.hidden_size + p.x] += output[p.x] * injection;
 }
+
+// Native independent states: reduce a head RMS once, retaining private positions.
+struct fn_qsa_batch_norm_args { qwen4exp_qsa_rope_args rope; uint gated; };
+kernel void kernel_fn_batch_qsa_prepare_norm_f32(
+    constant fn_qsa_batch_norm_args *args [[buffer(0)]], device const float *weight [[buffer(1)]],
+    device const float *x0 [[buffer(2)]], device const float *x1 [[buffer(3)]],
+    device const float *x2 [[buffer(4)]], device const float *x3 [[buffer(5)]],
+    device float *y0 [[buffer(6)]], device float *y1 [[buffer(7)]],
+    device float *y2 [[buffer(8)]], device float *y3 [[buffer(9)]],
+    device float *g0 [[buffer(10)]], device float *g1 [[buffer(11)]],
+    device float *g2 [[buffer(12)]], device float *g3 [[buffer(13)]],
+    uint2 group [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]]) {
+    const uint r=group.y, head=group.x;
+    const auto a=args[r].rope;
+    device const float *x=r==0?x0:r==1?x1:r==2?x2:x3;
+    device float *y=r==0?y0:r==1?y1:r==2?y2:y3;
+    device float *gate=r==0?g0:r==1?g1:r==2?g2:g3;
+    const bool gated=args[r].gated!=0;
+    device const float *row=x+ulong(head)*a.head_dim*(gated?2u:1u);
+    float ss=0.f;
+    for(uint i=lane;i<a.head_dim;i+=32) ss+=row[i]*row[i];
+    const float norm=rsqrt(simd_sum(ss)/float(a.head_dim)+a.eps);
+    for(uint i=lane;i<a.head_dim;i+=32) {
+        const ulong out=ulong(head)*a.head_dim+i;
+        y[out]=qwen4exp_qsa_rope_value(row,weight,i,a.rotary_dim,a.position,a.theta)*norm;
+        if(gated)gate[out]=row[a.head_dim+i];
+    }
+}

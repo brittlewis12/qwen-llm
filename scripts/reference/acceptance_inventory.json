@@ -6235,5 +6235,12 @@
     "class": "gpu",
     "ignored": false,
     "reason": "M5 Metal context with synthetic V4.1 toy weights; exercises causal batch state/fork equality or cancellation/error draining, without a real model import."
+  },
+  {
+    "target": "lib",
+    "name": "qwen4exp_qsa::decode_batch::norms::tests::independent_norms_preserve_positions_guards_and_gate_layout",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Model-free Metal differential: B2/3/4, QSA128/256 RMS and RoPE, private positions, shifted buffers, guards, exact gate layout and F64-scale diagnostics."
   }
 ]

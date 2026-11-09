@@ -1,4 +1,4 @@
-//! Kill screen: F32-coefficient MMA over the actual per-layer expert union.
+//! Kill screen: stock F32-coefficient banks, synthetic shared/independent routes.
 //! Build normally, then use canonical Metal lease; MODEL argument; no snapshots.
 use objc2_metal::{MTLBuffer as _, MTLCommandBuffer as _, MTLCommandQueue as _};
 use qwen_llm::{

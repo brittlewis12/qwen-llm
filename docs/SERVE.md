@@ -846,6 +846,10 @@ plain throwaway decode before accepting requests.
   cooperative F32 router members and packed MLA views. It preserves the
   per-output arithmetic and removes redundant projections/copies;
   `=0` restores the previous projection/copy policies.
+  `QWEN_GLM53_BATCH_SELECTION=0` restores per-member sparse selection;
+  `QWEN_GLM53_BATCH_KDA=0` restores per-member KDA dispatches. These controls
+  reuse admitted scratch and keep each session's persistent state separate.
+  Set all three to zero to compare against the preceding batch implementation.
   `QWEN_GLM53_BATCH_EXPERT_ROWS` defaults on for the qualified batched
   IQ2_S gate/up and IQ3_S down geometries. Four output channels share each
   activation-fragment load, retaining the per-channel F32 FMA chain and

@@ -1535,6 +1535,38 @@ impl Qwen4ExpTextSessionMetalWorkspace {
         Ok(())
     }
 
+    pub(crate) fn install_snapshot_logits(
+        &mut self,
+        logits: &[f32],
+    ) -> Result<(), Qwen4ExpTextSessionError> {
+        self.require_idle()?;
+        if self.state_poisoned
+            || self.committed_length == 0
+            || logits.len() != self.geometry.vocab_size()
+            || logits.iter().any(|x| !x.is_finite())
+        {
+            return invalid(
+                "snapshot logits require a healthy nonempty session and a finite full vocabulary row",
+            );
+        }
+        // The exclusive released workspace owns this shared output. The caller
+        // paired this row with the exact snapshot/token key it restored.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                logits.as_ptr(),
+                self.logits
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(self.logits.offset as usize)
+                    .cast::<f32>(),
+                logits.len(),
+            );
+        }
+        self.logits_ready = true;
+        Ok(())
+    }
     pub fn logits(&self) -> Result<Qwen4ExpCompletedLogits<'_>, Qwen4ExpTextSessionError> {
         if self.active_command.is_some() || !self.logits_ready || self.state_poisoned {
             return invalid("completed logits are unavailable");

@@ -65,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let start = runner.next_position();
     let entry = runner.capture_snapshot()?;
+    let entry_logits = runner.logits()?.to_vec();
     // Import PLE banks and compile feedback pipelines before steady-state arms.
     let cold = runner.generate_gpu_tokens(
         &mut Sampler::new(SamplingConfig::default())?,
@@ -91,10 +92,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 [(false, true), (true, true), (true, false), (false, false)]
             };
             for (causal, gpu) in arms {
-                runner.restore_snapshot(&entry)?;
+                runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
                 runner.configure_causal_executor(causal);
                 runner.generate_gpu_tokens(&mut Sampler::new(sampling)?, 2, &[], |_| true)?;
-                runner.restore_snapshot(&entry)?;
+                runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
                 let mut sampler = Sampler::new(sampling)?;
                 let now = Instant::now();
                 let (wall_ms, gpu_ms, encode_ms, wait_ms, first_ms) = if gpu {
@@ -140,7 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // GPU autoregression supplies teacher inputs; replay exactly those inputs
     // on the incumbent twice to establish its repeat floor, then the executor.
     for causal in [false, true] {
-        runner.restore_snapshot(&entry)?;
+        runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
         runner.configure_causal_executor(causal);
         let sampling = SamplingConfig {
             temperature: 0.8,
@@ -163,7 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         let mut baseline = Vec::new();
         for replay in 0..3 {
-            runner.restore_snapshot(&entry)?;
+            runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
             runner.configure_causal_executor(replay == 2);
             let mut rows = vec![runner.logits()?.to_vec()];
             let (mut wall_ms, mut gpu_ms, mut encode_ms) = (0., 0., 0.);
@@ -205,14 +206,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             json!({"kind":"distribution","depth":depth,"gpu_causal":causal,"candidate":"gpu_loop","rows":results})
         );
         // A resumed ordinary step checks history, recurrence and QSA frontiers.
-        runner.restore_snapshot(&entry)?;
+        runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
         runner.configure_causal_executor(causal);
         let stats =
             runner.generate_gpu_tokens(&mut Sampler::new(sampling)?, count, &[], |_| true)?;
         let resumed = runner
             .forward_token(stats.terminal_token.unwrap() as u32)?
             .to_vec();
-        runner.restore_snapshot(&entry)?;
+        runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
         runner.configure_causal_executor(false);
         for &t in &selected {
             runner.forward_token(t as u32)?;
@@ -224,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // A discarded pre-encoded frame must leave the completed state at entry.
     for (limit, eos, accept) in [(8, vec![], false), (1, vec![], true)] {
-        runner.restore_snapshot(&entry)?;
+        runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
         let stats = runner.generate_gpu_tokens(
             &mut Sampler::new(SamplingConfig::default())?,
             limit,
@@ -236,7 +237,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert!(!runner.is_poisoned());
         runner.capture_snapshot()?;
     }
-    runner.restore_snapshot(&entry)?;
+    runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
     let token = Sampler::new(SamplingConfig::default())?
         .sample(runner.logits()?.as_slice())?
         .token;

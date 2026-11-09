@@ -545,7 +545,14 @@ impl GenerationBackend for FlashNextBackend {
                     hit,
                     &mut runner,
                     |runner, checkpoint: &Checkpoint| {
-                        runner.restore_snapshot(&checkpoint.snapshot)?;
+                        if checkpoint.logits.is_empty() {
+                            runner.restore_snapshot(&checkpoint.snapshot)?;
+                        } else {
+                            runner.restore_snapshot_with_logits(
+                                &checkpoint.snapshot,
+                                &checkpoint.logits,
+                            )?;
+                        }
                         restored_logits =
                             (!checkpoint.logits.is_empty()).then(|| checkpoint.logits.clone());
                         Ok(runner.next_position())

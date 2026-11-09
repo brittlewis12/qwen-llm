@@ -1839,6 +1839,24 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         Ok(self.workspace.restore_snapshot(snapshot)?)
     }
 
+    /// Restore a checkpoint together with the full logits row cached at that
+    /// exact prefix. The owner must pair both with the same token key/model;
+    /// ordinary snapshots alone deliberately leave logits unavailable.
+    pub fn restore_snapshot_with_logits(
+        &mut self,
+        snapshot: &Qwen4ExpTextSnapshot,
+        logits: &[f32],
+    ) -> Result<(), Qwen4ExpRuntimeError> {
+        if snapshot.length() == 0
+            || logits.len() != self.weights.geometry.vocab_size()
+            || logits.iter().any(|x| !x.is_finite())
+        {
+            return invalid("invalid paired snapshot logits");
+        }
+        self.restore_snapshot(snapshot)?;
+        Ok(self.workspace.install_snapshot_logits(logits)?)
+    }
+
     /// Release the weight binding and hand the workspace back (see
     /// `Qwen4ExpLoadedModel::restore_workspace`).
     pub fn into_workspace(self) -> Qwen4ExpTextSessionMetalWorkspace {

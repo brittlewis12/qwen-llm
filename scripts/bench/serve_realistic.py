@@ -445,20 +445,22 @@ def summarize(rows, begin, end, count, native_lines=()):
                     phase={}
             if candidates:native=min(candidates,key=lambda x:x[0])[1]
         first=r['first']
+        pending=r['end']>=end and (first is None or first>=end)
+        wait_end=first if first is not None else min(r['end'],end)
         cleaned.append(dict(label=r['label'],agent=r['agent'],sent=r['sent'],first=first,end=r['end'],
              offered_in_window=begin<=r['sent']<end,completed=r['completed'],
              ttft_s=first-r['sent'] if first is not None and first<end and r['sent']>=begin else None,
-             ttft_censored_s=end-r['sent'] if (first is None or first>=end) and r['sent']>=begin else None,
+             ttft_censored_s=end-r['sent'] if pending and r['sent']>=begin else None,
              carry_in=r['sent']<begin,
-             pending_at_cutoff=first is None or first>=end,
-             queue_exposure_s=max(0,min(first if first is not None else end,end)-max(r['sent'],begin)),
+             pending_at_cutoff=pending, empty_output=r['completed'] and first is None,
+             queue_exposure_s=max(0,min(wait_end,end)-max(r['sent'],begin)),
              window_tokens=window_tokens(r['events'],begin,end,count),
              target=r['target'],generated=r['generated'],prompt=r['prompt'],reused=r['reused'],
              new=r['prompt']-r['reused'] if r['prompt'] is not None and r['reused'] is not None else None,
              phases=native,spec=r['spec']))
     gaps=[b-a for r in active for a,b in zip([t for t,_,_ in r['events']],[t for t,_,_ in r['events']][1:])
           if begin<=a<b<end]
-    wall_rows=[dict(sent=r['sent'],first=r['first'] if r['first'] is not None else end,end=r['end']) for r in active]
+    wall_rows=[dict(sent=r['sent'],first=r['first'] if r['first'] is not None else r['end'],end=r['end']) for r in active]
     trace=[]
     for offset in range(0,math.ceil(end-begin),20):
         lo=begin+offset;hi=min(end,lo+20)

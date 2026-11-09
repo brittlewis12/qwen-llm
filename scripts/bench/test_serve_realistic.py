@@ -67,6 +67,17 @@ class SteadyTests(unittest.TestCase):
             bench.dump(b/'summary.json',dict(common,window_seconds=90,aggregate_tps=75,window_tokens=6750))
             with self.assertRaises(ValueError):bench.compare(a,b)
 
+    def test_completed_empty_eos_is_not_a_request_pending_at_cutoff(self):
+        k='response.output_text.delta'
+        empty=self.row(0,11,None,12,[])
+        empty.update(completed=True,generated=1)
+        rows=[empty,self.row(1,11,13,22,[(13,k,'ab')]),self.row(2,11,14,22,[(14,k,'cd')])]
+        x=bench.summarize(rows,10,20,len)
+        self.assertTrue(x['rows'][0]['empty_output'])
+        self.assertFalse(x['rows'][0]['pending_at_cutoff'])
+        self.assertEqual(x['agents'][0]['censored_ttft'],0)
+        self.assertEqual(x['agents'][0]['queue_exposure_s'],1)
+
     def test_partial_reasoning_replays_with_an_assistant_turn(self):
         self.assertEqual(bench.history_items([dict(type='reasoning',content=[dict(text='λ')])]),
                          [dict(type='reasoning',content='λ'),dict(role='assistant',content='')])

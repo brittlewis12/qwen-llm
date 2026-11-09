@@ -42,8 +42,9 @@ crate::env_flag!(
     "QWEN_FN_QSA_DECODE_SELECT_WIDE"
 );
 
-/// Research override for same-process paired arms: 0 follows the environment,
-/// 1 forces the existing decode selector, 2 forces the wide selector.
+/// Research override for same-process paired arms: 0 follows the environment
+/// and depth gate, 1 forces the existing decode selector, 2 forces the wide
+/// selector at every depth.
 #[cfg(feature = "perf-ablations")]
 static WIDE_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
@@ -60,14 +61,18 @@ pub fn diagnostic_wide_decode_selector(mode: u8) -> impl Drop {
     Guard(WIDE_OVERRIDE.swap(mode, Ordering::SeqCst))
 }
 
-fn wide_decode_selector_active() -> bool {
+/// Fewest visible blocks (sequence length / 4) at which whole M5 tokens
+/// measured faster with the wide selector; shallower rows keep the incumbent.
+pub(super) const WIDE_SELECTOR_MIN_VISIBLE: usize = 4096;
+
+fn wide_decode_selector_active(visible: usize) -> bool {
     #[cfg(feature = "perf-ablations")]
     match WIDE_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
         1 => return false,
         2 => return true,
         _ => {}
     }
-    wide_decode_selector_enabled()
+    visible >= WIDE_SELECTOR_MIN_VISIBLE && wide_decode_selector_enabled()
 }
 
 /// Keys per thread compiled for the wide selector, smallest first. Larger
@@ -115,7 +120,7 @@ pub(super) fn wide_decode_selector(
     if !decode_selector_shape(true, capacity, budget, 1)
         || !ctx.tensor_ops_status().is_available()
         || !decode_selector_enabled()
-        || !wide_decode_selector_active()
+        || !wide_decode_selector_active(visible)
     {
         return Ok(None);
     }

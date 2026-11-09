@@ -210,7 +210,7 @@ impl<'a> Owner<'a> {
             im_start: base.im_start,
             control_reserve: base.control_cpu_reserve,
             head_reserve: base.vocab_size as u64 * 4 * base.batching.active as u64 * 2
-                + base.forward_limit as u64 * 16 * base.batching.active as u64,
+                + base.forward_limit as u64 * 64 * base.batching.active as u64,
         })
     }
     fn limits(&self) -> super::super::request_profile::OutputLimits {
@@ -284,7 +284,6 @@ impl<'a> Owner<'a> {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<Run<'a>, BackendFailure> {
-        self.residency.before_request();
         sink.tick().map_err(BackendFailure::Aborted)?;
         let maximum = self.limits().max_tokens(request);
         let sampler = Sampler::new(super::super::request_profile::sampling_with_defaults(
@@ -715,6 +714,12 @@ impl<'a> Owner<'a> {
                 .record_tip(old.live.conversation, &(), &old.live.tokens);
         }
     }
+    fn track_failure<T>(&mut self, result: Result<T, BackendFailure>) -> Result<T, BackendFailure> {
+        if matches!(&result,Err(BackendFailure::Serve(e)) if e.status>=500) {
+            self.residency.request_failed_on_server();
+        }
+        result
+    }
     fn ordinary_step(&mut self, state: &mut State<'a>, token: u32) -> Result<Vec<f32>, String> {
         crate::shutdown::checkpoint().map_err(|e| e.to_string())?;
         let v = state
@@ -755,6 +760,11 @@ impl<'a> Owner<'a> {
         let mut runners: Vec<_> = states.iter_mut().map(|s| &mut s.runner).collect();
         let result = native.step(&mut runners, tokens).map_err(|e| e.to_string());
         drop(runners);
+        if let Ok(v) = &result
+            && (v.len() != states.len() || v.iter().any(|h| h.len() != self.vocab as usize))
+        {
+            return Err("malformed native Flash-Next heads".into());
+        }
         if result.is_ok() {
             for s in states {
                 s.failed = false;
@@ -834,8 +844,10 @@ impl<'a> Runtime for Owner<'a> {
         p: &PreparedResponse,
         sink: &mut dyn GenerationSink,
     ) -> Result<Begun<Self::Run>, BackendFailure> {
-        self.begin_run(p.request(), &p.prompt, sink)
-            .map(|r| Begun::Run(Box::new(r)))
+        let result = self
+            .begin_run(p.request(), &p.prompt, sink)
+            .map(|r| Begun::Run(Box::new(r)));
+        self.track_failure(result)
     }
     fn rows(&self, run: &Self::Run) -> usize {
         run.rows
@@ -847,11 +859,14 @@ impl<'a> Runtime for Owner<'a> {
         sink: &mut dyn GenerationSink,
         reserve: u64,
     ) -> Result<Option<DecodeCursor>, BackendFailure> {
-        run.reserve = reserve;
-        if !self.prefill_run(run, rows, sink)? {
-            return Ok(None);
-        }
-        self.cursor(run).map(Some)
+        let result = (|| {
+            run.reserve = reserve;
+            if !self.prefill_run(run, rows, sink)? {
+                return Ok(None);
+            }
+            self.cursor(run).map(Some)
+        })();
+        self.track_failure(result)
     }
     fn advance(
         &mut self,
@@ -894,7 +909,8 @@ impl<'a> Runtime for Owner<'a> {
         generation: &crate::GenerationResult,
         batch: serde_json::Value,
     ) -> Result<GenerationOutcome, BackendFailure> {
-        self.finish_run(run, generation, batch)
+        let result = self.finish_run(run, generation, batch);
+        self.track_failure(result)
     }
 }
 impl GenerationBackend for Owner<'_> {
@@ -919,13 +935,14 @@ impl GenerationBackend for Owner<'_> {
     }
     fn pump(&mut self) -> bool {
         let mut d = self.driver.take().expect("driver");
+        // Attribute encoder activity to one synchronous owner quantum. HTTP
+        // connection completions overlap and cannot own this observation.
+        self.residency.before_request();
         let progress = d.pump(self);
         if d.take_native_failure() {
             self.residency.request_failed_on_server();
         }
-        if progress {
-            self.residency.note_activity();
-        }
+        self.residency.request_finished();
         self.driver = Some(d);
         progress
     }
@@ -955,6 +972,7 @@ impl GenerationBackend for Owner<'_> {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        self.residency.before_request();
         let mut run = self.begin_run(request, prompt, sink)?;
         while !self.prefill_run(&mut run, usize::MAX, sink)? {}
         let mut cursor = self.cursor(&mut run)?;
@@ -1036,6 +1054,25 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(calls, 0);
+        let (mut a, mut b) = (Fake::default(), Fake::default());
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = step_members(
+                &mut [&mut a, &mut b],
+                &[7, 8],
+                |_, _| true,
+                |s, f| s.failed = f,
+                |s, t| {
+                    if t == 8 {
+                        panic!("injected owner unwind");
+                    }
+                    s.position += 1;
+                    Ok(vec![])
+                },
+            );
+        }));
+        assert!(panic.is_err());
+        assert_eq!((a.position, b.position), (1, 0));
+        assert!(a.failed && b.failed);
     }
     #[test]
     fn ordinary_group_keeps_member_order_and_refuses_before_mutation() {

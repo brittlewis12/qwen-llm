@@ -6,6 +6,82 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - Flash-Next Concurrency: Current Few-Row Vehicle Killed
+
+- Base **`09a3a521`**, GSQ-RCO **IQ3_S**, M5 Ultra; M4 Max fallback uses the
+  local GSQ-RCO archive and the same frozen executable/text. Read the Oct 22
+  Flash short-verifier HC loss and Aug 11 exact-Q6 two-token reuse kill first;
+  neither old candidate is reintroduced. **No engine or serve change ships.**
+  The requested roughly **1.3x B=4 aggregate** gate fails at both depths.
+- Cheapest public vehicle: B consecutive teacher-forced inputs through
+  `forward_rows_with_captures_and_logits`, compared with B ordinary single
+  forwards. Every requested full head is copied in the timer; the packed arm
+  additionally captures one layer-47 mean. Prefill/snapshot restore, checks,
+  hashes and census are outside timing. Same resident weights and identical
+  entry per arm, normal **2048-row prefill workspace**, widths 2/3/4, depths
+  8192/32768. Eight excluded warm rounds/route/width, then **ABBA + BAAB**,
+  eight rounds/arm: **32 retained rounds/route/cell**. No timing sample dropped.
+
+  | M5 depth | B | B single steps ms | Packed round ms | Aggregate ratio |
+  | --- | ---: | ---: | ---: | ---: |
+  | 8192 | 2 | 26.705 | 180.852 | **0.148x** |
+  | 8192 | 3 | 40.119 | 201.350 | **0.199x** |
+  | 8192 | 4 | 53.244 | 190.695 | **0.279x** |
+  | 32768 | 2 | 27.262 | 180.549 | **0.151x** |
+  | 32768 | 3 | 40.851 | 200.647 | **0.204x** |
+  | 32768 | 4 | 54.414 | 189.935 | **0.286x** |
+
+  M5 B=4 reaches **20.98/21.06 aggregate tok/s**, versus **75.13/73.51**
+  serial at 8K/32K. Both order blocks agree: **0.27929/0.27913x** at 8K,
+  **0.28640/0.28658x** at 32K. The 1.3x target requires about **41.0/41.9 ms**
+  rounds, far below this vehicle's roughly 190 ms.
+
+  | M4 depth | B | B single steps ms | Packed round ms | Aggregate ratio |
+  | --- | ---: | ---: | ---: | ---: |
+  | 8192 | 2 | 45.828 | 230.047 | **0.199x** |
+  | 8192 | 3 | 69.369 | 260.027 | **0.267x** |
+  | 8192 | 4 | 92.401 | 254.554 | **0.363x** |
+  | 32768 | 2 | 46.970 | 228.983 | **0.205x** |
+  | 32768 | 3 | 76.490 | 280.754 | **0.272x** |
+  | 32768 | 4 | 94.495 | 255.436 | **0.370x** |
+
+- Bounds and diagnosis: **this is a causal append proxy, not a measured native
+  independent batch or a ceiling on one**. Per-sequence GDN/conv, PLE and QSA
+  owners/attention are not represented independently. Consecutive tokens can
+  overlap experts more; independent recurrences can parallelize differently.
+  All-row readout currently evaluates **B separate heads**, rather than sharing
+  one head GEMM, and the single mean capture adds a small unisolated bias.
+  These differences stay explicit; no native-batch speed or accuracy claim.
+- Excluded census is **1956/1997/2050 dispatches** at B=2/3/4 on both machines
+  and depths. B=4 still has **218 BF16 + 216 F32 ordinary matrix calls**,
+  **48 expert-bucket calls**, N16/grouped expert kernels, Q6/Q4 nc4 routes,
+  **140 separate Q5 matvecs** and four scalar Q6 heads. Flash's generic few-row
+  MMA is explicitly excluded by its current caller; newer HC tensor routes
+  start at 512 rows. The large nearly width-/depth-flat cost is consistent with
+  the recorded underfilled HC/grouped-expert floor, not evidence that dispatch
+  reduction alone makes this path fast. No new per-stage timing attribution
+  is inferred from these counts.
+- Code did not wait for GPU time: while queued, built an independent-state
+  scaffold with admitted workspaces, group preflight/poisoning, layer ordering,
+  an F32 few-row head, token-grid MoE and per-layer route-status storage.
+  The initial transaction/head frame typechecks; later composition was not
+  qualified or benchmarked. **Drop all of it after the kill**, as requested;
+  the rejected source patch is archived, with no scheduler/default/knob change.
+  Native code would have different routes from this proxy and remains unmeasured.
+- M5 sharing delayed the campaign, so after about ten minutes the M4 fallback
+  ran while coding continued. Timing packets take the build lock and canonical
+  Metal lease, nice 10; cooling before the process and each depth. **139 M5 /
+  272 M4 thermal samples, all zero**. All heads are finite and four repeated
+  stream hashes/route/cell agree. This is repeatability, not cross-route NLL/KL
+  qualification; none is claimed for discarded code. No 16K-root serve promotion.
+- Final engine/shader sources are identical to main **`09a3a521`**. Fresh full
+  GPU lib/CLI and distribution gates are not run for a discarded implementation.
+  Format/diff checks pass; `scripts/check-contracts.sh` passes on **`090ac051`**, tree
+  **`9ed860185d56ef9a814440a34499d59efb47deae`**; this receipt changes documentation only.
+  Raw plans, frozen binary/source hashes, all arms/censuses/thermal samples,
+  rejected prototype and validation logs: **`$HOME/qwen-runs/2026-11-08-fn-batch/`**
+  on both hosts (`m4/` holds the fallback). No merge or owned worker left running.
+
 ## 2026-11-08 - GLM Concurrent Serve: Qualify 16K Roots, Keep Normal Prefill Geometry
 
 - Rebased the GLM batching series onto **`c6855ba5`**. This qualification

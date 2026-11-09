@@ -139,12 +139,15 @@ fn forty_layers_python_legacy_trace_and_one_command() {
             1
         );
         // Host Engram row reads are a wall span, not a command.
-        assert!(
-            report
-                .operations
-                .iter()
-                .all(|o| ["gpu_step", "decode_engram_rows"].contains(&o.operation))
-        );
+        assert!(report.operations.iter().all(|o| {
+            [
+                "gpu_step",
+                "decode_engram_rows",
+                "decode_embedding",
+                "decode_readback",
+            ]
+            .contains(&o.operation)
+        }));
         assert_eq!(logits, untraced);
         let ws = plain.gpu_step.as_ref().unwrap();
         assert_eq!((ws.commands, ws.trace_copies), (1, 0));

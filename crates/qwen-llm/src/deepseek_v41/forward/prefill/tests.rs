@@ -330,6 +330,8 @@ fn public_single_row_prefill_uses_one_scalar_command() {
         [
             "gpu_step",
             "decode_engram_rows",
+            "decode_embedding",
+            "decode_readback",
             "prefill_select",
             "prefill_admission",
             "prefill_scratch_release",

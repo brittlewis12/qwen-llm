@@ -279,6 +279,156 @@ No GPU execution or timing. Fixed base a95456865; no main refresh.
   **348 s**, queue **169 s**, active **53.4 s**, thermal rejection. MLA build
   **233 s**, queue **0.094 s**, active **50.5 s**, thermal 0. No build locks,
   frozen binaries, disk snapshots or new ignored tests.
+## 2026-11-09 - GLM Q6 Bounded Stores: Small Win, Qualification Pending
+## 2026-11-09 - GLM IQ3_S Down Count-Adaptive Panels: SHIP (~1%, bitwise)
+
+- Fixed base **`2c4e6d2d9`**, branch `perf/glm-append-next`, unmerged. UD-IQ3_XXS,
+  warm 65,536-token root, stock 2,048-row capacity. Whole-append **ABBA + BAAB**,
+  five retained samples per arm, one immutable binary. Every retained arm
+  pressure **0**, compiler overlap flagged; endpoints bitwise identical, finite,
+  correct position, healthy session.
+- Route: three disjoint count bands on the tensor tier -- N16 for 1..=16 slots,
+  the existing 32-slot tile for 17..=32, and a new N64 tile above. Same half
+  operands and K32 F32 sums; only the slot panel width changes. Default-on for
+  the GLM 2048x4096x288 down bank at 128..=4096 rows; rollback
+  **`QWEN_GLM53_IQ3_DOWN_PANELS=0`** restores the 32-slot tile. Preparation
+  resolves all panel pipelines before the first dispatch and falls back to the
+  32-slot tile when one is missing or cannot fit its threadgroup allocation.
+
+  | Rows | 32-slot ms | Adaptive ms | Change | ABBA / BAAB |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 400 | 618.71 | 614.22 | -0.73% | -0.81% / -0.89% |
+  | 2,000 | 2,083.41 | 2,053.32 | -1.44% | -1.54% / -1.44% |
+
+- Accuracy: signed teacher-forced dNLL and KL are **exactly zero** against the
+  incumbent across 8 documents x {400, 2000} rows x 128 targets; adaptive
+  outputs are **bitwise identical** (repeat noise also zero), because a slot's
+  K reduction order is unchanged.
+- Why the win is small: the down operator runs **39 times per append**, and each
+  call streams its full 288-expert bank (~1 GB). It is dominated by weight read
+  traffic, not slot-padding MMA, so the priced 89-97 / 130-187 ms ceiling is
+  mostly irreducible; the panel route recovers roughly 7% / 15% of it. The
+  padding-only lever cannot close more without cutting bytes or improving
+  coalescing.
+- Suites: lib **2,469 passed, 0 failed, 777 ignored**; CLI **1,697 passed,
+  0 failed, 74 ignored**; `scripts/check-contracts.sh` ok on code commit
+  **`c86e43e3`**. The suite host is an M4 Max (no GLM fixture; Metal 4.1
+  tensor-op tier skipped), so model/tensor GPU witnesses skip there; the M5 run
+  validated the kernels bitwise.
+- Reproduce from `2c4e6d2d9` plus the ship commit: `nice -n 10 cargo build
+  --release -p qwen-llm --features perf-ablations --example glm_append_iq3_down`;
+  under the Metal lease, `glm_append_iq3_down "$CORPUS" 3` (3 = production env
+  default) and `glm_append_iq3_down quality "$CORPUS_DIR"`. Set
+  `QWEN_MODEL_SEARCH_PATH`. Raw packets, binary hash, logs and suite receipts:
+  `~/qwen-runs/2026-11-09-glm-append-iq3panels/`.
+
+## 2026-11-09 - GLM Q6 Bounded Stores: KILL, Qualification Cost Exceeds Gain
+
+- **KILL by owner:** 0.5% / 0.6% is too small to justify scarce GPU
+  qualification time. Candidate code and knob deleted; measurements retained.
+- Fixed base **`17c2e9394`** (main ancestor `466aadb21`); no main chase.
+  Candidate runtime **`d483cde1`**, validation source **`677c01ef`**.
+  The GLM-only Q6 wide entry uses a bounded F32 destination tensor directly,
+  including ragged query/output tiles. Half operands and ascending K32 F32
+  sums are unchanged. Dynamic threadgroup allocation falls **16 -> 8 KiB**;
+  no added buffer. The prototype rollback was `QWEN_GLM53_DENSE_Q6_DIRECT`;
+  it is removed with the candidate.
+  Existing Fast/Half, tensor-tier, row-policy and Q6-wide rollbacks still apply;
+  Exact/F32 routes retain their contracts.
+- UD-IQ3_XXS, warm 65,536-token root, stock 2,048-row capacity. Whole-append
+  **ABBA + BAAB**, four retained samples per arm, one immutable binary:
+
+  | Rows | Incumbent ms | Bounded-store ms | Change | ABBA / BAAB change |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 400 | 619.69 | 616.72 | -0.48% | -0.45% / -0.50% |
+  | 2,000 | 2,080.90 | 2,068.03 | -0.62% | -0.70% / -0.54% |
+
+- All retained arms flagged pressure **1** and compiler overlap; both orders
+  agree. Endpoints bitwise identical, finite, correct position and healthy
+  session. The synthetic guard witness covers 24 F32/F16-input cases, ragged
+  M/N and guards; identical F32 outputs, hence identical F64 error for those
+  cases. No new operand or output rounding. This is a small win, not a claim
+  to meet the 400/2K targets or eliminate the priced Q6 ceiling.
+- **Kills:** once-per-operator Q6 -> Half scratch: **618.90 -> 632.14 ms** at
+  400; **2,077.45 -> 2,080.90 ms** at 2K. Direct stores with a separate tail
+  dispatch also regressed. Their kernels, scratch and prototype controls were
+  removed. Fixed-index K32 unrolling passed its guard witness but was not timed
+  after bounded stores won; source/binaries are recorded in the raw campaign.
+- Reproduce: `nice -n 10 cargo build --release -p qwen-llm --features
+  perf-ablations --example glm_append_q6_screen`; under the Metal lease,
+  `target/release/examples/glm_append_q6_screen "$CORPUS" 3`, or `witness`,
+  or `quality "$CORPUS_DIR"`. Model lookup uses `QWEN_MODEL_SEARCH_PATH`.
+  Raw packets, immutable-binary hashes, prototype patch, distribution data,
+  test/contract receipts and exact commands:
+  `~/qwen-runs/2026-11-09-glm-append-q6-preweight/`.
+
+- **Unshipped candidate:** distribution accuracy, full lib/CLI execution and
+  steady TTFT remain pending the shared GPU. The suite binaries built once
+  on this fixed base: lib **6m28s**, CLI **4m00s**. Contracts and detailed
+  queue/build accounting are recorded in the raw campaign; no new ignored tests.
+
+
+## 2026-11-09 - GLM Append Counterfactuals: Q6 First; K64 Killed
+
+- Measured base **`fdd087b74`**; final validation rebased onto **`466aadb21`**.
+  Includes landed F32 selected attention. UD-IQ3_XXS,
+  warm 65,536-token root, stock 2,048-row packed capacity. Output-preserving
+  counterfactuals capture the incumbent operators once, then replay their exact
+  outputs while omitting their computation. Off/on warmups, **ABBA + BAAB**, four
+  retained samples per arm; endpoint hashes, cursor/shape order, finite values,
+  position and poison status checked. Whole-append host-clock means:
+
+  | Rows | Replayed operators | Native ms | Replay ms | Saved ms |
+  | ---: | --- | ---: | ---: | ---: |
+  | 400 | IQ3_S down | 619.35 | 526.05 | 93.29 |
+  | 400 | Q6 dense | 619.44 | 549.42 | 70.02 |
+  | 400 | Both | 619.37 | 456.05 | 163.32 |
+  | 2,000 | IQ3_S down | 2,083.66 | 1,924.99 | 158.67 |
+  | 2,000 | Q6 dense | 2,082.83 | 1,858.78 | 224.05 |
+  | 2,000 | Both | 2,082.18 | 1,632.23 | 449.95 |
+
+- These include output-copy cost and large-tape cache effects, **not an exact
+  free-skip roof**. Tapes are RAM-only, 4.37 / 21.85 GB; the initial 20-GiB
+  capture cap rejected 2K, which was rerun with an admitted 24-GiB cap. All
+  retained pricing arms pressure **0**; compiler presence flagged in raw data.
+  At 2K, order-separated savings: IQ3 **187 / 130 ms**, Q6 **236 / 212 ms**,
+  both **497 / 403 ms**. Q6 ranks first in both orders. Optional architectural
+  streaming reads plus exact output replay saved **59 / 38 ms** at 400 for
+  IQ3 / Q6, with visible order drift; no 2K streaming claim.
+- **KILL:** Q6 64x64x64 tensor tile, same 16-KiB staging and Half operands:
+  first screen regressed **3.7% / 3.8%** at 400 / 2K. Register prefetch before
+  the staging barrier still regressed **2.3% / 2.8%** (625.67 -> 639.97 ms;
+  2,091.89 -> 2,149.48 ms), in both orders. Revised screen records pressure
+  **0** and compiler overlap in every retained arm; first screen lacked those
+  flags and is exploratory. Endpoints identical; no distribution campaign for
+  a performance loser. Both kernels and their knob removed; production
+  arithmetic and defaults unchanged.
+- Harness default now retains/flags pressure **1**, aborts above 1; strict old
+  policy via **`--max-thermal-pressure 0`**. Records per-arm/window compiler
+  presence and thermal samples. Resumable `serve_realistic_pair.py` retains
+  both orders, per-agent TTFT and throughput, including flagged arms. The full
+  post-land steady F32-attention confirmation remains pending; its roughly
+  24-minute ABBA does not fit after this increment's pricing/build work.
+- Reproduce pricing: `nice -n 10 cargo build --release -p qwen-llm --features
+  perf-ablations --example glm_append_counterfactual`; under the Metal lease,
+  `target/release/examples/glm_append_counterfactual "$CORPUS" 400,2000`
+  (optional third argument `stream`). Resolve UD-IQ3_XXS with
+  `QWEN_MODEL_SEARCH_PATH`. Raw packets, analyzer, source patch for killed
+  experiments and exact commands: `~/qwen-runs/2026-11-09-glm-append-next/`.
+  GPU queue waits **91.0 + 121.9 + 7.1 + 0.0 s**; four experiment builds
+  **70 / 60 / 69 / 82 s**, nice 10, no build lock.
+
+- Validation commands: 11 harness checks via
+  `python3 -m unittest discover -s scripts/bench -p test_serve_realistic.py`;
+  full lib + CLI artifacts from `cargo test --offline --locked --release
+  --workspace --no-run`, executed under the Metal lease;
+  `nice -n 10 scripts/check-contracts.sh`. Final receipts and build/wait
+  accounting are in the raw directory. No new ignored tests.
+- **Qualification pending:** workspace and diagnostic-example builds pass;
+  full lib/CLI suite execution did not acquire the GPU before the turn cutoff
+  (additional canceled wait **230 s**). Contracts started a separate inventory
+  compile and were stopped. No inference optimization ships in this increment.
+
 
 ## 2026-11-09 - V4.1 Expert Grouping Killed; Calibrated Overlap Bounds
 

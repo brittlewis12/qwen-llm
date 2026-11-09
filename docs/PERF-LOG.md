@@ -93,6 +93,63 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `$MODEL` resolves through `QWEN_MODEL_SEARCH_PATH`. Regenerable binaries,
   target and serve bulk removed; no merge or owned worker remains.
 
+## 2026-11-09 - V4.1 B=3 Byte Floor And Whole-Round Q5 SIMD Kill
+
+- **No runtime change ships.** The native few-column Q5_K prototype failed the
+  first-increment **2 ms whole-round saving** gate and is removed, including its
+  knob and kernels. Experimental **`f17be874`** remains on
+  **`perf/v41-batch-attn-q5-simd-kill`** for commit-plus-command reproduction.
+- M5 Ultra, the production four-shard **DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS**
+  artifact, all 384 experts/top-6, native mixed tensor types and disk IQ4_NL Engram.
+  Header-only `scripts/research/v41-batch/bytes.py MODEL --batch 3` prices shared
+  attention/dense/head weights once, **three routed streams without overlap
+  credit**, and each sequence's F32 KV/index state at depth. The denominator is
+  the standing's warmed **1175.47 GB/s** reference, not new DRAM-counter evidence.
+
+  | Depth | Shared weights GB | Routed weights GB | State/cache GB | Round byte floor ms | Prior census GPU ms | Fraction of byte roof |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 32K | 5.705 | 6.987 | 0.479 | **11.204** | 28.22 / 28.42 | **39.4–39.7%** |
+  | 64K | 5.705 | 6.987 | 0.806 | **11.483** | 28.58 / 28.60 | **40.1–40.2%** |
+
+- Shared attention projections alone are **3.620 GB / 3.079 ms**; routed expert
+  bytes are **6.987 GB / 5.944 ms**, beside the census's **8.2 / 10.3 ms** isolated
+  services. Those profiling services remove overlap and are **not additive native
+  wall budgets**. The floor credits shared-weight and QK/PV key reuse, includes
+  native embedding/Engram row gathers and cache publications, and excludes extra
+  activation/scratch/cacheline traffic and quant-unpack work. It reproduces the
+  previous **8.193 GB** one-sequence 32K accounting. **20 ms** would require
+  **56.0 / 57.4%** of this byte roof: bytes permit the target, without proving that
+  the mixed-instruction and serialization costs can reach it.
+- First whole-round kill at **`f17be874`**, B=3/32K, 128 retained teacher-forced
+  rounds: matrix rollback **28.401499 ms**, live-column scalar SIMD
+  **32.672990 ms**, **4.271491 ms slower (+15.0% latency)**. A separate
+  **`732a7f57`** rollback is **28.106214 ms**, with identical complete logit-stream
+  hashes to the first rollback. All candidate outputs are finite; its changed
+  reduction changes hashes. No accuracy, 64K, ABBA or serve qualification was
+  spent on the failed candidate. No isolated-kernel speed claim substitutes for
+  this decision.
+- Committed probe: `cargo build --offline --locked --release -p qwen-llm
+  --example v41_batch_depth`, then `nice -n 10 python3
+  scripts/research/v41-batch/run.py --binary TARGET/release/examples/v41_batch_depth
+  --model MODEL --out RUNS/gate --arms off,on`. Defaults are 32K/B=3/128 rounds;
+  the corpus regenerates from the standing's Git blobs, independent states have
+  distinct 4096+17*sequence suffixes, 16 initial and eight per-width steps are
+  excluded, snapshots restore outside timing, full vocabulary readback is timed.
+  All thermal samples **0**, three short leased arms total **2.69 min**.
+- Next candidate: preserve the matrix arithmetic and remove attention projection
+  gather/scatter and rank-norm phase transitions, then combine HC/FFN controls.
+  The census has **526 copy dispatches/round across all families**; only a subset
+  belongs to this attention target. Budget **4–8 engineering hours** for the next
+  prototype/gate, about **1–2 days** including distribution/round-ABBA/steady-serve
+  qualification if it clears 2 ms. This is a sizing estimate, not a measured win.
+- Cycle audit of the inherited campaign: **28.1 min M5 build-lock wait**, only
+  **2.1 min actual builds**, and approximately **10.7 min GPU-lease wait**.
+  GPU waits are reconstructed from queue/cooling and lease-start timestamps;
+  laptop queue waits overlapped and are not added. No locks are used going forward;
+  builds run on M5 under nice 10, timing takes only the Metal lease. Old
+  **`~/qwen-runs/2026-11-08-v41-batch-depth`** bulk is deleted on both hosts.
+  Retain only compact results, waits and commands under
+  **`~/qwen-runs/2026-11-09-v41-batch-attn/`**; delete regenerable build/run bulk.
 
 ## 2026-11-09 - Share V4.1 HC Pre Grids Across Concurrent Decode Sequences
 

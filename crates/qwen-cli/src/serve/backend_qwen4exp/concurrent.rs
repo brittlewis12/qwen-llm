@@ -600,7 +600,7 @@ impl<'a> Owner<'a> {
             self.cache.record_tip(run.conversation, &(), &run.tokens);
         }
         self.cache.record_tip(run.conversation, &(), &consumed);
-        let phases = serde_json::json!({"prefill_ms":run.prefill_ms,"decode_ms":generation.wall_ms,"reused_tokens":run.matched,"prefill_tokens":run.tokens.len()-run.matched,"restore_ms":run.restore_ms,"reuse_source":run.reuse_source,"batch":batch});
+        let phases = serde_json::json!({"prefill_ms":run.prefill_ms,"decode_ms":generation.wall_ms,"reused_tokens":run.matched,"prefill_tokens":run.tokens.len()-run.matched,"restore_ms":run.restore_ms,"reuse_source":run.reuse_source,"batch":batch,"decode_impl":"ordinary_members"});
         tracing::info!(target:"qwen_diag", "serve phases: family=qwen4exp tokenize_ms={:.1} restore_ms={:.1} reuse_source={} departing_capture_ms={:.1} endpoint_checkpoint={} prefill_calls={} matched_tokens={} prefill_ms={:.1} prefill_tokens={} snapshot_capture_ms={:.1} decode_ms={:.1} required_forwards={} forward_limit={} transitions={} batch={}",run.tokenize_ms,run.restore_ms,run.reuse_source,run.departing_ms,run.endpoint,run.prefill_calls,run.matched,run.prefill_ms,run.tokens.len()-run.matched,run.capture_ms,generation.wall_ms,run.required,self.forward_limit,generation.transitions,phases["batch"]);
         let mut out = super::super::outcome::finish_generation(
             run.tokens.len(),

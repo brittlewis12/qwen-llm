@@ -6200,5 +6200,19 @@
     "class": "cpu",
     "ignored": false,
     "reason": "GPU-burst cursor protocol tested with completed host metadata: native resumption, unconsumed tail, token limit and unpublished EOS; no Metal context."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::feedback_bursts_yield_before_existing_peers_and_keep_width_accounting",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fake feedback/runtime with nonblocking sinks: bounded lone-member bursts yield to peers and park before forwarding on backpressure; no Metal context."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::feedback_burst_backpressure_parks_before_any_forward",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Fake feedback/runtime with nonblocking sinks: bounded lone-member bursts yield to peers and park before forwarding on backpressure; no Metal context."
   }
 ]

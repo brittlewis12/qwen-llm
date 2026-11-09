@@ -62,6 +62,8 @@ struct Run {
 }
 #[derive(Default)]
 struct Fake {
+    feedback_bursts: bool,
+    bursts: usize,
     steps: Vec<usize>,
     prefills: Vec<usize>,
     reserves: Vec<u64>,
@@ -147,6 +149,43 @@ impl Runtime for Fake {
         _: u64,
     ) -> Result<Advance, BackendFailure> {
         c.advance(&mut r.sampler, None, &Bytes, s, || Ok(()))
+    }
+    fn advance_single(
+        &mut self,
+        r: &mut Run,
+        c: &mut DecodeCursor,
+        s: &mut dyn GenerationSink,
+        _: u64,
+    ) -> Option<Result<Advance, BackendFailure>> {
+        if !self.feedback_bursts {
+            return None;
+        }
+        self.bursts += 1;
+        Some((|| {
+            let mut tokens = Vec::new();
+            let limit = c.remaining_tokens().min(3);
+            for i in 0..limit {
+                if i > 0 {
+                    r.state.pos += 1;
+                    r.state.consumed.push(tokens[i - 1] as u32);
+                }
+                let token = b'a' as i32 + r.state.consumed.len() as i32 % 26;
+                tokens.push(token);
+                s.piece(&[token as u8])
+                    .and_then(|()| s.tick())
+                    .map_err(BackendFailure::Aborted)?;
+                if !s.flush_ready().map_err(BackendFailure::Aborted)? {
+                    break;
+                }
+            }
+            let stats = qwen_llm::metal::GpuTokenLoopStats {
+                sampled_tokens: tokens.len(),
+                emitted_tokens: tokens.len(),
+                forwarded_tokens: tokens.len() - 1,
+                ..Default::default()
+            };
+            Ok(c.append_gpu_burst(&tokens, stats, 0.))
+        })())
     }
     fn state(r: &mut Run) -> &mut State {
         &mut r.state
@@ -559,4 +598,62 @@ fn scheduler_fair_service_credit_is_capped_and_cleared_without_mixed_work() {
     assert!(d.decode_budget.is_zero());
     finish(&mut d, &mut e);
     terminal_ok(&b.0);
+}
+
+#[test]
+fn feedback_bursts_yield_before_existing_peers_and_keep_width_accounting() {
+    let mut d = Driver::new(2);
+    let mut e = Fake {
+        feedback_bursts: true,
+        ..Default::default()
+    };
+    let a = submit(&mut d, 5, true, 100);
+    d.pump(&mut e);
+    assert_eq!(e.bursts, 1);
+    assert_eq!(d.active[0].steps, 2);
+    assert_eq!(d.active[0].width_sum, 2);
+    let b = submit(&mut d, 5, true, 100);
+    d.pump(&mut e);
+    let bursts = e.bursts;
+    for _ in 0..5 {
+        if d.active.len() != 2 {
+            break;
+        }
+        d.pump(&mut e);
+        if d.active.len() == 2 {
+            assert_eq!(e.bursts, bursts);
+        }
+    }
+    finish(&mut d, &mut e);
+    terminal_ok(&a.0);
+    terminal_ok(&b.0);
+}
+
+#[test]
+fn feedback_burst_backpressure_parks_before_any_forward() {
+    let mut d = Driver::new(2);
+    let mut e = Fake {
+        feedback_bursts: true,
+        ..Default::default()
+    };
+    let a = submit(&mut d, 5, false, 100);
+    d.pump(&mut e);
+    assert_eq!(e.bursts, 1);
+    assert_eq!(
+        d.active[0].run.as_ref().unwrap().state.consumed,
+        Vec::<u32>::new()
+    );
+    assert!(d.active[0].parked.is_some());
+    let b = submit(&mut d, 5, true, 100);
+    d.pump(&mut e);
+    for _ in 0..20 {
+        d.pump(&mut e);
+        if b.0.borrow().terminal.is_some() {
+            break;
+        }
+    }
+    terminal_ok(&b.0);
+    a.0.borrow_mut().credit = true;
+    finish(&mut d, &mut e);
+    terminal_ok(&a.0);
 }

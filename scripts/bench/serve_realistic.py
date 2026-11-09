@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Seeded warm-agent concurrency workload (stdlib only).
 
-plan samples paired append/reply/tool-duration observations from the recorded
-OpenCode calls. run records a serial reference, then replays its new inputs
-with each candidate's own replies. Frozen-history replay is a diagnostic option.
-Warm-up is separate. compare refuses unequal offered work/output counts.
-Run each arm under the build lock and with-metal-lease; see the packet.
+Three warm agents draw continuously from recorded per-family OpenCode calls.
+The default is a fixed shared measurement window, excluding ramp and cancellation.
+Rates permit natural EOS and unequal completed work. Timing needs a Metal lease,
+not the build lock. Build first; retain commit + command and compact summaries.
 """
 
 import argparse
@@ -23,6 +22,7 @@ import re
 import signal
 import statistics
 import subprocess
+import sys
 import threading
 import time
 
@@ -56,26 +56,21 @@ def percentile(values, fraction):
 
 
 def make_plan(rows, family, seed, seconds):
-    # Snapshot fallbacks include replayed history rather than just new tool input.
-    # Cold roots, title calls and effort changes are not warm-agent appends.
     rows = [r for r in rows if r["model"] == family and r["purpose"] == "primary"
             and int(r["reused"]) > 0 and r["reuse_source"] in ("live_session", "live")]
-    if not rows:
-        raise ValueError("no primary live-prefix observations for family")
-    rng = random.Random(f"{seed}:{family}")
-    agents = [[] for _ in range(3)]
-    loads = [0.0] * 3
-    while sum(loads) < seconds or any(not a for a in agents):
-        agent = min(range(3), key=lambda a: loads[a])
-        row = rng.choice(rows)
-        turn = {"source_call": row["call"], "append_tokens": int(row["new"]),
-                "reply_tokens": int(row["generated"]),
-                "tool_gap_s": float(row["tool_union_ms"]) / 1000,
-                "source_active_s": (float(row["server_pre_ms"]) + float(row["decode_ms"])) / 1000}
-        agents[agent].append(turn)
-        loads[agent] += turn["source_active_s"] + turn["tool_gap_s"]
-    return {"version": 1, "family": family, "seed": seed, "target_serial_s": seconds,
-            "population": len(rows), "agents": agents, "estimated_agent_work_s": loads}
+    if not rows or seconds <= 0:
+        raise ValueError("positive window and primary live-prefix observations required")
+    population = [dict(source_call=r["call"], append_tokens=int(r["new"]),
+                       reply_tokens=int(r["generated"]),
+                       tool_gap_s=float(r["tool_union_ms"]) / 1000) for r in rows]
+    return dict(version=2, mode="steady", family=family, seed=seed,
+                window_seconds=seconds, population=population)
+
+
+def draws(plan, agent):
+    rng = random.Random(f"{plan['seed']}:{plan['family']}:{agent}")
+    while True:
+        yield dict(rng.choice(plan["population"]))
 
 
 def token_text(binary, model, text=None, ids=None):
@@ -162,484 +157,370 @@ class Arm:
         self.out = args.out.resolve()
         self.out.mkdir(parents=True, exist_ok=False)
         self.plan = json.loads(args.plan.read_text())
+        if self.plan.get('version') != 2:
+            raise ValueError('regenerate a version-2 steady plan')
+        self.rows, self.samples, self.lines = [], [], []
         self.server = None
-        self.stop = threading.Event()
-        self.done = threading.Event()
+        self.abort = threading.Event()
+        self.finish = threading.Event()
+        self.monitor_done = threading.Event()
         self.lock = threading.Lock()
-        self.rows = []
-        self.samples = []
-        self.lines = []
+        self.window_begin = self.window_end = None
         self.deadline = time.monotonic() + args.timeout
 
-    def emit(self, **record):
+    def emit(self, **row):
         with self.lock:
-            print(json.dumps(record), flush=True)
-            with (self.out / "client.jsonl").open("a") as f:
-                f.write(json.dumps(record) + "\n")
+            print(json.dumps(row), flush=True)
 
     def check(self):
-        if self.stop.is_set() or time.monotonic() > self.deadline:
-            raise RuntimeError("arm stopped (thermal, timeout, signal or request failure)")
-        if self.server is not None and self.server.poll() is not None:
-            raise RuntimeError(f"server exited: {self.server.returncode}")
-
-    def memory(self):
-        raw = subprocess.check_output(["vm_stat"], text=True)
-        page = int(re.search(r"page size of (\d+)", raw)[1])
-        values = {a: int(b) for a, b in re.findall(r"^([^:\n]+):\s+(\d+)", raw, re.M)}
-        available = (values.get("Pages free", 0) + max(0, values.get("Pages inactive", 0) - values.get("Anonymous pages", 0))) * page
-        rss = subprocess.check_output(["ps", "-o", "rss=", "-p", str(self.server.pid)], text=True).strip()
-        return {"host_conservative_available": available, "rss": int(rss or 0) * 1024}
+        if self.abort.is_set() or time.monotonic() > self.deadline:
+            raise RuntimeError('thermal/deadline/transport stop')
+        if self.server is not None and self.server.poll() is not None and not self.finish.is_set():
+            raise RuntimeError(f'server exited {self.server.returncode}')
 
     def watch(self):
         try:
-            while not self.done.is_set():
-                row = {"time": time.time(), "thermal": pressure(), **self.memory()}
-                self.samples.append(row)
-                if row["thermal"] or time.monotonic() > self.deadline:
-                    self.emit(event="stop", sample=row)
-                    self.stop.set()
+            while not self.monitor_done.is_set():
+                p = pressure()
+                self.samples.append(dict(time=time.time(), thermal=p))
+                if p or time.monotonic() > self.deadline:
+                    self.abort.set()
+                    self.finish.set()
+                    self.emit(event='abort', thermal=p)
                     if self.server.poll() is None:
                         self.server.send_signal(signal.SIGINT)
                     return
-                self.done.wait(1)
+                self.monitor_done.wait(1)
         except Exception as error:
-            if not self.done.is_set() and self.server.poll() is None:
-                self.emit(event="monitor_error", error=str(error))
-                self.stop.set()
+            self.abort.set()
+            self.finish.set()
+            self.emit(event='monitor_error', error=str(error))
+            if self.server.poll() is None:
                 self.server.send_signal(signal.SIGINT)
 
     def readlog(self):
-        with (self.out / "server.log").open("w") as f, (self.out / "server-lines.jsonl").open("w") as j:
-            for line in self.server.stdout:
-                record = {"time": time.time(), "line": line.rstrip()}
-                self.lines.append(record)
-                f.write(line)
-                f.flush()
-                j.write(json.dumps(record) + "\n")
-                j.flush()
+        for line in self.server.stdout:
+            self.lines.append(dict(time=time.time(), line=line.rstrip()))
 
-    def request(self, body, label, warm=False):
+    def prepare(self):
+        text = self.args.corpus.read_text().replace('<|', '‹|').replace('<｜', '‹｜')
+        ids = token_text(self.args.tokenizer, self.args.model, text=text)
+        n = self.args.warm_tokens
+        if len(ids) < n * 3:
+            raise ValueError('corpus needs three disjoint warm roots')
+        warm = [token_text(self.args.tokenizer, self.args.model, ids=ids[a*n:(a+1)*n]) for a in range(3)]
+        sizes = sorted({t['append_tokens'] for t in self.plan['population']})
+        suffix = {(a, size): token_text(self.args.tokenizer, self.args.model,
+                                      ids=ids[(a*977) % (len(ids)-size):(a*977) % (len(ids)-size)+size])
+                  for a in range(3) for size in sizes}
+        return warm, suffix
+
+    def body(self, history, count):
+        body = dict(model=self.model_id, input=copy.deepcopy(history), instructions=INSTRUCTIONS,
+                    stream=True, temperature=0, top_p=1, max_output_tokens=count,
+                    x_qwen=dict(stats=True, seed=self.plan['seed']),
+                    tools=[dict(type='function', name='read_file', description='Read source',
+                                parameters=dict(type='object', properties=dict(path=dict(type='string')),
+                                                required=['path'], additionalProperties=False))])
+        if self.plan['family'] in ('glm', 'fn'):
+            body['reasoning'] = dict(effort='low')
+        return body
+
+    def request(self, body, label, spec=None, warm=False):
         self.check()
-        path = self.out / f"{label}.request.json"
-        dump(path, body)
+        payload = json.dumps(body, ensure_ascii=False).encode()
         sent = time.time()
-        first = None
-        final = None
+        headers = first = final = None
         events = []
-        connection = http.client.HTTPConnection("127.0.0.1", self.args.port, timeout=200)
+        conn = http.client.HTTPConnection('127.0.0.1', self.args.port, timeout=180)
         try:
-            connection.request("POST", "/v1/responses", body=path.read_bytes(), headers={"Content-Type": "application/json"})
-            response = connection.getresponse()
+            conn.request('POST', '/v1/responses', body=payload, headers={'Content-Type':'application/json'})
+            response = conn.getresponse()
             headers = time.time()
             if response.status != 200:
-                raise RuntimeError(f"HTTP {response.status}: {response.read().decode()[:1500]}")
+                raise RuntimeError(f'HTTP {response.status}: {response.read().decode()[:1000]}')
             while True:
-                self.check()
                 line = response.readline()
                 if not line:
                     break
-                if not line.startswith(b"data:"):
+                if not line.startswith(b'data:'):
                     continue
                 raw = line[5:].strip()
-                if raw == b"[DONE]":
+                if raw == b'[DONE]':
                     break
                 event = json.loads(raw)
                 now = time.time()
-                events.append({"time": now, "data": event})
-                if event.get("type") in DELTA_TYPES and event.get("delta") and first is None:
-                    first = now
-                if event.get("type") in ("response.completed", "response.incomplete", "response.failed"):
-                    final = event["response"]
+                kind = event.get('type')
+                if kind in DELTA_TYPES and event.get('delta'):
+                    events.append((now, kind, event['delta']))
+                    if first is None:
+                        first = now
+                if kind in ('response.completed', 'response.incomplete', 'response.failed'):
+                    final = event['response']
+        except (OSError, http.client.HTTPException):
+            if not self.finish.is_set():
+                raise
         finally:
-            connection.close()
-        end = time.time()
-        dump(self.out / f"{label}.events.json", events)
-        dump(self.out / f"{label}.response.json", final)
-        if not final or final.get("error"):
-            self.stop.set()
-            raise RuntimeError(f"invalid terminal response {label}: {str(final)[:1000]}")
-        usage = final["usage"]
-        prompt = usage["input_tokens"]
-        cached = usage.get("input_tokens_details", {}).get("cached_tokens", 0)
-        deltas = [e["time"] for e in events if e["data"].get("type") in DELTA_TYPES and e["data"].get("delta")]
-        # A stop token may have no visible delta; mark the missing observation.
-        first = first if first is not None else end
-        row = {"label": label, "warm": warm, "sent": sent, "headers": headers,
-               "first": first, "end": end, "prompt": prompt, "new": prompt - cached,
-               "reused": cached, "generated": usage["output_tokens"],
-               "requested_output": body["max_output_tokens"], "ttft_s": first - sent,
-               "wall_s": end - sent, "stream_decode_tps": max(0, usage["output_tokens"] - 1) / max(.000001, end - first),
-               "delta_gaps_s": [b - a for a, b in zip(deltas, deltas[1:])],
-               "delta_times": deltas, "request_sha256": digest(path), "x_qwen": final.get("x_qwen", {})}
+            conn.close()
+        ended = time.time()
+        if final and final.get('error') and not self.finish.is_set():
+            raise RuntimeError(str(final['error']))
+        usage = final.get('usage', {}) if final else {}
+        valid = bool(usage and not final.get('error')) if final else False
+        row = dict(label=label, agent=int(label[1]), warm=warm, sent=sent, headers=headers,
+                   first=first, end=ended, completed=valid,
+                   generated=usage.get('output_tokens') if valid else None,
+                   prompt=usage.get('input_tokens') if valid else None,
+                   reused=usage.get('input_tokens_details',{}).get('cached_tokens') if valid else None,
+                   target=body['max_output_tokens'], spec=spec,
+                   x_qwen=final.get('x_qwen',{}) if valid else {}, events=events)
         self.rows.append(row)
-        self.emit(event="turn", **{k: v for k, v in row.items() if k not in ("x_qwen", "delta_times", "delta_gaps_s")})
-        return final
-
-    def prepare(self):
-        args = self.args
-        if args.reference:
-            for agent in range(3):
-                for name in [f"a{agent}-warm"] + [f"a{agent}-t{i}" for i in range(len(self.plan["agents"][agent]))]:
-                    path = args.reference / f"{name}.request.json"
-                    if not path.exists():
-                        raise ValueError(f"incomplete reference: {path}")
-            return None, None
-        corpus = args.corpus.read_text().replace("<|", "‹|").replace("<｜", "‹｜")
-        ids = token_text(args.tokenizer, args.model, text=corpus)
-        if len(ids) < 3 * args.warm_tokens:
-            raise ValueError("corpus needs three distinct warm contexts")
-        warm = [token_text(args.tokenizer, args.model, ids=ids[a * args.warm_tokens:(a + 1) * args.warm_tokens]) for a in range(3)]
-        suffixes = {}
-        offset = 0
-        for agent, turns in enumerate(self.plan["agents"]):
-            for turn, spec in enumerate(turns):
-                # Content count is empirical. Chat wrappers are measured separately.
-                n = spec["append_tokens"]
-                if offset + n > len(ids):
-                    offset = 0
-                suffixes[(agent, turn)] = token_text(args.tokenizer, args.model, ids=ids[offset:offset + n])
-                offset += n
-        return warm, suffixes
-
-    def body(self, history, tokens):
-        body = {"model": self.model_id, "input": copy.deepcopy(history), "instructions": INSTRUCTIONS,
-                "stream": True, "max_output_tokens": tokens, "temperature": 0,
-                "top_p": 1, "x_qwen": {"stats": True, "seed": self.plan["seed"]},
-                "tools": [{"type": "function", "name": "read_file", "description": "Read source",
-                           "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
-                                          "required": ["path"], "additionalProperties": False}}]}
-        if self.plan["family"] in ("glm", "fn"):
-            body["reasoning"] = {"effort": "low"}
-        return body
+        self.emit(event='turn', label=label, completed=valid, generated=row['generated'],
+                  ttft_s=first-sent if first else None)
+        if self.args.keep_bulk:
+            dump(self.out/f'{label}.request.json', body)
+            dump(self.out/f'{label}.events.json', events)
+            dump(self.out/f'{label}.response.json', final)
+        return final if valid else None
 
     def run(self):
         args = self.args
-        fd = int(os.environ["QWEN_METAL_LEASE_FD"])
+        fd = int(os.environ['QWEN_METAL_LEASE_FD'])
         os.fstat(fd)
-        warm, suffixes = self.prepare()  # CPU tokenization is outside server timing.
-        dump(self.out / "plan.json", self.plan)
-        time.sleep(25)  # Cooling gap, including when an unrelated owner just exited.
+        warm, suffix = self.prepare()
+        dump(self.out/'plan.json', self.plan)
+        time.sleep(args.cool)
         for _ in range(3):
             if pressure():
-                raise RuntimeError("nonzero thermal pressure before arm")
-            time.sleep(5)
-        check = subprocess.run(["lsof", "-nP", f"-iTCP:{args.port}", "-sTCP:LISTEN"], stdout=subprocess.DEVNULL)
-        if check.returncode != 1:
-            raise RuntimeError("loopback port occupied or lsof failed")
-        env = dict(os.environ)
-        for key in ("QWEN_SERVE_V41_MAX_ACTIVE", "QWEN_SERVE_GLM_MAX_ACTIVE"):
-            env.pop(key, None)
-        if args.arm == "serial" and self.plan["family"] in ("v41", "glm"):
-            env["QWEN_SERVE_V41_MAX_ACTIVE" if self.plan["family"] == "v41" else "QWEN_SERVE_GLM_MAX_ACTIVE"] = "1"
-        env.update(RUST_LOG="warn,qwen_diag=info", NO_COLOR="1")
-        command = [str(args.binary.resolve()), "serve", "-m", str(args.model.resolve()),
-                   "--addr", f"127.0.0.1:{args.port}", "--max-context-tokens", str(args.context),
-                   "--max-tokens", str(max(t["reply_tokens"] for a in self.plan["agents"] for t in a))]
-        identity = {"source": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-                    "binary_sha256": digest(args.binary), "harness_sha256": digest(Path(__file__)),
-                    "command": command, "env": {k: v for k, v in env.items() if k.startswith("QWEN_")},
-                    "reference": str(args.reference) if args.reference else None,
-                    "history": args.history}
-        dump(self.out / "launch.json", identity)
+                raise RuntimeError('nonzero thermal before arm')
+            time.sleep(3)
+        occupied = subprocess.run(['lsof','-nP',f'-iTCP:{args.port}','-sTCP:LISTEN'],stdout=subprocess.DEVNULL)
+        if occupied.returncode != 1:
+            raise RuntimeError('port occupied or lsof failed')
+        env = dict(os.environ, RUST_LOG='warn,qwen_diag=info', NO_COLOR='1')
+        for key in ('QWEN_SERVE_V41_MAX_ACTIVE','QWEN_SERVE_GLM_MAX_ACTIVE'):
+            env.pop(key,None)
+        if args.arm == 'serial' and self.plan['family'] in ('v41','glm'):
+            env['QWEN_SERVE_V41_MAX_ACTIVE' if self.plan['family']=='v41' else 'QWEN_SERVE_GLM_MAX_ACTIVE']='1'
+        maximum = max(t['reply_tokens'] for t in self.plan['population'])
+        command = [str(args.binary.resolve()),'serve','-m',str(args.model.resolve()),
+                   '--addr',f'127.0.0.1:{args.port}','--max-context-tokens',str(args.context),
+                   '--max-tokens',str(maximum)]
+        dump(self.out/'launch.json', dict(commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+             command=command, harness_command=sys.argv, arm=args.arm,
+             harness_commit=args.harness_commit,
+             cool_seconds=args.cool, ramp_seconds=args.ramp, context=args.context,
+             runtime_env={k:v for k,v in env.items() if k.startswith('QWEN_')},
+             corpus_sha256=digest(args.corpus), protocol='steady-own-history-v2'))
         started = time.time()
-        self.server = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                       text=True, bufsize=1, pass_fds=(fd,))
+        self.server = subprocess.Popen(command,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+                                       text=True,bufsize=1,pass_fds=(fd,))
         reader = threading.Thread(target=self.readlog)
         watcher = threading.Thread(target=self.watch)
-        reader.start()
-        watcher.start()
+        reader.start();watcher.start()
+        error = None
         try:
-            while time.time() - started < 180:
+            while time.time()-started < 180:
                 self.check()
                 try:
-                    c = http.client.HTTPConnection("127.0.0.1", args.port, timeout=1)
-                    c.request("GET", "/v1/models")
-                    response = c.getresponse()
-                    data = json.loads(response.read())
-                    c.close()
-                    if response.status == 200:
-                        self.model_id = data["data"][0]["id"]
-                        break
-                except (OSError, ValueError, KeyError):
+                    c=http.client.HTTPConnection('127.0.0.1',args.port,timeout=1)
+                    c.request('GET','/v1/models');response=c.getresponse();data=json.loads(response.read());c.close()
+                    if response.status==200:
+                        self.model_id=data['data'][0]['id'];break
+                except (OSError,ValueError,KeyError):
                     pass
                 time.sleep(.25)
             else:
-                raise TimeoutError("server startup")
-            ready = time.time()
-            histories = []
-            for a in range(3):
-                if args.reference:
-                    body = json.loads((args.reference / f"a{a}-warm.request.json").read_text())
-                    if body["model"] != self.model_id:
-                        raise ValueError("reference model ID mismatch")
-                else:
-                    body = self.body([{"role": "user", "content": f"Independent agent {a}. Source corpus follows.\n" + warm[a]}], 1)
-                final = self.request(body, f"a{a}-warm", warm=True)
-                histories.append(body["input"] + history_items(final.get("output", [])))
-            warmed = time.time()
-            self.emit(event="warmed", startup_s=ready - started, warmup_s=warmed - ready,
-                      thermal=pressure())
-            if pressure():
-                raise RuntimeError("nonzero thermal after warm-up")
-            barrier = threading.Barrier(3)
-
-            def agent(a):
-                history = histories[a]
-                barrier.wait(timeout=10)
-                for turn, spec in enumerate(self.plan["agents"][a]):
+                raise TimeoutError('startup')
+            ready=time.time();histories=[]
+            for agent in range(3):
+                body=self.body([dict(role='user',content=f'Independent agent {agent}. Source corpus follows.\n'+warm[agent])],8)
+                final=self.request(body,f'a{agent}-warm',warm=True)
+                if final is None:raise RuntimeError('warm-up failed')
+                histories.append(body['input']+history_items(final.get('output',[])))
+            warmed=time.time()
+            self.emit(event='warmed',startup_s=ready-started,warmup_s=warmed-ready)
+            if pressure():raise RuntimeError('nonzero thermal after warm-up')
+            barrier=threading.Barrier(4)
+            self.window_begin=time.time()+args.ramp
+            self.window_end=self.window_begin+self.plan['window_seconds']
+            def agent_loop(agent):
+                history=histories[agent]
+                barrier.wait()
+                for turn,spec in enumerate(draws(self.plan,agent)):
+                    if self.finish.is_set() or time.time()>=self.window_end:break
                     self.check()
-                    label = f"a{a}-t{turn}"
-                    if args.reference:
-                        body = json.loads((args.reference / f"{label}.request.json").read_text())
-                        if args.history == "own":
-                            history.extend(copy.deepcopy(body["input"][-2:]))
-                            body["input"] = copy.deepcopy(history)
-                    else:
-                        call = f"agent{a}_read{turn}"
-                        history.extend([
-                            {"type": "function_call", "call_id": call, "name": "read_file",
-                             "arguments": json.dumps({"path": f"src/agent{a}/excerpt{turn}.rs"})},
-                            {"type": "function_call_output", "call_id": call, "output": suffixes[(a, turn)]},
-                        ])
-                        body = self.body(history, spec["reply_tokens"])
-                    final = self.request(body, label)
-                    history += history_items(final.get("output", []))
-                    if turn + 1 < len(self.plan["agents"][a]):
-                        if self.stop.wait(spec["tool_gap_s"]):
-                            self.check()
-
-            begin = time.time()
+                    call=f'agent{agent}_read{turn}'
+                    history.extend([dict(type='function_call',call_id=call,name='read_file',
+                                         arguments=json.dumps({'path':f'src/agent{agent}/excerpt{turn}.rs'})),
+                                    dict(type='function_call_output',call_id=call,
+                                         output=suffix[(agent,spec['append_tokens'])])])
+                    final=self.request(self.body(history,spec['reply_tokens']),f'a{agent}-t{turn}',spec)
+                    if final is None:break
+                    history.extend(history_items(final.get('output',[])))
+                    if self.finish.wait(spec['tool_gap_s']):break
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-                futures = [pool.submit(agent, a) for a in range(3)]
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        future.result()
-                    except BaseException:
-                        self.stop.set()
-                        if self.server.poll() is None:
-                            self.server.send_signal(signal.SIGINT)
-                        raise
-            end = time.time()
-            self.check()
-            summary = {"family": self.plan["family"], "arm": args.arm, "begin": begin, "end": end,
-                       "wall_s": end - begin, "startup_s": ready - started, "warmup_s": warmed - ready,
-                       "thermal_after": pressure(), "rows": sorted(self.rows, key=lambda r: r["label"])}
-            if summary["thermal_after"]:
-                raise RuntimeError("thermal pressure at arm end")
-            dump(self.out / "summary.json", summary)
-            self.emit(event="arm_done", wall_s=end - begin, warmup_s=warmed - ready)
+                futures=[pool.submit(agent_loop,a) for a in range(3)]
+                barrier.wait()
+                try:
+                    while time.time()<self.window_end and not self.finish.is_set():
+                        self.check()
+                        for f in futures:
+                            if f.done():
+                                f.result()
+                                raise RuntimeError('agent exited before common cutoff')
+                        self.finish.wait(.1)
+                finally:
+                    self.finish.set()
+                    if self.server.poll() is None:self.server.send_signal(signal.SIGINT)
+                for f in futures:f.result()
+            self.emit(event='window_done',seconds=self.plan['window_seconds'])
+        except BaseException as exc:
+            error=str(exc)
+            raise
         finally:
-            self.stop.set()
-            if self.server.poll() is None:
-                self.server.send_signal(signal.SIGINT)
-            try:
-                self.server.wait(timeout=40)
-            except subprocess.TimeoutExpired:
-                self.server.terminate()
-                self.server.wait(timeout=10)
-            self.done.set()
-            watcher.join(timeout=5)
-            reader.join(timeout=5)
-            dump(self.out / "memory-thermal.json", self.samples)
-            self.emit(event="server_stopped", code=self.server.returncode)
+            self.finish.set()
+            if self.server.poll() is None:self.server.send_signal(signal.SIGINT)
+            try:self.server.wait(timeout=40)
+            except subprocess.TimeoutExpired:self.server.terminate();self.server.wait(timeout=10)
+            self.monitor_done.set();watcher.join(timeout=5);reader.join(timeout=5)
+            dump(self.out/'thermal.json',self.samples)
+            if self.args.keep_bulk:
+                dump(self.out/'native-lines.json',self.lines)
+            if error or self.abort.is_set():
+                dump(self.out/'failed.json',dict(error=error,thermal_abort=self.abort.is_set()))
+            self.emit(event='server_stopped',code=self.server.returncode)
+        if self.abort.is_set():
+            raise RuntimeError('arm aborted; no accepted timing summary')
+        result=summarize(self.rows,self.window_begin,self.window_end,
+                         lambda text:len(token_text(args.tokenizer,args.model,text=text)),self.lines)
+        result.update(startup_s=ready-started,warmup_s=warmed-ready,arm=args.arm,
+                      family=self.plan['family'],seed=self.plan['seed'],thermal_max=max(x['thermal'] for x in self.samples),
+                      metric='delivered text+reasoning tokens retokenized; excludes EOS/format control')
+        detailed=result.pop('rows')
+        dump(self.out/'summary.json',result)
+        with (self.out/'calls.jsonl').open('w') as f:
+            for row in detailed:f.write(json.dumps(row)+'\n')
+        if not args.keep_bulk:
+            for p in self.out.glob('*.request.json'):p.unlink()
+            for p in self.out.glob('*.response.json'):p.unlink()
+            for p in self.out.glob('*.events.json'):p.unlink()
+        self.emit(event='summary',**result)
 
 
-def analyze(directory):
-    summary = json.loads((directory / "summary.json").read_text())
-    launch = json.loads((directory / "launch.json").read_text())
-    rows = [r for r in summary["rows"] if not r["warm"]]
-    native = []
-    phases = {}
-    for line in (directory / "server-lines.jsonl").read_text().splitlines():
-        record = json.loads(line)
-        if "serve phases:" in record["line"]:
-            phases = kv(record["line"])
-        if "serve stats:" in record["line"]:
-            native.append({"time": record["time"], "phases": phases, "stats": kv(record["line"])})
-            phases = {}
-    used = set()
-    for row in summary["rows"]:
-        matches = [(abs(n["time"] - row["end"]), i, n) for i, n in enumerate(native)
-                   if i not in used and int(n["stats"]["prompt_tokens"]) == row["prompt"]
-                   and int(n["stats"]["generated_tokens"]) == row["generated"]]
-        if not matches:
-            raise ValueError(f"unmatched native timings: {row['label']}")
-        _, i, n = min(matches)
-        used.add(i)
-        p = row["x_qwen"].get("phases") or n["phases"]
-        row["phases"] = p
-        row["native_decode_tps"] = float(n["stats"]["decode_tps"])
-        batch = p.get("batch", {})
-        row["native_width_transitions"] = native_widths(batch) if batch else [max(0, row["generated"] - 1), 0, 0]
-        # Header delay is the serial proxy; native queue_ms is owner-only.
-        native_ms = float(p.get("prefill_ms", 0)) + float(p.get("decode_ms", 0)) + float(p.get("restore_ms", 0))
-        row["queue_proxy_s"] = batch.get("queue_ms", max(0, row["wall_s"] * 1000 - native_ms)) / 1000
-        row["queue_kind"] = "owner_submission_to_admission" if batch else "serial_wall_minus_logged_phases_proxy"
-        row["reuse_source"] = p.get("reuse_source", "")
-        row["restore_origin"] = p.get("restore_origin", "")
-        row["prefill_wall_s"] = float(p.get("prefill_ms", 0)) / 1000
-        row["decode_wall_s"] = float(p.get("decode_ms", 0)) / 1000
-        row["header_delay_s"] = row["headers"] - row["sent"]
-    samples = json.loads((directory / "memory-thermal.json").read_text())
-    if any(s["thermal"] for s in samples):
-        raise ValueError("nonzero thermal sample")
-    result = {k: v for k, v in summary.items() if k != "rows"}
-    result["plan_sha256"] = digest(directory / "plan.json")
-    result["history"] = launch.get("history", "legacy_frozen" if launch.get("reference") else "legacy_record")
-    result.update(generated=sum(r["generated"] for r in rows),
-                  new=sum(r["new"] for r in rows), reused=sum(r["reused"] for r in rows),
-                  aggregate_tps=sum(r["generated"] for r in rows) / summary["wall_s"],
-                  intervals=interval_buckets(rows, summary["begin"], summary["end"]),
-                  native_width_transitions=[sum(r["native_width_transitions"][i] for r in rows) for i in range(3)],
-                  queue_request_seconds=sum(r["queue_proxy_s"] for r in rows),
-                  min_host_available=min(s["host_conservative_available"] for s in samples),
-                  max_rss=max(s["rss"] for s in samples), thermal_max=max(s["thermal"] for s in samples),
-                  output_shortfalls=[r["label"] for r in rows if r["generated"] != r["requested_output"]],
-                  rows=rows)
-    bins = []
-    for start in range(0, math.ceil(summary["wall_s"]), 20):
-        values = [b - a for r in rows for a, b in zip(r["delta_times"], r["delta_times"][1:])
-                  if start <= b - summary["begin"] < start + 20]
-        lo, hi = summary["begin"] + start, min(summary["end"], summary["begin"] + start + 20)
-        telemetry = [s for s in samples if lo <= s["time"] < hi]
-        bins.append({"start_s": start, "duration_s": hi - lo, "chunks": len(values),
-                     "gap_p50_s": percentile(values, .5), "gap_p95_s": percentile(values, .95),
-                     "gap_max_s": max(values, default=None), **interval_buckets(rows, lo, hi),
-                     "thermal_max": max((s["thermal"] for s in telemetry), default=None),
-                     "min_host_available": min((s["host_conservative_available"] for s in telemetry), default=None)})
-    result["trace_20s"] = bins
-    result["agents"] = []
+def window_tokens(events, begin, end, count):
+    """Count delivered model-token text, including reasoning, across boundaries.
+
+    Native usage arrives only at completion; using only complete calls would
+    discard long requests. Retokenize the channel prefixes bracketing the window
+    offline. EOS/template controls are excluded; boundary merges can move ~1 token.
+    """
+    total=0
+    for kind in DELTA_TYPES:
+        before=''.join(text for t,k,text in events if k==kind and t<begin)
+        through=''.join(text for t,k,text in events if k==kind and t<end)
+        if through:
+            total+=count(through)-(count(before) if before else 0)
+    return total
+
+
+def summarize(rows, begin, end, count, native_lines=()):
+    if begin is None or end<=begin:raise ValueError('invalid shared window')
+    active=[r for r in rows if not r['warm'] and r['sent']<end and r['end']>begin]
+    if {r['agent'] for r in active}!={0,1,2}:raise ValueError('three active agent loops required')
+    cleaned=[]
+    for r in active:
+        native=r['x_qwen'].get('phases',{})
+        # Match legacy serial native metadata by unique prompt/generated counts
+        # and nearest completion; partial/cancelled calls have no final usage.
+        if r['completed'] and not native:
+            phase={};candidates=[]
+            for entry in native_lines:
+                line=entry['line']
+                if 'serve phases:' in line:phase=kv(line)
+                if 'serve stats:' in line:
+                    stats=kv(line)
+                    if int(stats['prompt_tokens'])==r['prompt'] and int(stats['generated_tokens'])==r['generated']:
+                        candidates.append((abs(entry['time']-r['end']),dict(phase)))
+                    phase={}
+            if candidates:native=min(candidates,key=lambda x:x[0])[1]
+        first=r['first']
+        cleaned.append(dict(label=r['label'],agent=r['agent'],sent=r['sent'],first=first,end=r['end'],
+             offered_in_window=begin<=r['sent']<end,completed=r['completed'],
+             ttft_s=first-r['sent'] if first is not None and first<end and r['sent']>=begin else None,
+             ttft_censored_s=end-r['sent'] if (first is None or first>=end) and r['sent']>=begin else None,
+             carry_in=r['sent']<begin,
+             pending_at_cutoff=first is None or first>=end,
+             queue_exposure_s=max(0,min(first if first is not None else end,end)-max(r['sent'],begin)),
+             window_tokens=window_tokens(r['events'],begin,end,count),
+             target=r['target'],generated=r['generated'],prompt=r['prompt'],reused=r['reused'],
+             new=r['prompt']-r['reused'] if r['prompt'] is not None and r['reused'] is not None else None,
+             phases=native,spec=r['spec']))
+    gaps=[b-a for r in active for a,b in zip([t for t,_,_ in r['events']],[t for t,_,_ in r['events']][1:])
+          if begin<=a<b<end]
+    wall_rows=[dict(sent=r['sent'],first=r['first'] if r['first'] is not None else end,end=r['end']) for r in active]
+    trace=[]
+    for offset in range(0,math.ceil(end-begin),20):
+        lo=begin+offset;hi=min(end,lo+20)
+        gs=[b-a for r in active for a,b in zip([t for t,_,_ in r['events']],[t for t,_,_ in r['events']][1:]) if lo<=a<b<hi]
+        trace.append(dict(start_s=offset,duration_s=hi-lo,gap_p50_s=percentile(gs,.5),
+                          gap_p95_s=percentile(gs,.95),gap_max_s=max(gs,default=None),
+                          **interval_buckets(wall_rows,lo,hi)))
+    agents=[]
     for agent in range(3):
-        selected = [r for r in rows if r["label"].startswith(f"a{agent}-")]
-        gaps = [g for r in selected for g in r["delta_gaps_s"]]
-        result["agents"].append({
-            "agent": agent, "calls": len(selected),
-            "generated": sum(r["generated"] for r in selected),
-            "ttft_p50_s": percentile([r["ttft_s"] for r in selected], .5),
-            "ttft_p95_s": percentile([r["ttft_s"] for r in selected], .95),
-            "stream_decode_tps": sum(max(0, r["generated"] - 1) for r in selected) /
-                                 max(.000001, sum(r["end"] - r["first"] for r in selected)),
-            "native_decode_tps": sum(r["generated"] for r in selected) /
-                                 max(.000001, sum(r["decode_wall_s"] for r in selected)),
-            "gap_p95_s": percentile(gaps, .95), "gap_max_s": max(gaps, default=None),
-            "queue_request_seconds": sum(r["queue_proxy_s"] for r in selected),
-            "header_delay_seconds": sum(r["header_delay_s"] for r in selected),
-        })
-    with (directory / "requests.csv").open("w", newline="") as f:
-        fields = ["label", "prompt", "new", "reused", "generated", "requested_output",
-                  "ttft_s", "wall_s", "stream_decode_tps", "native_decode_tps", "queue_proxy_s",
-                  "queue_kind", "reuse_source", "restore_origin", "prefill_wall_s", "decode_wall_s", "header_delay_s"]
-        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore", lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(rows)
-    with (directory / "trace-20s.csv").open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(bins[0]), lineterminator="\n")
-        writer.writeheader()
-        writer.writerows(bins)
-    dump(directory / "analysis.json", result)
-    return result
+        rs=[r for r in cleaned if r['agent']==agent];tt=[r['ttft_s'] for r in rs if r['ttft_s'] is not None]
+        agents.append(dict(agent=agent,window_tokens=sum(r['window_tokens'] for r in rs),
+                           turns_offered=sum(r['offered_in_window'] for r in rs),
+                           ttft_p50_s=percentile(tt,.5),ttft_p95_s=percentile(tt,.95),
+                           carry_in_requests=sum(r['carry_in'] for r in rs),
+                           pending_at_cutoff=sum(r['pending_at_cutoff'] for r in rs),
+                           queue_exposure_s=sum(r['queue_exposure_s'] for r in rs),
+                           censored_ttft=sum(r['ttft_censored_s'] is not None for r in rs)))
+    return dict(window_begin=begin,window_end=end,window_seconds=end-begin,
+                window_tokens=sum(r['window_tokens'] for r in cleaned),
+                aggregate_tps=sum(r['window_tokens'] for r in cleaned)/(end-begin),
+                gap_p50_s=percentile(gaps,.5),gap_p95_s=percentile(gaps,.95),gap_max_s=max(gaps,default=None),
+                agents=agents,trace_20s=trace,rows=cleaned)
 
 
-def compare(reference, candidate, own_history=False):
-    a, b = analyze(reference), analyze(candidate)
-    x = {r["label"]: r for r in a["rows"]}
-    y = {r["label"]: r for r in b["rows"]}
-    if x.keys() != y.keys():
-        raise ValueError("different request sets")
-    errors = []
-    prompt_deltas = []
-    if a.get("plan_sha256") != b.get("plan_sha256"):
-        errors.append("different seeded plans or tool gaps")
-    if own_history and b.get("history") != "own":
-        errors.append("candidate did not run with its own history")
-    if own_history:
-        for agent in range(3):
-            name = f"a{agent}-warm.request.json"
-            if digest(reference / name) != digest(candidate / name):
-                errors.append(f"different warm root {agent}")
-    for label in x:
-        if own_history:
-            lhs = json.loads((reference / f"{label}.request.json").read_text())
-            rhs = json.loads((candidate / f"{label}.request.json").read_text())
-            # Batched rounding can change generated history. Fresh tool input
-            # bytes and every generation setting must remain identical.
-            lhs["input"], rhs["input"] = lhs["input"][-2:], rhs["input"][-2:]
-            if lhs != rhs:
-                errors.append(f"{label}: unequal new input or generation settings")
-            if x[label]["prompt"] != y[label]["prompt"]:
-                prompt_deltas.append({"label": label, "tokens": y[label]["prompt"] - x[label]["prompt"]})
-        for field in (("generated",) if own_history else ("request_sha256", "prompt", "generated")):
-            if x[label][field] != y[label][field]:
-                errors.append(f"{label}: unequal {field}: {x[label][field]} != {y[label][field]}")
-    # Differences in *processed* rows are intentionally surfaced: cache effects
-    # are a result, not something to hide with a denominator adjustment.
-    if errors:
-        raise ValueError("unmatched work; no speed ratio:\n" + "\n".join(errors))
-    return {"reference_wall_s": a["wall_s"], "candidate_wall_s": b["wall_s"],
-            "speed_ratio": a["wall_s"] / b["wall_s"], "generated": a["generated"],
-            "reference_new": a["new"], "candidate_new": b["new"],
-            "identical_new_inputs_and_generated_counts": True,
-            "history": "own" if own_history else "frozen", "full_prompt_count_deltas": prompt_deltas}
+def compare(reference,candidate):
+    a=json.loads((reference/'summary.json').read_text());b=json.loads((candidate/'summary.json').read_text())
+    if (a['family'],a['seed'],a['window_seconds'],a['metric'])!=(b['family'],b['seed'],b['window_seconds'],b['metric']):
+        raise ValueError('different rate protocols')
+    return dict(reference_tps=a['aggregate_tps'],candidate_tps=b['aggregate_tps'],
+                throughput_ratio=b['aggregate_tps']/a['aggregate_tps'],
+                reference_window_tokens=a['window_tokens'],candidate_window_tokens=b['window_tokens'])
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
-    plan = commands.add_parser("plan")
-    plan.add_argument("--calls-csv", type=Path, default=DEFAULT_CALLS)
-    plan.add_argument("--family", choices=("v41", "glm", "fn"), required=True)
-    plan.add_argument("--seed", type=int, default=20261108)
-    plan.add_argument("--seconds", type=float, default=240)
-    plan.add_argument("--out", type=Path, required=True)
-    run = commands.add_parser("run")
-    for name in ("binary", "model", "plan", "out"):
-        run.add_argument(f"--{name}", type=Path, required=True)
-    run.add_argument("--tokenizer", type=Path)
-    run.add_argument("--corpus", type=Path)
-    run.add_argument("--reference", type=Path)
-    run.add_argument("--history", choices=("own", "frozen"), default="own",
-                     help="own is the agent protocol; frozen is a canonical-history diagnostic")
-    run.add_argument("--arm", choices=("serial", "default"), required=True)
-    run.add_argument("--warm-tokens", type=int, default=48000)
-    run.add_argument("--context", type=int, default=98304)
-    run.add_argument("--port", type=int, default=18737)
-    run.add_argument("--timeout", type=float, default=780)
-    analysis = commands.add_parser("analyze")
-    analysis.add_argument("directory", type=Path)
-    comparison = commands.add_parser("compare")
-    comparison.add_argument("reference", type=Path)
-    comparison.add_argument("candidate", type=Path)
-    comparison.add_argument("--history", choices=("own", "frozen"), default="own",
-                            help="own compares fresh inputs/output counts; frozen also requires identical full requests")
-    args = parser.parse_args()
-    if args.command == "plan":
-        if args.seconds <= 0:
-            parser.error("--seconds must be positive")
-        with args.calls_csv.open() as f:
-            value = make_plan(list(csv.DictReader(f)), args.family, args.seed, args.seconds)
-        value["calls_sha256"] = digest(args.calls_csv)
-        dump(args.out, value)
-        print(json.dumps(value))
-    elif args.command == "run":
-        if not args.reference and (not args.corpus or not args.tokenizer):
-            parser.error("recording requires --corpus and --tokenizer")
-        arm = Arm(args)
-
-        def stop(signum, frame):
-            arm.stop.set()
-            if arm.server is not None and arm.server.poll() is None:
-                arm.server.send_signal(signal.SIGINT)
+    parser=argparse.ArgumentParser(description=__doc__)
+    sub=parser.add_subparsers(dest='command',required=True)
+    p=sub.add_parser('plan');p.add_argument('--family',choices=('v41','glm','fn'),required=True)
+    p.add_argument('--calls-csv',type=Path,default=DEFAULT_CALLS);p.add_argument('--seed',type=int,default=20261109)
+    p.add_argument('--seconds',type=float,default=180);p.add_argument('--out',type=Path,required=True)
+    p=sub.add_parser('run')
+    for name in ('binary','tokenizer','model','corpus','plan','out'):p.add_argument('--'+name,type=Path,required=True)
+    p.add_argument('--arm',choices=('serial','default'),required=True);p.add_argument('--ramp',type=float,default=15)
+    p.add_argument('--warm-tokens',type=int,default=48000);p.add_argument('--context',type=int,default=196608)
+    p.add_argument('--port',type=int,default=18737);p.add_argument('--cool',type=float,default=25)
+    p.add_argument('--timeout',type=float,default=900);p.add_argument('--keep-bulk',action='store_true')
+    p.add_argument('--harness-commit',default='working-tree')
+    p=sub.add_parser('analyze');p.add_argument('directory',type=Path)
+    p=sub.add_parser('compare');p.add_argument('reference',type=Path);p.add_argument('candidate',type=Path)
+    args=parser.parse_args()
+    if args.command=='plan':
+        with args.calls_csv.open() as f:plan=make_plan(list(csv.DictReader(f)),args.family,args.seed,args.seconds)
+        dump(args.out,plan);print(json.dumps({k:v for k,v in plan.items() if k!='population'}))
+    elif args.command=='run':
+        arm=Arm(args)
+        def stop(sig,frame):
+            arm.abort.set();arm.finish.set()
+            if arm.server is not None and arm.server.poll() is None:arm.server.send_signal(signal.SIGINT)
             raise KeyboardInterrupt
-
-        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-            signal.signal(sig, stop)
+        for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,stop)
         arm.run()
-    elif args.command == "analyze":
-        print(json.dumps({k: v for k, v in analyze(args.directory).items() if k not in ("rows", "trace_20s")}))
-    else:
-        print(json.dumps(compare(args.reference, args.candidate, args.history == "own")))
+    elif args.command=='analyze':print((args.directory/'summary.json').read_text())
+    else:print(json.dumps(compare(args.reference,args.candidate)))
 
 
-if __name__ == "__main__":
-    main()
+if __name__=='__main__':main()

@@ -26,7 +26,12 @@ fn git_path(manifest_dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 fn watch_git_metadata(manifest_dir: &Path) {
-    for name in ["HEAD", "index", "packed-refs", "refs", "reftable"] {
+    // Do not watch `index`: read-only git queries (`status`, `diff`) refresh
+    // its stat cache and rewrite it, which would invalidate every build even
+    // though `ls-files --stage` (the staged content the stamp hashes) is
+    // unchanged. Staging a real edit also changes a watched source file, so
+    // the build still re-stamps when the staged content can matter.
+    for name in ["HEAD", "packed-refs", "refs", "reftable"] {
         if let Some(path) = git_path(manifest_dir, name)
             && path.exists()
         {

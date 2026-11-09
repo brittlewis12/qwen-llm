@@ -23,7 +23,10 @@ esac
 cd "$(git rev-parse --show-toplevel)"
 
 worktree_clean() {
-  git diff --quiet HEAD -- && [ -z "$(git ls-files --others --exclude-standard)" ]
+  # These are read-only queries; keep git from refreshing the worktree index,
+  # which would otherwise invalidate the provenance build script.
+  GIT_OPTIONAL_LOCKS=0 git diff --quiet HEAD -- &&
+    [ -z "$(GIT_OPTIONAL_LOCKS=0 git ls-files --others --exclude-standard)" ]
 }
 
 if ! worktree_clean; then

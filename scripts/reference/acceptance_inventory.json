@@ -996,9 +996,9 @@
   {
     "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::select_kernels_timing",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+    "class": "timing",
+    "ignored": true,
+    "reason": "Environment-gated M5 timing probe, ignored so ordinary runs never time or take the canonical lease; parent timing lane only, never CPU acceptance."
   },
   {
     "target": "lib",
@@ -1038,9 +1038,9 @@
   {
     "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::mma_sink_tile_dispatch_timing",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+    "class": "timing",
+    "ignored": true,
+    "reason": "Environment-gated M5 timing probe, ignored so ordinary runs never time or take the canonical lease; parent timing lane only, never CPU acceptance."
   },
   {
     "target": "lib",
@@ -1094,9 +1094,9 @@
   {
     "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::flash_decode::flash_decode_kill_test_timing",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+    "class": "timing",
+    "ignored": true,
+    "reason": "Environment-gated M5 timing probe, ignored so ordinary runs never time or take the canonical lease; parent timing lane only, never CPU acceptance."
   },
   {
     "target": "lib",
@@ -3089,9 +3089,9 @@
   {
     "target": "lib",
     "name": "deepseek_v41::forward::prefill::tests::hc_timing::hc_rows_kernel_timing",
-    "class": "gpu",
-    "ignored": false,
-    "reason": "Metal context, allocation or dispatch witness; parent GPU lane only."
+    "class": "timing",
+    "ignored": true,
+    "reason": "Environment-gated M5 timing probe, ignored so ordinary runs never time or take the canonical lease; parent timing lane only, never CPU acceptance."
   },
   {
     "target": "lib",

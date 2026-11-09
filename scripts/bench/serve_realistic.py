@@ -232,12 +232,12 @@ class Arm:
         sent = time.time()
         headers = first = final = None
         events = []
-        conn = http.client.HTTPConnection('127.0.0.1', self.args.port, timeout=180)
+        conn = http.client.HTTPConnection('127.0.0.1', self.args.port, timeout=self.args.timeout)
         try:
             conn.request('POST', '/v1/responses', body=payload, headers={'Content-Type':'application/json'})
             response = conn.getresponse()
             headers = time.time()
-            if response.status != 200:
+            if response.status != 200 and not self.finish.is_set():
                 raise RuntimeError(f'HTTP {response.status}: {response.read().decode()[:1000]}')
             while True:
                 line = response.readline()
@@ -366,14 +366,19 @@ class Arm:
                     while time.time()<self.window_end and not self.finish.is_set():
                         self.check()
                         for f in futures:
-                            if f.done():
+                            if f.done() and time.time()<self.window_end and not self.finish.is_set():
                                 f.result()
                                 raise RuntimeError('agent exited before common cutoff')
                         self.finish.wait(.1)
                 finally:
                     self.finish.set()
                     if self.server.poll() is None:self.server.send_signal(signal.SIGINT)
-                for f in futures:f.result()
+                try:
+                    for f in concurrent.futures.as_completed(futures,timeout=45):f.result()
+                except concurrent.futures.TimeoutError:
+                    self.server.kill()
+                    self.server.wait(timeout=10)
+                    raise RuntimeError('server failed to cancel within 45 seconds')
             self.emit(event='window_done',seconds=self.plan['window_seconds'])
         except BaseException as exc:
             error=str(exc)

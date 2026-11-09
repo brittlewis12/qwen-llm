@@ -386,6 +386,47 @@ last-expert regressions and shared state hashing. No GPU timing or inference.
   `target/release/examples/fn_batch_counterfactual "$MODEL" "$CODE" "$PROSE" 8192 128 4 pair`
   (also 32768); pricing uses `8192 24 4 fine` (also 32768).
   Compact metrics/commands: **`~/qwen-runs/2026-11-09-fn-batch-next/`**.
+## 2026-11-09 - GPU Loop Family Census: GLM First, Prototype Not Shipped
+
+- Branch **`perf/gpu-loop-families`**, census **`ff598d1a`** on **`b3fbf7a1`**.
+  M5 Ultra, 8K, ordinary dispatches, same-snapshot ABBA, 32 transitions/arm;
+  temperature 0.8 / K20 / p0.95 / minP0.02. GLM uses tier-1 stock
+  UD-IQ3_XXS. GPU time sums command execution intervals; outside time is
+  wall minus that sum. These are fixture results, not a new family benchmark.
+
+  | Family | Token ms | GPU ms | Outside GPU ms | Outside share | Measured tok/s | Ideal zero-host ceiling tok/s |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | V4.1 | 14.081 | 13.485 | 0.596 | 4.23% | 71.02 | 74.16 |
+  | GLM | 17.184 | 16.323 | 0.861 | 5.01% | 58.19 | 61.26 |
+
+- CPU encoding work **0.636 / 0.374 ms**, sampling **0.152 / 0.170 ms**,
+  readback **0.040 / 0.027 ms** (V4.1 / GLM). V4.1 embedding/Engram
+  gathers **0.007 / 0.093 ms**; GLM embedding already runs on GPU. CPU
+  scopes overlap GPU execution, especially V4.1's causal submissions, and
+  are **not additive** to outside time. Warm greedy outside shares
+  **6.04% / 6.74%** (V4.1 has only one valid observed greedy arm).
+  Zero-host ceilings exclude GPU selection costs and are not predictions.
+- Qualified census arms: thermal **0**, no `pgrep -x rustc` overlap;
+  observed/control final-head hashes agree. Excluded V4.1's first transient
+  greedy pair and an initial GLM run using the laptop Maya-M artifact. The
+  corrected stock rerun missed the 30-minute gate. Initial build queued
+  about **8 min**, compiled **66 s** at nice 10; census GPU wait **200.4 s**.
+- **GLM first.** Prototype **`1f03c56b`** reuses the shared asynchronous
+  token driver/sampler and scalar operator body, accepts a GPU token tensor,
+  and moves sparse controls to a GPU prefix. Native B>1 paths are unchanged.
+  No default or CLI/serve enablement yet. Release build and formatting pass;
+  distribution, handoff, whole-model speed and ship suites remain pending.
+  Two attempts failed 60-s thermal gates (the corrected attempt saw pressure
+  **2 then 1**); another was stopped after review found a position-index bug,
+  fixed in `1f03c56b`. All three are excluded; no loop speedup is claimed.
+  Additional GPU waits **61.5 / 81.9 s**; corrected build **59.6 s** at nice 10.
+- Reproduce: `cargo run -p qwen-llm --release --example
+  gpu_loop_host_census -- FAMILY MODEL 8192 32`; prototype example
+  `glm_gpu_loop_check -- MODEL 8192 128`, each under the canonical lease.
+  Commit/command manifests, qualified arms and raw results:
+  **`~/qwen-runs/2026-11-09-gpu-loop-families/`**, especially
+  `corrected-summary.json`, `census/` and `census-stock/`. Coordination is
+  recorded on **GLM-PYH3 / V41-ZPX6**. Flash-Next QSA stays banked.
 
 ## 2026-11-09 - GLM M4 Peak-Before-Warm: KILL Under Build Load
 

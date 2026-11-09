@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-09 - V4.1 Causal Waves At Solo, B=2 And B=4: Default On
+
+- **All three widths win; ship default-on** on M5 (Apple10). Solo decode uses
+  the B=3 layer-scoped causal waves inside its three Engram-overlap command
+  buffers, rollback **`QWEN_V41_CAUSAL_EXECUTOR=0`**; B=2/B=4 reuse the B=3
+  plan, rollback **`QWEN_V41_BATCH_CAUSAL_EXECUTOR=0`** (now B=2..4). Kernels and
+  arithmetic unchanged; trace, capture, census/profile and ablation paths keep
+  native encoders. Base **`3d29c95e1`**, source **`5bb47fe30`**.
+- M5 Ultra, GSQ-RCO IQ2_XS, the B=3 method: restored prefixes, eight excluded
+  warm rounds, **128 teacher rounds per ABBA arm**, full-vocabulary readback.
+  Two separate processes per cell: r1 binary `17d4c6a4b`, r2 `5bb47fe30`
+  (identical runtime under the per-arm override). ms/token or ms/round, mean of
+  the two arms of each kind:
+
+  | Width | Depth | r1 native -> causal | r2 native -> causal | Pooled saving | Gain |
+  | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 1 | 32K | 14.074 -> 13.545 | 13.820 -> 13.357 | 0.496 ms | **+3.7%** |
+  | 1 | 64K | 14.151 -> 13.741 | 13.914 -> 13.431 | 0.447 ms | **+3.3%** |
+  | 2 | 32K | 22.731 -> 20.624 | 22.677 -> 20.736 | 2.024 ms | **+9.8%** |
+  | 4 | 32K | 33.689 -> 29.199 | 33.540 -> 28.920 | 4.555 ms | **+15.7%** |
+
+- Every candidate arm beat both controls in both runs; every arm thermal **0**.
+  Other lanes' compilers overlapped every arm except three of r2 solo-32K's
+  four (flagged, retained); no own build overlapped. Logits, each member's
+  causal state digest and eight following serial steps are **bitwise** identical
+  across arms and across both binaries: dNLL/KL **0**. B=2/B=4 at 64K not measured.
+- M5 at `5bb47fe30`: the three causal state/fork/failure tests under
+  `MTL_DEBUG_LAYER=1` **3 passed**; all `deepseek_v41::` lib tests **488 passed /
+  96 ignored**. Serve smoke, greedy, default against both rollbacks: one request,
+  four concurrent (width 4 stepping down to 1), one repeat; all complete, all six
+  texts identical across arms, clean teardown. Laptop M4 Max: lib **2467 passed /
+  694 ignored**, CLI **1697 passed / 74 ignored**, `scripts/check-contracts.sh`
+  **passes**.
+- Build `nice -n 10 cargo build --offline --locked --release -p qwen-llm
+  --features perf-ablations --example v41_batch_depth`, then `python3
+  scripts/research/v41-batch/run.py --binary BINARY --model MODEL --out RUNS
+  --depth 32768 --batch 4 --steps 128 --causal` (also batch 1/2; batch 1 at
+  65536). r2 ran the same `--leased` mode inside one `V41-waves` lease. GPU queue
+  this session **14 s**; the prior session's overlapping requests waited
+  17-41 min each. Compact evidence (M5):
+  `~/qwen-runs/2026-11-09-v41-waves-widths-final/summary.json`.
+
 ## 2026-11-09 - V4.1 B3 Causal Waves Default On
 
 - **Default on for M5 B=3 decode**, rollback

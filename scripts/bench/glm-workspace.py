@@ -31,10 +31,16 @@ def main():
     parser.add_argument("workload", choices=["run", "serve"])
     parser.add_argument("--release", choices=["on", "off"], required=True)
     parser.add_argument("--label", required=True)
+    parser.add_argument("--engine-commit", required=True,
+                        help="commit used to build the existing executable; driver identity is separate")
     args = parser.parse_args()
     fd = int(os.environ["QWEN_METAL_LEASE_FD"])
     os.fstat(fd)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    if not re.fullmatch(r"[0-9a-f]{7,64}", args.engine_commit):
+        raise ValueError("engine commit must be a hex object id")
+    engine_commit = subprocess.check_output(
+        ["git", "rev-parse", "--verify", args.engine_commit + "^{commit}"], cwd=ROOT, text=True).strip()
     if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT):
         raise RuntimeError("commit the measured tree first")
     model = resolve_model("GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf")
@@ -62,6 +68,11 @@ def main():
     append = cut("Explain the memory admission and snapshot behavior of this code.\n" +
                  (ROOT / "crates/qwen-llm/src/glm5_next_metal/snapshot.rs").read_text(), 512)
     thermals = []
+    compiler_samples = []
+    decode_ends = []
+    seen_ends = set()
+    log = None
+    sample_lock = threading.Lock()
     stop = threading.Event()
 
     def thermal():
@@ -70,16 +81,34 @@ def main():
         thermals.append(int(value.split()[-1]))
         return thermals[-1]
 
-    def monitor():
-        while not stop.wait(5):
+    def sample():
+        with sample_lock:
             thermal()
+            rows = subprocess.check_output(["ps", "-axo", "rss=,comm="], text=True)
+            rss = sum(int(parts[0]) * 1024 for line in rows.splitlines()
+                      if len(parts := line.split(maxsplit=1)) == 2
+                      and Path(parts[1]).name.strip("()") == "rustc")
+            now = time.time()
+            compiler_samples.append((now, rss))
+            if log is not None and log.exists():
+                for line in log.read_text().splitlines():
+                    if ("glm5_next stats:" in line or "serve phases:" in line) and line not in seen_ends:
+                        seen_ends.add(line)
+                        duration = re.search(r"(?:generation|decode)_ms=([0-9.]+)", line)
+                        if duration:
+                            decode_ends.append((now, float(duration[1])))
+
+    def monitor():
+        while not stop.wait(1):
+            sample()
 
     if thermal() != 0:
         raise RuntimeError("nonzero thermal pressure before arm")
     watcher = threading.Thread(target=monitor)
     watcher.start()
     child = None
-    result = {"commit": commit, "command": [str(Path(__file__).relative_to(ROOT)), *sys.argv[1:]],
+    result = {"commit": engine_commit, "harness_commit": commit,
+              "command": [str(Path(__file__).relative_to(ROOT)), *sys.argv[1:]],
               "model": model.name, "workload": args.workload, "release": args.release,
               "label": args.label}
     try:
@@ -98,6 +127,8 @@ def main():
                 if child.returncode:
                     raise RuntimeError(log.read_text()[-8000:])
                 result["stats"] = json.loads(stats.read_text())
+                if result["stats"]["build"]["commit"] != engine_commit:
+                    raise RuntimeError("CLI build identity differs from --engine-commit")
             else:
                 with socket.socket() as reserve:
                     reserve.bind(("127.0.0.1", 0))
@@ -142,6 +173,9 @@ def main():
                                         "status": row["status"]} for row in [first, second, third]]
                 child.terminate()
                 child.wait(timeout=20)
+            stop.set()
+            watcher.join()
+            sample()
             text = re.sub(r"\x1b\[[0-9;]*m", "", log.read_text())
             result["diagnostics"] = [line for line in text.splitlines()
                 if any(key in line for key in ["glm workspace:", "glm5_next stats:",
@@ -159,6 +193,19 @@ def main():
         thermal()
     result["thermal_samples"] = thermals
     result["thermal_valid"] = all(value == 0 for value in thermals)
+    # End observations lag their diagnostic writes by at most one poll. A
+    # two-second guard conservatively includes both ends of each decode.
+    # Setup builds are allowed; timing never acquires the build lock.
+    result["compiler_poll_seconds"] = 1
+    result["compiler_window_guard_seconds"] = 2
+    result["decode_windows"] = []
+    for end, duration in decode_ends:
+        observed = [rss for at, rss in compiler_samples
+                    if end - duration / 1000 - 2 <= at <= end + 2]
+        result["decode_windows"].append({
+            "decode_ms": duration, "compiler_samples": len(observed),
+            "compiler_peak_rss_bytes": max(observed, default=0),
+            "no_compiler_observed": bool(observed) and not any(observed)})
     print(json.dumps(result), flush=True)
     if not result["thermal_valid"]:
         raise RuntimeError("thermal pressure changed; arm excluded")

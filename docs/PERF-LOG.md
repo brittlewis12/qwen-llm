@@ -150,6 +150,84 @@ default precision/embedding/MTP checks, the product selected-value oracle,
 last-expert regressions and shared state hashing. No GPU timing or inference.
 [Exact deletions, retained cases and validation protocol](bench/2026-11-09-ignored-sweep-batch2.md).
 
+
+## 2026-11-09 - Flash-Next QSA SIMD Norms: Native B4 Reaches 1.75x
+
+- Pinned to **`e22ce32a2`** (main **`fdd087b74`** plus the prior measured
+  batch series); **no mid-validation rebases**. M5 GSQ-RCO IQ3_S, independent
+  B4 states at depth 8192/32768 plus offsets 0/17/34/51, code/prose cohorts.
+- **Priced before implementation**, source **`f494a232`**, two palindromic
+  passes of 24 real B4 rounds/cell, with selected private kernel outputs held.
+  These intentionally invalid-numerics counterfactuals are non-additive cost
+  estimates. Compile overlap is flagged; wall/encode drift remains visible.
+
+  | Private work omitted | Wall saving, 8K / 32K ms | GPU saving, 8K / 32K ms | Estimated implementation value |
+  | --- | ---: | ---: | --- |
+  | QSA RMS/RoPE | 1.90 / 1.95 | 1.68 / 1.76 | First: 0.9–1.4 ms in 0.5–1 h |
+  | Child-to-parent copies | 1.13 / 0.42 | 0.92 / 0.80 | Next: roughly 0.8–1.0 ms in 1 h |
+  | Router/top-k | 1.35 / 0.85 | 1.00 / 0.94 | 0.4–0.6 ms in 1–2 h |
+  | QSA pending/cache publication | 0.63 / 0.66 | 0.62 / 0.72 | 0.3–0.5 ms in 1–2 h |
+  | GDN controls/preparation | 1.33 / 1.61 | 1.35 / 1.37 | 0.5–0.8 ms in 3–5 h; buffer-slot pressure |
+
+  Engineering estimates are judgment. The copy proposal writes mixer/MoE
+  results directly into parent outputs: **384 of 420** private copies/round
+  are duplicate transport. No unmeasured copy/GDN/router stage is carried.
+- **Keep QSA normalization**, default on, rollback
+  **`QWEN_FN_BATCH_QSA_NORMS=0`**. One SIMD computes each RMS once; member
+  grids reduce **144 -> 36 launches/B4 round**. Main/index head dimensions
+  are **256/128**. Existing rotary/gate expressions, F16 caches and private
+  positions stay intact; scalar, prefill and M4 routes retain their policies.
+  The private scalar parts wrapper always passes `normalized=false`.
+- Same-process paired AB/BA, 128 teacher-forced rounds, first eight excluded;
+  measured source **`d2736c93`**, on/off engagement asserted **36/0** grids:
+
+  | Depth | Off / on round ms | Throughput gain | GPU saving |
+  | --- | ---: | ---: | ---: |
+  | 8K | 31.521 / 30.097 | **4.73%** | **1.439 ms** |
+  | 32K | 33.302 / 31.781 | **4.79%** | **1.484 ms** |
+
+  Signed dNLL **-4.27e-5 / +1.58e-5**, mean KL **7.45e-6 / 3.57e-7**;
+  worst cohort |dNLL| **0.000403**, KL **2.83e-5**, repeat noise **0**.
+  **32 exact fork rounds/depth**. All accepted timing arms thermal **0**;
+  **each overlaps compiles and is flagged**. An initial 128-wide main-head
+  eligibility guard failed to engage and is excluded. A later hot acquisition
+  rejected before sampling; retry cooled outside the lease.
+- Production build, no perf feature, same source, `fn_native_batch_check`
+  with 64 rounds, B4, 3 GPU warm tokens/state and exact handoff checks:
+
+  | Depth | Four serial steps ms | Native B4 round ms | Aggregate |
+  | --- | ---: | ---: | ---: |
+  | 8K | 53.251 | 30.334 | **1.755x** |
+  | 32K | 53.971 | 30.920 | **1.745x** |
+
+  These arms also overlap compiles, thermal **0**. Signed dNLL
+  **+1.60e-6 / +2.55e-5**, KL **7.64e-7 / 2.82e-7**; 32 exact forks/depth,
+  GPU/native roundtrip error **0**. Remaining distance to 1.8x is
+  **0.75 / 0.94 ms/round**. This is native standing, not a serve requalification.
+- Targeted M4 Metal-API-validation witness **passes**, 36 cases covering
+  B2/3/4, HD128/256, mixed long positions, shifted buffers, guards and exact
+  gate layout. Max scaled difference from incumbent **4.30e-7**; normalized
+  F64 RMS error at position zero **5.13e-8**. **No new `#[ignore]`**; witness
+  is classified GPU in the CPU acceptance inventory. At **`d6bd6705`**,
+  `scripts/check-contracts.sh` **passes**. Full lib/CLI suites were not rerun,
+  per the user's validation handoff; the new operator test alone was run.
+- Reproduce: build on M5 with `nice -n 10 cargo build --release -p qwen-llm
+  --features perf-ablations --example fn_batch_counterfactual`; under
+  `scripts/bench/with-metal-lease`, run the example with
+  `"$MODEL" "$CODE" "$PROSE" DEPTH 24 4 remaining` for pricing, and
+  `DEPTH 128 4 pair-qsa` for paired timing/distributions. Production standing:
+  build `--example fn_native_batch_check` without perf features and run
+  `"$MODEL" "$CODE" "$PROSE" DEPTH 64 4`. Operator command:
+  `MTL_DEBUG_LAYER=1 QWEN_REQUIRE_METAL_TESTS=1 nice -n 10 cargo test --release -p qwen-llm --lib independent_norms_preserve_positions_guards_and_gate_layout -- --nocapture`.
+  Source archive **`fn-qsa-prep-probe-20261109`**; compact commands, metrics,
+  excluded-arm reasons and lease rows: **`~/qwen-runs/2026-11-09-fn-qsa-prep/`**.
+- Waits: GPU lease **277.2 s (4.62 min)**; M5 builds **4m57s**, overlapped
+  with coding/checks; M4 operator build **7m10s**, plus a **55 s** failed
+  missing-trait compile. Contracts took **~18 min**, including separate release
+  artifacts and unmetered Cargo package-cache waits. MBX twice rejected a
+  build-script cache write (**~339 KB** payload, **256 KB** limit), a potential
+  removable cycle cost. No custom build lock or `taskpolicy -b` was used.
+
 ## 2026-11-09 - Flash-Next Paired Mixer Sharing; Price Remaining Native B4 Work
 
 - Main **`b3fbf7a12`**; real independent GSQ-RCO IQ3_S states, B4,

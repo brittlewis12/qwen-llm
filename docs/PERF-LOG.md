@@ -281,6 +281,110 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `$HOME/qwen-runs/2026-11-09-append-roofline/` on both hosts. M5 worktree,
   target, bundle and regenerable dispatch bulk removed; no owned worker,
   merge or client/server changes. V4.1 deferred for its separate Engram roof.
+## 2026-11-09 - GLM B=4: 33.84 / 34.25 / 35.35 ms, 624 Fewer Dispatches
+
+- Engine **`45687e25`**, base **`22046c76`**, M5 Ultra, stock **UD-IQ3_XXS**.
+  The first increment's **>=2-ms B=4 kill gate** passed before continuing;
+  cumulative savings now **4.66 / 5.42 / 6.01 ms** at 8K / 32K / 64K.
+  **28 ms remains open.** No speculation, persistent format change or extra
+  session allocation.
+- Start with the artifact-byte ledger in the earlier GLM entry, rather than
+  multiplying serial throughput. Shared always-on weights **7.170 GB**, of
+  which **6.084 GB Q6_K**; logical routed weights **3.052 GB/member**.
+  At 8K B=4, weights plus useful state total **20.634 GB** with no routed
+  overlap, or **18.660 GB** for the actual sampled expert union. Main's
+  **1175.47 GB/s loads-only** anchor gives **17.554 / 15.874 ms** floors.
+  These bracket two useful-byte assumptions; neither is a DRAM counter.
+  The latter assumes perfect reuse of shared experts and selected latent rows.
+  Convolution, small control/temporary traffic and repeated reads are additional.
+
+  | Depth | B=2 off / on ms | B=3 off / on ms | B=4 off / on ms | B=4 saved, two ABBA orders ms | Roof attainment, no overlap / union, off -> on |
+  | --- | ---: | ---: | ---: | ---: | --- |
+  | 8K | 26.170 / 24.044 | 32.305 / 28.903 | 38.495 / 33.837 | 4.677 / 4.639 | 45.6 / 41.2% -> 51.9 / 46.9% |
+  | 32K | 26.712 / 24.360 | 33.152 / 29.245 | 39.669 / 34.253 | 5.431 / 5.400 | 44.4 / 40.2% -> 51.4 / 46.6% |
+  | 64K | 27.489 / 24.824 | 34.358 / 29.785 | 41.363 / 35.353 | 6.456 / 5.564 | 42.8 / 38.8% -> 50.0 / 45.4% |
+
+  Round includes normal admission, full heads and route/selection validation.
+  Four independently restored code/prose prefixes, eight excluded warm
+  rounds/route, **ABBA + BAAB**, four retained arms/route with eight transitions
+  each. At 8K B=4, GPU **36.940 -> 32.399 ms**, CPU encode **0.926 -> 0.811 ms**.
+  All timed model packets monitor once per second: **thermal 0 throughout**.
+- After Q6 tiling, shared F32 routers and packed MLA views, group the existing
+  exact top-512 selector across independent members. Reuse the first member's
+  admitted packed score/id/status scratch, with explicit common strides,
+  per-member visibility and per-layer status checks. Smaller heterogeneous
+  workspaces fall back. Selection and expansion **44 -> 11 calls each**.
+  One grid also updates each member's independent KDA conv/recurrence buffers:
+  **136 -> 34 calls**, with the incumbent per-head arithmetic. Total B=4
+  dispatches **2341 -> 1717**. No new buffer or cache layout.
+- Default on. Roll back projection/copy policies with
+  **`QWEN_GLM53_BATCH_PROJECTIONS=0`**, selection with
+  **`QWEN_GLM53_BATCH_SELECTION=0`**, KDA with **`QWEN_GLM53_BATCH_KDA=0`**.
+  All three zero form the table's control. Existing global F32/DSA rollbacks
+  remain effective. B=1, Exact/F32 and ordinary prefill retain their routes.
+- Feature attribution at 8K: selector-only **36.317 -> 35.510 ms B=4**;
+  KDA on top of it **35.674 -> 33.891 ms**, **1.825 / 1.741 ms** saved in
+  the two orders. Smaller widths also pay: KDA **0.529 / 1.171 ms B=2/3**.
+  These are separate controlled packets, not additive whole-round allocations.
+- Accuracy: cumulative on/off matches **1536 complete teacher-forced vocabulary
+  vectors** over four documents and all three depths, **dNLL = KL = 0**.
+  Each depth also changes width/order/first workspace over **32 rounds**, then
+  performs a **13-token real append/member** using the borrowed scratch;
+  logits and final KDA/conv/latent/pool state match bitwise. Separate selector
+  and KDA packets each add 512 matching vectors. Model-free Metal witnesses
+  cover shifted bindings, canaries, immutable inputs, unequal visibility,
+  poisoned unread score tails, visible NaNs, and cross-member state aliases.
+- Remaining census, **`0ab2b486`**, 8K B=4: ordinary round **37.069 ms** after
+  the first increment. Four sampled encoder profiles rank Q6 projections,
+  IQ2_S gate/up (**8.334 ms sampled span**), IQ3_S down (**4.740**), selected
+  attention partial (**3.190**) and KDA (**2.784**). Profiling perturbs and
+  overlaps spans; do not add them or treat them as ordinary wall allocations.
+- Further kill: share an expert union through F32-coefficient few-row MMA,
+  stock banks, two common experts/member, otherwise distinct routes, B=2/3/4,
+  six tiles, two warm + ten retained alternating repetitions. **Loses at every
+  width**. B=4 best matrix gate/up **359.88 vs 186.53 us native**, down
+  **197.07 vs 112.08 us**. Only about 1.2 members use each expert; an eight-column
+  matrix wastes most columns. Native F64 relative RMS is also lower
+  (**2.50e-7 / 1.46e-7** vs **4.90e-7 / 2.66e-7** for the fastest matrices).
+  No runtime route or knob. Research source remains reproducible; transient
+  binaries and bulk outputs are discarded after the run.
+- Realistic serve: engine **`45687e25`**, steady harness **`4120be7e`**, three
+  continuous own-history agents, distinct **48K roots**, **15-s ramp + 90-s
+  shared window**, seed **20261109**, context 196608, fresh server per arm.
+  All scheduler/residency settings stay at default; only the three new
+  rollback flags change. Actual delivered rate **68.2889 tok/s off** versus
+  **77.2778 / 77.6000 on**, **13.16% / 13.63%** above that control.
+  Content-gap p95 **36.011 -> 31.685 / 31.650 ms**; maximum
+  **2.303 -> 2.295 / 2.299 s**. Root warm-up stays about **141 s**, untimed.
+  Valid arms are thermal **0 throughout**. These are observed rate cohorts
+  with natural EOS and unequal completed work, not identical-work ratios.
+  One on-arm was rejected at thermal 1 during untimed singleton root warm-up;
+  discard it and repeat after **180 s sustained level 0**, outside the lease.
+  The final control was canceled **before GPU acquisition** behind an external
+  **50-minute lease**. Thus serve has **one control and two default arms**;
+  there is **no serve ABBA claim**. Kernel ABBA above is complete.
+- Validation at **`45687e25`**: full M5 release library **2480 passed / 749
+  ignored**, all **11 release CLI targets, 1693 passed / 72 ignored**,
+  doctests **0 passed / 2 ignored**, contracts pass (tree **`da2bef08`**).
+  Required Metal witnesses and validation are on; test execution uses a
+  canonical lease without the build lock. Builds alone take the build lock.
+- Reproduce from the source commit with normal Cargo builds: release library
+  `--no-run`, `glm_batch_q6`, `glm_batch_census`, `glm_batch_experts`, `qwen`
+  and `qwen-tok`. No frozen/exported executables are evidence. Model packet:
+  `GLM53_GGUF=MODEL GLM53_BATCH_DEPTH=8192 QWEN_METAL_LEASE_WAIT=1
+  MTL_DEBUG_LAYER=0 LIB_TEST_EXECUTABLE
+  glm5_next_metal::packed::batch::tests::projection_model::m5_projection_abba_and_distribution
+  --exact --ignored --nocapture --test-threads=1`; also depths 32768/65536,
+  and `GLM53_BATCH_CONTROL=15 GLM53_BATCH_CANDIDATE=31` for KDA isolation.
+  Serve recipe: `scripts/research/glm-batch-q6/prepare_serve.py --source
+  9b193b38 --seed 20261109 --seconds 90 --out RUN`; then `serve.py` with the
+  normal build log/model, `RUN/plan.json`, `RUN/corpus.rs`, steady harness and
+  an output directory. The helper supports `--arms on2 off2 --cooldown 180`
+  for a cooled continuation; warm-up and cooling never enter the rate metric.
+  Census/operator examples require `scripts/bench/with-metal-lease`; timing
+  takes **no build lock**. Keep compact summaries, commands and check receipts
+  in **`$HOME/qwen-runs/2026-11-09-glm-batch-q6/`**; delete bulk after each run.
+
 ## 2026-11-09 - GLM Batched Projections: 2.16–2.43 ms Saved, Steady Agents +4.94%
 
 - Engine **`0160f910`**, base **`9b193b38`**, M5 Ultra, unchanged
@@ -349,7 +453,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Initial CLI invocation hit the shared laptop's busy Metal lease and memory
   admission; all targets were rerun under one validation lease, with no memory
   override. Builds alone use the build lock; all timing uses only canonical
-  Metal lease/wait, nice 10. Model packets and serve monitor thermal once per
+  Metal lease/wait. Model packets and serve monitor thermal once per
   second, **0 throughout**. Compact summaries/commands only:
   **`$HOME/qwen-runs/2026-11-09-glm-batch-q6/`**; no frozen binaries, exported
   snapshots or raw event/profile traces retained.

@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-09 - GLM M4 Prompt Workspace Lifetime: Default On
+
+- Branch **`perf/m4-glm-decode`**, base **`2b9fe91c`**, code **`a5ff2a0e`**;
+  product arms **`b9b8bb1c`**, 128-GiB M4 Max, unchanged **Maya-M IQ2_S**.
+  Default-on release when session peak reaches 75% of physical memory and
+  independent batching is unsupported; rollback **`QWEN_GLM53_RELEASE_PREFILL=0`**.
+  Completed prompt commands drain before dropping buffers: **2,600,271,872
+  device bytes freed**. Preserve 2048-row Fast/Half policy; appends normally
+  re-admit the original workspace before mutation. Supported M5 B>1 and the
+  F32-weight contract retain their existing paths.
+- Real **`qwen run`**, 8204 input / 128 output tokens: release **29.53** versus
+  rollback **29.59 wall tok/s**; **no resolved throughput gain** in this pair.
+  Real **`qwen serve`** root / 512-token user append (517 rendered) / followup:
+  **29.17 / 29.19 / 29.26 wall tok/s**, with three captured snapshots totaling
+  **663,702,916 bytes** retained after the append. No paging collapse in this
+  sequence. Thermal pressure **0**; compiler presence recorded, no timing
+  build lock or admission override.
+- Matched warmed native tg64@8192, capacity 10000, ABBA: stock **30.823**
+  versus one-row resident **30.900 tok/s**; **0.080 ms/token** difference is
+  within **0.121 ms/token** pair noise (preregistered floor **0.100**).
+  Same state/inputs/full readbacks; tiny reference storage pre-admitted within
+  the original budget and held in both modes. About **63.2%** of the Nov 6
+  bandwidth roofline; kernel work has not started.
+- 8K+512 / 64 teacher-forced vectors: signed **dNLL=0, KL=0**, incumbent
+  repeat noise **0**, append KL **0**; physical release and weak-buffer
+  destruction checked. Arithmetic/kernels unchanged. Full release lib
+  **2471 passed / 749 ignored**, CLI **1689 passed / 72 ignored**;
+  **`scripts/check-contracts.sh` passes** on the code commit.
+  Reproduce product arms with **`scripts/bench/glm-workspace.py`**;
+  exact build/witness commands and compact results:
+  **`~/qwen-runs/2026-11-08-glm-workspace/summary.json`**.
+  Current and prior roofline run bulk pruned; commit-plus-command evidence
+  replaces binary/source copies. **Ship the memory change; stop before kernels.**
+
 ## 2026-11-09 - GLM Small Appends: 400 Rows Beat The 512-Row Control
 
 - M5 Ultra, unchanged UD-IQ3_XXS. Code **`47b48418`**, guards **`d77a7347`**.
@@ -58,6 +92,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   "$RUNS/campaign.py" "$RUNS/native-abba" "$RUNS/native" "$MODEL" "$CORPUS"`;
   `$MODEL` resolves through `QWEN_MODEL_SEARCH_PATH`. Regenerable binaries,
   target and serve bulk removed; no merge or owned worker remains.
+
 
 ## 2026-11-09 - Share V4.1 HC Pre Grids Across Concurrent Decode Sequences
 
@@ -279,7 +314,6 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   own`. Evidence summaries/commands: `$RUNS_ROOT/2026-11-09-fn-serve-batch/`;
   no frozen executables or on-disk model checkpoints are required.
 
-
 ## 2026-11-09 - Steady Agent Concurrency: V4.1 1.308x, GLM 1.730x; 128K Rooflines
 
 - Clean engine **`9b193b38`**, M5 Ultra 256 GiB, current tier-1 artifacts;
@@ -370,7 +404,6 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   identities, full dispatch records and thermal controller:
   **`~/qwen-runs/2026-11-08-v41-batch-depth/`** on both hosts. No performance default
   changes in this census.
-
 
 ## 2026-11-08 - Warm Agent Concurrency: Observed Capacity, EOS Fails Exact-Work Gate
 
@@ -510,6 +543,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Raw source/binary identities, all operator candidates, kernel profiles,
   retained arms, conditions and test receipts:
   **`$HOME/qwen-runs/2026-11-08-glm-batch-dispatch/`** on both machines.
+
 
 ## 2026-11-08 - GLM M4 Decode Decision: Quant Work And Workspace Lifetime
 

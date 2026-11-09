@@ -122,6 +122,163 @@ Review all 13 new lease-fix ignores: delete the load stopwatch; retain twelve
 actual artifact checks or inventoried timing probes for runner migration.
 No GPU execution or timing. Fixed base a95456865; no main refresh.
 [Decisions, exact deletions, 13-test migration list and validation](bench/2026-11-09-ignored-sweep-batch3.md).
+## 2026-11-09 - GLM Causal Batch Waves: 3.0-3.4 ms Per B=4 Round
+
+- Default-on **`QWEN_GLM53_BATCH_WAVES`**, rollback **`=0`**. Reuse the
+  existing dependency-wave executor in bounded GLM layer scopes, preserving
+  reflected RAW/WAR/WAW byte-range dependencies. Arithmetic fusion is disabled;
+  the kernels, dispatch geometry, scratch and persistent-state layout stay the
+  same. Stage profiling uses serial encoders. B=1 and Exact/F32 retain their
+  existing contracts; this route is inside the admitted M5 Fast/Half B=2..4 step.
+- M5 Ultra, stock **UD-IQ3_XXS**, native round including full head readback and
+  route/selection validation. Four excluded warm rounds after each restore,
+  **ABBA + BAAB**, four retained arms/route, **16 transitions/arm**.
+  Initial source **`2379861dc`**, final M5 qualification **`ce581ae50`**;
+  preserved on `research/glm-b4-waves-abba` and
+  `research/glm-b4-waves-qualification`. These are paired cohorts, not a
+  subtraction from the earlier 33.837-ms standing.
+
+  | Depth / prefix cohort | B=2 off / on ms | B=3 off / on ms | B=4 off / on ms | B=4 saved, two orders ms |
+  | --- | ---: | ---: | ---: | ---: |
+  | 8K / distinct documents | 25.608 / 23.850 | 30.760 / 27.976 | 36.327 / 33.290 | 2.952 / 3.122 |
+  | 32K / forked root | 24.704 / 22.776 | 29.752 / 26.955 | 34.917 / 31.531 | 3.392 / 3.381 |
+
+  The forked cohort avoids four cold long prefills: one root, then independent
+  17/34/51-token document suffixes, private state and distinct TF continuations.
+  Both cohorts start with 64 warm rounds and unequal member positions.
+  All retained packets monitor once/second: **thermal 0 throughout**.
+  The earlier artifact ledger's approximately **17.55 / 17.61-ms** useful-byte
+  floors (no routed-overlap credit, **1175.47 GB/s** loads-only anchor) imply
+  approximately **52.7% / 55.9%** roof attainment on these two cohorts.
+  These are modeled useful-byte floors, not new DRAM counters. **28 ms remains
+  open**; the stage-removal and overlap ceilings in the pricing entry overlap.
+- Accuracy: **512 full teacher-forced vocabulary vectors** across 8K / 32K /
+  64K, plus **512 identical-arithmetic repeat vectors**: **all bits equal,
+  signed dNLL = KL = 0**, observed noise floor zero. Per-document/position
+  resampling is consequently zero on these cohorts. At 32K and 64K, another
+  **84 vectors/depth** cover changing B=1/2/3/4, member order and lending
+  workspace, followed by a real **13-token append/member**. Outputs and all
+  **eight final KDA/conv/latent/pool snapshots** match bitwise. No F64 operator
+  threshold substitutes for these pipeline witnesses. 64K is an accuracy
+  witness, not a timed round standing.
+- Realistic serve qualification, engine **`ce581ae50`**, harness **`e5ed42cd6`**:
+  three continuous own-history agents, distinct **48K cold roots**, **15-s
+  ramp + 90-s shared window**, seed 20261109, context 196608, fresh server per
+  arm, only the new rollback flag changes. The valid control delivers
+  **78.3556 tok/s**, **7052 window tokens**, p95 content gap **32.912 ms**,
+  maximum **2.238 s**, warm-up **140.236 s**, thermal 0 throughout.
+  Default delivers **86.1222 tok/s**, **7751 window tokens**, **+9.91%**.
+  P95 content gap **32.912 -> 29.631 ms** (-9.97%); maximum
+  **2.238 -> 2.184 s**, warm-up **140.236 / 140.478 s**, both retained
+  arms thermal 0 throughout. These are rate cohorts with natural EOS and
+  unequal completed work: one retained arm/route, **no serve ABBA claim**.
+  An earlier control was rejected at thermal 1 during its third warm root,
+  before the measurement window; its server drained and stopped. Retry after
+  180 s sustained level 0 outside the lease. The retry control waited about
+  **7.5 min**; the candidate waited approximately **13m13s**, behind a
+  reservation advertised for 20 min followed by another lane's packet.
+- Implementation kill completed in approximately **13 min**, including the
+  **7m48s** background build; 8K native packet **57.5 s**, quality **52.5 s**.
+  Final 32K combined packet **57.6 s** (GPU wait **73.1 s**); 64K quality
+  **76.7 s** (wait **215.8 s**). Joint serve build **7m41s**; standalone probe
+  dependency variant **3m55s**. M5 builds use **`taskpolicy -b`**, no build lock.
+  Cooling and all compilation happen outside GPU leases.
+- Rebased onto main **`70288e61`**; the M5-qualified GLM arithmetic and
+  scheduler implementation are unchanged. Final validation **`0972f48a`** on
+  the laptop: full release lib **2464 passed / 694 ignored**, Metal validation,
+  required GPU tests, serial; full CLI's **11 targets: 1697 passed / 72 ignored**,
+  doctests **0 passed / 2 ignored**. Both feature-gated examples type-check.
+  **`scripts/check-contracts.sh` passes: 612 CPU acceptance tests + 10
+  comparison tripwires**, no skips. Final lib/CLI prebuilds **7m11s / 4m27s**.
+  An initial diagnostic max reduction tripped the comparison checker; use the
+  shared checked reporter, then rerun the contracts. No new ignored tests.
+- Reproduce native probes with background `taskpolicy -b cargo build --offline
+  --locked --release -p qwen-llm --features perf-ablations --example
+  glm_batch_waves`, then `python3 scripts/research/glm-batch-next/run.py
+  --example glm_batch_waves --mode timing --depth 8192 --model "$MODEL"
+  --out "$RUN"`. For long-context witnesses: `--mode all --cohort forked
+  --depth 32768 --quality 32`, or `--mode quality --cohort forked --depth
+  65536 --quality 32`. The controller leases and monitors the whole packet.
+  Serve: regenerate plan/corpus with
+  `python3 scripts/research/glm-batch-q6/prepare_serve.py --seconds 90 --out
+  "$INPUT"`, then its `serve.py --build-log "$BUILD_LOG" --model "$MODEL"
+  --plan "$INPUT/plan.json" --corpus "$INPUT/corpus.rs" --harness
+  scripts/bench/serve_realistic.py --harness-commit e5ed42cd6 --out "$RUN"
+  --rollback QWEN_GLM53_BATCH_WAVES --arms off1 on1 --cooldown 180`.
+  Full suites are prebuilt outside the lease; the existing `cli.py` runner
+  accepts `--build-log` and optional `--lib-build-log` to select current Cargo
+  artifacts, avoiding compilation waits under a GPU lease. Regenerable
+  binaries, traces, snapshots and serve bulk are deleted after the run.
+  No merge; no owned worker or server remains.
+
+## 2026-11-09 - GLM B=4 Whole-Round Pricing And Two Small-Kernel Kills
+
+- M5 Ultra, stock UD-IQ3_XXS, four independently restored code/prose
+  prefixes at 8K + 0/17/34/51 positions, 64 warm teacher-forced rounds.
+  Counterfactual source **`c96796ea`**, one captured native B=4 round,
+  six alternating repetitions/group. Native control **35.524 ms**; this
+  cohort differs from the earlier 33.837-ms standing. Held stages replay
+  their exact real-input writes through GPU copies; private-input skips
+  remove the work without changing expert IDs. All retained heads and
+  mutable outputs match, including the native continuation. Feature-gated
+  examples only; no default path change from the probes.
+
+  | Stage | Exact-write hold saves ms | Private-input skip saves ms |
+  | --- | ---: | ---: |
+  | IQ gate/up | 7.871 | 7.213 |
+  | IQ down | 5.189 | 4.529 |
+  | KDA Q6 projections | 3.127 | 2.399 |
+  | Selected attention | 3.005 | 2.865 |
+  | Other Q6 projections | 2.002 | 1.806 |
+  | Per-member MLA projections | 1.857 | 1.757 |
+  | Shared Q6 projections | 1.015 | 1.498 |
+  | Batched Q8 projections | 0.913 | 0.900 |
+  | Router | 0.598 | 0.666 |
+  | mHC | 0.592 | 1.585 |
+  | Head | 0.506 | -0.280 |
+  | Index scores / selection | 0.390 / 0.376 | -0.529 / -0.426 |
+
+  Full state/cache copies make KDA/index-cache holds pessimistic (negative
+  savings). These ceilings overlap and are not additive allocations.
+  The capture's readonly-byte aggregates included stale inactive bindings;
+  **discard those byte figures**, fixed in **`248f686d`**. Artifact bytes put
+  the KDA Q6 floor at **2.389 ms**, leaving <0.74 ms of its hold ceiling.
+- Concurrency predictor retains all real RAW/WAR/WAW hazards: causal serial
+  **38.133**, ordered barriers **37.370**, reordered waves **34.064 ms**.
+  Private-input serial **36.508**, independent branches **29.946**, fully
+  independent dispatches **27.054 ms**. Branch cuts follow mHC post boundaries,
+  not individual sequence identities. Serial controls split into roughly
+  **34/39-ms populations by arm order**; treat the apparent 4-7-ms overlap
+  as an optimistic bound, not a production forecast. No additive credit
+  between overlap and stage removal.
+- Ranking reported before implementation, recoverable-time estimates / effort:
+  attention head grouping **0.5-1.5 ms / ~0.5 h**; MLA member projections
+  **0.5-1.2 ms / ~1 h**; causal overlap **1.5-3 ms / 2-3 h**; remaining KDA
+  Q6 tuning **0.2-0.6 ms / ~1 h**; IQ retile **0.5-1.5 ms / 3-5 h**.
+  The next two whole-round probes show why the raw ceilings need kill tests:
+  four-head attention groups (**`ecba32b33`**) save only **0.188 ms B=4**
+  (0.220/0.156 in the two orders); Q8 grouped MLA member grids with idle SIMD
+  groups removed (**`ab18fc231`**) save **0.020 ms** (34.713 -> 34.693).
+  MLA B=2/3 saves **0.018/-0.005 ms**. **Both paths and knobs removed.**
+  Their source remains on `research/glm-b4-kills`; no accuracy claim is needed
+  for killed candidates. The attention packet reached thermal 1 after all
+  timing arms and before quality output; it is unqualified diagnostic evidence.
+  The MLA packet completed at thermal 0. Next candidate: reuse main's causal
+  executor, without FN arithmetic rewrites, in bounded GLM layer scopes.
+- Commands: background `taskpolicy -b cargo build --offline --locked --release
+  -p qwen-llm --features perf-ablations --example glm_batch_bounds`, then
+  `QWEN_METAL_LEASE_WAIT=1 scripts/bench/with-metal-lease --task glm-b4-price
+  --for 5m -- target/release/examples/glm_batch_bounds "$MODEL" 8192 1`.
+  `python3 scripts/research/glm-batch-next/run.py --model "$MODEL" --out "$RUN"
+  --depth 8192 --frames 1` automates background build, cooling, lease and
+  thermal rejection. Analyze with its `summarize.py`. Killed variants use
+  the examples and controller at their recorded commits (MLA `--mode timing`).
+- Waits: first background build **166 s**, GPU queue **519 s**, hot acquisition
+  rejected before launching. Successful pricing build **578 s**, queue
+  **0.053 s**, active **85.7 s**, thermal 0 throughout. Attention build
+  **348 s**, queue **169 s**, active **53.4 s**, thermal rejection. MLA build
+  **233 s**, queue **0.094 s**, active **50.5 s**, thermal 0. No build locks,
+  frozen binaries, disk snapshots or new ignored tests.
 
 ## 2026-11-09 - V4.1 Expert Grouping Killed; Calibrated Overlap Bounds
 

@@ -56,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut model =
         Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, capacity, depth + steps + 128)?;
     let mut runner = model.create_runner(&ctx)?;
+    runner.configure_causal_executor(false);
     runner.prefill(&ids(64, config.vocab_size, 1))?;
     runner.reset()?;
     runner.prefill(&ids(depth, config.vocab_size, 1 ^ 0x9e3779b97f4a7c15))?;

@@ -3,6 +3,20 @@
 use super::*;
 use objc2_metal::MTLBinding;
 
+#[cfg(any(test, feature = "perf-ablations"))]
+thread_local! {static REPLAY_MODE:Cell<u8>=const {Cell::new(3)};}
+#[inline]
+fn replay_mode() -> u8 {
+    #[cfg(any(test, feature = "perf-ablations"))]
+    {
+        return REPLAY_MODE.with(Cell::get);
+    }
+    #[cfg(not(any(test, feature = "perf-ablations")))]
+    {
+        3
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum Binding {
     Buffer {
@@ -169,6 +183,19 @@ impl MetalContext {
 }
 
 impl KernelEncoder {
+    /// Research-only control: bit 0 schedules waves, bit 1 fuses scalar leaves.
+    /// It changes no normal-build policy and is scoped to the calling thread.
+    #[cfg(any(test, feature = "perf-ablations"))]
+    pub fn diagnostic_causal_replay(mode: u8) -> impl Drop {
+        assert!(mode < 4);
+        struct Guard(u8);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                REPLAY_MODE.with(|m| m.set(self.0));
+            }
+        }
+        Guard(REPLAY_MODE.with(|m| m.replace(mode)))
+    }
     /// Begin a bounded causal scope within a concurrent pass. Scopes and
     /// independent sequence owners compose without sharing mutable session state.
     pub(crate) fn begin_causal_scope(&self) {
@@ -185,7 +212,7 @@ impl KernelEncoder {
         fuse_ffn: bool,
     ) -> Result<(), MetalError> {
         let mut recording = self.recording.borrow_mut().take().expect("causal scope");
-        if fuse_ffn {
+        if fuse_ffn && replay_mode() & 2 != 0 {
             fuse_flash_next(ctx, &mut recording.nodes)?;
         }
         let mut spans = Vec::with_capacity(recording.nodes.len());
@@ -211,7 +238,11 @@ impl KernelEncoder {
             }
             spans.push(accesses);
         }
-        let waves = dependency_waves(&spans);
+        let waves = if replay_mode() & 1 != 0 {
+            dependency_waves(&spans)
+        } else {
+            (0..spans.len()).map(|i| vec![i]).collect()
+        };
         for wave in waves {
             self.buffer_barrier();
             for i in wave {
@@ -397,5 +428,117 @@ mod tests {
         ];
         let waves = dependency_waves(&spans);
         assert_eq!(waves, vec![vec![0, 1, 3], vec![2], vec![4]]);
+    }
+
+    #[test]
+    fn ffn_epilogue_f64_error_no_worse_than_unfused_chain() {
+        let Some(ctx) = test_support::metal_test_context() else {
+            return;
+        };
+        let (hidden, branches, topk) = (257usize, 3usize, 5usize);
+        let values = |n: usize, salt: usize| {
+            (0..n)
+                .map(|i| ((i * 167 + salt * 31) % 521) as f32 / 521. - 0.5)
+                .collect::<Vec<_>>()
+        };
+        let (experts, weights, shared, raw, residual) = (
+            values(hidden * topk, 1),
+            values(topk, 2),
+            values(hidden, 3),
+            values(branches, 4),
+            values(hidden * branches, 5),
+        );
+        let scale = 0.37f32;
+        let make = |v: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(v),
+                vec![v.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let (e, w, s, r, old, gate) = (
+            make(&experts),
+            make(&weights),
+            make(&shared),
+            make(&raw),
+            make(&residual),
+            make(&[scale]),
+        );
+        let native = make(&residual);
+        let fused = make(&residual);
+        let sum = MetalTensor::zeros_f32(&ctx, vec![hidden as u64]).unwrap();
+        let cmd = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&cmd);
+        encode_moe_weighted_sum_f32(&ctx, &enc, &e, &w, &sum, hidden, topk).unwrap();
+        encode_axpy_scalar_f32(&ctx, &enc, &s, &gate, &sum).unwrap();
+        enc.set_pipeline(&ctx.pipeline("kernel_qwen4exp_hc_inject_f32").unwrap());
+        enc.set_bytes(0, &[branches as u32, hidden as u32]);
+        enc.set_tensor(1, &sum);
+        enc.set_tensor(2, &r);
+        enc.set_tensor(3, &native);
+        enc.dispatch(
+            MTLSize {
+                width: hidden.div_ceil(256),
+                height: branches,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        enc.set_pipeline(&ctx.pipeline("kernel_qwen4exp_ffn_epilogue_f32").unwrap());
+        enc.set_bytes(0, &[hidden as u32, branches as u32, topk as u32]);
+        for (i, t) in [&e, &w, &s, &gate, &r, &fused].into_iter().enumerate() {
+            enc.set_tensor(i + 1, t);
+        }
+        enc.dispatch(
+            MTLSize {
+                width: hidden.div_ceil(256),
+                height: branches,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        enc.end();
+        cmd.commit();
+        wait_completed(&cmd).unwrap();
+        let read = |t: &MetalTensor| unsafe {
+            std::slice::from_raw_parts(
+                t.buffer.contents().as_ptr().cast::<f32>(),
+                hidden * branches,
+            )
+        };
+        let (a, b) = (read(&native), read(&fused));
+        let mut error = [(0f64, 0f64); 2];
+        for branch in 0..branches {
+            for j in 0..hidden {
+                let sum = (0..topk)
+                    .map(|k| f64::from(weights[k]) * f64::from(experts[k * hidden + j]))
+                    .sum::<f64>()
+                    + f64::from(scale) * f64::from(shared[j]);
+                let reference = f64::from(residual[branch * hidden + j])
+                    + sum * 2. / (1. + (-f64::from(raw[branch]) / branches as f64).exp());
+                for (slot, v) in [a, b].into_iter().enumerate() {
+                    let d = (f64::from(v[branch * hidden + j]) - reference).abs();
+                    error[slot].0 += d * d;
+                    error[slot].1 = error[slot].1.max(d);
+                }
+            }
+        }
+        assert!(
+            error[1].0 <= error[0].0 && error[1].1 <= error[0].1,
+            "native={:?} fused={:?}",
+            error[0],
+            error[1]
+        );
+        drop(old);
     }
 }

@@ -2196,6 +2196,16 @@ fn execute_qwen4exp_text_token_with_captures_sync(
         }
     };
     drop(pending);
+    if encoder.causal_mode {
+        if let Err(error) = encoder.finish_causal_scope(ctx, false) {
+            encoder.cancel_causal_scope();
+            encoder.end();
+            unsafe {
+                workspace.abandon_uncommitted()?;
+            }
+            return Err(Qwen4ExpTextSessionError::from(error).into());
+        }
+    }
     encoder.end();
     let encode_cpu_ms = wall_started.elapsed().as_secs_f64() * 1e3;
     let wait_started = Instant::now();
@@ -2229,7 +2239,11 @@ fn execute_qwen4exp_text_token_with_post_layer_hyper_probe_sync(
     let command = ctx.queue.commandBuffer().ok_or_else(|| {
         Qwen4ExpRuntimeError::Invalid("Metal command queue returned no command buffer".into())
     })?;
-    let encoder = KernelEncoder::begin(&command);
+    let encoder = if workspace.causal_executor {
+        KernelEncoder::begin_causal(&command)
+    } else {
+        KernelEncoder::begin(&command)
+    };
     let pending = match encode_qwen4exp_text_token_with_post_layer_hyper_probe(
         ctx, &encoder, token_id, position, table, weights, workspace, probe,
     ) {
@@ -2248,14 +2262,9 @@ fn execute_qwen4exp_text_token_with_post_layer_hyper_probe_sync(
     };
     drop(pending);
     if encoder.causal_mode {
-        if let Err(error) = encoder.finish_causal_scope(ctx, false) {
-            encoder.cancel_causal_scope();
-            encoder.end();
-            unsafe {
-                workspace.abandon_uncommitted()?;
-            }
-            return Err(Qwen4ExpTextSessionError::from(error).into());
-        }
+        encoder
+            .finish_causal_scope(ctx, false)
+            .map_err(Qwen4ExpTextSessionError::from)?;
     }
     encoder.end();
     let encode_cpu_ms = wall_started.elapsed().as_secs_f64() * 1e3;

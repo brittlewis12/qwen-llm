@@ -168,6 +168,152 @@ mod tests {
         assert!(!memory_tight(120 << 30, Some(256 << 30), false));
     }
 
+    /// Matched native timing: one weights instance and persistent state, the
+    /// same captured prefix, capacity and teacher-forced inputs. Only unused
+    /// prompt storage changes. The one-row comparator never runs an append;
+    /// production keeps its original 2048-row command ceiling.
+    #[test]
+    #[ignore = "model characterization: glm-5.3-flash-maya-m-iq2_s"]
+    fn m4_native_decode_matches_one_row_reference() {
+        assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("0"));
+        let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+        let fixture = crate::test_fixtures::Fixture {
+            id: "glm-5.3-flash-maya-m-iq2_s",
+            env: &[],
+            filename: "GLM-5.3-Flash-Maya-M-IQ2_S-00001-of-00003.gguf",
+        };
+        let gguf = GgufFile::open(fixture.required()).unwrap();
+        let ctx = MetalContext::new().unwrap();
+        let weights = Glm5NextWeights::load(&ctx, &gguf).unwrap();
+        let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf).unwrap();
+        let text = format!(
+            "[gMASK]<sop>Review this Rust server.\n{}\n{}",
+            include_str!("../../../qwen-cli/src/serve/backend_glm5_next.rs"),
+            super::super::tests::long_qualification_text()
+        );
+        let tokens: Vec<u32> = tokenizer
+            .encode(&text, false)
+            .unwrap()
+            .into_iter()
+            .map(|t| t as u32)
+            .collect();
+        assert!(tokens.len() >= 8256);
+        // Future CPU snapshot plus two complete 64-row logit streams. No
+        // admission or working-set override is used by either timing arm.
+        let cpu_reserve = 512 << 20;
+        let logits_reserve = 2 * 64 * u64::from(weights.config.vocab_size) * 4;
+        let mut session = Glm5NextSession::with_prefill_rows_and_cpu_reserve(
+            &ctx,
+            &weights,
+            10000,
+            2048,
+            cpu_reserve,
+        )
+        .unwrap();
+        assert!(
+            session.release_prefill_for_decode,
+            "requires the eligible memory-tight default path"
+        );
+        session.set_packed_lineage(PackedLineage::Fast).unwrap();
+        session.set_fast_precision(FastPrecision::Half).unwrap();
+        session.prefill_packed(&ctx, &tokens[..8192]).unwrap();
+        let prefix = session.capture_snapshot().unwrap();
+        assert!(prefix.bytes() as u64 + logits_reserve < cpu_reserve);
+        session.prepare_decode(&ctx).unwrap();
+
+        let thermal = || {
+            let status = std::process::Command::new("notifyutil")
+                .args(["-g", "com.apple.system.thermalpressurelevel"])
+                .output()
+                .unwrap();
+            assert!(status.status.success());
+            let text = String::from_utf8(status.stdout).unwrap();
+            assert_eq!(text.split_whitespace().last(), Some("0"), "{text}");
+        };
+        let mut oracle: Option<Vec<Vec<f32>>> = None;
+        let mut samples = Vec::new();
+        let mut records = Vec::new();
+        for (label, resident) in [
+            ("stock1", false),
+            ("resident1", true),
+            ("resident2", true),
+            ("stock2", false),
+        ] {
+            session.release_workspace(&ctx).unwrap();
+            session.prefill_config.as_mut().unwrap().rows = if resident { 1 } else { 2048 };
+            if resident {
+                session.prepare_prefill(&ctx, logits_reserve).unwrap();
+            }
+            session.release_prefill_for_decode = !resident;
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            thermal();
+            session.restore_snapshot(&prefix).unwrap();
+            // Priming follows cooling; restoring after this warm-up is
+            // untimed, as in the original resident roofline measurement.
+            for &token in &tokens[8192..8256] {
+                session.forward(&ctx, token).unwrap();
+            }
+            session.restore_snapshot(&prefix).unwrap();
+            thermal();
+            let start = std::time::Instant::now();
+            let logits: Vec<Vec<f32>> = tokens[8192..8256]
+                .iter()
+                .map(|&token| session.forward(&ctx, token).unwrap())
+                .collect();
+            let ms = start.elapsed().as_secs_f64() * 1e3;
+            thermal();
+            assert!(ms.is_finite() && ms > 0.0);
+            let kl = oracle.as_ref().map_or(0.0, |reference| {
+                reference
+                    .iter()
+                    .zip(&logits)
+                    .map(|(a, b)| super::super::tests::kl_divergence(a, b))
+                    .sum::<f64>()
+                    / 64.0
+            });
+            assert!(kl <= 1e-6, "matched-state KL {kl}");
+            if oracle.is_none() {
+                oracle = Some(logits);
+            }
+            samples.push((resident, ms));
+            let record = serde_json::json!({"label":label, "native_ms":ms,
+                "tps":64000.0/ms, "configured_rows":session.prefill_rows(),
+                "allocated_rows":session.prefill_workspace_rows(), "kl":kl,
+                "nonweight_device_bytes":ctx.current_allocated_size().saturating_sub(weights.retained_bytes)});
+            eprintln!("matched native arm: {record}");
+            records.push(record);
+        }
+        let stock: Vec<f64> = samples
+            .iter()
+            .filter(|(r, _)| !r)
+            .map(|(_, ms)| *ms)
+            .collect();
+        let resident: Vec<f64> = samples
+            .iter()
+            .filter(|(r, _)| *r)
+            .map(|(_, ms)| *ms)
+            .collect();
+        let stock_ms = (stock[0] + stock[1]) / 2.0;
+        let resident_ms = (resident[0] + resident[1]) / 2.0;
+        let delta_ms_per_token = (stock_ms - resident_ms) / 64.0;
+        let noise_ms_per_token = (stock[0] - stock[1])
+            .abs()
+            .max((resident[0] - resident[1]).abs())
+            / 64.0;
+        // Characterization reports the decision; it does not make CI depend
+        // on a speed threshold. The preregistered floor is 0.10 ms/token.
+        eprintln!(
+            "matched native summary: {}",
+            serde_json::json!({
+            "context":8192, "tokens":64, "capacity":10000,
+            "snapshot_bytes":prefix.bytes(), "arms":records,
+            "stock_tps":64000.0/stock_ms, "resident_tps":64000.0/resident_ms,
+            "delta_ms_per_token":delta_ms_per_token,
+            "noise_ms_per_token":noise_ms_per_token, "floor_ms_per_token":0.10,
+            "within_noise":delta_ms_per_token <= noise_ms_per_token.max(0.10)})
+        );
+    }
+
     #[test]
     #[ignore = "model witness: glm-5.3-flash-maya-m-iq2_s"]
     fn append_snapshot_release_preserves_distribution_and_policy() {

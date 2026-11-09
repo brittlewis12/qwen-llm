@@ -79,6 +79,13 @@ fn main() -> Result<()> {
             } {
                 s.restore_snapshot(&entry)?;
                 let mut sampler = Sampler::new(config(temp, 19))?;
+                let rustc_before = std::process::Command::new("pgrep")
+                    .args(["-x", "rustc"])
+                    .output()?
+                    .stdout;
+                let started_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs_f64();
                 let started = Instant::now();
                 let (first, tokens, forwarded) = if gpu {
                     let st = s.generate_gpu_tokens(&ctx, &head, &mut sampler, n, &[], |_| true)?;
@@ -98,7 +105,7 @@ fn main() -> Result<()> {
                 let wall = started.elapsed().as_secs_f64() * 1e3;
                 println!(
                     "{}",
-                    json!({"kind":"timing","depth":depth,"temperature":temp,"rep":rep,"gpu":gpu,"wall_ms":wall,"first_ms":first,"tokens":tokens,"tps":forwarded as f64*1e3/(wall-first)})
+                    json!({"kind":"timing","depth":depth,"temperature":temp,"rep":rep,"gpu":gpu,"wall_ms":wall,"first_ms":first,"tokens":tokens,"tps":forwarded as f64*1e3/(wall-first),"started_unix":started_unix,"finished_unix":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs_f64(),"rustc_before":String::from_utf8_lossy(&rustc_before),"rustc_after":String::from_utf8_lossy(&std::process::Command::new("pgrep").args(["-x","rustc"]).output()?.stdout)})
                 );
             }
         }

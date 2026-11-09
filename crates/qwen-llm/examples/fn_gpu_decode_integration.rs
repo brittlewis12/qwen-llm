@@ -86,12 +86,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             seed: 19,
         };
         for rep in 0..3 {
-            let arms = if rep % 2 == 0 {
-                [(false, false), (true, false), (true, true), (false, true)]
-            } else {
-                [(false, true), (true, true), (true, false), (false, false)]
-            };
-            for (causal, gpu) in arms {
+            let mut arms = [
+                (false, false, false),
+                (true, false, false),
+                (true, true, false),
+                (false, true, false),
+                (true, true, true),
+            ];
+            if rep % 2 != 0 {
+                arms.reverse();
+            }
+            for (causal, gpu, burst) in arms {
                 runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
                 runner.configure_causal_executor(causal);
                 runner.generate_gpu_tokens(&mut Sampler::new(sampling)?, 2, &[], |_| true)?;
@@ -99,14 +104,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut sampler = Sampler::new(sampling)?;
                 let now = Instant::now();
                 let (wall_ms, gpu_ms, encode_ms, wait_ms, first_ms) = if gpu {
-                    let stats = runner.generate_gpu_tokens(&mut sampler, count, &[], |_| true)?;
-                    assert_eq!(stats.forwarded_tokens, count - 1);
+                    let (mut remaining, mut gpu_ms, mut encode_ms, mut wait_ms) =
+                        (count, 0., 0., 0.);
+                    let mut first_ms = None;
+                    while remaining > 0 {
+                        let n = if burst { remaining.min(16) } else { remaining };
+                        let stats = runner.generate_gpu_tokens(&mut sampler, n, &[], |_| true)?;
+                        first_ms.get_or_insert(stats.first_token_ready_ms.unwrap());
+                        gpu_ms += stats.gpu_ms;
+                        encode_ms += stats.encode_cpu_ms;
+                        wait_ms += stats.completion_wait_ms;
+                        remaining -= stats.sampled_tokens;
+                        if remaining > 0 {
+                            // The fair owner consumes the yielded last token
+                            // in its next ordinary/native decode quantum.
+                            runner
+                                .forward_token(stats.terminal_token.unwrap() as u32)?
+                                .to_vec();
+                            let t = runner.last_token_timing().unwrap();
+                            gpu_ms += t.gpu_ms.unwrap_or(0.);
+                            encode_ms += t.encode_cpu_ms;
+                            wait_ms += t.completion_wait_ms;
+                        }
+                    }
                     (
-                        stats.wall_ms,
-                        stats.gpu_ms,
-                        stats.encode_cpu_ms,
-                        stats.completion_wait_ms,
-                        stats.first_token_ready_ms.unwrap(),
+                        now.elapsed().as_secs_f64() * 1e3,
+                        gpu_ms,
+                        encode_ms,
+                        wait_ms,
+                        first_ms.unwrap(),
                     )
                 } else {
                     let first = sampler.sample(runner.logits()?.as_slice())?.token;
@@ -133,14 +159,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 assert_eq!(runner.next_position(), start + count - 1);
                 println!(
                     "{}",
-                    json!({"kind":"whole_model","depth":depth,"temperature":temperature,"rep":rep,"causal":causal,"gpu_loop":gpu,"tokens":count,"transitions":count-1,"wall_ms":wall_ms,"transition_tps":(count-1) as f64*1e3/(wall_ms-first_ms),"gpu_ms":gpu_ms,"encode_ms":encode_ms,"wait_ms":wait_ms,"first_ms":first_ms,"sampler_version":sampler.algorithm_version()})
+                    json!({"kind":"whole_model","depth":depth,"temperature":temperature,"rep":rep,"causal":causal,"gpu_loop":gpu,"burst":burst,"tokens":count,"transitions":count-1,"wall_ms":wall_ms,"transition_tps":(count-1) as f64*1e3/(wall_ms-first_ms),"gpu_ms":gpu_ms,"encode_ms":encode_ms,"wait_ms":wait_ms,"first_ms":first_ms,"sampler_version":sampler.algorithm_version()})
                 );
             }
         }
     }
     // GPU autoregression supplies teacher inputs; replay exactly those inputs
     // on the incumbent twice to establish its repeat floor, then the executor.
-    for causal in [false, true] {
+    for (causal, burst) in [(false, false), (true, false), (true, true)] {
         runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
         runner.configure_causal_executor(causal);
         let sampling = SamplingConfig {
@@ -152,16 +178,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let mut selected = Vec::new();
         let mut observed = Vec::new();
-        runner.generate_gpu_tokens_observed(
-            &mut Sampler::new(sampling)?,
-            count,
-            &[],
-            |t, row| {
-                selected.push(t);
-                observed.push(row.to_vec());
-                true
-            },
-        )?;
+        let mut sampler = Sampler::new(sampling)?;
+        let mut left = count;
+        while left > 0 {
+            let stats = runner.generate_gpu_tokens_observed(
+                &mut sampler,
+                if burst { left.min(16) } else { left },
+                &[],
+                |t, row| {
+                    selected.push(t);
+                    observed.push(row.to_vec());
+                    true
+                },
+            )?;
+            left -= stats.sampled_tokens;
+            if left > 0 {
+                runner.forward_token(stats.terminal_token.unwrap() as u32)?;
+            }
+        }
         let mut baseline = Vec::new();
         for replay in 0..3 {
             runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
@@ -192,7 +226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect();
             println!(
                 "{}",
-                json!({"kind":"distribution","depth":depth,"gpu_causal":causal,"candidate":if replay==1{"incumbent_repeat"}else{"executor"},"rows":results})
+                json!({"kind":"distribution","depth":depth,"gpu_causal":causal,"burst":burst,"candidate":if replay==1{"incumbent_repeat"}else{"executor"},"rows":results})
             );
         }
         let results: Vec<_> = baseline
@@ -203,7 +237,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect();
         println!(
             "{}",
-            json!({"kind":"distribution","depth":depth,"gpu_causal":causal,"candidate":"gpu_loop","rows":results})
+            json!({"kind":"distribution","depth":depth,"gpu_causal":causal,"burst":burst,"candidate":"gpu_loop","rows":results})
         );
         // A resumed ordinary step checks history, recurrence and QSA frontiers.
         runner.restore_snapshot_with_logits(&entry, &entry_logits)?;

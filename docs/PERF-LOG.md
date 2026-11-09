@@ -71,6 +71,46 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `~/qwen-runs/2026-11-09-v41-batch-wave/summary.json`.
   Regenerable run bulk deleted; normal Cargo cache retained. No merge or
   owned process remains.
+## 2026-11-09 - GLM GPU Feedback Clears The Ship Gate
+
+- **Keep, default on for M5** in run, serial serve and bounded lone-owner
+  bursts; rollback **`QWEN_GLM53_GPU_TOKEN_LOOP=0`**. Budgets below 32 stay
+  on the host. The shared sampler/async driver feeds embedding gathers and
+  GPU sparse controls. Scalar operators and native B>1 ownership are unchanged.
+  V4.1 is deferred.
+- Stock UD-IQ3_XXS, 128 whole tokens including sampling/setup, same snapshot
+  and seed, alternating paired arms, temperature 0.8 / K20 / p0.95 / minP0.02:
+
+  | Context | Host tok/s | GPU loop tok/s | Paired gain |
+  | --- | ---: | ---: | ---: |
+  | 8K | 58.255 | 60.183 | **3.31%** |
+  | 32K | 57.208 | 59.132 | **3.36%** |
+
+- Primary timing arms thermal **0**, no compiler overlap. Sampled pair gains
+  **3.06–3.45% / 3.33–3.40%**; exclude the third 32K GPU arm's compiler overlap
+  (**3.77%**). Greedy gains about **5.15% / 5.17%**. Teacher-forced signed dNLL
+  **0**, max logit delta **0**, KL equals repeat noise (~1e-24). Model floating
+  arithmetic is unchanged. GPU→native **B2/B3/B4**→GPU passes at both depths:
+  32 exact fork rounds and zero continuation error; callback stop consumes
+  no extra token.
+- Default HTTP smoke passes lone feedback, native peers and cancel/recovery:
+  feedback **225/15/0/0/45**, native **0/48/48/0/0**, from response stats.
+  CLI greedy rollback/default outputs agree.
+- Code **`5149c4f0`**, base main **`466aadb21`**; measured vehicle **`8df78ec5`**,
+  frontend binary **`17075644`**. Later differences are only three test updates.
+  All **23** release targets ran once: 22 pass; library **2466 pass / 2
+  profiling-label failures / 777 ignored**. Fixed the allowlists, preserving
+  command-count assertions; both and main's test-lease fix pass targeted
+  reruns (**2468 effective library passes**). CLI **1693** pass. Final CPU
+  contracts pass tree **`d70f32c0`**. No new ignores. Main's witness retirement
+  advanced during qualification; GLM runtime files were unchanged.
+- Builds at nice 10; largest build queue about **10 min**. GPU waits total
+  **1888 s (31m28s)**. Excluded smoke attempts resolved a rewritten shard alias
+  to an invalid filename, then used FN console counters instead of GLM stats;
+  the final witness corrects both. No merge. Commits, commands, qualified pairs
+  and validation: **`~/qwen-runs/2026-11-09-glm-loop-qualify/`**, especially
+  `qualification.json` and `lease-waits.json`. Reproduce with
+  `glm_gpu_loop_check MODEL DEPTH 128` and the recorded frontend commands.
 
 ## 2026-11-09 - V4.1 Expert Grouping Killed; Calibrated Overlap Bounds
 

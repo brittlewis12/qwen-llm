@@ -6,6 +6,93 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - GLM Batched Decode: Reuse IQ Expert Activations Across Channels
+
+- Base **`09a3a521`** census, implementation rebased onto **`2b9fe91c`**
+  (code **`54af14bd`**), M5 Ultra, unchanged production
+  **GLM-5.3-Flash UD-IQ3_XXS**. Start from the real OpenCode calls (71–80% decode) and
+  a B=3 per-kernel census at **32768/65536**. Three independently prefetched
+  code/prose contexts; ordinary full-readback round **36.179/37.215 ms**,
+  **2020 dispatches/round**. Four timestamp profiles/depth cover a complete
+  indexer publication period. Profiling splits encoders: wall rises to
+  **43.372/44.553 ms**, summed overlapping spans **46.763/47.714 ms**.
+  Spans rank kernels; they are not additive ordinary wall allocations.
+
+  | Sampled kernel family | 32K / 64K span ms per B=3 round |
+  | --- | ---: |
+  | Q6 few-row projections | about 13.5 / 13.4 |
+  | IQ2_S routed gate/up (41 calls) | 7.774 / 7.760 |
+  | IQ3_S routed down (39 calls) | 4.634 / 4.636 |
+  | F32 GEMV (159 calls; 126 routers) | 2.924 / 2.887 |
+  | Selected-attention partial (33 calls) | 2.429 / 2.445 |
+  | KDA recurrence (102 calls) | 2.100 / 2.109 |
+  | Sparse selection (33 calls) | 1.429 / 2.370 |
+
+- Q6 already uses the few-row matrix route; the next-largest IQ pair still
+  uses one output channel/SG. First kill test: reuse its compile-time-K template
+  across **four output channels per SIMD group**. Actual hot shapes are
+  IQ2_S **4096 -> 2048** gate/up and IQ3_S **2048 -> 4096** down. Reuse
+  activation-fragment loads; preserve each channel's F32 dequantization,
+  explicit FMA chain, SIMD reduction, SwiGLU/clamp and route rejection.
+  No materialized weight cache, new scratch, buffer format or extra dispatch.
+  Explicit GLM batch entrypoints keep all existing primitive policies and
+  ordinary single-token/Exact/F32 routes unchanged. Default on;
+  **`QWEN_GLM53_BATCH_EXPERT_ROWS=0`** restores the original token grids.
+- Real artifact operator sweep, rotating IDs and balanced variant order,
+  two excluded warm iterations plus ten retained repeats, channels/SG
+  **1/2/4/8**. Four wins at every width; all candidate outputs match the
+  incumbent bitwise. At B=2/3/4, gate/up **1.368/1.312/1.314x**, down
+  **1.321/1.346/1.349x**. Keep only the winning four-channel instantiations.
+- Same-binary whole-round packet: independently restored prefixes, excluded
+  route warmups, **ABBA + BAAB**, four retained arms/route/cell, eight
+  transitions/arm; serial controls bracket each width. Full head readback,
+  route/sparse status validation and normal admission remain in the timer.
+
+  | Depth | B=2 rollback / default ms | B=3 rollback / default ms | B=4 rollback / default ms | B=3 / B=4 vs serial |
+  | --- | ---: | ---: | ---: | ---: |
+  | 8K | 28.006 / 26.280 | 35.355 / 32.462 | 42.673 / 38.688 | 1.580x / 1.762x |
+  | 32K | 28.630 / 26.884 | 36.211 / 33.282 | 43.825 / 39.835 | 1.564x / 1.741x |
+  | 64K | 29.401 / 27.687 | 37.359 / 34.522 | 45.380 / 41.390 | 1.541x / 1.727x |
+
+  Whole-round speedup over shipped batching is **6.2–6.6% B=2,
+  8.2–8.9% B=3, 9.6–10.3% B=4** across all three depths. Both ABBA
+  orders agree in every cell. Still short of 2x; Q6 projections are the
+  largest remaining sampled family. Dispatch count is unchanged.
+- Distribution witness at **B=4**: **128 sequential teacher-forced complete-vocabulary
+  vectors x four documents x each depth**; old and new batch arithmetic
+  match bitwise, all finite (**1536 complete vectors**, **dNLL = KL = 0**).
+  Operator bits also match at B=2/3; existing mode, poisoning,
+  width/permutation and lifetime gates remain. New model-free GPU witness covers duplicate and invalid IDs,
+  mixed READY/rejected members, shifted inputs, untouched banks, output
+  canaries and singleton/unaligned fallbacks.
+- End-to-end: the realistic warm-agent harness was **not on main** when
+  qualification started, so use the requested fallback: fresh servers,
+  **three agents x three turns**, distinct ~16K cold roots, ~1K tool appends,
+  greedy/seed 1, **128 outputs/turn**, actual response history replayed.
+  Both arms retain default MAX_ACTIVE/live states and scheduling; only
+  **`QWEN_GLM53_BATCH_EXPERT_ROWS=0`** changes. Full **off/on/on/off**.
+  Rollback **69.528/69.580 s**, default **68.771/68.699 s**;
+  mean **69.554 -> 68.735 s**, **1.0119x** (pairs **1.0110/1.0128x**).
+  Every arm completes **1152 outputs, 55008 new rows**. Matched fresh
+  source bytes/settings, own reply histories; rollback repeats also diverge
+  greedily (5/9 replies), so do not use text equality as the numerical gate.
+  Mean TTFT **12.200 -> 12.408 s**; content-gap p95 **45–48 -> 43–44 ms**,
+  maximum about **1.98 s** in both. This cold-root cohort gain is small and
+  descriptive; no warm-agent or confidence-interval claim.
+- Validation: full release CLI **1689 passed / 74 ignored**; full M5
+  library (Metal validation and required GPU witnesses on)
+  **2472 passed / 748 ignored**; **`scripts/check-contracts.sh` passed on `54af14bd`**.
+  Measured M5 binaries are from **`9b40c735`**; final arithmetic/shaders
+  are identical (the source-equivalence receipt records only knob doc comments,
+  inventory scope and documentation changes after that build).
+  GPU jobs take individual short canonical leases plus the build lock,
+  nice 10, with cooling outside the lease. Long shared-host waits are outside
+  GPU ownership. Census, packets and serve monitor once per second: thermal **0 throughout**;
+  the short operator sweep records zero before/after.
+  Raw source/binary identities, all operator candidates, kernel profiles,
+  retained arms, conditions and test receipts:
+  **`$HOME/qwen-runs/2026-11-08-glm-batch-dispatch/`** on both machines.
+
 ## 2026-11-08 - GLM M4 Decode Decision: Quant Work And Workspace Lifetime
 
 - **Diagnosis/design only**, base **`09a3a521`**, 128-GiB M4 Max,

@@ -28,7 +28,7 @@ pub(crate) enum Binding {
         offset: usize,
         len: usize,
     },
-    Bytes(Vec<u8>),
+    Bytes(Arc<[u8]>),
 }
 
 #[derive(Clone, Default)]
@@ -123,7 +123,7 @@ impl Recording {
         );
     }
     pub(crate) fn bytes(&mut self, i: usize, b: &[u8]) {
-        self.bindings.bind(i, Binding::Bytes(b.to_vec()));
+        self.bindings.bind(i, Binding::Bytes(Arc::from(b)));
     }
     pub(crate) fn threadgroup(&mut self, i: usize, n: usize) {
         if let Some((_, old)) = self.bindings.threadgroup.iter_mut().find(|(j, _)| *j == i) {
@@ -136,8 +136,28 @@ impl Recording {
         self.bindings.resources.push(b.clone());
     }
     pub(crate) fn dispatch(&mut self, grid: MTLSize, threads: MTLSize) {
+        // Metal binding state persists across pipelines. Snapshot only slots
+        // that the current function uses, once reflection is warm; replaying
+        // every stale slot adds host work and unnecessary resource bindings.
+        let state = if let Some(accesses) = self.bindings.pipeline.as_ref().unwrap().accesses.get()
+        {
+            Bindings {
+                pipeline: self.bindings.pipeline.clone(),
+                slots: self
+                    .bindings
+                    .slots
+                    .iter()
+                    .filter(|(slot, _)| accesses.iter().any(|(used, _)| used == slot))
+                    .cloned()
+                    .collect(),
+                threadgroup: self.bindings.threadgroup.clone(),
+                resources: self.bindings.resources.clone(),
+            }
+        } else {
+            self.bindings.clone()
+        };
         self.nodes.push(Node {
-            state: self.bindings.clone(),
+            state,
             grid,
             threads,
         });
@@ -228,12 +248,13 @@ impl KernelEncoder {
             fuse_flash_next(ctx, &mut recording.nodes, replay_mode())?;
         }
         let mut spans = Vec::with_capacity(recording.nodes.len());
-        for n in &recording.nodes {
+        for n in &mut recording.nodes {
             let mut accesses = Vec::new();
-            for &(i, write) in ctx
-                .buffer_accesses(n.state.pipeline.as_ref().unwrap())?
-                .iter()
-            {
+            let used = ctx.buffer_accesses(n.state.pipeline.as_ref().unwrap())?;
+            n.state
+                .slots
+                .retain(|(slot, _)| used.iter().any(|(i, _)| i == slot));
+            for &(i, write) in used.iter() {
                 if let Some(Binding::Buffer {
                     buffer,
                     offset,
@@ -429,7 +450,7 @@ fn fuse_flash_next(ctx: &MetalContext, nodes: &mut Vec<Node>, mode: u8) -> Resul
                 }
                 state.bind(
                     0,
-                    Binding::Bytes(bytemuck::cast_slice(&[sw[0], iw[0], sw[1]]).to_vec()),
+                    Binding::Bytes(Arc::from(bytemuck::cast_slice(&[sw[0], iw[0], sw[1]]))),
                 );
                 let fused = Node {
                     state,

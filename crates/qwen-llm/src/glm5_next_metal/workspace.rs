@@ -66,9 +66,11 @@ impl Glm5NextSession<'_> {
         if !self.release_prefill_for_decode || self.packed.is_none() {
             return Ok(0);
         }
+        let allocated = ctx.current_allocated_size();
         let released = self.release_workspace(ctx)?;
+        let device_released = allocated.saturating_sub(ctx.current_allocated_size());
         tracing::info!(target: "qwen_diag",
-            "glm workspace: phase=decode configured_rows={} allocated_rows=0 released_bytes={released}",
+            "glm workspace: phase=decode configured_rows={} allocated_rows=0 released_bytes={released} device_released_bytes={device_released}",
             self.prefill_rows());
         Ok(released)
     }
@@ -197,9 +199,11 @@ mod tests {
         session.set_fast_precision(FastPrecision::Half).unwrap();
         // Explicit incumbent control, independent of the process-wide knob.
         session.release_prefill_for_decode = false;
-        session.prefill_packed(&ctx, &tokens[..8192]).unwrap();
+        objc2::rc::autoreleasepool(|_| session.prefill_packed(&ctx, &tokens[..8192])).unwrap();
         let prefix = session.capture_snapshot().unwrap();
-        let append_logits = session.prefill_packed(&ctx, &tokens[8192..8704]).unwrap();
+        let append_logits =
+            objc2::rc::autoreleasepool(|_| session.prefill_packed(&ctx, &tokens[8192..8704]))
+                .unwrap();
         let appended = session.capture_snapshot().unwrap();
         let full = *session.ledger();
         let targets = &tokens[8704..8769];
@@ -209,9 +213,9 @@ mod tests {
                 .map(|&t| session.forward(&ctx, t).unwrap())
                 .collect()
         };
-        let reference = rollout(&mut session);
+        let reference = objc2::rc::autoreleasepool(|_| rollout(&mut session));
         session.restore_snapshot(&appended).unwrap();
-        let noise = rollout(&mut session);
+        let noise = objc2::rc::autoreleasepool(|_| rollout(&mut session));
         session.restore_snapshot(&appended).unwrap();
         session.release_prefill_for_decode = true;
         let released = session.prepare_decode(&ctx).unwrap();
@@ -268,7 +272,20 @@ mod tests {
         assert!(session.capture_snapshot().unwrap().same_state(&appended));
         let append_kl = super::super::tests::kl_divergence(&append_logits, &replay);
         assert!(append_kl <= 1e-6);
-        session.prepare_decode(&ctx).unwrap();
+        let weak = objc2::rc::Weak::from_retained(
+            &session.packed.as_ref().unwrap().route_ids()[0].1.buffer,
+        );
+        let allocated = ctx.current_allocated_size();
+        let released_again = session.prepare_decode(&ctx).unwrap();
+        let device_released = allocated.saturating_sub(ctx.current_allocated_size());
+        assert!(
+            weak.upgrade().is_none(),
+            "completed prompt command retained its route buffer"
+        );
+        assert!(
+            device_released >= released_again.saturating_sub(16 << 20),
+            "ledger freed {released_again} bytes but device freed only {device_released}"
+        );
         session.poisoned = true;
         assert!(matches!(
             session.prepare_prefill(&ctx, 0),
@@ -284,6 +301,7 @@ mod tests {
             serde_json::json!({
                 "context":8192, "append":512, "teacher_forced":64,
                 "released_bytes":released, "snapshot_bytes":appended.bytes(),
+                "device_released_bytes":device_released,
                 "signed_dnll":candidate.0, "kl":candidate.1,
                 "noise_signed_dnll":noise.0, "noise_kl":noise.1, "append_kl":append_kl,
             })

@@ -1854,6 +1854,25 @@ impl Glm5NextSession<'_> {
         want_logits: bool,
         output: Option<&capture::RowOutput<'_>>,
     ) -> Result<()> {
+        // Completed autoreleased commands/encoders can still retain every
+        // bound prompt buffer. Drain their references before decode drops
+        // the workspace. Supported independent batches keep their old path.
+        if self.release_prefill_for_decode {
+            objc2::rc::autoreleasepool(|_| {
+                self.encode_chunk_inner(ctx, tokens, want_logits, output)
+            })
+        } else {
+            self.encode_chunk_inner(ctx, tokens, want_logits, output)
+        }
+    }
+
+    fn encode_chunk_inner(
+        &self,
+        ctx: &MetalContext,
+        tokens: &[u32],
+        want_logits: bool,
+        output: Option<&capture::RowOutput<'_>>,
+    ) -> Result<()> {
         let w = self.weights;
         let c = &w.config;
         let p = self.packed.as_ref().expect("packed scratch");

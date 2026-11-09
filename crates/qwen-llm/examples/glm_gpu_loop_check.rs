@@ -37,6 +37,42 @@ fn check(a: &[f32], b: &[f32], target: usize) -> serde_json::Value {
 fn ensure_finite(v: &[f32]) {
     assert!(v.iter().all(|x| x.is_finite()));
 }
+fn conditions() -> serde_json::Value {
+    let read = |cmd: &str, args: &[&str]| {
+        String::from_utf8_lossy(
+            &std::process::Command::new(cmd)
+                .args(args)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string()
+    };
+    json!({"thermal":read("notifyutil", &["-g","com.apple.system.thermalpressurelevel"]),
+        "rustc":read("pgrep", &["-x","rustc"])})
+}
+fn arm_monitor() -> (
+    std::sync::mpsc::Sender<()>,
+    std::thread::JoinHandle<Vec<serde_json::Value>>,
+) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (ready, wait) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let mut rows = vec![conditions()];
+        ready.send(()).unwrap();
+        while rx
+            .recv_timeout(std::time::Duration::from_millis(250))
+            .is_err()
+        {
+            rows.push(conditions());
+        }
+        rows.push(conditions());
+        rows
+    });
+    wait.recv().unwrap();
+    (tx, thread)
+}
 fn main() -> Result<()> {
     let a: Vec<_> = std::env::args().collect();
     let depth: usize = a[2].parse()?;
@@ -77,36 +113,58 @@ fn main() -> Result<()> {
             } else {
                 [true, false]
             } {
-                s.restore_snapshot(&entry)?;
-                let mut sampler = Sampler::new(config(temp, 19))?;
-                let rustc_before = std::process::Command::new("pgrep")
-                    .args(["-x", "rustc"])
-                    .output()?
-                    .stdout;
-                let started_unix = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs_f64();
-                let started = Instant::now();
-                let (first, tokens, forwarded) = if gpu {
-                    let st = s.generate_gpu_tokens(&ctx, &head, &mut sampler, n, &[], |_| true)?;
-                    (
-                        st.first_token_ready_ms.unwrap(),
-                        st.sampled_tokens,
-                        st.forwarded_tokens,
-                    )
-                } else {
-                    let mut token = sampler.sample(&head)?.token;
-                    let first = started.elapsed().as_secs_f64() * 1e3;
-                    for _ in 1..n {
-                        token = sampler.sample(&s.forward(&ctx, token as u32)?)?.token;
+                for attempt in 0..3 {
+                    s.restore_snapshot(&entry)?;
+                    let (stop_monitor, monitor) = arm_monitor();
+                    let mut sampler = Sampler::new(config(temp, 19))?;
+                    let rustc_before = std::process::Command::new("pgrep")
+                        .args(["-x", "rustc"])
+                        .output()?
+                        .stdout;
+                    let started_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_secs_f64();
+                    let started = Instant::now();
+                    let (first, tokens, forwarded) = if gpu {
+                        let st =
+                            s.generate_gpu_tokens(&ctx, &head, &mut sampler, n, &[], |_| true)?;
+                        (
+                            st.first_token_ready_ms.unwrap(),
+                            st.sampled_tokens,
+                            st.forwarded_tokens,
+                        )
+                    } else {
+                        let mut token = sampler.sample(&head)?.token;
+                        let first = started.elapsed().as_secs_f64() * 1e3;
+                        for _ in 1..n {
+                            token = sampler.sample(&s.forward(&ctx, token as u32)?)?.token;
+                        }
+                        (first, n, n - 1)
+                    };
+                    let wall = started.elapsed().as_secs_f64() * 1e3;
+                    stop_monitor.send(()).unwrap();
+                    let observations = monitor.join().unwrap();
+                    let pressure2 = observations
+                        .iter()
+                        .any(|r| r["thermal"].as_str().unwrap().ends_with(" 2"));
+                    println!(
+                        "{}",
+                        json!({"attempt":attempt,"pressure2":pressure2,"conditions":observations,"kind":"timing","depth":depth,"temperature":temp,"rep":rep,"gpu":gpu,"wall_ms":wall,"first_ms":first,"tokens":tokens,"tps":forwarded as f64*1e3/(wall-first),"started_unix":started_unix,"finished_unix":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs_f64(),"rustc_before":String::from_utf8_lossy(&rustc_before),"rustc_after":String::from_utf8_lossy(&std::process::Command::new("pgrep").args(["-x","rustc"]).output()?.stdout)})
+                    );
+                    if !pressure2 {
+                        break;
                     }
-                    (first, n, n - 1)
-                };
-                let wall = started.elapsed().as_secs_f64() * 1e3;
-                println!(
-                    "{}",
-                    json!({"kind":"timing","depth":depth,"temperature":temp,"rep":rep,"gpu":gpu,"wall_ms":wall,"first_ms":first,"tokens":tokens,"tps":forwarded as f64*1e3/(wall-first),"started_unix":started_unix,"finished_unix":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs_f64(),"rustc_before":String::from_utf8_lossy(&rustc_before),"rustc_after":String::from_utf8_lossy(&std::process::Command::new("pgrep").args(["-x","rustc"]).output()?.stdout)})
-                );
+                    ensure!(attempt < 2, "pressure2 on all three attempts");
+                    // Only rejected level-2 arms wait, and only until level 1.
+                    let cooling = Instant::now();
+                    while conditions()["thermal"].as_str().unwrap().ends_with(" 2") {
+                        ensure!(
+                            cooling.elapsed().as_secs() < 180,
+                            "pressure2 did not subside"
+                        );
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                    }
+                }
             }
         }
     }

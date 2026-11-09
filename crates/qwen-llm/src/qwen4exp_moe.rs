@@ -1914,13 +1914,19 @@ fn encode_singleton_shared_gate_up(
             g.shared_intermediate_size,
         )?;
     } else {
-        // Routed down has already been reduced into output. Reuse its dead
-        // per-slot output for two disjoint shared projections (25,600 floats
-        // available versus 1,280 needed for the released Flash-Next geometry).
+        // A causal FFN epilogue keeps routed outputs live until injection.
+        // Its shared output is dead until shared down, and can hold both
+        // shared projections for the released geometry without allocation.
+        // Other geometries retain the existing per-slot scratch policy.
         let n = g.shared_intermediate_size as u64;
         require_shared_projection_scratch(g)?;
-        let gate = buffers.routed_expert_output.view_subrange(0, vec![n]);
-        let up = buffers.routed_expert_output.view_subrange(n, vec![n]);
+        let scratch = if enc.causal_mode && 2 * n <= buffers.shared_output.n_elements() {
+            buffers.shared_output
+        } else {
+            buffers.routed_expert_output
+        };
+        let gate = scratch.view_subrange(0, vec![n]);
+        let up = scratch.view_subrange(n, vec![n]);
         encode_mat_vec_dispatch(
             ctx,
             enc,

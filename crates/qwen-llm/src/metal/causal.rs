@@ -341,6 +341,42 @@ fn same_buffer(a: Option<&Binding>, b: Option<&Binding>) -> bool {
     }
 }
 
+fn access(binding: Option<&Binding>, write: bool) -> Option<Access> {
+    match binding {
+        Some(Binding::Buffer {
+            buffer,
+            offset,
+            len,
+        }) => Some(Access {
+            buffer: Retained::as_ptr(buffer) as *const () as usize,
+            lo: *offset,
+            hi: offset + len,
+            write,
+        }),
+        _ => None,
+    }
+}
+fn touches(
+    ctx: &MetalContext,
+    nodes: &[Node],
+    range: Access,
+    writes_only: bool,
+) -> Result<bool, MetalError> {
+    for n in nodes {
+        for &(slot, write) in ctx
+            .buffer_accesses(n.state.pipeline.as_ref().unwrap())?
+            .iter()
+        {
+            if (!writes_only || write)
+                && access(n.state.buffer(slot), true).is_some_and(|a| conflict(a, range))
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Fuse only the proven scalar epilogue pattern, with all producer/consumer
 /// identities checked. Other model geometries and packed kernels stay intact.
 fn fuse_flash_next(ctx: &MetalContext, nodes: &mut Vec<Node>, mode: u8) -> Result<(), MetalError> {
@@ -371,6 +407,11 @@ fn fuse_flash_next(ctx: &MetalContext, nodes: &mut Vec<Node>, mode: u8) -> Resul
                 && same_buffer(s.state.buffer(3), a.state.buffer(3))
                 && same_buffer(a.state.buffer(3), c.state.buffer(1))
                 && same_buffer(c.state.buffer(2), inj.state.buffer(1))
+                // Moving a reduction extends both input lifetimes. Native
+                // MoE paths can reuse their expert outputs as shared scratch.
+                && !touches(ctx, &nodes[sum+1..inject], access(s.state.buffer(1),false).unwrap(),true)?
+                && !touches(ctx, &nodes[sum+1..inject], access(s.state.buffer(2),false).unwrap(),true)?
+                && !touches(ctx, &nodes[sum+1..axpy], access(s.state.buffer(3),true).unwrap(),false)?
             {
                 let mut state = Bindings {
                     pipeline: Some(ctx.pipeline("kernel_qwen4exp_ffn_epilogue_f32")?),
@@ -423,6 +464,17 @@ fn fuse_flash_next(ctx: &MetalContext, nodes: &mut Vec<Node>, mode: u8) -> Resul
                 .words(0)
                 .is_some_and(|w| w.get(1) == Some(&0))
             && same_buffer(nodes[i].state.buffer(2), nodes[i + 1].state.buffer(1))
+            && nodes[i]
+                .state
+                .words(0)
+                .zip(nodes[i + 1].state.words(0))
+                .is_some_and(|(c, inj)| c.first() == inj.get(1))
+            && !touches(
+                ctx,
+                &nodes[i + 2..],
+                access(nodes[i].state.buffer(2), false).unwrap(),
+                false,
+            )?
         {
             let b = nodes[i].state.buffer(1).unwrap().clone();
             nodes[i + 1].state.bind(1, b);

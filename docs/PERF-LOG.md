@@ -44,6 +44,43 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `analyze_operator.py` regenerates the table from **`operator-3`**. Retain
   invalid preflight/checker attempts as rejected evidence; prototype full-test
   build was interrupted, not a passing qualification. Regenerable bulk deleted.
+## 2026-11-09 - GLM M4 Residency Attribution: First-Use Weight Paging
+
+- **`perf/m4-glm-residency`**, base **`74f6709ae`**, release **`bd8c9b20`**,
+  observer **`0504abb0`**. Same Maya-M IQ2_S request, 8204 input / 128 output;
+  three retained arms, thermal **0**, no purge, system-setting or admission
+  override. An intrusive `vmmap` pilot timed out and is excluded.
+
+  | Background | Prefill tok/s | Decode tok/s | First chunk s / physical GB read | First-chunk compiler RSS GB |
+  | --- | ---: | ---: | ---: | ---: |
+  | Natural builds + idle 6-GiB allocation | 111.57 | 27.58 | 44.77 / 53.10 | 7.45 |
+  | Natural builds | 119.75 | 26.06 | 38.68 / 45.86 | 12.37 |
+  | Build-excluded control | 209.24 | 27.43 | 8.50 / 0.0026 | 0 |
+
+- Natural/control both started at zero sampled GGUF cache residency and read
+  **112.4 GB** during **68.2 / 71.1 s** prefetch. First-chunk savings
+  **30.18 s** explain the whole-prefill difference **29.30 s**; later chunks
+  take **9–11 s**, with negligible reads. Best-effort warming does not survive
+  pressure through first GPU use. The synthetic allocation could swap:
+  its arm recorded **5.6 GB** host swap-outs, not a fixed active working set.
+- Source uses shared `Arc<Mmap>` no-copy windows, with no engine-side
+  model-sized duplicate found. Retained weights **112.402 GB (104.68 GiB)**,
+  unchanged wired cap **118 GiB**, prefetch worker scratch **64 MiB**.
+  Metal logical peak **115.279 GB** precedes physical prompt commitment:
+  process footprint grows from about **0.17 to 3.2 GB** at first GPU use.
+  Prompt release still frees **2.60 GB**; driver alias internals remain unproven.
+- **Isolated GLM timing on this M4 now takes the build lock**, plus the Metal
+  lease and memory/I/O validity observations. Small compilers below **0.5 GB**
+  still appeared outside the control's first chunk. Decode read only
+  **1–3 MB**: the full historical 23–30 tok/s dispersion remains unattributed.
+- Next: commit the same-width prompt peak before warming weights, then test
+  readiness under recorded natural background load; evaluate bounded scratch/
+  admission if capacity fails. **No residency-policy fix or kernel ships.**
+  Serve idle/append recovery remains for that experiment. Release build,
+  three model arms and contracts pass on **`db3cf21d`**; full lib/CLI suites
+  were not rerun for this attribution-only packet. Opt-in diagnostics,
+  exact commands, host/cache/I/O summaries and exclusions:
+  **`~/qwen-runs/2026-11-09-m4-glm-residency/summary.json`**.
 
 
 ## 2026-11-09 - Flash-Next Measured-Only Batch Candidate: Laptop Validation Complete

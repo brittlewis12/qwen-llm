@@ -58,9 +58,15 @@ canonical lease, so qwen arms refuse under a substitute directory.
 
 Under `uv run`, the PID a caller sees is uv's; uv forwards SIGINT and SIGTERM
 to COMMAND and returns its exit status. The lease file records COMMAND's PID.
+
+Every acquisition appends one JSON line to lease-history.jsonl beside the lock
+(requested/acquired UTC, seconds waited, task, expected hold, session, working
+directory name, and the owner it waited behind), so queueing on the shared GPU
+is measurable. Logging failures never affect the lease.
 """
 
 import fcntl
+import json
 import os
 import stat
 import sys
@@ -176,6 +182,35 @@ def record(command: str, options: dict[str, str]) -> str:
     return " ".join(fields) + "\n"
 
 
+def log_acquisition(
+    directory: str, options: dict[str, str], requested: float, waited_behind: str
+) -> None:
+    acquired = time.time()
+    session = options.get("--session") or os.environ.get("OPENCODE_CALLER_SESSION_ID")
+    entry = {
+        "requested": datetime.fromtimestamp(requested, timezone.utc).isoformat(timespec="seconds"),
+        "acquired": datetime.fromtimestamp(acquired, timezone.utc).isoformat(timespec="seconds"),
+        "waited_s": round(acquired - requested, 1),
+        "task": owner_field(options.get("--task", "")),
+        "expected": owner_field(options.get("--for", "")),
+        "session": owner_field(session or ""),
+        "cwd": owner_field(os.path.basename(os.getcwd())),
+        "waited_behind": waited_behind,
+    }
+    try:
+        history = os.open(
+            os.path.join(directory, "lease-history.jsonl"),
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+        try:
+            os.write(history, (json.dumps(entry) + "\n").encode())
+        finally:
+            os.close(history)
+    except OSError:
+        pass
+
+
 def join_campaign(value: str, path: str, uid: int) -> int:
     """Validate an inherited campaign descriptor, as qwen's adoption does."""
     if not value.isdigit():
@@ -217,10 +252,12 @@ def main(argv: list[str]) -> None:
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     os.fchmod(fd, 0o600)
     validate_lease(fd, path, uid)
+    requested, waited_behind = time.time(), ""
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         owner = read_owner(fd)
+        waited_behind = owner
         if os.environ.get(WAIT_ENV) not in ("1", "true", "TRUE", "yes", "YES"):
             die(
                 f"another qwen process owns {path} ({owner}); queue the work or set {WAIT_ENV}=1 to wait",
@@ -232,6 +269,7 @@ def main(argv: list[str]) -> None:
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
     os.write(fd, record(args[0], options).encode())
+    log_acquisition(directory, options, requested, waited_behind)
     # Never LOCK_UN: an unlock through any inherited copy releases the campaign
     # for everyone. The lease ends when the last holder of this description exits.
     os.set_inheritable(fd, True)

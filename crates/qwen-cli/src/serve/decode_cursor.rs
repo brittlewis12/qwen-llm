@@ -55,12 +55,15 @@ mod gpu_burst_tests {
     #[test]
     fn bursts_keep_the_unconsumed_tail_across_native_resume_and_limit() {
         let mut c = cursor(6);
+        assert_eq!(c.available_logits(), Some(&[0.; 3][..]));
         assert!(matches!(
             c.append_gpu_burst(&[1, 0, 1], stats(3, false), 0.5),
             Advance::Forward(1)
         ));
         assert_eq!(c.completed_transitions(), 2);
+        assert!(c.available_logits().is_none());
         c.on_logits(Ok(vec![0.; 3]), 4., || Ok(())).unwrap();
+        assert_eq!(c.available_logits(), Some(&[0.; 3][..]));
         let Advance::Done(g) = c.append_gpu_burst(&[0, 1, 0], stats(3, false), 9.) else {
             panic!("limit not finished");
         };

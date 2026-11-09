@@ -21,6 +21,11 @@ crate::env_flag!(
     default_on copy_enabled, "QWEN_FN_BATCH_PROJECTION_COPY"
 );
 
+crate::env_flag!(
+    /// Native independent-decode sharing of Q4_K/Q5_K/IQ4_NL/IQ4_XS/Q8_0 mixer projections using the existing F32 few-row decoder templates. 0 restores per-member projections. No new state or allocations; scalar and prefill policy are unchanged.
+    default_on other_mma_enabled, "QWEN_FN_BATCH_OTHER_DENSE_MMA"
+);
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CopyArgs {
@@ -83,8 +88,21 @@ impl Scratch {
         let k = w.shape[0] as usize;
         let m = w.shape[1] as usize;
         let b = inputs.len();
-        let mma = mma_enabled();
-        if !enabled() || !(2..=4).contains(&b) || w.dtype != GgmlType::Q6_K {
+        #[cfg(feature = "perf-ablations")]
+        let other = crate::metal::fn_batch_probe::other(other_mma_enabled());
+        #[cfg(not(feature = "perf-ablations"))]
+        let other = other_mma_enabled();
+        let other_mma = other
+            && matches!(
+                w.dtype,
+                GgmlType::Q4_K
+                    | GgmlType::Q5_K
+                    | GgmlType::IQ4_NL
+                    | GgmlType::IQ4_XS
+                    | GgmlType::Q8_0
+            );
+        let mma = mma_enabled() || other_mma;
+        if !enabled() || !(2..=4).contains(&b) || (w.dtype != GgmlType::Q6_K && !other_mma) {
             for (x, y) in inputs.iter().zip(outputs) {
                 encode_mat_vec_dispatch(ctx, enc, w, x, y, k, m)?;
             }

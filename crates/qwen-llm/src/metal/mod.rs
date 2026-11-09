@@ -585,3 +585,6 @@ pub mod decode_bounds;
 
 #[cfg(feature = "perf-ablations")]
 pub use dispatch_profile::decode_wave::{DecodeGraph, decode_capture_begin, decode_capture_finish};
+
+#[cfg(feature = "perf-ablations")]
+pub mod fn_batch_probe;

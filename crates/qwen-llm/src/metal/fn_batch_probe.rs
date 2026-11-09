@@ -1,0 +1,81 @@
+//! Research-only whole-round controls. Held stages intentionally invalidate outputs.
+use std::{cell::RefCell, collections::BTreeMap};
+#[derive(Clone, Default)]
+struct Settings {
+    other: Option<bool>,
+
+    group: String,
+    skipped: BTreeMap<String, usize>,
+    causal: bool,
+}
+thread_local! { static CANDIDATE: RefCell<String> = RefCell::new("formats".into()); }
+thread_local! { static ACTIVE: RefCell<Settings> = RefCell::new(Settings::default()); }
+pub struct Scope(Settings);
+impl Drop for Scope {
+    fn drop(&mut self) {
+        ACTIVE.with(|a| *a.borrow_mut() = self.0.clone());
+    }
+}
+pub fn scope(other: Option<bool>, group: &str, causal: bool) -> Scope {
+    Scope(ACTIVE.with(|a| {
+        a.replace(Settings {
+            other,
+            group: group.into(),
+            causal,
+            ..Default::default()
+        })
+    }))
+}
+pub fn skipped() -> BTreeMap<String, usize> {
+    ACTIVE.with(|a| a.borrow().skipped.clone())
+}
+pub fn candidate(name: &str) {
+    CANDIDATE.with(|v| *v.borrow_mut() = name.into());
+}
+pub(crate) fn axis(name: &str, default: bool) -> bool {
+    if CANDIDATE.with(|v| v.borrow().as_str() == name) {
+        ACTIVE.with(|a| a.borrow().other.unwrap_or(default))
+    } else {
+        default
+    }
+}
+pub(crate) fn other(default: bool) -> bool {
+    axis("formats", default)
+}
+pub(crate) fn causal() -> bool {
+    ACTIVE.with(|a| a.borrow().causal)
+}
+pub(crate) fn skip(name: &str) -> bool {
+    ACTIVE.with(|a| {
+        let mut a = a.borrow_mut();
+        let yes = match a.group.as_str() {
+            "hc_inject" => name == "kernel_qwen4exp_hc_inject_f32",
+            "gdn_prep" => name.contains("gdn_controls"),
+            "qsa_prepare" => {
+                name.contains("qsa_norm_rope")
+                    || name.contains("qsa_qgate_norm_rope")
+                    || name.contains("qsa_write_pending")
+                    || name.contains("qsa_pool_publish")
+                    || name.contains("qsa_publish_kv")
+            }
+            "copies" => name.contains("copy_offset") || name.contains("copy_f32"),
+            "hc" => name.contains("hc_"),
+            "gdn" => name.contains("gdn") || name.contains("gated_delta"),
+            "qsa" => name.contains("qsa") || name.contains("qwen_sparse"),
+            "routing" => name.contains("topk") || name.contains("router"),
+            "experts" => name.contains("expert_native"),
+            "transport" => {
+                name.contains("fn_batch_gather_columns")
+                    || name.contains("fn_batch_scatter_columns")
+            }
+            "norms" => {
+                name.contains("rms_norm") || name.contains("l2_norm") || name.contains("rope")
+            }
+            _ => false,
+        };
+        if yes {
+            *a.skipped.entry(name.into()).or_default() += 1;
+        }
+        yes
+    })
+}

@@ -2109,7 +2109,7 @@ pub fn try_encode_mat_mat_fewrow_gen_f32(
     try_encode_mat_mat_fewrow_gen_weights(ctx, enc, weight, x, y, n_in, n_out, n_cols, false)
 }
 
-/// Few-row Q6/Q8 MMA with F32 dequantized weights and activations. Changes
+/// Explicit few-row quantized MMA with F32 dequantized weights and activations. Changes
 /// reduction order (E1) but introduces no Half operand rounding. Explicit
 /// caller entrypoint, independent of Qwen DFlash's generic Half-weight route.
 /// Qualified widths are 1..=4; no global dispatch policy is widened.
@@ -2124,10 +2124,19 @@ pub fn encode_mat_mat_fewrow_gen_f32_weights(
     n_out: usize,
     n_cols: usize,
 ) -> Result<(), MetalError> {
-    if !matches!(weight.dtype, GgmlType::Q6_K | GgmlType::Q8_0) || !(1..=4).contains(&n_cols) {
+    if !matches!(
+        weight.dtype,
+        GgmlType::Q4_K
+            | GgmlType::Q5_K
+            | GgmlType::Q6_K
+            | GgmlType::Q8_0
+            | GgmlType::IQ4_NL
+            | GgmlType::IQ4_XS
+    ) || !(1..=4).contains(&n_cols)
+    {
         return Err(super::checks::bad_shape(
             "mat_mat_fewrow_gen_f32_weights",
-            "Q6/Q8 and 1..=4 columns required",
+            "Q4/Q5/Q6/Q8/IQ4 and 1..=4 columns required",
         ));
     }
     if try_encode_mat_mat_fewrow_gen_weights(ctx, enc, weight, x, y, n_in, n_out, n_cols, true)? {
@@ -4544,6 +4553,10 @@ mod tests {
             (GgmlType::Q6_K, 4096, 2048, 4),
             (GgmlType::Q8_0, 64, 9, 4),
             (GgmlType::Q8_0, 128, 8192, 2),
+            (GgmlType::Q4_K, 2560, 65, 4),
+            (GgmlType::Q5_K, 2560, 65, 3),
+            (GgmlType::IQ4_NL, 2560, 65, 2),
+            (GgmlType::IQ4_XS, 2560, 65, 4),
         ]
         .into_iter()
         .enumerate()

@@ -521,3 +521,9 @@ FEWROW_GEN_TYPE(iq4_xs, fewrow_gen_iq4_xs)
     FEWROW_F32W(NAME,Q,1,32) FEWROW_F32W(NAME,Q,2,32) FEWROW_F32W(NAME,Q,4,32)
 FEWROW_F32W_TYPE(q6_K, fewrow_gen_q6_K)
 FEWROW_F32W_TYPE(q8_0, fewrow_gen_q8_0)
+
+// Explicit Flash-Next member batches keep dequantized operands in F32.
+FEWROW_F32W_TYPE(q4_K, fewrow_gen_q4_K)
+FEWROW_F32W_TYPE(q5_K, fewrow_gen_q5_K)
+FEWROW_F32W_TYPE(iq4_nl, fewrow_gen_iq4_nl)
+FEWROW_F32W_TYPE(iq4_xs, fewrow_gen_iq4_xs)

@@ -10,6 +10,8 @@ pub struct Qwen4ExpDecodeBatch {
     inputs: MetalTensor,
     logits: MetalTensor,
     maximum: usize,
+    #[cfg(feature = "perf-ablations")]
+    pub diagnostic_ms: [f64; 3],
     projection: crate::qwen4exp_metal::decode_projection::Scratch,
 }
 struct Round<'a, 's> {
@@ -105,6 +107,8 @@ impl Qwen4ExpDecodeBatch {
             inputs: MetalTensor::zeros_f32(ctx, vec![h as u64, columns as u64])?,
             logits: MetalTensor::zeros_f32(ctx, vec![v as u64, columns as u64])?,
             maximum,
+            #[cfg(feature = "perf-ablations")]
+            diagnostic_ms: [0.; 3],
             projection: crate::qwen4exp_metal::decode_projection::Scratch {
                 inputs: MetalTensor::zeros_f32(ctx, vec![max_in as u64, columns as u64])?,
                 outputs: MetalTensor::zeros_f32(ctx, vec![max_out as u64, columns as u64])?,
@@ -143,6 +147,8 @@ impl Qwen4ExpDecodeBatch {
         if members.len() == 1 {
             return Ok(vec![members[0].forward_token(tokens[0])?.to_vec()]);
         }
+        #[cfg(feature = "perf-ablations")]
+        let start = std::time::Instant::now();
         let command = ctx
             .queue
             .commandBuffer()
@@ -154,7 +160,15 @@ impl Qwen4ExpDecodeBatch {
             submitted: false,
             completed: false,
         };
-        let enc = KernelEncoder::begin(&command);
+        #[cfg(feature = "perf-ablations")]
+        let causal = crate::metal::fn_batch_probe::causal();
+        #[cfg(not(feature = "perf-ablations"))]
+        let causal = false;
+        let enc = if causal {
+            KernelEncoder::begin_causal(&command)
+        } else {
+            KernelEncoder::begin(&command)
+        };
         let columns = tokens.len().next_power_of_two();
         let inputs = self.inputs.view_subrange(
             0,
@@ -176,8 +190,17 @@ impl Qwen4ExpDecodeBatch {
             &mut round.started,
             &self.projection,
         );
+        if causal {
+            if result.is_ok() {
+                enc.finish_causal_scope(ctx, false)?;
+            } else {
+                enc.cancel_causal_scope();
+            }
+        }
         enc.end();
         result?;
+        #[cfg(feature = "perf-ablations")]
+        let encode_ms = start.elapsed().as_secs_f64() * 1000.;
         command.commit();
         round.submitted = true;
         for s in round.members.iter_mut() {
@@ -190,6 +213,14 @@ impl Qwen4ExpDecodeBatch {
             .collect::<Result<_, _>>()?;
         if values.iter().flatten().any(|x| !x.is_finite()) {
             return invalid("nonfinite native batch logits");
+        }
+        #[cfg(feature = "perf-ablations")]
+        {
+            self.diagnostic_ms = [
+                encode_ms,
+                (command.GPUEndTime() - command.GPUStartTime()) * 1000.,
+                start.elapsed().as_secs_f64() * 1000.,
+            ];
         }
         round.completed = true;
         drop(round);

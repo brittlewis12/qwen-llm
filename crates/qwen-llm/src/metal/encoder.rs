@@ -409,6 +409,10 @@ impl KernelEncoder {
     }
 
     pub fn dispatch(&self, grid: MTLSize, threads: MTLSize) {
+        #[cfg(feature = "perf-ablations")]
+        if fn_batch_probe::skip(self.bound_pipeline_name.borrow().as_deref().unwrap_or("")) {
+            return;
+        }
         if let Some(r) = self.recording.borrow_mut().as_mut() {
             r.dispatch(grid, threads);
             return;

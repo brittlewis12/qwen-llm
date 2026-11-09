@@ -248,7 +248,8 @@ mod tests {
 
     #[test]
     fn range_prefetch_reads_exactly_the_requested_bytes() {
-        let path = std::env::temp_dir().join(format!("qwen-prefetch-range-{}", std::process::id()));
+        let directory = crate::test_fixtures::TestDir::new("prefetch-range");
+        let path = directory.path().join("input.bin");
         std::fs::write(&path, vec![7u8; 1 << 20]).unwrap();
         let file = File::open(&path).unwrap();
         let report = prefetch_fd_range(&file, 4096, 4096 + 300_000, 3, 64 * 1024).unwrap();

@@ -607,10 +607,8 @@ mod tests {
 
     #[test]
     fn raw_writer_hashes_exact_bytes() {
-        let dir =
-            std::env::temp_dir().join(format!("qwen-attn-capture-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir(&dir).unwrap();
+        let directory = qwen_llm::test_fixtures::TestDir::new("attn-capture");
+        let dir = directory.path();
         let meta = write_bytes(&dir.join("raw.bin"), b"abc", Some(2)).unwrap();
         assert_eq!(meta["byte_length"], 3);
         assert_eq!(

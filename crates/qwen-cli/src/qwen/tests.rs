@@ -2740,7 +2740,8 @@ fn completed_checkpoint_boundary_rejects_invalid_generation_state() {
 
 #[test]
 fn prompt_loading_gates_completed_capture_on_canonical_history() {
-    let root = std::env::temp_dir().join(format!("qwen-completed-policy-{}", std::process::id()));
+    let directory = qwen_llm::test_fixtures::TestDir::new("completed-policy");
+    let root = directory.path().join("input");
     let messages = root.with_extension("json");
     let prompt_file = root.with_extension("txt");
     std::fs::write(
@@ -5195,11 +5196,8 @@ fn request_stats_hex_encode_bytes_is_lowercase_padded() {
 
 #[test]
 fn request_stats_append_jsonl_serializes_one_line_per_record() {
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!(
-        "qwen-request-stats-test-{}.jsonl",
-        std::process::id()
-    ));
+    let directory = qwen_llm::test_fixtures::TestDir::new("request-stats");
+    let path = directory.path().join("stats.jsonl");
     let _ = std::fs::remove_file(&path);
 
     for i in 0..3u64 {
@@ -5336,11 +5334,8 @@ fn request_stats_append_jsonl_repairs_partial_prior_tail() {
     // Pre-seed the file with an unfinished record (no trailing newline).
     // The next append MUST NOT concatenate its record onto the abandoned
     // partial one — it must start on a fresh line.
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!(
-        "qwen-request-stats-tail-{}.jsonl",
-        std::process::id()
-    ));
+    let directory = qwen_llm::test_fixtures::TestDir::new("request-stats-tail");
+    let path = directory.path().join("stats.jsonl");
     let _ = std::fs::remove_file(&path);
     std::fs::write(&path, b"{\"partial\":\"orphan_no_newline\"").unwrap();
 

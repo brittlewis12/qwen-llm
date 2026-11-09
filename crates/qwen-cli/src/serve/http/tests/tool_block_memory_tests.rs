@@ -113,8 +113,8 @@ fn tool_block_publication_stays_within_the_admission_model() {
             call(&format!("[{}]", vec!["\"a\""; 20_000].join(","))),
         ),
     ];
-    let trace_dir = std::env::temp_dir().join(format!("qwen-tool-peak-{}", std::process::id()));
-    std::fs::create_dir_all(&trace_dir).unwrap();
+    let directory = qwen_llm::test_fixtures::TestDir::new("tool-peak");
+    let trace_dir = directory.path();
     let mut worst = 0.0f64;
     // One-byte pieces are the worst case for non-streaming collection (one
     // allocation per piece); four bytes is closer to typical tokens.

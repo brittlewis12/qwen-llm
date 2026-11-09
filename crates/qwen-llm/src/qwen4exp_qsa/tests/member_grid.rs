@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn independent_selection_attention_preserve_private_state_and_partial_groups() {
-    let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+    let _lease = crate::metal::acquire_metal_test_lease().expect("GPU test campaign lease");
     let ctx = MetalContext::new().unwrap();
     let g = selected_attention_test_geometry(4_096);
     let mut members: Vec<_> = (0..4)

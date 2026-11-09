@@ -25,7 +25,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Independent F64 QK/softmax/PV checks use 6144 scalar outputs per shape,
   the original F32 queries and native F16 cache. All six layouts fail the
   no-worse error gate. At 64 queries RMS is **2.967e-9 versus 9.305e-10**;
-  smaller absolute error does not waive the ratio gate. Stop before native
+  Small absolute errors do not waive the ratio gate. Stop before native
   ABBA, steady-harness TTFT and signed teacher-forced dNLL/KL qualification;
   **no claim against the 400/2000-row targets**. Unqualified runtime code and
   knob removed. Compensated/late-normalization attention and count-adaptive

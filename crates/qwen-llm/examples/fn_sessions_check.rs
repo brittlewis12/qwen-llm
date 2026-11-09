@@ -37,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     assert!(!code.is_empty() && !prose.is_empty());
     let extent = depth + 8192 + steps;
+    eprintln!("sessions-check: load");
     let mut loaded = Qwen4ExpLoadedModel::load_with_adaptive_prefill(
         &ctx,
         &gg,
@@ -44,13 +45,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         extent,
         Qwen4ExpDecodeOptions::default(),
     )?;
+    eprintln!("sessions-check: bind factory");
     let (factory, first) = loaded.session_factory(&ctx)?;
     let mut runners = vec![
         first,
         factory.create_runner(&ctx)?,
         factory.create_runner(&ctx)?,
     ];
+    eprintln!("sessions-check: allocated main runners");
     let mut unrelated = factory.create_runner(&ctx)?;
+    eprintln!("sessions-check: unrelated prefill");
     unrelated.prefill(&code[..64.min(code.len())])?;
     let prefixes = [depth, depth + 17, depth + 34];
     let appends = [1123usize, 1084, 1596];
@@ -63,7 +67,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, r) in runners.iter_mut().enumerate() {
         let p = prefixes[i];
         let end = p + appends[i];
+        eprintln!("sessions-check: baseline prefix {i} rows={p}");
         r.prefill(&docs[i][..p])?;
+        eprintln!("sessions-check: baseline append {i}");
         r.prefill_continuation_with_command_checkpoint(&docs[i][p..end - 3], || Ok(()))?;
         r.prefill_continuation_with_command_checkpoint(&docs[i][end - 3..end], || Ok(()))?;
         let mut vectors = Vec::new();

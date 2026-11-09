@@ -38,7 +38,7 @@ impl Qwen4ExpLoadedModel<'_> {
     }
 }
 ''')
-    p=ROOT/'crates/qwen-llm/src/glm5_next_metal.rs'
+    p=ROOT/'crates/qwen-llm/src/glm5_next_metal/packed.rs'
     p.write_text(p.read_text()+'''
 impl Glm5NextSession<'_> {
     pub fn append_research_routes(&self,rows:usize) -> serde_json::Value {

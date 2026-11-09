@@ -7,9 +7,9 @@ PEAK=131.676e12
 
 def category(kernel):
     k=kernel.lower()
-    if any(x in k for x in ('selected','sparse_attn','sparse_attention','index_score','indexer_score','radix','select_top','qsa_pool','indexer_pool','attention_partial','attention_qk','attention_pv')):
+    if any(x in k for x in ('selected','sparse','_qsa_','_indexer_','mla_qk','mla_pv','mla_softmax','radix','select_top','attention_partial','attention_qk','attention_pv')):
         return 'context'
-    if any(x in k for x in ('matmul','mat_mat','mat_vec','gemm','gemv','moe_swiglu','moe_down','moe_gate_up','moe_expert','iq3_s_down','iq4_nl_down','q6_k_dense')):
+    if any(x in k for x in ('matmul','mat_mat','mat_vec','gemm','gemv','moe_swiglu','moe_down','moe_gate_up','moe_expert','iq3_s_down','iq4_nl_down','q6_k_dense','hc_inject_dot','hc_up_mix','hc_down_silu')):
         return 'learned'
     return 'non_gemm'
 

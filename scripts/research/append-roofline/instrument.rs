@@ -1,5 +1,6 @@
 //! Scratch-only instrumentation. Never installed in the committed library.
 use crate::metal::{KernelEncoder, MetalContext, MetalTensor, encode_copy_offset_i32};
+use objc2_metal::MTLBuffer;
 use std::cell::RefCell;
 thread_local! {
     static ROUTES: RefCell<Option<Vec<(u32, MetalTensor, Vec<u64>)>>> = const { RefCell::new(None) };

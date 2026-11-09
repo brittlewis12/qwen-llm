@@ -108,12 +108,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         stats.first_token_ready_ms.unwrap(),
                     )
                 } else {
-                    let first = sampler.sample(&runner.logits()?)?.token;
+                    let first = sampler.sample(runner.logits()?.as_slice())?.token;
                     let first_ms = now.elapsed().as_secs_f64() * 1e3;
                     let mut token = first;
                     let (mut gpu_ms, mut encode_ms, mut wait_ms) = (0., 0., 0.);
                     for _ in 1..count {
-                        token = sampler.sample(&runner.forward_token(token as u32)?)?.token;
+                        token = sampler
+                            .sample(runner.forward_token(token as u32)?.as_slice())?
+                            .token;
                         let t = runner.last_token_timing().unwrap();
                         gpu_ms += t.gpu_ms.unwrap_or(0.);
                         encode_ms += t.encode_cpu_ms;
@@ -207,7 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         println!(
             "{}",
-            json!({"kind":"continuation","depth":depth,"causal":causal,"comparison":distribution(&runner.logits()?,&resumed,selected[0] as usize)})
+            json!({"kind":"continuation","depth":depth,"causal":causal,"comparison":distribution(runner.logits()?.as_slice(),&resumed,selected[0] as usize)})
         );
     }
     // A discarded pre-encoded frame must leave the completed state at entry.
@@ -226,7 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     runner.restore_snapshot(&entry)?;
     let token = Sampler::new(SamplingConfig::default())?
-        .sample(&runner.logits()?)?
+        .sample(runner.logits()?.as_slice())?
         .token;
     let stats = runner.generate_gpu_tokens(
         &mut Sampler::new(SamplingConfig::default())?,

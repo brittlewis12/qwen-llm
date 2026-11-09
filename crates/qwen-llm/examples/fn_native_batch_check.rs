@@ -7,6 +7,7 @@ use qwen_llm::{
     qwen4exp_runtime::{
         Qwen4ExpDecodeBatch, Qwen4ExpDecodeOptions, Qwen4ExpLoadedModel, Qwen4ExpSessionCapacity,
     },
+    sampling::{Sampler, SamplingConfig},
     tokenizer::Tokenizer,
 };
 use std::{fs, time::Instant};
@@ -58,6 +59,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut checkpoints = Vec::new();
     for (i, r) in runners.iter_mut().enumerate() {
         r.prefill(&docs[i][..depth + i * 17])?;
+        // Leave cached GPU input/control banks on every independent owner,
+        // then hand those live histories to native B>1 decode below.
+        r.generate_gpu_tokens(
+            &mut Sampler::new(SamplingConfig::default())?,
+            3,
+            &[],
+            |_| true,
+        )?;
         checkpoints.push(r.capture_snapshot()?);
     }
     let mut native = Qwen4ExpDecodeBatch::new(&runners[0], 4)?;
@@ -172,6 +181,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 fork_exact += 1;
             }
+            let mut tokens = Vec::new();
+            let mut rows = Vec::new();
+            runners[0].generate_gpu_tokens_observed(
+                &mut Sampler::new(SamplingConfig::default())?,
+                4,
+                &[],
+                |t, row| {
+                    tokens.push(t);
+                    rows.push(row.to_vec());
+                    true
+                },
+            )?;
+            let mut maximum = 0f64;
+            for (i, row) in rows.iter().enumerate() {
+                if i > 0 {
+                    runners[1].forward_token(tokens[i - 1] as u32)?;
+                }
+                for (&a, &b) in row.iter().zip(runners[1].logits()?.as_slice()) {
+                    maximum = maximum.max((f64::from(a) - f64::from(b)).abs());
+                }
+            }
+            assert_eq!(
+                maximum, 0.,
+                "GPU -> native batch -> GPU history/control round trip"
+            );
+            println!(
+                "{}",
+                serde_json::json!({"kind":"gpu_native_roundtrip","depth":depth,"max_logit_error":maximum})
+            );
         }
         println!(
             "{}",

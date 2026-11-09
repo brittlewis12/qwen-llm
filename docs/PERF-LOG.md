@@ -6,6 +6,72 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-09 - V4.1 B3 Causal Waves Default On
+
+- **Default on for M5 B=3 decode**, rollback
+  `QWEN_V41_BATCH_CAUSAL_EXECUTOR=0`. Base **`fe0df5796`**; no main chasing.
+  Reuse the Flash-Next executor with bounded layer scopes in each of V4.1's
+  three existing Engram-overlap command buffers. Replace per-sequence encoder
+  cuts with resource-dependency waves; learned kernels and arithmetic stay
+  unchanged. Census, binding capture, isolated dispatch profiling and
+  counterfactual ablations retain native binding/phase lineage automatically.
+- M5 Ultra, production four-shard **GSQ-RCO IQ2_XS** artifact, same restored
+  prefixes, eight excluded warm rounds, **128 teacher rounds per ABBA arm**,
+  full-vocabulary readback. Screen source **`a9310ecc`**:
+
+  | Depth | Native ms/round | Causal ms/round | Saved | Aggregate speedup |
+  | --- | ---: | ---: | ---: | ---: |
+  | 32K | 28.157 | 24.690 | **3.468 ms** | **1.140x** |
+  | 64K | 29.909 | 26.505 | **3.404 ms** | **1.128x** |
+
+  Every accepted arm was thermal **0**. No compiler overlap at 32K;
+  **all 64K arms compiler-overlapped**, with wider spread, retained and flagged.
+  Every candidate arm beat both corresponding controls. The 20-ms goal remains
+  open; this is a whole-round win, not a sum of isolated-kernel estimates.
+- Per depth, **384 teacher-forced full-vocabulary distributions**, causal
+  snapshot payloads for all three members, and eight following serial steps
+  per member match **bitwise** across arms: dNLL/KL **0** by byte agreement.
+  Added toy rollback/fork/state checks and cancellation/partial-commit error
+  draining; diagnostics assert native serial census records.
+- Warm-agent protocol, seed 20261109, three independent **48K roots**,
+  **90-s measured window** and 10-s ramp: delivered text+reasoning rate
+  **94.34 -> 97.60 tok/s (+3.45%)**. Stream-gap p50 **27.46 -> 25.98 ms**;
+  per-agent TTFT medians **0.786/0.840/1.028 -> 0.806/0.812/0.980 s**.
+  Both accepted arms thermal **0**, compiler-overlapped. The first rollback
+  warm-up reached **level 2** and was rejected before measurement; only that
+  arm was redone. Native screens used one binary; serve rollback was built
+  at `8d490d8e`, default at the diagnostics-compatibility revision; that
+  follow-up changes diagnostic interception only.
+- Final validated Rust source **`ba77b7c5`**: lib **2470 passed**, CLI
+  **1697 passed**, additional library integration **48 passed**;
+  `perf-ablations` check and eight steady-harness CPU tests **pass**.
+  Contracts' source/format/generated-reference/self-test stages passed;
+  **unchanged inventory discovery, ignore-state and CPU execution checks
+  passed using the already-qualified M5 release executables**. The redundant
+  laptop relink was stopped at the hour cap; this is composed contract
+  validation, not a claim that the compiling shell invocation exited zero.
+- Build/measure: `nice -n 10 cargo build --offline --locked --release
+  -p qwen-llm --features perf-ablations --example v41_batch_depth`, then
+  `python3 scripts/research/v41-batch/run.py --binary BINARY --model MODEL
+  --out RUNS --depth 32768 --batch 3 --steps 128 --causal` (also 65536).
+  The retained `a9310ecc` screen ref reproduces the original experiment.
+  Steady arms use `scripts/bench/serve_realistic.py`, the standing's
+  dabb9702 corpus, plan `--family v41 --seconds 90 --seed 20261109`,
+  `--arm default --warm-tokens 48000 --ramp 10 --cool 0`; cool outside
+  the lease and compare rollback=0 with default. Qualification builds use
+  `cargo test --release -p qwen-llm -p qwen-cli --lib --bins --tests --no-run`,
+  followed by every emitted executable under the Metal lease.
+- Waits: **14.5 min GPU queue wall time**, overlapping CPU work; completed
+  requests sum to **12.7 min**, plus a canceled superseded test request.
+  **No build-lock wait**; M5 builds/checks about **19 min accumulated**,
+  including a test-only field-name correction and the diagnostics rebuild.
+  The slow final laptop contract relink was replaced with verified artifact
+  reuse; future contract discovery can avoid this duplicate compilation.
+  Compact commit/command, flags, state digests, cohort calls and checks:
+  `~/qwen-runs/2026-11-09-v41-batch-wave/summary.json`.
+  Regenerable run bulk deleted; normal Cargo cache retained. No merge or
+  owned process remains.
+
 ## 2026-11-09 - V4.1 Expert Grouping Killed; Calibrated Overlap Bounds
 
 - **No production change.** M5 Ultra, production GSQ-RCO IQ2_XS artifact,

@@ -1199,3 +1199,13 @@ kernel void kernel_dense_pair_skinny_mma_q8_0_f32(
         if (channel < n_out) y[ulong(c) * n_out + channel] = s;
     }
 }
+
+// Flash-Next independent member grids: same native F32 decoders and FMA chains.
+EXPERT_NATIVE_SPEC("iq2_s", "2560", "4", QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_iq2_s, 2560, 4)
+EXPERT_NATIVE_SPEC("iq3_s", "2560", "4", QT_IQ3_S_BYTES, QT_IQ3_S_NL, latent_dequantize_iq3_s, 2560, 4)
+EXPERT_NATIVE_SPEC("iq3_xxs", "2560", "4", QT_IQ3_XXS_BYTES, QT_IQ3_XXS_NL, latent_dequantize_iq3_xxs, 2560,
+                   4)
+EXPERT_NATIVE_SPEC("iq4_xs", "2560", "4", QT_IQ4_XS_BYTES, QT_IQ4_XS_NL, latent_dequantize_iq4_xs, 2560, 4)
+EXPERT_NATIVE_SPEC("q2_0", "640", "4", QT_Q2_0_BYTES, QT_Q2_0_NL, latent_dequantize_q2_0, 640, 4)
+EXPERT_NATIVE_SPEC("iq4_nl", "640", "4", QT_IQ4_NL_BYTES, QT_IQ4_NL_NL, latent_dequantize_iq4_nl, 640, 4)
+EXPERT_NATIVE_SPEC("q8_0", "640", "4", QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequantize_q8_0, 640, 4)

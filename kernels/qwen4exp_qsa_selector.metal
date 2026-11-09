@@ -141,3 +141,42 @@ kernel void kernel_qwen4exp_qsa_select_scan_f32(
         ushort sl [[thread_index_in_simdgroup]]) {
     qsa_select_compact(a,scores,visible,ids,counts,status,scratch,shared,lane,query,width,sg,sl);
 }
+
+kernel void kernel_fn_batch_qsa_select(
+        constant qsa_select_args &a [[buffer(0)]], device const float *score0 [[buffer(1)]],
+        device const float *score1 [[buffer(2)]], device const float *score2 [[buffer(3)]],
+        device const float *score3 [[buffer(4)]], device const int *visible0 [[buffer(5)]],
+        device const int *visible1 [[buffer(6)]], device const int *visible2 [[buffer(7)]],
+        device const int *visible3 [[buffer(8)]], device int *ids0 [[buffer(9)]],
+        device int *ids1 [[buffer(10)]], device int *ids2 [[buffer(11)]], device int *ids3 [[buffer(12)]],
+        device int *count0 [[buffer(13)]], device int *count1 [[buffer(14)]],
+        device int *count2 [[buffer(15)]], device int *count3 [[buffer(16)]],
+        device int *status0 [[buffer(17)]], device int *status1 [[buffer(18)]],
+        device int *status2 [[buffer(19)]], device int *status3 [[buffer(20)]],
+        threadgroup uint *scratch [[threadgroup(0)]], threadgroup uint *shared [[threadgroup(1)]],
+        uint r [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]],
+        uint threads [[threads_per_threadgroup]], ushort sg [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    qsa_select_compact(a,
+                       r == 0   ? score0
+                       : r == 1 ? score1
+                       : r == 2 ? score2
+                                : score3,
+                       r == 0   ? visible0
+                       : r == 1 ? visible1
+                       : r == 2 ? visible2
+                                : visible3,
+                       r == 0   ? ids0
+                       : r == 1 ? ids1
+                       : r == 2 ? ids2
+                                : ids3,
+                       r == 0   ? count0
+                       : r == 1 ? count1
+                       : r == 2 ? count2
+                                : count3,
+                       r == 0   ? status0
+                       : r == 1 ? status1
+                       : r == 2 ? status2
+                                : status3,
+                       scratch, shared, tid, 0, threads, sg, lane);
+}

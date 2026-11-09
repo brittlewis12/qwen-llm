@@ -1,4 +1,4 @@
-//! Layer-major independent owners: grouped HC, private causal mixers and MoE.
+//! Layer-major independent owners with private causal state and grouped kernels.
 use super::*;
 use crate::qwen4exp_metal::decode_batch::{self as hc, Member};
 pub(crate) fn encode(
@@ -9,6 +9,7 @@ pub(crate) fn encode(
     weights: Qwen4ExpPostPleBlockMetalWeights<'_>,
     members: &mut [&mut Qwen4ExpPostPleBlockMetalWorkspace],
     projection: &crate::qwen4exp_metal::decode_projection::Scratch,
+    moe_scratch: Option<&crate::qwen4exp_moe::Qwen4ExpMoePackedMotorScratch>,
 ) -> Result<(), Qwen4ExpPostPleBlockError> {
     validate_encoder(ctx, enc)?;
     for ((w, &p), &x) in members.iter().zip(positions).zip(inputs) {
@@ -105,12 +106,22 @@ pub(crate) fn encode(
         weights.ffn_residual.inject,
         hc_members,
     )?;
-    for (read, moe) in reads.into_iter().zip(rest) {
-        let result = encode_qwen4exp_moe(ctx, enc, read.mixed(), weights.moe, moe)?;
+    let mixed: Vec<_> = reads.iter().map(|r| r.mixed()).collect();
+    let results = crate::qwen4exp_moe::decode_batch::encode(
+        ctx,
+        enc,
+        &mixed,
+        weights.moe,
+        rest,
+        moe_scratch,
+    )?;
+    for (result, read) in results.into_iter().zip(&reads) {
         result
             .output()
             .encode_copy_to(ctx, enc, read.block_output())?;
-        drop(result);
+    }
+    drop(mixed);
+    for read in reads {
         read.encode_combine()?;
     }
     for w in members {

@@ -139,7 +139,7 @@ fn native_spec_pipeline(
     Some((name, if fused { 2 * rows } else { 4 * rows }))
 }
 
-/// Qualified batched GLM geometries. No global primitive dispatch widening.
+/// Qualified batched GLM and Flash-Next geometries. No global dispatch widening.
 fn batch_tile_pipeline(
     dtype: GgmlType,
     k: usize,
@@ -157,6 +157,23 @@ fn batch_tile_pipeline(
         (GgmlType::IQ3_S, 2048, 4096, false) => {
             Some(("kernel_expert_native_iq3_s_f32_k2048_r4", 16))
         }
+        (GgmlType::IQ2_S, 2560, 640, true) => {
+            Some(("kernel_expert_native_gate_up_iq2_s_f32_k2560_r4", 8))
+        }
+        (GgmlType::IQ3_S, 2560, 640, true) => {
+            Some(("kernel_expert_native_gate_up_iq3_s_f32_k2560_r4", 8))
+        }
+        (GgmlType::IQ3_XXS, 2560, 640, true) => {
+            Some(("kernel_expert_native_gate_up_iq3_xxs_f32_k2560_r4", 8))
+        }
+        (GgmlType::IQ4_XS, 2560, 640, true) => {
+            Some(("kernel_expert_native_gate_up_iq4_xs_f32_k2560_r4", 8))
+        }
+        (GgmlType::Q2_0, 640, 2560, false) => Some(("kernel_expert_native_q2_0_f32_k640_r4", 16)),
+        (GgmlType::IQ4_NL, 640, 2560, false) => {
+            Some(("kernel_expert_native_iq4_nl_f32_k640_r4", 16))
+        }
+        (GgmlType::Q8_0, 640, 2560, false) => Some(("kernel_expert_native_q8_0_f32_k640_r4", 16)),
         _ => None,
     }
 }
@@ -232,6 +249,11 @@ pub(crate) fn encode_glm_batch_down(
         true,
     )
 }
+
+// Explicit Flash-Next policy uses the same independently validated token-grid
+// implementation. Its qualified shape table is disjoint from GLM's shapes.
+pub(crate) use encode_glm_batch_down as encode_fn_batch_down;
+pub(crate) use encode_glm_batch_gate_up as encode_fn_batch_gate_up;
 
 /// Q5_K uses `kernel_expert_native_q5_K_f32_split` (llama.cpp's work split)
 /// unless `QWEN_EXPERT_NATIVE_Q5K=one_row` keeps the one-row kernel (A/B).

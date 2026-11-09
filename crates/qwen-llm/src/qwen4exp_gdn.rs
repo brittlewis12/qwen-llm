@@ -658,6 +658,45 @@ fn encode_recurrence(
     workspace: &GatedDeltaNetMetalWorkspace,
 ) -> Result<(), Qwen4ExpGdnError> {
     let geometry = workspace.geometry;
+    encode_recurrence_prepare(ctx, enc, input, weights, workspace)?;
+    let value = workspace.qkv_conv.view_subrange(
+        (2 * geometry.key_width()) as u64,
+        vec![geometry.value_width() as u64],
+    );
+    encode_gdn_step_decay_f32(
+        ctx,
+        enc,
+        &workspace.query_norm,
+        &workspace.key_norm,
+        &value,
+        &workspace.decay,
+        &workspace.beta,
+        &workspace.delta_state,
+        &workspace.recurrent,
+        geometry.value_heads,
+        geometry.key_heads,
+        geometry.head_dim,
+    )?;
+    encode_rmsnorm_sigmoid_gated(
+        ctx,
+        enc,
+        &workspace.recurrent,
+        weights.norm,
+        &workspace.gate,
+        &workspace.normalized,
+        geometry,
+    )?;
+    Ok(())
+}
+
+fn encode_recurrence_prepare(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: GatedDeltaNetMetalWeights<'_>,
+    workspace: &GatedDeltaNetMetalWorkspace,
+) -> Result<(), Qwen4ExpGdnError> {
+    let geometry = workspace.geometry;
     let fusion = controls::try_encode(ctx, enc, input, weights, workspace)?;
     if fusion == controls::Fusion::Incumbent {
         encode_mat_vec_f32_sigmoid(
@@ -706,10 +745,6 @@ fn encode_recurrence(
         geometry.key_width() as u64,
         vec![geometry.key_width() as u64],
     );
-    let value = workspace.qkv_conv.view_subrange(
-        (2 * geometry.key_width()) as u64,
-        vec![geometry.value_width() as u64],
-    );
     if fusion != controls::Fusion::ControlsAndPrep {
         encode_l2_norm_pair_batched_f32(
             ctx,
@@ -723,29 +758,6 @@ fn encode_recurrence(
             geometry.eps,
         )?;
     }
-    encode_gdn_step_decay_f32(
-        ctx,
-        enc,
-        &workspace.query_norm,
-        &workspace.key_norm,
-        &value,
-        &workspace.decay,
-        &workspace.beta,
-        &workspace.delta_state,
-        &workspace.recurrent,
-        geometry.value_heads,
-        geometry.key_heads,
-        geometry.head_dim,
-    )?;
-    encode_rmsnorm_sigmoid_gated(
-        ctx,
-        enc,
-        &workspace.recurrent,
-        weights.norm,
-        &workspace.gate,
-        &workspace.normalized,
-        geometry,
-    )?;
     Ok(())
 }
 

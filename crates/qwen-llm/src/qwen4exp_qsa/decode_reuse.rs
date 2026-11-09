@@ -4,6 +4,9 @@ crate::env_flag!(
     default_on enabled,
     "QWEN_FN_DECODE_QSA_REUSE"
 );
+pub(super) fn batch_enabled() -> bool {
+    enabled()
+}
 pub(super) fn try_encode(
     ctx: &MetalContext,
     enc: &KernelEncoder,

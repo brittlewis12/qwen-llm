@@ -5,6 +5,13 @@ fn batch_expert_tile_scope_preserves_other_shapes_and_unaligned_inputs() {
     for (ty, k, m, fused) in [
         (GgmlType::IQ2_S, 4096, 2048, true),
         (GgmlType::IQ3_S, 2048, 4096, false),
+        (GgmlType::IQ2_S, 2560, 640, true),
+        (GgmlType::IQ3_S, 2560, 640, true),
+        (GgmlType::IQ3_XXS, 2560, 640, true),
+        (GgmlType::IQ4_XS, 2560, 640, true),
+        (GgmlType::Q2_0, 640, 2560, false),
+        (GgmlType::IQ4_NL, 640, 2560, false),
+        (GgmlType::Q8_0, 640, 2560, false),
     ] {
         for offset in [0, 16, 32] {
             assert!(batch_tile_pipeline(ty, k, m, offset, fused).is_some());
@@ -28,6 +35,13 @@ fn batch_expert_tiles_match_generic_bits_routes_offsets_and_guards() {
     for (ty, k, m, fused) in [
         (GgmlType::IQ2_S, 4096, 2048, true),
         (GgmlType::IQ3_S, 2048, 4096, false),
+        (GgmlType::IQ2_S, 2560, 640, true),
+        (GgmlType::IQ3_S, 2560, 640, true),
+        (GgmlType::IQ3_XXS, 2560, 640, true),
+        (GgmlType::IQ4_XS, 2560, 640, true),
+        (GgmlType::Q2_0, 640, 2560, false),
+        (GgmlType::IQ4_NL, 640, 2560, false),
+        (GgmlType::Q8_0, 640, 2560, false),
     ] {
         let wb = bank_bytes(ty, k, m, 3);
         let ub = bank_bytes(ty, k, m, 4);

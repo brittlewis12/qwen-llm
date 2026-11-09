@@ -1,4 +1,4 @@
-//! Independent owners in one command, initially sharing the output head.
+//! Independent owners sharing dense/head projections and causal/expert grids.
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
@@ -59,22 +59,36 @@ pub(crate) fn encode(
             s,
         )?;
     }
-    for layer in 0..weights.post_ple.len() {
-        let mut blocks = Vec::with_capacity(b);
+    {
+        let mut layers = Vec::with_capacity(b);
         let mut residuals = Vec::with_capacity(b);
-        for s in members.iter_mut() {
-            blocks.push(&mut s.post_ple[layer]);
-            residuals.push(&s.hyper_residual);
+        let mut moe_scratch = None;
+        for (i, s) in members.iter_mut().enumerate() {
+            let Qwen4ExpTextSessionMetalWorkspace {
+                post_ple,
+                hyper_residual,
+                packed,
+                ..
+            } = &mut **s;
+            layers.push(post_ple);
+            residuals.push(&*hyper_residual);
+            if i == 0 {
+                moe_scratch = packed.as_ref().map(|p| &p.moe);
+            }
         }
-        crate::qwen4exp_post_ple_block::decode_batch::encode(
-            ctx,
-            enc,
-            &positions,
-            &residuals,
-            weights.post_ple[layer],
-            &mut blocks,
-            projection,
-        )?;
+        for layer in 0..weights.post_ple.len() {
+            let mut blocks: Vec<_> = layers.iter_mut().map(|p| &mut p[layer]).collect();
+            crate::qwen4exp_post_ple_block::decode_batch::encode(
+                ctx,
+                enc,
+                &positions,
+                &residuals,
+                weights.post_ple[layer],
+                &mut blocks,
+                projection,
+                moe_scratch,
+            )?;
+        }
     }
     for (i, s) in members.iter_mut().enumerate() {
         let read = crate::qwen4exp_metal::encode_final_gated_residual_mix_with_policy(
@@ -95,7 +109,7 @@ pub(crate) fn encode(
             h,
         )?;
     }
-    if b == 3 {
+    if b == 3 && !crate::qwen4exp_metal::decode_projection::mma_enabled() {
         encode_copy_offset_f32(
             ctx,
             enc,
@@ -105,16 +119,29 @@ pub(crate) fn encode(
             h,
         )?;
     }
-    crate::metal::encode_mat_vec_nc_dispatch(
-        ctx,
-        enc,
-        weights.output,
-        inputs,
-        logits,
-        h,
-        v,
-        columns,
-    )?;
+    if crate::qwen4exp_metal::decode_projection::mma_enabled() {
+        crate::metal::encode_mat_mat_fewrow_gen_f32_weights(
+            ctx,
+            enc,
+            weights.output,
+            &inputs.view_subrange(0, vec![h as u64, b as u64]),
+            &logits.view_subrange(0, vec![v as u64, b as u64]),
+            h,
+            v,
+            b,
+        )?;
+    } else {
+        crate::metal::encode_mat_vec_nc_dispatch(
+            ctx,
+            enc,
+            weights.output,
+            inputs,
+            logits,
+            h,
+            v,
+            columns,
+        )?;
+    }
     for (i, s) in members.iter_mut().enumerate() {
         encode_copy_offset_f32(
             ctx,

@@ -1,4 +1,6 @@
 use super::*;
+pub(super) mod attention;
+pub(super) mod selection;
 use crate::qwen4exp_metal::decode_projection::Scratch;
 pub(crate) fn encode<'a>(
     ctx: &MetalContext,
@@ -45,8 +47,24 @@ pub(crate) fn encode<'a>(
             .collect();
         scratch.project(ctx, enc, weight, inputs, &outputs)?;
     }
+    let batch_attention = attention::eligible(weights.geometry, &members, &controls);
+    let batch_selection = selection::eligible(ctx, weights.geometry, &controls);
     for ((w, x), &(p, n)) in members.iter_mut().zip(inputs).zip(&controls) {
-        encode_step_inner(ctx, enc, x, weights, w, p, n, true)?;
+        if batch_attention || batch_selection {
+            encode_step_parts(ctx, enc, x, weights, w, p, n, true, false, !batch_selection)?;
+        } else {
+            encode_step_inner(ctx, enc, x, weights, w, p, n, true)?;
+        }
+    }
+    if batch_selection {
+        selection::encode(ctx, enc, &members, &controls)?;
+    }
+    if batch_attention {
+        attention::encode(ctx, enc, &members, &controls)?;
+    } else if batch_selection {
+        for (w, &(p, n)) in members.iter().zip(&controls) {
+            encode_attention_step(ctx, enc, w, p, n)?;
+        }
     }
     let attention: Vec<_> = members.iter().map(|w| &w.attention).collect();
     let outputs: Vec<_> = members.iter().map(|w| &w.output).collect();

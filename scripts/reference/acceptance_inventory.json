@@ -6116,5 +6116,12 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Self-leased M5 independent KDA grid: per-member output/conv/state bits across steps, shifted views, immutable inputs, canaries and cross-member alias refusal."
+  },
+  {
+    "target": "lib",
+    "name": "qwen4exp_qsa::tests::member_grid::independent_selection_attention_preserve_private_state_and_partial_groups",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Self-leased model-free Metal differential: mixed private QSA lengths, B=2/3/4, reversed members, exact selection/attention and immutable caches."
   }
 ]

@@ -1,5 +1,5 @@
 //! Real independent states, full-vocabulary distribution witness and step costs.
-//! MODEL CODE PROSE DEPTH [STEPS=128]. Keep all heads/checkpoints in RAM.
+//! MODEL CODE PROSE DEPTH [STEPS=128] [WIDTHS=2,3,4] [profile]. Keep all heads/checkpoints in RAM.
 use qwen_llm::{
     gguf::GgufFile,
     metal::MetalContext,
@@ -19,6 +19,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let depth: usize = a[4].parse()?;
     let steps: usize = a.get(5).map_or(Ok(128), |s| s.parse())?;
     assert!(steps > 8, "need eight warm rounds plus retained rounds");
+    let widths: Vec<usize> = a
+        .get(6)
+        .map(|s| s.split(',').map(str::parse).collect())
+        .transpose()?
+        .unwrap_or(vec![2, 3, 4]);
+    assert!(!widths.is_empty() && widths.iter().all(|b| (2..=4).contains(b)));
     let ctx = MetalContext::new()?;
     let gg = GgufFile::open(&a[1])?;
     let c = Qwen4ExpConfig::from_gguf(&gg)?;
@@ -55,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         checkpoints.push(r.capture_snapshot()?);
     }
     let mut native = Qwen4ExpDecodeBatch::new(&runners[0], 4)?;
-    for width in [2, 3, 4] {
+    for width in widths {
         for (r, s) in runners.iter_mut().zip(&checkpoints) {
             r.reset()?;
             r.restore_snapshot(s)?;
@@ -95,6 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             r.restore_snapshot(s)?;
         }
         let (mut dnll, mut kl, mut max_abs, mut exact, mut native_ms) = (0., 0., 0f64, 0, 0.);
+        let mut per_member = vec![(0., 0.); width];
         let mut hash = blake3::Hasher::new();
         for step in 0..steps {
             let tokens: Vec<_> = (0..width).map(|i| docs[i][depth + i * 17 + step]).collect();
@@ -118,12 +125,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let (z, bz) = (lz(v), lz(r));
                 let target = docs[i][depth + i * 17 + step + 1] as usize;
-                dnll += (z - v[target] as f64) - (bz - r[target] as f64);
-                kl += r
+                let delta = (z - v[target] as f64) - (bz - r[target] as f64);
+                let divergence = r
                     .iter()
                     .zip(v)
                     .map(|(&p, &q)| (p as f64 - bz).exp() * ((p as f64 - bz) - (q as f64 - z)))
                     .sum::<f64>();
+                dnll += delta;
+                kl += divergence;
+                per_member[i].0 += delta;
+                per_member[i].1 += divergence;
                 for (&p, &q) in r.iter().zip(v) {
                     max_abs = max_abs.max((p as f64 - q as f64).abs());
                 }
@@ -131,6 +142,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         dnll /= (width * steps) as f64;
         kl /= (width * steps) as f64;
+        for (i, (delta, divergence)) in per_member.iter_mut().enumerate() {
+            *delta /= steps as f64;
+            *divergence /= steps as f64;
+            assert!(
+                delta.abs() <= 0.005 && *divergence <= 1e-2,
+                "member {i} distribution failed dNLL={delta} KL={divergence}"
+            );
+        }
         assert!(
             dnll.abs() <= 0.005 && kl <= 1e-2,
             "distribution failed dNLL={dnll} KL={kl}"
@@ -156,7 +175,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         println!(
             "{}",
-            serde_json::json!({"depth":depth,"width":width,"steps":steps,"serial_step_ms":serial_ms/(steps-8) as f64,"native_step_ms":native_ms/(steps-8) as f64,"aggregate_speedup":serial_ms/native_ms,"signed_dNLL":dnll,"mean_KL":kl,"max_logit_error":max_abs,"bitwise_vectors":exact,"noise_exact_vectors":noise_exact,"noise_dNLL":0.,"noise_KL":0.,"fork_exact":fork_exact,"stream_hash":hash.finalize().to_hex().to_string()})
+            serde_json::json!({"depth":depth,"width":width,"steps":steps,"serial_step_ms":serial_ms/(steps-8) as f64,"native_step_ms":native_ms/(steps-8) as f64,"aggregate_speedup":serial_ms/native_ms,"signed_dNLL":dnll,"mean_KL":kl,"member_dNLL_KL":per_member,"max_logit_error":max_abs,"bitwise_vectors":exact,"noise_exact_vectors":noise_exact,"noise_dNLL":0.,"noise_KL":0.,"fork_exact":fork_exact,"stream_hash":hash.finalize().to_hex().to_string()})
+        );
+    }
+    if a.get(7).is_some_and(|v| v == "profile") {
+        // Profile four independent histories, after the fork witness has
+        // finished. Warm the restored states without including those dispatches.
+        for (r, s) in runners.iter_mut().zip(&checkpoints) {
+            r.reset()?;
+            r.restore_snapshot(s)?;
+        }
+        for step in 0..8 {
+            let tokens: Vec<_> = (0..4).map(|i| docs[i][depth + i * 17 + step]).collect();
+            native.step(&mut runners.iter_mut().collect::<Vec<_>>(), &tokens)?;
+        }
+        let tokens: Vec<_> = runners
+            .iter()
+            .enumerate()
+            .map(|(i, r)| docs[i][r.next_position()])
+            .collect();
+        let guard = qwen_llm::metal::dispatch_profile_begin(&ctx, 10000)?;
+        native.step(&mut runners.iter_mut().collect::<Vec<_>>(), &tokens)?;
+        let report = qwen_llm::metal::dispatch_profile_finish(&ctx, guard)?;
+        assert_eq!(
+            report.overflow, 0,
+            "dispatch profile exceeded its admitted rows"
+        );
+        let mut kernels = std::collections::BTreeMap::<String, (usize, u64)>::new();
+        for row in report.rows {
+            let e = kernels.entry(row.kernel).or_default();
+            e.0 += 1;
+            e.1 += row.gpu_ns.unwrap_or(0);
+        }
+        println!(
+            "{}",
+            serde_json::json!({"dispatch_kernels":kernels,"overflow":report.overflow})
         );
     }
     Ok(())

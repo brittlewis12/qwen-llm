@@ -8,6 +8,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 mod decode_selector;
+mod member_grid;
 mod pool_publish;
 mod selected_value_product;
 mod split_decode;

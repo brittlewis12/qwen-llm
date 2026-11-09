@@ -4344,6 +4344,32 @@ fn encode_step_inner(
     sequence_length: usize,
     projected: bool,
 ) -> Result<(), Qwen4ExpQsaError> {
+    encode_step_parts(
+        ctx,
+        enc,
+        input,
+        weights,
+        workspace,
+        position,
+        sequence_length,
+        projected,
+        true,
+        true,
+    )
+}
+
+fn encode_step_parts(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: QwenSparseAttentionMetalWeights<'_>,
+    workspace: &QwenSparseAttentionMetalWorkspace,
+    position: usize,
+    sequence_length: usize,
+    projected: bool,
+    with_attention: bool,
+    with_selection: bool,
+) -> Result<(), Qwen4ExpQsaError> {
     let g = workspace.geometry;
     #[cfg(test)]
     let child_index = crate::qwen4exp_child_profile::span(enc, "index_projection_norm_pending");
@@ -4380,6 +4406,7 @@ fn encode_step_inner(
         g.theta,
         g.eps,
     )?;
+
     encode_write_pending(ctx, enc, workspace, position % g.ratio)?;
     #[cfg(test)]
     drop(child_index);
@@ -4398,19 +4425,21 @@ fn encode_step_inner(
     #[cfg(test)]
     let child_selection = crate::qwen4exp_child_profile::span(enc, "index_score_select_expand");
     let visible_blocks = sequence_length / g.ratio;
-    if visible_blocks > 0 {
-        encode_index_scores(ctx, enc, workspace, visible_blocks)?;
+    if with_selection {
+        if visible_blocks > 0 {
+            encode_index_scores(ctx, enc, workspace, visible_blocks)?;
+        }
+        if visible_blocks > g.block_budget() {
+            encode_select_blocks(ctx, enc, workspace, visible_blocks)?;
+        } else {
+            encode_fill_blocks(ctx, enc, workspace, visible_blocks, sequence_length)?;
+        }
+        encode_expand_ids(ctx, enc, workspace, visible_blocks, sequence_length)?;
     }
-    if visible_blocks > g.block_budget() {
-        encode_select_blocks(ctx, enc, workspace, visible_blocks)?;
-    } else {
-        encode_fill_blocks(ctx, enc, workspace, visible_blocks, sequence_length)?;
-    }
-    encode_expand_ids(ctx, enc, workspace, visible_blocks, sequence_length)?;
     #[cfg(test)]
     drop(child_selection);
     #[cfg(test)]
-    if visible_blocks > g.block_budget() {
+    if with_selection && visible_blocks > g.block_budget() {
         encode_qwen4exp_qsa_decision_capture(
             ctx,
             enc,
@@ -4472,11 +4501,40 @@ fn encode_step_inner(
         g.theta,
         g.eps,
     )?;
+
     encode_publish_kv(ctx, enc, workspace, position)?;
     #[cfg(test)]
     drop(child_qkv);
+    if with_attention {
+        encode_attention_step(ctx, enc, workspace, position, sequence_length)?;
+    }
+    #[cfg(test)]
+    let _child_output = crate::qwen4exp_child_profile::span(enc, "qsa_output_projection");
+    if !projected {
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.output,
+            &workspace.attention,
+            &workspace.output,
+            g.query_width(),
+            g.hidden_size,
+        )?;
+    }
+    Ok(())
+}
+
+fn encode_attention_step(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    workspace: &QwenSparseAttentionMetalWorkspace,
+    position: usize,
+    sequence_length: usize,
+) -> Result<(), Qwen4ExpQsaError> {
     #[cfg(test)]
     let child_attention = crate::qwen4exp_child_profile::span(enc, "attention_logits_value");
+    let g = workspace.geometry;
+    let visible_blocks = sequence_length / g.ratio;
     let active_id_count =
         visible_blocks.min(g.block_budget()) * g.ratio + sequence_length % g.ratio;
     let split = match workspace.split_decode_scratch.as_ref() {
@@ -4498,19 +4556,6 @@ fn encode_step_inner(
     }
     #[cfg(test)]
     drop(child_attention);
-    #[cfg(test)]
-    let _child_output = crate::qwen4exp_child_profile::span(enc, "qsa_output_projection");
-    if !projected {
-        encode_mat_vec_dispatch(
-            ctx,
-            enc,
-            weights.output,
-            &workspace.attention,
-            &workspace.output,
-            g.query_width(),
-            g.hidden_size,
-        )?;
-    }
     Ok(())
 }
 

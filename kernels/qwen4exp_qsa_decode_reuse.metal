@@ -5,15 +5,9 @@ struct qwen4exp_decode_logits_args {
     uint query_heads; uint kv_heads; uint head_dim; uint id_count;
     uint row_stride; uint cache_capacity; float scale;
 };
-kernel void kernel_qwen4exp_qsa_decode_logits_reuse_f32(
-        constant qwen4exp_decode_logits_args & args [[buffer(0)]],
-        device const float * query [[buffer(1)]],
-        device const half * key_cache [[buffer(2)]],
-        device const int * token_ids [[buffer(3)]],
-        device float * logits [[buffer(4)]],
-        uint3 group [[threadgroup_position_in_grid]],
-        ushort simdgroup [[simdgroup_index_in_threadgroup]],
-        ushort simd_lane [[thread_index_in_simdgroup]]) {
+inline void fn_qsa_logits_body(constant qwen4exp_decode_logits_args &args, device const float *query,
+                               device const half *key_cache, device const int *token_ids,
+                               device float *logits, uint3 group, ushort simdgroup, ushort simd_lane) {
     constexpr uint heads_per_group = 4u;
     constexpr uint slots_per_simdgroup = 8u;
     constexpr uint simdgroups_per_threadgroup = 4u;
@@ -93,4 +87,43 @@ kernel void kernel_qwen4exp_qsa_decode_logits_reuse_f32(
             logits[output + 3u * args.row_stride] = partial_3 * args.scale;
         }
     }
+}
+kernel void kernel_qwen4exp_qsa_decode_logits_reuse_f32(
+        constant qwen4exp_decode_logits_args &args [[buffer(0)]], device const float *query [[buffer(1)]],
+        device const half *key_cache [[buffer(2)]], device const int *token_ids [[buffer(3)]],
+        device float *logits [[buffer(4)]], uint3 group [[threadgroup_position_in_grid]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]], ushort simd_lane [[thread_index_in_simdgroup]]) {
+    fn_qsa_logits_body(args, query, key_cache, token_ids, logits, group, simdgroup, simd_lane);
+}
+
+kernel void kernel_fn_batch_qsa_logits(
+        constant qwen4exp_decode_logits_args *args [[buffer(0)]], device const float *q0 [[buffer(1)]],
+        device const float *q1 [[buffer(2)]], device const float *q2 [[buffer(3)]],
+        device const float *q3 [[buffer(4)]], device const half *keys0 [[buffer(5)]],
+        device const half *keys1 [[buffer(6)]], device const half *keys2 [[buffer(7)]],
+        device const half *keys3 [[buffer(8)]], device const int *ids0 [[buffer(9)]],
+        device const int *ids1 [[buffer(10)]], device const int *ids2 [[buffer(11)]],
+        device const int *ids3 [[buffer(12)]], device float *out0 [[buffer(13)]],
+        device float *out1 [[buffer(14)]], device float *out2 [[buffer(15)]],
+        device float *out3 [[buffer(16)]], uint3 group [[threadgroup_position_in_grid]],
+        ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    const uint r = group.z;
+    fn_qsa_logits_body(args[r],
+                       r == 0   ? q0
+                       : r == 1 ? q1
+                       : r == 2 ? q2
+                                : q3,
+                       r == 0   ? keys0
+                       : r == 1 ? keys1
+                       : r == 2 ? keys2
+                                : keys3,
+                       r == 0   ? ids0
+                       : r == 1 ? ids1
+                       : r == 2 ? ids2
+                                : ids3,
+                       r == 0   ? out0
+                       : r == 1 ? out1
+                       : r == 2 ? out2
+                                : out3,
+                       uint3(group.xy, 0), sg, lane);
 }

@@ -34,15 +34,9 @@ struct qwen4exp_split_args {
     uint row_stride;
 };
 
-kernel void kernel_qwen4exp_qsa_split_softmax_f32(
-        constant qwen4exp_split_args & args [[buffer(0)]],
-        device float * logits [[buffer(1)]],
-        device float * partials [[buffer(2)]],
-        threadgroup float * scratch [[threadgroup(0)]],
-        uint head [[threadgroup_position_in_grid]],
-        uint lane [[thread_position_in_threadgroup]],
-        ushort sg [[simdgroup_index_in_threadgroup]],
-        ushort simd_lane [[thread_index_in_simdgroup]]) {
+inline void fn_qsa_softmax_body(constant qwen4exp_split_args &args, device float *logits,
+                                device float *partials, threadgroup float *scratch, uint head, uint lane,
+                                ushort sg, ushort simd_lane) {
     device float * row = logits + (ulong)head * args.row_stride;
     float local_maximum = -INFINITY;
     for (uint slot = lane; slot < args.id_count; slot += 256u) {
@@ -79,18 +73,19 @@ kernel void kernel_qwen4exp_qsa_split_softmax_f32(
         partials[base + 1u] = 0.0f;
     }
 }
+kernel void kernel_qwen4exp_qsa_split_softmax_f32(
+        constant qwen4exp_split_args &args [[buffer(0)]], device float *logits [[buffer(1)]],
+        device float *partials [[buffer(2)]], threadgroup float *scratch [[threadgroup(0)]],
+        uint head [[threadgroup_position_in_grid]], uint lane [[thread_position_in_threadgroup]],
+        ushort sg [[simdgroup_index_in_threadgroup]], ushort simd_lane [[thread_index_in_simdgroup]]) {
+    fn_qsa_softmax_body(args, logits, partials, scratch, head, lane, sg, simd_lane);
+}
 
 // Released geometry only: 24 query heads / 2 KV heads / 256 dimensions.
 // One SIMDgroup owns three heads; four SIMDgroups cover one KV head.
-kernel void kernel_qwen4exp_qsa_split_f16(
-        constant qwen4exp_split_args & args [[buffer(0)]],
-        device const float * masses [[buffer(1)]],
-        device const half * values [[buffer(3)]],
-        device const int * ids [[buffer(4)]],
-        device float * partials [[buffer(5)]],
-        uint2 group [[threadgroup_position_in_grid]],
-        ushort sg [[simdgroup_index_in_threadgroup]],
-        ushort lane [[thread_index_in_simdgroup]]) {
+inline void fn_qsa_value_body(constant qwen4exp_split_args &args, device const float *masses,
+                              device const half *values, device const int *ids, device float *partials,
+                              uint2 group, ushort sg, ushort lane) {
     if (group.x >= args.splits || group.y >= 2u) return;
     const uint first_head = group.y * 12u + uint(sg) * 3u;
     float numerator[3][8] = {};
@@ -117,14 +112,16 @@ kernel void kernel_qwen4exp_qsa_split_f16(
         }
     }
 }
+kernel void kernel_qwen4exp_qsa_split_f16(
+        constant qwen4exp_split_args &args [[buffer(0)]], device const float *masses [[buffer(1)]],
+        device const half *values [[buffer(3)]], device const int *ids [[buffer(4)]],
+        device float *partials [[buffer(5)]], uint2 group [[threadgroup_position_in_grid]],
+        ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    fn_qsa_value_body(args, masses, values, ids, partials, group, sg, lane);
+}
 
-kernel void kernel_qwen4exp_qsa_split_merge_f32(
-        constant qwen4exp_split_args & args [[buffer(0)]],
-        device const float * partials [[buffer(1)]],
-        device const float * gate [[buffer(2)]],
-        device float * output [[buffer(3)]],
-        uint head [[threadgroup_position_in_grid]],
-        ushort lane [[thread_index_in_simdgroup]]) {
+inline void fn_qsa_merge_body(constant qwen4exp_split_args &args, device const float *partials,
+                              device const float *gate, device float *output, uint head, ushort lane) {
     if (head >= 24u) return;
     device const float * row = partials + (ulong)head * args.splits * 258u;
     const float denominator = row[0];
@@ -140,4 +137,89 @@ kernel void kernel_qwen4exp_qsa_split_merge_f32(
         const float activation = 1.0f / (1.0f + exp(-gate[index]));
         output[index] = denominator > 0.0f ? numerator[d] / denominator * activation : 0.0f;
     }
+}
+kernel void kernel_qwen4exp_qsa_split_merge_f32(constant qwen4exp_split_args &args [[buffer(0)]],
+                                                device const float *partials [[buffer(1)]],
+                                                device const float *gate [[buffer(2)]],
+                                                device float *output [[buffer(3)]],
+                                                uint head [[threadgroup_position_in_grid]],
+                                                ushort lane [[thread_index_in_simdgroup]]) {
+    fn_qsa_merge_body(args, partials, gate, output, head, lane);
+}
+
+kernel void kernel_fn_batch_qsa_softmax(
+        constant qwen4exp_split_args *args [[buffer(0)]], device float *logits0 [[buffer(1)]],
+        device float *logits1 [[buffer(2)]], device float *logits2 [[buffer(3)]],
+        device float *logits3 [[buffer(4)]], device float *partial0 [[buffer(5)]],
+        device float *partial1 [[buffer(6)]], device float *partial2 [[buffer(7)]],
+        device float *partial3 [[buffer(8)]], threadgroup float *scratch [[threadgroup(0)]],
+        uint2 group [[threadgroup_position_in_grid]], uint2 local [[thread_position_in_threadgroup]],
+        ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    const uint r = group.y;
+    fn_qsa_softmax_body(args[r],
+                        r == 0   ? logits0
+                        : r == 1 ? logits1
+                        : r == 2 ? logits2
+                                 : logits3,
+                        r == 0   ? partial0
+                        : r == 1 ? partial1
+                        : r == 2 ? partial2
+                                 : partial3,
+                        scratch, group.x, local.x, sg, lane);
+}
+kernel void kernel_fn_batch_qsa_value(
+        constant qwen4exp_split_args *args [[buffer(0)]], device const float *mass0 [[buffer(1)]],
+        device const float *mass1 [[buffer(2)]], device const float *mass2 [[buffer(3)]],
+        device const float *mass3 [[buffer(4)]], device const half *values0 [[buffer(5)]],
+        device const half *values1 [[buffer(6)]], device const half *values2 [[buffer(7)]],
+        device const half *values3 [[buffer(8)]], device const int *ids0 [[buffer(9)]],
+        device const int *ids1 [[buffer(10)]], device const int *ids2 [[buffer(11)]],
+        device const int *ids3 [[buffer(12)]], device float *partial0 [[buffer(13)]],
+        device float *partial1 [[buffer(14)]], device float *partial2 [[buffer(15)]],
+        device float *partial3 [[buffer(16)]], uint3 group [[threadgroup_position_in_grid]],
+        ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    const uint r = group.z;
+    fn_qsa_value_body(args[r],
+                      r == 0   ? mass0
+                      : r == 1 ? mass1
+                      : r == 2 ? mass2
+                               : mass3,
+                      r == 0   ? values0
+                      : r == 1 ? values1
+                      : r == 2 ? values2
+                               : values3,
+                      r == 0   ? ids0
+                      : r == 1 ? ids1
+                      : r == 2 ? ids2
+                               : ids3,
+                      r == 0   ? partial0
+                      : r == 1 ? partial1
+                      : r == 2 ? partial2
+                               : partial3,
+                      group.xy, sg, lane);
+}
+kernel void kernel_fn_batch_qsa_merge(
+        constant qwen4exp_split_args *args [[buffer(0)]], device const float *partial0 [[buffer(1)]],
+        device const float *partial1 [[buffer(2)]], device const float *partial2 [[buffer(3)]],
+        device const float *partial3 [[buffer(4)]], device const float *gate0 [[buffer(5)]],
+        device const float *gate1 [[buffer(6)]], device const float *gate2 [[buffer(7)]],
+        device const float *gate3 [[buffer(8)]], device float *out0 [[buffer(9)]],
+        device float *out1 [[buffer(10)]], device float *out2 [[buffer(11)]],
+        device float *out3 [[buffer(12)]], uint2 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    const uint r = group.y;
+    fn_qsa_merge_body(args[r],
+                      r == 0   ? partial0
+                      : r == 1 ? partial1
+                      : r == 2 ? partial2
+                               : partial3,
+                      r == 0   ? gate0
+                      : r == 1 ? gate1
+                      : r == 2 ? gate2
+                               : gate3,
+                      r == 0   ? out0
+                      : r == 1 ? out1
+                      : r == 2 ? out2
+                               : out3,
+                      group.x, lane);
 }

@@ -450,15 +450,9 @@ struct qwen4exp_gdn_norm_args {
     float eps;
 };
 
-kernel void kernel_qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32(
-        constant qwen4exp_gdn_norm_args & args [[buffer(0)]],
-        device const float * input           [[buffer(1)]],
-        device const float * weight          [[buffer(2)]],
-        device const float * gate            [[buffer(3)]],
-        device       float * output          [[buffer(4)]],
-        uint2 tgpig [[threadgroup_position_in_grid]],
-        uint2 tpitg [[thread_position_in_threadgroup]],
-        ushort tiisg [[thread_index_in_simdgroup]]) {
+inline void fn_gdn_rms_gated_body(constant qwen4exp_gdn_norm_args &args, device const float *input,
+                                  device const float *weight, device const float *gate, device float *output,
+                                  uint2 tgpig, uint2 tpitg, ushort tiisg) {
     constexpr uint HEAD_DIM = 128;
     constexpr uint ROWS_PER_TG = 4;
     const uint head = tgpig.x * ROWS_PER_TG + tpitg.y;
@@ -481,6 +475,13 @@ kernel void kernel_qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32(
         const float sigmoid_gate = 1.0f / (1.0f + exp(-gate_head[lane]));
         output_head[lane] = normalized * sigmoid_gate;
     }
+}
+kernel void kernel_qwen4exp_gdn_rmsnorm_sigmoid_hd128_r4_f32(
+        constant qwen4exp_gdn_norm_args &args [[buffer(0)]], device const float *input [[buffer(1)]],
+        device const float *weight [[buffer(2)]], device const float *gate [[buffer(3)]],
+        device float *output [[buffer(4)]], uint2 tgpig [[threadgroup_position_in_grid]],
+        uint2 tpitg [[thread_position_in_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]]) {
+    fn_gdn_rms_gated_body(args, input, weight, gate, output, tgpig, tpitg, tiisg);
 }
 
 struct qwen4exp_qsa_rope_args {
@@ -626,6 +627,7 @@ static inline float qwen4exp_qsa_rope_value(
     return row[pair + half_dim] * weight[pair + half_dim] * cosine
         + row[pair] * weight[pair] * sine;
 }
+
 
 kernel void kernel_qwen4exp_qsa_norm_rope_f32(
         constant qwen4exp_qsa_rope_args & args [[buffer(0)]],
@@ -882,14 +884,9 @@ kernel void kernel_qwen4exp_qsa_commit_pending_packed_f32(
         = raw_keys[(ulong)last * args.head_dim + lane];
 }
 
-kernel void kernel_qwen4exp_qsa_index_scores_4x128_f16(
-        constant qwen4exp_qsa_index_score_args & args [[buffer(0)]],
-        device const float * query [[buffer(1)]],
-        device const half * compressed_keys [[buffer(2)]],
-        device float * scores [[buffer(3)]],
-        uint group [[threadgroup_position_in_grid]],
-        ushort simdgroup [[simdgroup_index_in_threadgroup]],
-        ushort lane [[thread_index_in_simdgroup]]) {
+inline void fn_qsa_index_body(constant qwen4exp_qsa_index_score_args &args, device const float *query,
+                              device const half *compressed_keys, device float *scores, uint group,
+                              ushort simdgroup, ushort lane) {
     const uint block = group * 8u + uint(simdgroup);
     if (block >= args.visible_blocks) return;
     device const half * key = compressed_keys + (ulong)block * 128u;
@@ -904,6 +901,13 @@ kernel void kernel_qwen4exp_qsa_index_scores_4x128_f16(
         if (lane == 0u) score += max(dot, 0.0f);
     }
     if (lane == 0u) scores[block] = score * 0.08838834764831845f;
+}
+kernel void kernel_qwen4exp_qsa_index_scores_4x128_f16(
+        constant qwen4exp_qsa_index_score_args &args [[buffer(0)]], device const float *query [[buffer(1)]],
+        device const half *compressed_keys [[buffer(2)]], device float *scores [[buffer(3)]],
+        uint group [[threadgroup_position_in_grid]], ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    fn_qsa_index_body(args, query, compressed_keys, scores, group, simdgroup, lane);
 }
 
 kernel void kernel_qwen4exp_qsa_index_scores_packed_4x128_f16(
@@ -985,18 +989,12 @@ kernel void kernel_qwen4exp_qsa_expand_ids_i32(
 // QWEN4EXP_EXPAND_PAR_MAX_BLOCKS, checked by the host), then every thread
 // writes its output slots in parallel instead of one thread writing all.
 constant uint QWEN4EXP_EXPAND_PAR_MAX_BLOCKS = 2048u;
-kernel void kernel_qwen4exp_qsa_expand_ids_par_i32(
-        constant qwen4exp_qsa_ids_args & args [[buffer(0)]],
-        device const int * selected_blocks [[buffer(1)]],
-        device int * token_ids [[buffer(2)]],
-        uint tid [[thread_position_in_threadgroup]],
-        uint threads [[threads_per_threadgroup]],
-        ushort lane [[thread_index_in_simdgroup]],
-        ushort simd [[simdgroup_index_in_threadgroup]]) {
-    threadgroup int valid_blocks[QWEN4EXP_EXPAND_PAR_MAX_BLOCKS];
-    threadgroup uint simd_counts[32];
-    threadgroup uint valid_count;
-    if (tid == 0u) valid_count = 0u;
+inline void fn_qsa_expand_body(constant qwen4exp_qsa_ids_args &args, device const int *selected_blocks,
+                               device int *token_ids, threadgroup int *valid_blocks,
+                               threadgroup uint *simd_counts, threadgroup uint *shared_count, uint tid,
+                               uint threads, ushort lane, ushort simd) {
+    if (tid == 0u)
+        shared_count[0] = 0u;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     // Stream compaction in slot order: per round, a SIMD prefix within each
     // simdgroup plus the counts of earlier simdgroups and earlier rounds.
@@ -1009,18 +1007,18 @@ kernel void kernel_qwen4exp_qsa_expand_ids_par_i32(
         const uint simd_total = simd_sum(flag);
         if (lane == 0) simd_counts[simd] = simd_total;
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        uint before = valid_count;
+        uint before = shared_count[0];
         for (uint s = 0u; s < uint(simd); ++s) before += simd_counts[s];
         if (valid) valid_blocks[before + lane_prefix] = block;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (tid == 0u) {
             uint total = 0u;
             for (uint s = 0u; s < (threads + 31u) / 32u; ++s) total += simd_counts[s];
-            valid_count += total;
+            shared_count[0] += total;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    const uint head = args.ratio == 0u ? 0u : valid_count * args.ratio;
+    const uint head = args.ratio == 0u ? 0u : shared_count[0] * args.ratio;
     const uint tail_start = args.visible_blocks * args.ratio;
     for (uint slot = tid; slot < args.output_width; slot += threads) {
         int value;
@@ -1032,6 +1030,19 @@ kernel void kernel_qwen4exp_qsa_expand_ids_par_i32(
         }
         token_ids[slot] = value;
     }
+}
+kernel void kernel_qwen4exp_qsa_expand_ids_par_i32(constant qwen4exp_qsa_ids_args &args [[buffer(0)]],
+                                                   device const int *selected_blocks [[buffer(1)]],
+                                                   device int *token_ids [[buffer(2)]],
+                                                   uint tid [[thread_position_in_threadgroup]],
+                                                   uint threads [[threads_per_threadgroup]],
+                                                   ushort lane [[thread_index_in_simdgroup]],
+                                                   ushort simd [[simdgroup_index_in_threadgroup]]) {
+    threadgroup int valid_blocks[QWEN4EXP_EXPAND_PAR_MAX_BLOCKS];
+    threadgroup uint simd_counts[32];
+    threadgroup uint shared_count[1];
+    fn_qsa_expand_body(args, selected_blocks, token_ids, valid_blocks, simd_counts, shared_count, tid,
+                       threads, lane, simd);
 }
 
 kernel void kernel_qwen4exp_qsa_expand_ids_packed_i32(
@@ -1075,6 +1086,7 @@ kernel void kernel_qwen4exp_qsa_expand_ids_packed_i32(
         ? int(tail_start + tail_slot)
         : -1;
 }
+
 
 kernel void kernel_qwen4exp_qsa_qgate_norm_rope_f32(
         constant qwen4exp_qsa_qgate_args & args [[buffer(0)]],
@@ -1666,3 +1678,86 @@ kernel void kernel_qwen4exp_qsa_reset_selected_controls_i32(
     selected_counts[index] = -1;
     selector_status[index] = -1;
 }
+
+kernel void kernel_fn_batch_gdn_rms_gate(
+        constant qwen4exp_gdn_norm_args &args [[buffer(0)]], device const float *weight [[buffer(1)]],
+        device const float *input0 [[buffer(2)]], device const float *input1 [[buffer(3)]],
+        device const float *input2 [[buffer(4)]], device const float *input3 [[buffer(5)]],
+        device const float *gate0 [[buffer(6)]], device const float *gate1 [[buffer(7)]],
+        device const float *gate2 [[buffer(8)]], device const float *gate3 [[buffer(9)]],
+        device float *out0 [[buffer(10)]], device float *out1 [[buffer(11)]],
+        device float *out2 [[buffer(12)]], device float *out3 [[buffer(13)]],
+        uint2 group [[threadgroup_position_in_grid]], uint2 local [[thread_position_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    const uint r = group.y;
+    fn_gdn_rms_gated_body(args,
+                          r == 0   ? input0
+                          : r == 1 ? input1
+                          : r == 2 ? input2
+                                   : input3,
+                          weight,
+                          r == 0   ? gate0
+                          : r == 1 ? gate1
+                          : r == 2 ? gate2
+                                   : gate3,
+                          r == 0   ? out0
+                          : r == 1 ? out1
+                          : r == 2 ? out2
+                                   : out3,
+                          uint2(group.x, 0), local, lane);
+}
+
+kernel void kernel_fn_batch_qsa_index(
+        constant qwen4exp_qsa_index_score_args *args [[buffer(0)]], device const float *query0 [[buffer(1)]],
+        device const float *query1 [[buffer(2)]], device const float *query2 [[buffer(3)]],
+        device const float *query3 [[buffer(4)]], device const half *keys0 [[buffer(5)]],
+        device const half *keys1 [[buffer(6)]], device const half *keys2 [[buffer(7)]],
+        device const half *keys3 [[buffer(8)]], device float *score0 [[buffer(9)]],
+        device float *score1 [[buffer(10)]], device float *score2 [[buffer(11)]],
+        device float *score3 [[buffer(12)]], uint2 group [[threadgroup_position_in_grid]],
+        ushort sg [[simdgroup_index_in_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    const uint r = group.y;
+    fn_qsa_index_body(args[r],
+                      r == 0   ? query0
+                      : r == 1 ? query1
+                      : r == 2 ? query2
+                               : query3,
+                      r == 0   ? keys0
+                      : r == 1 ? keys1
+                      : r == 2 ? keys2
+                               : keys3,
+                      r == 0   ? score0
+                      : r == 1 ? score1
+                      : r == 2 ? score2
+                               : score3,
+                      group.x, sg, lane);
+}
+
+kernel void kernel_fn_batch_qsa_expand(
+        constant qwen4exp_qsa_ids_args *args [[buffer(0)]], device const int *selected0 [[buffer(1)]],
+        device const int *selected1 [[buffer(2)]], device const int *selected2 [[buffer(3)]],
+        device const int *selected3 [[buffer(4)]], device int *out0 [[buffer(5)]],
+        device int *out1 [[buffer(6)]], device int *out2 [[buffer(7)]], device int *out3 [[buffer(8)]],
+        uint r [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]],
+        uint threads [[threads_per_threadgroup]], ushort lane [[thread_index_in_simdgroup]],
+        ushort sg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup int valid_blocks[QWEN4EXP_EXPAND_PAR_MAX_BLOCKS];
+    threadgroup uint simd_counts[32];
+    threadgroup uint shared_count[1];
+    fn_qsa_expand_body(args[r],
+                       r == 0   ? selected0
+                       : r == 1 ? selected1
+                       : r == 2 ? selected2
+                                : selected3,
+                       r == 0   ? out0
+                       : r == 1 ? out1
+                       : r == 2 ? out2
+                                : out3,
+                       valid_blocks, simd_counts, shared_count, tid, threads, lane, sg);
+}
+
+
+
+
+
+// The same prepared-coefficient injection, with a separate member axis.

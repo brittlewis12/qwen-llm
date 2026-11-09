@@ -133,18 +133,9 @@ kernel void kernel_gdn_step_f32(
     }
 }
 
-[[max_total_threads_per_threadgroup(32)]]
-kernel void kernel_gdn_step_decay_f32(
-        constant gdn_step_args & args    [[buffer(0)]],
-        device const float     * q       [[buffer(1)]], // [n_k_heads, head_dim]
-        device const float     * k       [[buffer(2)]], // [n_k_heads, head_dim]
-        device const float     * v       [[buffer(3)]], // [n_v_heads, head_dim]
-        device const float     * decay   [[buffer(4)]], // [n_v_heads] exp(g)
-        device const float     * beta    [[buffer(5)]], // [n_v_heads]
-        device       float     * state   [[buffer(6)]], // [n_v_heads, head_dim, head_dim]
-        device       float     * out     [[buffer(7)]], // [n_v_heads, head_dim]
-        uint2  tgpig [[threadgroup_position_in_grid]],
-        ushort tiisg [[thread_index_in_simdgroup]]) {
+inline void fn_gdn_decay_body(constant gdn_step_args &args, device const float *q, device const float *k,
+                              device const float *v, device const float *decay, device const float *beta,
+                              device float *state, device float *out, uint2 tgpig, ushort tiisg) {
     const uint dv = tgpig.x;
     const uint hi = tgpig.y;
     if (hi >= args.n_v_heads || dv >= HEAD_DIM) return;
@@ -197,6 +188,19 @@ kernel void kernel_gdn_step_decay_f32(
     for (ushort j = 0; j < DKS_PER_LANE; ++j) {
         s_row[dk_base + j] = s_reg[j];
     }
+}
+[[max_total_threads_per_threadgroup(32)]]
+kernel void kernel_gdn_step_decay_f32(constant gdn_step_args &args [[buffer(0)]],
+                                      device const float *q [[buffer(1)]],     // [n_k_heads, head_dim]
+                                      device const float *k [[buffer(2)]],     // [n_k_heads, head_dim]
+                                      device const float *v [[buffer(3)]],     // [n_v_heads, head_dim]
+                                      device const float *decay [[buffer(4)]], // [n_v_heads] exp(g)
+                                      device const float *beta [[buffer(5)]],  // [n_v_heads]
+                                      device float *state [[buffer(6)]], // [n_v_heads, head_dim, head_dim]
+                                      device float *out [[buffer(7)]],   // [n_v_heads, head_dim]
+                                      uint2 tgpig [[threadgroup_position_in_grid]],
+                                      ushort tiisg [[thread_index_in_simdgroup]]) {
+    fn_gdn_decay_body(args, q, k, v, decay, beta, state, out, tgpig, tiisg);
 }
 
 // Reverse one recurrence step with direct decay input. The VJP consumes the
@@ -555,4 +559,56 @@ kernel void kernel_gdn_step_decay_packed_nsg4_f32(
     for (ushort j = 0; j < DKS_PER_LANE; ++j) {
         s_row[dk_base + j] = s_reg[j];
     }
+}
+
+[[max_total_threads_per_threadgroup(32)]]
+kernel void
+kernel_fn_batch_gdn_decay(constant gdn_step_args &args [[buffer(0)]], device const float *q0 [[buffer(1)]],
+                          device const float *q1 [[buffer(2)]], device const float *q2 [[buffer(3)]],
+                          device const float *q3 [[buffer(4)]], device const float *k0 [[buffer(5)]],
+                          device const float *k1 [[buffer(6)]], device const float *k2 [[buffer(7)]],
+                          device const float *k3 [[buffer(8)]], device const float *v0 [[buffer(9)]],
+                          device const float *v1 [[buffer(10)]], device const float *v2 [[buffer(11)]],
+                          device const float *v3 [[buffer(12)]], device const float *decay0 [[buffer(13)]],
+                          device const float *decay1 [[buffer(14)]],
+                          device const float *decay2 [[buffer(15)]],
+                          device const float *decay3 [[buffer(16)]], device const float *beta0 [[buffer(17)]],
+                          device const float *beta1 [[buffer(18)]], device const float *beta2 [[buffer(19)]],
+                          device const float *beta3 [[buffer(20)]], device float *state0 [[buffer(21)]],
+                          device float *state1 [[buffer(22)]], device float *state2 [[buffer(23)]],
+                          device float *state3 [[buffer(24)]], device float *out0 [[buffer(25)]],
+                          device float *out1 [[buffer(26)]], device float *out2 [[buffer(27)]],
+                          device float *out3 [[buffer(28)]], uint3 group [[threadgroup_position_in_grid]],
+                          ushort lane [[thread_index_in_simdgroup]]) {
+    const uint r = group.z;
+    fn_gdn_decay_body(args,
+                      r == 0   ? q0
+                      : r == 1 ? q1
+                      : r == 2 ? q2
+                               : q3,
+                      r == 0   ? k0
+                      : r == 1 ? k1
+                      : r == 2 ? k2
+                               : k3,
+                      r == 0   ? v0
+                      : r == 1 ? v1
+                      : r == 2 ? v2
+                               : v3,
+                      r == 0   ? decay0
+                      : r == 1 ? decay1
+                      : r == 2 ? decay2
+                               : decay3,
+                      r == 0   ? beta0
+                      : r == 1 ? beta1
+                      : r == 2 ? beta2
+                               : beta3,
+                      r == 0   ? state0
+                      : r == 1 ? state1
+                      : r == 2 ? state2
+                               : state3,
+                      r == 0   ? out0
+                      : r == 1 ? out1
+                      : r == 2 ? out2
+                               : out3,
+                      group.xy, lane);
 }

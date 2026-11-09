@@ -46,6 +46,7 @@ SCOPES = {
         "qwen4exp_metal::hc_read::tests::native_hc_axis_matches_member_reductions_and_guards",
         "qwen4exp_qsa::tests::pool_publish::",
         "qwen4exp_qsa::tests::decode_selector::",
+        "qwen4exp_qsa::tests::member_grid::",
         "qwen4exp_text_session::snapshot_copy::tests::",
         "metal::moe_grouped_generic::tests::staging_ownership::",
         "metal::moe_grouped_generic::tests::wide_activation_type::",

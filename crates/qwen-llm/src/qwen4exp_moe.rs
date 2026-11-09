@@ -1,6 +1,8 @@
 //! One-token Metal MoE execution for Qwen3.8-Flash-Next.
 
+pub(crate) mod decode_batch;
 mod projections;
+
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,
     MetalTimestampSampleBuffer, encode_axpy_rowwise_f32, encode_axpy_scalar_f32,

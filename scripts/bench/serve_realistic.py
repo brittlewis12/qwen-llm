@@ -48,6 +48,17 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def arm_environment(source, family, arm):
+    env = dict(source, RUST_LOG='warn,qwen_diag=info', NO_COLOR='1')
+    knobs = dict(v41='QWEN_SERVE_V41_MAX_ACTIVE', glm='QWEN_SERVE_GLM_MAX_ACTIVE',
+                 fn='QWEN_SERVE_FN_MAX_ACTIVE')
+    for knob in knobs.values():
+        env.pop(knob, None)
+    if arm == 'serial':
+        env[knobs[family]] = '1'
+    return env
+
+
 def percentile(values, fraction):
     if not values:
         return None
@@ -297,11 +308,7 @@ class Arm:
         occupied = subprocess.run(['lsof','-nP',f'-iTCP:{args.port}','-sTCP:LISTEN'],stdout=subprocess.DEVNULL)
         if occupied.returncode != 1:
             raise RuntimeError('port occupied or lsof failed')
-        env = dict(os.environ, RUST_LOG='warn,qwen_diag=info', NO_COLOR='1')
-        for key in ('QWEN_SERVE_V41_MAX_ACTIVE','QWEN_SERVE_GLM_MAX_ACTIVE'):
-            env.pop(key,None)
-        if args.arm == 'serial' and self.plan['family'] in ('v41','glm'):
-            env['QWEN_SERVE_V41_MAX_ACTIVE' if self.plan['family']=='v41' else 'QWEN_SERVE_GLM_MAX_ACTIVE']='1'
+        env = arm_environment(os.environ, self.plan['family'], args.arm)
         maximum = max(t['reply_tokens'] for t in self.plan['population'])
         command = [str(args.binary.resolve()),'serve','-m',str(args.model.resolve()),
                    '--addr',f'127.0.0.1:{args.port}','--max-context-tokens',str(args.context),

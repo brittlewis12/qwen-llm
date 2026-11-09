@@ -9,6 +9,18 @@ sys.path.insert(0,str(Path(__file__).resolve().parent))
 import serve_realistic as bench
 
 class SteadyTests(unittest.TestCase):
+    def test_serial_arm_is_serial_for_each_family_and_default_clears_inherited_cap(self):
+        knobs = dict(fn='QWEN_SERVE_FN_MAX_ACTIVE', glm='QWEN_SERVE_GLM_MAX_ACTIVE',
+                     v41='QWEN_SERVE_V41_MAX_ACTIVE')
+        inherited = {k: '2' for k in knobs.values()}
+        inherited['QWEN_FN_BATCH_GDN'] = '0'
+        for family, knob in knobs.items():
+            serial = bench.arm_environment(inherited, family, 'serial')
+            self.assertEqual({k:v for k,v in serial.items() if k in knobs.values()}, {knob:'1'})
+            default = bench.arm_environment(inherited, family, 'default')
+            self.assertTrue(all(k not in default for k in knobs.values()))
+            self.assertEqual(default['QWEN_FN_BATCH_GDN'], '0')
+
     def population(self):
         return [dict(model='glm',purpose='primary',reused='48000',reuse_source='live',
                      call=f'glm/{i}',new=str(5+i),generated=str(20+i),tool_union_ms=str(i*10))

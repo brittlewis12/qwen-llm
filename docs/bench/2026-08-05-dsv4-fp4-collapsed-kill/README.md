@@ -1,5 +1,10 @@
 # DeepSeek V4 Collapsed FP4 Selector KILL
 
+> Historical recipe: this packet’s ignored tests and exclusive prototype code were
+> retired in [cleanup batch 2](../2026-11-09-ignored-sweep-batch2.md). Reproduce these commands with the
+> frozen pre-cleanup source `bc05a78eb` or the packet’s original commit, rather than current main.
+
+
 Date: 2026-08-05
 
 Status: collapsed diagnostics execution is structurally qualified; direct

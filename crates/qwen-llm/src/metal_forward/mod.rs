@@ -2462,15 +2462,10 @@ mod moe;
 mod native_embedding_pilot;
 mod prefill_gemm;
 
-#[cfg(test)]
-mod snapshot_transfer_pilot;
-
 mod residency;
 #[cfg(test)]
 mod role_tests;
 mod session;
-#[cfg(test)]
-mod snapshot_segments_pilot;
 mod support;
 #[cfg(test)]
 mod tests;

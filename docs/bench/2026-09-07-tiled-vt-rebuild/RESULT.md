@@ -1,5 +1,10 @@
 # Coalesced raw-bit V transpose: bank PASS, restored-phase HOLD
 
+> Historical recipe: this packet’s ignored tests and exclusive prototype code were
+> retired in [cleanup batch 2](../2026-11-09-ignored-sweep-batch2.md). Reproduce these commands with the
+> frozen pre-cleanup source `bc05a78eb` or the packet’s original commit, rather than current main.
+
+
 The subsequent full-model phase preserves logits/state bitwise but fails its
 frozen control-spread gates. No production flag, kernel promotion or endpoint
 qualification follows. The bank result remains valid at its original scope.

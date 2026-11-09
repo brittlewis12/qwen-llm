@@ -3,9 +3,6 @@
 use super::*;
 
 #[cfg(test)]
-pub(crate) mod hc4_strict;
-
-#[cfg(test)]
 mod route_parity_tests;
 
 #[cfg(test)]

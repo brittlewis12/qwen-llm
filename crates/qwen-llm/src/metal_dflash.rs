@@ -7238,8 +7238,6 @@ fn plan_prefill_scratch_inner(
 }
 
 pub struct MetalDFlashLayerMajorScratch {
-    #[cfg(test)]
-    online_verify_pilot: Option<online_verify_pilot::Workspace>,
     /// `[N, H]` F32 — residual stream across N tokens.
     pub x_pack: MetalTensor,
     /// `[N, H]` F32 — post-norm activation across N tokens (reused for
@@ -7880,8 +7878,6 @@ impl MetalDFlashLayerMajorScratch {
         };
 
         let scratch = Self {
-            #[cfg(test)]
-            online_verify_pilot: None,
             x_pack: allocator.f32(ctx, "x_pack", vec![n, h])?,
             h_pack: allocator.f32(ctx, "h_pack", vec![n, h])?,
             mixer_out_pack: allocator.f32(ctx, "mixer_out_pack", vec![n, h])?,
@@ -9964,164 +9960,107 @@ pub fn encode_packed_verify_layer_major_inner_for(
                     }
                     emit_mtp_verify_count_phase(trace_counts, il as isize, "attn", "front");
 
-                    #[cfg(test)]
-                    let shared_kv_shape_ok = head_dim == 256
-                        && n_q == 24
-                        && n_kv == 4
-                        && target_session.kv_k[ai].dtype == GgmlType::F16
-                        && target_session.kv_v[ai].dtype == GgmlType::F16;
-                    #[cfg(test)]
-                    let pilot_handled = if let Some(workspace) = &layer_scratch.online_verify_pilot
-                    {
-                        assert!(shared_kv_shape_ok && n == 16);
-                        let enc = KernelEncoder::begin(&cmd_buf);
-                        if !fused_qk_norm_rope {
-                            encode_prefill_qk_rope(
-                                base.ctx,
-                                &enc,
-                                &attn_q_normed_pack,
-                                &attn_k_normed_pack,
-                                n,
-                                n_q,
-                                n_kv,
-                                head_dim,
-                                n_rot,
-                                start_position,
-                                arch.rope_theta,
-                            )?;
-                        }
-                        encode_scatter_offset_f32_to_f16_kv(
-                            base.ctx,
-                            &enc,
-                            &attn_k_normed_pack,
-                            &attn_v_now_pack,
-                            &target_session.kv_k[ai],
-                            &target_session.kv_v[ai],
-                            start_position as usize * kv_dim,
-                            n * kv_dim,
-                        )?;
-                        workspace.encode(
-                            base.ctx,
-                            &enc,
-                            &attn_q_normed_pack,
-                            &target_session.kv_k[ai],
-                            &target_session.kv_v[ai],
-                            &attn_o_pack,
-                            start_position as usize,
-                        )?;
-                        target_session.kv_n_pos[ai] = start_position as usize + n;
-                        enc.end();
-                        true
-                    } else {
-                        false
-                    };
-                    #[cfg(not(test))]
-                    let pilot_handled = false;
-
-                    if pilot_handled {
-                    } else {
-                        // The generic path appends and attends one causal row at
-                        // a time because each row sees a different KV extent.
-                        for n_idx in 0..n {
-                            let position_n = start_position + n_idx as u32;
-                            let q_normed_n = layer_scratch
-                                .attn_q_normed_pack
-                                .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
-                            let k_normed_n = layer_scratch
-                                .attn_k_normed_pack
-                                .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
-                            let v_now_n = layer_scratch
-                                .attn_v_now_pack
-                                .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
-                            let attn_o_n = layer_scratch
-                                .attn_o_pack
-                                .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
-                            {
-                                let enc = KernelEncoder::begin(&cmd_buf);
-                                if !fused_qk_norm_rope {
-                                    // RoPE on this row of Q and K.
-                                    encode_rope_neox_f32(
-                                        base.ctx,
-                                        &enc,
-                                        &q_normed_n,
-                                        n_q,
-                                        head_dim,
-                                        n_rot,
-                                        position_n,
-                                        arch.rope_theta,
-                                    )?;
-                                    encode_rope_neox_f32(
-                                        base.ctx,
-                                        &enc,
-                                        &k_normed_n,
-                                        n_kv,
-                                        head_dim,
-                                        n_rot,
-                                        position_n,
-                                        arch.rope_theta,
-                                    )?;
-                                }
-                                // KV scatter into F16 cache slot.
-                                encode_scatter_offset_f32_to_f16_kv(
+                    // The generic path appends and attends one causal row at
+                    // a time because each row sees a different KV extent.
+                    for n_idx in 0..n {
+                        let position_n = start_position + n_idx as u32;
+                        let q_normed_n = layer_scratch
+                            .attn_q_normed_pack
+                            .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                        let k_normed_n = layer_scratch
+                            .attn_k_normed_pack
+                            .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                        let v_now_n = layer_scratch
+                            .attn_v_now_pack
+                            .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                        let attn_o_n = layer_scratch
+                            .attn_o_pack
+                            .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            if !fused_qk_norm_rope {
+                                // RoPE on this row of Q and K.
+                                encode_rope_neox_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &q_normed_n,
+                                    n_q,
+                                    head_dim,
+                                    n_rot,
+                                    position_n,
+                                    arch.rope_theta,
+                                )?;
+                                encode_rope_neox_f32(
                                     base.ctx,
                                     &enc,
                                     &k_normed_n,
-                                    &v_now_n,
+                                    n_kv,
+                                    head_dim,
+                                    n_rot,
+                                    position_n,
+                                    arch.rope_theta,
+                                )?;
+                            }
+                            // KV scatter into F16 cache slot.
+                            encode_scatter_offset_f32_to_f16_kv(
+                                base.ctx,
+                                &enc,
+                                &k_normed_n,
+                                &v_now_n,
+                                &target_session.kv_k[ai],
+                                &target_session.kv_v[ai],
+                                (position_n as usize) * kv_dim,
+                                kv_dim,
+                            )?;
+                            target_session.kv_n_pos[ai] = position_n as usize + 1;
+
+                            // Fused attn-v4 (or naive fallback for non-matching shapes).
+                            const V4_HEAD_DIM: usize = 256;
+                            let group = n_q / n_kv;
+                            let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 4 | 6 | 8 | 16);
+                            if use_v4 {
+                                let nwg = crate::metal::attn_v4_choose_nwg(
+                                    target_session.kv_n_pos[ai],
+                                    group,
+                                );
+                                let tile_c = crate::metal::attn_v4_choose_tile_c(
+                                    target_session.kv_n_pos[ai],
+                                    group,
+                                );
+                                crate::metal::encode_attn_decode_v4_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &q_normed_n,
                                     &target_session.kv_k[ai],
                                     &target_session.kv_v[ai],
-                                    (position_n as usize) * kv_dim,
-                                    kv_dim,
+                                    &target_session.attn_v4_o_partial,
+                                    &target_session.attn_v4_ml_partial,
+                                    &attn_o_n,
+                                    n_q,
+                                    n_kv,
+                                    head_dim,
+                                    target_session.kv_n_pos[ai],
+                                    nwg,
+                                    tile_c,
                                 )?;
-                                target_session.kv_n_pos[ai] = position_n as usize + 1;
-
-                                // Fused attn-v4 (or naive fallback for non-matching shapes).
-                                const V4_HEAD_DIM: usize = 256;
-                                let group = n_q / n_kv;
-                                let use_v4 =
-                                    head_dim == V4_HEAD_DIM && matches!(group, 4 | 6 | 8 | 16);
-                                if use_v4 {
-                                    let nwg = crate::metal::attn_v4_choose_nwg(
-                                        target_session.kv_n_pos[ai],
-                                        group,
-                                    );
-                                    let tile_c = crate::metal::attn_v4_choose_tile_c(
-                                        target_session.kv_n_pos[ai],
-                                        group,
-                                    );
-                                    crate::metal::encode_attn_decode_v4_f32(
-                                        base.ctx,
-                                        &enc,
-                                        &q_normed_n,
-                                        &target_session.kv_k[ai],
-                                        &target_session.kv_v[ai],
-                                        &target_session.attn_v4_o_partial,
-                                        &target_session.attn_v4_ml_partial,
-                                        &attn_o_n,
-                                        n_q,
-                                        n_kv,
-                                        head_dim,
-                                        target_session.kv_n_pos[ai],
-                                        nwg,
-                                        tile_c,
-                                    )?;
-                                } else {
-                                    crate::metal::encode_attn_decode_f16kv_f32(
-                                        base.ctx,
-                                        &enc,
-                                        &q_normed_n,
-                                        &target_session.kv_k[ai],
-                                        &target_session.kv_v[ai],
-                                        &attn_o_n,
-                                        n_q,
-                                        n_kv,
-                                        head_dim,
-                                        target_session.kv_n_pos[ai],
-                                    )?;
-                                }
-                                enc.end();
+                            } else {
+                                crate::metal::encode_attn_decode_f16kv_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &q_normed_n,
+                                    &target_session.kv_k[ai],
+                                    &target_session.kv_v[ai],
+                                    &attn_o_n,
+                                    n_q,
+                                    n_kv,
+                                    head_dim,
+                                    target_session.kv_n_pos[ai],
+                                )?;
                             }
+                            enc.end();
                         }
                     }
+
                     emit_mtp_verify_count_phase(trace_counts, il as isize, "attn", "body");
 
                     // Step C: gate-sigmoid + mul (flat elementwise on N*q_dim)
@@ -18010,11 +17949,3 @@ mod tests;
 #[cfg(test)]
 #[path = "metal_dflash/draft_core_tests.rs"]
 mod draft_core_tests;
-
-#[cfg(test)]
-#[path = "metal_dflash/online_verify_pilot.rs"]
-mod online_verify_pilot;
-
-#[cfg(test)]
-#[path = "metal_dflash/tiled_vt_prefill_pilot.rs"]
-mod tiled_vt_prefill_pilot;

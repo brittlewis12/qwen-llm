@@ -229,7 +229,7 @@ def file_level_review_module(path: str) -> bool:
         return True
     if name.startswith("muse_lens") or name in {"lens.rs", "plain_logit_lens.rs"}:
         return True
-    return path == "crates/qwen-llm/src/metal_dflash/tiled_vt_prefill_pilot.rs"
+    return False
 
 
 def scan_text(path: str, text: str) -> list[Finding]:
@@ -444,11 +444,6 @@ verified_checkpoint_content_identity(source);
         assert test_only_fixture not in rust_files()
     registry = ALLOWLIST.read_text()
     for path, token in [
-        (
-            "crates/qwen-llm/src/qwen4exp_runtime/strict_inject_probe.rs",
-            "874537119c68f6c566c4288ba17c1099694416edb001c4003249570894438e97",
-        ),
-        ("crates/qwen-llm/src/metal/moe/hc4_strict.rs", "1_013_904_223"),
         (
             "crates/qwen-llm/src/deepseek_v41/forward/ced/qualification/provenance.rs",
             "1b2bf6b0384435d7cb551f4df7444beb52da51ed62bd52f3e2626bf0f1c675c5",

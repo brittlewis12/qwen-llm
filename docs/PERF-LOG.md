@@ -73,6 +73,16 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   retained for unfinished qualification; regenerable run bulk is deleted.
   **Nothing left running.** Next: finish cached qualification (~5–10 min,
   plus any lease wait), then the bounded executor screen.
+## 2026-11-09 - Retire ignored witnesses and closed prototypes, batch 2
+
+Remove 27 ignored tests plus four ordinary tests of exclusive unshipped
+prototypes. Retire diagnostic-only FP4 selector KILL packets, N16/transpose
+and snapshot research harnesses, the negative strict-HC experiment, obsolete
+CPU-planned MoE characterizations, a print-only MTP census and the superseded
+raw-byte snapshot spike. Keep registered/inventoried/current-lane witnesses,
+default precision/embedding/MTP checks, the product selected-value oracle,
+last-expert regressions and shared state hashing. No GPU timing or inference.
+[Exact deletions, retained cases and validation protocol](bench/2026-11-09-ignored-sweep-batch2.md).
 
 ## 2026-11-09 - GLM M4 Peak-Before-Warm: KILL Under Build Load
 

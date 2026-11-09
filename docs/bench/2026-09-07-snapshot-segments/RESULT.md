@@ -1,5 +1,10 @@
 # Incremental snapshot publication: lifecycle PASS, production unpromoted
 
+> Historical recipe: this packet’s ignored tests and exclusive prototype code were
+> retired in [cleanup batch 2](../2026-11-09-ignored-sweep-batch2.md). Reproduce these commands with the
+> frozen pre-cleanup source `bc05a78eb` or the packet’s original commit, rather than current main.
+
+
 Test-only `3cfc7fe0` reuses immutable CPU KV from the root actually restored into
 the producer. Subsequent publication plus a full restore takes 39.026% less wall
 time at 8840+16 rows and 52.268% less at 32752+16. Both frozen cells pass; this is

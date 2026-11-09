@@ -1,5 +1,10 @@
 # Flash Strict HC Projection Screen
 
+> Historical recipe: this packet’s ignored tests and exclusive prototype code were
+> retired in [cleanup batch 2](../2026-11-09-ignored-sweep-batch2.md). Reproduce these commands with the
+> frozen pre-cleanup source `bc05a78eb` or the packet’s original commit, rather than current main.
+
+
 Decision: **do not change production routing**. A strict four-output packed HC
 injection projection improves a synthetic kernel but not ordinary native prefill.
 Keep the bounded research kernel and test-only witness to avoid repeating the bet.

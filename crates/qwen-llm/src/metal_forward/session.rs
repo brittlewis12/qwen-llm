@@ -57,7 +57,7 @@ pub const SNAPSHOT_LAYOUT_VERSION: u32 = 4;
 /// Captured state at the end of prefilling `prefix_tokens` through a
 /// fresh session. Restoring into a fresh session and running additional
 /// tokens is bit-equivalent to cold prefill of the full sequence
-/// (validated by `h2_prefix_cache_correctness_spike`).
+/// (validated by `h2_packed_arena_snapshot_matches_cold`).
 #[derive(Clone, Debug)]
 pub struct SessionSnapshot {
     pub identity: SnapshotIdentity,

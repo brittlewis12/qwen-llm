@@ -1,5 +1,10 @@
 # N16 online attention: full-verifier phase PASS, product HOLD
 
+> Historical recipe: this packet’s ignored tests and exclusive prototype code were
+> retired in [cleanup batch 2](../2026-11-09-ignored-sweep-batch2.md). Reproduce these commands with the
+> frozen pre-cleanup source `bc05a78eb` or the packet’s original commit, rather than current main.
+
+
 The charged one-layer result survives real-model verification on
 `Qwen3.8-27B-Q8_0.gguf`: warmed full-verifier wall falls **16.086%**, including
 full-prefix V-transpose rebuilds on all16 attention layers. Partial8 restore

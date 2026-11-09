@@ -1,5 +1,10 @@
 # DeepSeek V4 Real-Weight FP4 Sidecar
 
+> Historical recipe: this packet’s ignored tests and exclusive prototype code were
+> retired in [cleanup batch 2](../2026-11-09-ignored-sweep-batch2.md). Reproduce these commands with the
+> frozen pre-cleanup source `bc05a78eb` or the packet’s original commit, rather than current main.
+
+
 Date: 2026-08-04
 
 Status: diagnostics sidecar and selection counterfactual `GO`; production FP4

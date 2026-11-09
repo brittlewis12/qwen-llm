@@ -1,5 +1,10 @@
 # Snapshot lifecycle: 32K cell PASS, two-cell promotion HOLD
 
+> Historical recipe: this packet’s ignored tests and exclusive prototype code were
+> retired in [cleanup batch 2](../2026-11-09-ignored-sweep-batch2.md). Reproduce these commands with the
+> frozen pre-cleanup source `bc05a78eb` or the packet’s original commit, rather than current main.
+
+
 Test-only `741c4ef4` compares complete snapshot publication plus one restore,
 not just an already-staged GPU copy. At32K the model-free cycle drops from
 244.042084 to85.585000 ms, saving64.930%; both pairs pass25% and control spread

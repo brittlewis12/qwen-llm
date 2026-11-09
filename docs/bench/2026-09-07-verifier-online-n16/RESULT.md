@@ -1,5 +1,10 @@
 # N16 long-context online attention: primitive PASS
 
+> Historical recipe: this packet’s ignored tests and exclusive prototype code were
+> retired in [cleanup batch 2](../2026-11-09-ignored-sweep-batch2.md). Reproduce these commands with the
+> frozen pre-cleanup source `bc05a78eb` or the packet’s original commit, rather than current main.
+
+
 Test-only `4a8ef407`, built on `d06c3e31`, uses existing kernels and changes no
 production selector, scratch constructor, policy or numerical contract.
 

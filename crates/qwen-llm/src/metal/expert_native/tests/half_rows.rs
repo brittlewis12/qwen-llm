@@ -1076,8 +1076,8 @@ fn native_half_rows_metal_half_operand_basis() {
         args.mode = NativeOperands::Half.mode(0);
         one_shot(&ctx, |enc| {
             dispatch(
-                enc, &pso, &args, &weights, &input, &ids, &status, &output, 1,
-            );
+                &ctx, enc, &pso, &args, &weights, &input, &ids, &status, &output, 1,
+            )?;
             Ok(())
         })
         .unwrap();

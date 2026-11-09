@@ -139,21 +139,45 @@ fn main() -> Result<()> {
             }
         }
         let snap = f.capture_snapshot(&base)?;
+        let is_bounds = args.get(5).is_some_and(|s| s == "bounds");
+        let is_waves = args.get(5).is_some_and(|s| s == "waves");
+        let members = if is_bounds || is_waves { 3 } else { 4 };
         let mut states = Vec::new();
-        for i in 0..4 {
+        for i in 0..members {
             let mut state = f.new_state(98304)?;
             f.restore_snapshot(&mut state, &snap)?;
             f.prefill(&mut state, &streams[i][..4096 + i * 17], Some(&CANCEL))?;
             states.push(state);
         }
         for j in 0..16 {
-            let tokens: Vec<_> = (0..4).map(|i| streams[i][4096 + i * 17 + j]).collect();
+            let tokens: Vec<_> = (0..members)
+                .map(|i| streams[i][4096 + i * 17 + j])
+                .collect();
             step(&f, &mut states, &tokens, true)?;
         }
         let entries = states
             .iter()
             .map(|s| f.capture_snapshot(s))
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        if is_waves {
+            #[cfg(feature = "perf-ablations")]
+            return waves(&ctx, &f, &mut states, &streams);
+            #[cfg(not(feature = "perf-ablations"))]
+            anyhow::bail!("waves requires perf-ablations");
+        }
+        if is_bounds {
+            #[cfg(feature = "perf-ablations")]
+            return bounds(
+                &ctx,
+                &f,
+                &mut states,
+                &entries,
+                &streams,
+                args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(32),
+            );
+            #[cfg(not(feature = "perf-ablations"))]
+            anyhow::bail!("bounds requires --features perf-ablations");
+        }
         println!(
             "{}",
             serde_json::json!({"kind":"prepared","depth":depth,"actual_position":states[0].position(),"prepare_ms":t.elapsed().as_secs_f64()*1000.,"suffix_rows":4096,"warm_steps":16})
@@ -433,4 +457,267 @@ mod comparison_tests {
             .unwrap();
         assert!(compare_stats(a.path(), c.path()).is_err());
     }
+}
+
+/// Same prepared B=3 trajectory for every counterfactual. Capture is excluded;
+/// the read control preserves real expert IDs, grids and exact normal outputs.
+#[cfg(feature = "perf-ablations")]
+fn bounds(
+    ctx: &MetalContext,
+    f: &Forward<'_>,
+    states: &mut [State],
+    entries: &[qwen_llm::deepseek_v41::forward::Snapshot],
+    streams: &[Vec<u32>],
+    n: usize,
+) -> Result<()> {
+    use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
+    use qwen_llm::metal::decode_bounds::{Experiment, Mode};
+    ensure!((8..=64).contains(&n), "8..64 bounded probe steps");
+    let experiment = Experiment::default();
+    let restore = |states: &mut [State]| -> Result<()> {
+        for (s, e) in states.iter_mut().zip(entries) {
+            f.restore_snapshot(s, e)?;
+        }
+        Ok(())
+    };
+    let run = |mode,
+               states: &mut [State]|
+     -> Result<(f64, Vec<String>, qwen_llm::metal::decode_bounds::Stats)> {
+        restore(states)?;
+        let scope = experiment.scope(mode)?;
+        let start = Instant::now();
+        let mut heads = Vec::with_capacity(n);
+        for j in 0..n {
+            let tokens: Vec<_> = (0..3).map(|i| streams[i][4310 + j]).collect();
+            heads.push(step(f, states, &tokens, true)?);
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000. / n as f64;
+        let stats = scope.finish();
+        let mut digests: Vec<_> = (0..3).map(|_| blake3::Hasher::new()).collect();
+        for row in &heads {
+            for (h, d) in row.iter().zip(&mut digests) {
+                ensure!(h.iter().all(|v| v.is_finite()), "finite bound head");
+                d.update(bytemuck::cast_slice(h));
+            }
+        }
+        Ok((
+            ms,
+            digests
+                .iter()
+                .map(|d| d.finalize().to_hex().to_string())
+                .collect(),
+            stats,
+        ))
+    };
+    let (_, reference, _) = run(Mode::Capture, states)?;
+    println!(
+        "{}",
+        serde_json::json!({"kind":"bound_capture","frames":n,"calls":experiment.captured_calls(),"routed_bytes_per_round":experiment.captured_bytes()/n as u64})
+    );
+    // Compile/warm the substituted pipeline outside the measured cells.
+    let (_, check, _) = run(Mode::RoutedRead, states)?;
+    ensure!(
+        check == reference,
+        "held expert outputs preserve exact normal trajectory"
+    );
+    for mode in [
+        Mode::Reference,
+        Mode::AttentionIo,
+        Mode::PostControls,
+        Mode::RoutedRead,
+        Mode::RoutedHold,
+        Mode::Reference,
+        Mode::AllHc,
+    ] {
+        thermal()?;
+        let (ms, hashes, stats) = run(mode, states)?;
+        if matches!(mode, Mode::Reference | Mode::RoutedRead | Mode::RoutedHold) {
+            ensure!(hashes == reference, "normal/stream endpoint bits");
+        }
+        println!(
+            "{}",
+            serde_json::json!({"kind":"bound","mode":mode,"rounds":n,"ms_round":ms,"stats":stats,"hashes":hashes})
+        );
+    }
+    for read in [true, false, true, false] {
+        thermal()?;
+        let cmd = ctx
+            .queue
+            .commandBuffer()
+            .ok_or_else(|| anyhow::anyhow!("command"))?;
+        let enc = metal::KernelEncoder::begin(&cmd);
+        experiment.encode_streams(ctx, &enc, read)?;
+        enc.end();
+        cmd.commit();
+        metal::wait_completed(&cmd)?;
+        let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1000. / n as f64;
+        println!(
+            "{}",
+            serde_json::json!({"kind":"expert_stream","read":read,"frames":n,"ms_per_round":ms,"logical_gb_s":read.then_some((experiment.captured_bytes() as f64/n as f64)/ms/1e6)})
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "perf-ablations")]
+fn waves(
+    ctx: &MetalContext,
+    f: &Forward<'_>,
+    states: &mut [State],
+    streams: &[Vec<u32>],
+) -> Result<()> {
+    use objc2_foundation::NSString;
+    use objc2_metal::{
+        MTLBinding, MTLCommandBuffer, MTLCommandQueue, MTLDevice, MTLLibrary, MTLPipelineOption,
+    };
+    let tokens: Vec<_> = (0..3).map(|i| streams[i][4310]).collect();
+    let entries = states
+        .iter()
+        .map(|s| f.capture_snapshot(s))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    native_wave_calibration(f, states, &entries, &tokens, "before")?;
+    for (s, snap) in states.iter_mut().zip(&entries) {
+        f.restore_snapshot(s, snap)?;
+    }
+    let guard = metal::decode_capture_begin();
+    let native = step(f, states, &tokens, true)?;
+    let graph = metal::decode_capture_finish(guard);
+    let expected = hashes(&native)?;
+    println!(
+        "{}",
+        serde_json::json!({"kind":"wave_capture","metadata":graph.metadata(),"hashes":expected})
+    );
+    let mut access = std::collections::BTreeMap::new();
+    for kernel in graph.kernels() {
+        let function = ctx
+            .library
+            .newFunctionWithName(&NSString::from_str(&kernel))
+            .unwrap();
+        let mut reflection = None;
+        unsafe {
+            ctx.device
+                .newComputePipelineStateWithFunction_options_reflection_error(
+                    &function,
+                    MTLPipelineOption::BindingInfo,
+                    Some(&mut reflection),
+                )
+        }
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let rows = reflection
+            .unwrap()
+            .bindings()
+            .iter()
+            .filter(|b| b.r#type().0 == 0 && b.isUsed())
+            .map(|b| (b.index(), b.access().0 != 0))
+            .collect::<Vec<_>>();
+        access.insert(kernel, rows);
+    }
+    let flush_src = metal::MetalTensor::zeros_f32(ctx, vec![134217728])?;
+    let flush_dst = metal::MetalTensor::zeros_f32(ctx, vec![134217728])?;
+    let flush = || -> Result<()> {
+        let cmd = ctx.queue.commandBuffer().unwrap();
+        let enc = metal::KernelEncoder::begin(&cmd);
+        metal::encode_copy_offset_f32(ctx, &enc, &flush_src, 0, &flush_dst, 134217728)?;
+        enc.end();
+        cmd.commit();
+        metal::wait_completed(&cmd)?;
+        Ok(())
+    };
+    for rep in 0..4 {
+        for dag in if rep % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            thermal()?;
+            flush()?;
+            let mut gpu_ms = 0.;
+            let t = Instant::now();
+            for segment in 0..graph.segments() {
+                gpu_ms += graph.replay_segment(ctx, segment, dag.then_some(&access));
+            }
+            ensure!(
+                hashes(&graph.outputs(3))? == expected,
+                "causal replay mismatch"
+            );
+            println!(
+                "{}",
+                serde_json::json!({"kind":"wave_causal","dag":dag,"rep":rep,"gpu_ms":gpu_ms,"wall_ms":t.elapsed().as_secs_f64()*1000.,"bitwise":true})
+            );
+        }
+    }
+    let frozen = graph.freeze(ctx, &access);
+    ensure!(
+        hashes(&graph.outputs(3))? == expected,
+        "frozen input oracle mismatch"
+    );
+    println!(
+        "{}",
+        serde_json::json!({"kind":"wave_frozen_metadata","metadata":frozen.metadata()})
+    );
+    for rep in 0..6 {
+        let modes = if rep % 2 == 0 { [0, 1, 2] } else { [2, 1, 0] };
+        for mode in modes {
+            thermal()?;
+            frozen.restore();
+            flush()?;
+            let cmd = ctx.queue.commandBuffer().unwrap();
+            let enc = if mode == 0 {
+                metal::KernelEncoder::begin(&cmd)
+            } else {
+                metal::KernelEncoder::begin_concurrent(&cmd)
+            };
+            frozen.replay(&enc, mode == 1);
+            enc.end();
+            cmd.commit();
+            metal::wait_completed(&cmd)?;
+            ensure!(cmd.error().is_none(), "frozen command error");
+            ensure!(frozen.check(), "frozen reflected output mismatch");
+            println!(
+                "{}",
+                serde_json::json!({"kind":"wave_frozen","mode":(["serial","branches","global"][mode]),"rep":rep,"gpu_ms":(cmd.GPUEndTime()-cmd.GPUStartTime())*1000.,"all_outputs_bitwise":true})
+            );
+        }
+    }
+    native_wave_calibration(f, states, &entries, &tokens, "after")?;
+    Ok(())
+}
+
+#[cfg(feature = "perf-ablations")]
+fn native_wave_calibration(
+    f: &Forward<'_>,
+    states: &mut [State],
+    entries: &[qwen_llm::deepseek_v41::forward::Snapshot],
+    tokens: &[u32],
+    label: &str,
+) -> Result<()> {
+    let mut expected = None;
+    for rep in 0..6 {
+        thermal()?;
+        for (s, snap) in states.iter_mut().zip(entries) {
+            f.restore_snapshot(s, snap)?;
+        }
+        let scope =
+            qwen_llm::deepseek_v41::forward::profile::Scope::begin().map_err(anyhow::Error::msg)?;
+        let start = Instant::now();
+        let outputs = step(f, states, tokens, true)?;
+        let wall_ms = start.elapsed().as_secs_f64() * 1000.;
+        let report = scope.finish();
+        let h = hashes(&outputs)?;
+        if let Some(ref r) = expected {
+            ensure!(*r == h, "native fixed-frame mismatch");
+        } else {
+            expected = Some(h.clone());
+        }
+        let op = report
+            .operations
+            .iter()
+            .find(|o| o.operation == "gpu_step_batch")
+            .unwrap();
+        println!(
+            "{}",
+            serde_json::json!({"kind":"wave_native","label":label,"rep":rep,"wall_ms":wall_ms,"gpu_ms":op.gpu_ms,"hashes":h,"pageins":report.process_pageins,"disk_read_bytes":report.process_disk_read_bytes})
+        );
+    }
+    Ok(())
 }

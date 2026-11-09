@@ -11,6 +11,8 @@ def pressure():
 def leased(a):
     fd=int(os.environ['QWEN_METAL_LEASE_FD']);assert pressure()==0
     cmd=[str(a.binary.resolve()),str(a.model.resolve()),str(a.depth),str(a.batch),str(a.steps)]
+    if a.bounds:cmd.append('bounds')
+    if a.waves:cmd.append('waves')
     start=time.monotonic();reason=None;samples=[];child=None
     def stop(sig,frame):
         if child is not None and child.poll() is None:os.killpg(child.pid,signal.SIGINT)
@@ -39,7 +41,10 @@ def leased(a):
     stem.with_suffix('.conditions.json').write_text(json.dumps(record,indent=2)+'\n')
     if code or reason:raise RuntimeError(record)
     rows=[json.loads(s) for s in stem.with_suffix('.stdout').read_text().splitlines() if s.startswith('{')]
-    result=next(x for x in rows if x['kind']=='kill')
+    result=rows if (a.bounds or a.waves) else next(x for x in rows if x['kind']=='kill')
+    for row in rows:
+        if row.get('kind')=='wave_capture':
+            meta=row['metadata'];meta['dispatches']=len(meta.pop('steps'))
     print(json.dumps(dict(event='complete',label=a.leased,commit=record['commit'],result=result)),flush=True)
 
 
@@ -47,26 +52,44 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ['binary','model','out']:p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--depth',type=int,default=32768);p.add_argument('--batch',type=int,default=3)
-    p.add_argument('--steps',type=int,default=128);p.add_argument('--arms',default='off,on,on,off')
+    p.add_argument('--steps',type=int,default=128)
     p.add_argument('--cool',type=float,default=25);p.add_argument('--leased')
+    mode=p.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--bounds',action='store_true')
+    mode.add_argument('--waves',action='store_true')
     a=p.parse_args()
     if a.leased:leased(a);return
     assert 'QWEN_METAL_LEASE_FD' not in os.environ
     assert subprocess.run(['git','diff','--quiet','HEAD']).returncode==0,'commit code before timing'
     root=Path(subprocess.check_output(['git','rev-parse','--show-toplevel'],text=True).strip())
-    for i,arm in enumerate(a.arms.split(',')):
-        assert arm in ['off','on'];time.sleep(a.cool)
+    active_child=None
+    def cancel(sig,frame):
+        if active_child is not None and active_child.poll() is None:
+            os.killpg(active_child.pid,signal.SIGINT)
+        raise KeyboardInterrupt
+    for sig in [signal.SIGINT,signal.SIGTERM]:signal.signal(sig,cancel)
+    for i,arm in enumerate(['bounds'] if a.bounds else ['waves']):
+        assert arm in ['bounds','waves'];time.sleep(a.cool)
         for _ in range(3):
             assert pressure()==0;time.sleep(3)
         label=f'{arm}-{i}-d{a.depth}-b{a.batch}'
-        cmd=[str(root/'scripts/bench/with-metal-lease'),'--task','v41-q5-'+label,'--for','2m','--',
+        cmd=[str(root/'scripts/bench/with-metal-lease'),'--task','v41-round-'+label,'--for','2m','--',
              'python3',str(Path(__file__).resolve()),'--leased',label,'--binary',str(a.binary.resolve()),
              '--model',str(a.model.resolve()),'--out',str(a.out.resolve()),'--depth',str(a.depth),
              '--batch',str(a.batch),'--steps',str(a.steps)]
+        if a.bounds:cmd.append('--bounds')
+        if a.waves:cmd.append('--waves')
         env=dict(os.environ,QWEN_METAL_LEASE_WAIT='1');env.pop('MTL_DEBUG_LAYER',None);env.pop('QWEN_REQUIRE_METAL_TESTS',None)
-        if arm=='off':env['QWEN_V41_BATCH_Q5_SIMD']='0'
-        else:env.pop('QWEN_V41_BATCH_Q5_SIMD',None)
-        print(json.dumps(dict(event='queued',label=label,command=cmd)),flush=True)
-        subprocess.run(cmd,env=env,check=True)
+        print(json.dumps(dict(event='queued',label=label,command=cmd,requested_unix=time.time())),flush=True)
+        active_child=subprocess.Popen(cmd,env=env,start_new_session=True)
+        try:
+            code=active_child.wait()
+            if code:raise subprocess.CalledProcessError(code,cmd)
+        finally:
+            if active_child.poll() is None:
+                os.killpg(active_child.pid,signal.SIGINT)
+                try:active_child.wait(timeout=60)
+                except subprocess.TimeoutExpired:os.killpg(active_child.pid,signal.SIGKILL);active_child.wait()
+            active_child=None
 
 if __name__=='__main__':main()

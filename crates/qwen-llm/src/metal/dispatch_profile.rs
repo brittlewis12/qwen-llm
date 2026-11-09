@@ -114,6 +114,8 @@ pub fn dispatch_profile_begin(
 /// Attribute subsequent dispatches on this thread. No-op without a profile.
 #[inline]
 pub fn dispatch_profile_label(label: &'static str, layer: Option<usize>) {
+    #[cfg(feature = "perf-ablations")]
+    super::decode_bounds::label(label);
     if ACTIVE_THREADS.load(Ordering::Relaxed) == 0 {
         return;
     }
@@ -168,19 +170,28 @@ pub fn dispatch_profile_finish(
 /// Whether a new plain encoder on this thread should record bindings.
 #[inline]
 pub(crate) fn dispatch_profile_records() -> bool {
-    ACTIVE_THREADS.load(Ordering::Relaxed) != 0 && PROFILE.with(|p| p.borrow().is_some())
+    let profiling =
+        ACTIVE_THREADS.load(Ordering::Relaxed) != 0 && PROFILE.with(|p| p.borrow().is_some());
+    #[cfg(feature = "perf-ablations")]
+    if decode_wave::active() {
+        return true;
+    }
+    profiling
 }
 
 /// Bindings set on a plain encoder while a profile is active, replayed onto
 /// each per-dispatch encoder.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct Replay {
     pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     slots: Vec<(usize, Slot)>,
     threadgroup: Vec<(usize, usize)>,
     resources: Vec<Buffer>,
+    #[cfg(feature = "perf-ablations")]
+    metadata: std::collections::BTreeMap<usize, decode_wave::CaptureTensor>,
 }
 
+#[derive(Clone)]
 enum Slot {
     Buffer(Buffer, usize),
     Bytes(Vec<u8>),
@@ -191,11 +202,27 @@ impl Replay {
         self.pipeline = Some(pso.raw.clone());
     }
 
+    #[cfg(feature = "perf-ablations")]
+    pub(crate) fn tensor(&mut self, index: usize, t: &MetalTensor) {
+        self.metadata.insert(
+            index,
+            decode_wave::CaptureTensor {
+                dtype: t.dtype.wire_name().into(),
+                shape: t.shape.clone(),
+                bytes: t.n_bytes(),
+                writable: t.is_writable(),
+            },
+        );
+    }
     pub(crate) fn buffer(&mut self, index: usize, buf: &Buffer, offset: u64) {
+        #[cfg(feature = "perf-ablations")]
+        self.metadata.remove(&index);
         self.slot(index, Slot::Buffer(buf.clone(), offset as usize));
     }
 
     pub(crate) fn bytes(&mut self, index: usize, bytes: &[u8]) {
+        #[cfg(feature = "perf-ablations")]
+        self.metadata.remove(&index);
         self.slot(index, Slot::Bytes(bytes.to_vec()));
     }
 
@@ -246,6 +273,10 @@ impl Replay {
 
 /// Move `enc` onto a fresh sampled serial encoder for its next dispatch.
 pub(crate) fn split_for_dispatch(enc: &KernelEncoder, grid: MTLSize, threads: MTLSize) {
+    #[cfg(feature = "perf-ablations")]
+    if decode_wave::capture(enc, grid, threads) {
+        return;
+    }
     PROFILE.with(|p| {
         let mut p = p.borrow_mut();
         let Some(active) = p.as_mut() else { return };
@@ -386,3 +417,7 @@ mod tests {
         assert!(report.rows.is_empty());
     }
 }
+
+#[cfg(feature = "perf-ablations")]
+#[path = "decode_wave.rs"]
+pub(crate) mod decode_wave;

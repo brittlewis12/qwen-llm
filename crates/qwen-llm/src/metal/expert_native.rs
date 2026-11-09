@@ -499,6 +499,7 @@ fn check_device(
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch(
+    ctx: &MetalContext,
     enc: &KernelEncoder,
     (pso, channels): &(Pipeline, usize),
     args: &NativeArgs,
@@ -508,26 +509,51 @@ fn dispatch(
     status: &MetalTensor,
     output: &MetalTensor,
     rows: usize,
-) {
-    enc.set_pipeline(pso);
-    enc.set_bytes(0, args);
-    enc.set_tensor(1, bank);
-    enc.set_tensor(2, input);
-    enc.set_tensor(3, ids);
-    enc.set_tensor(4, status);
-    enc.set_tensor(5, output);
-    enc.dispatch(
-        MTLSize {
-            width: (args.n_out as usize).div_ceil(*channels),
-            height: args.top_k as usize,
-            depth: rows,
+) -> Result<(), MetalError> {
+    let grid = MTLSize {
+        width: (args.n_out as usize).div_ceil(*channels),
+        height: args.top_k as usize,
+        depth: rows,
+    };
+    let threads = MTLSize {
+        width: 128,
+        height: 1,
+        depth: 1,
+    };
+    let original = || {
+        enc.set_pipeline(pso);
+        enc.set_bytes(0, args);
+        enc.set_tensor(1, bank);
+        enc.set_tensor(2, input);
+        enc.set_tensor(3, ids);
+        enc.set_tensor(4, status);
+        enc.set_tensor(5, output);
+        enc.dispatch(grid, threads);
+    };
+    #[cfg(feature = "perf-ablations")]
+    return super::decode_bounds::expert(
+        ctx,
+        enc,
+        super::decode_bounds::Expert {
+            bank,
+            bank_b: None,
+            ids,
+            output,
+            row_bytes: args.row_bytes,
+            n_out: args.n_out as usize,
+            experts: args.experts as usize,
+            channels: *channels,
+            grid,
+            threads,
         },
-        MTLSize {
-            width: 128,
-            height: 1,
-            depth: 1,
-        },
+        original,
     );
+    #[cfg(not(feature = "perf-ablations"))]
+    {
+        let _ = ctx;
+        original();
+        Ok(())
+    }
 }
 
 /// Two serial GPU-indexed projections, accepting independent gate/up types.
@@ -953,28 +979,47 @@ fn encode_gate_up_with_batch_tile(
         // One dispatch: gate and up channels side by side, then SwiGLU.
         args.mode = operands.mode(1);
         args.row_bytes = gate_bytes;
-        enc.set_pipeline(&fused);
-        enc.set_bytes(0, &args);
-        enc.set_tensor(1, gate_bank);
-        enc.set_tensor(2, input);
-        enc.set_tensor(3, ids);
-        enc.set_tensor(4, status);
-        enc.set_tensor(5, output);
-        enc.set_tensor(6, up_bank);
-        enc.dispatch(
-            MTLSize {
-                // Channels per threadgroup: two simdgroup pairs of one (or,
-                // for the IQ2 split and specialized kernels, two) channels each.
-                width: n_out.div_ceil(channels),
-                height: top_k,
-                depth: rows.unwrap_or(1),
+        let grid = MTLSize {
+            width: n_out.div_ceil(channels),
+            height: top_k,
+            depth: rows.unwrap_or(1),
+        };
+        let threads = MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        };
+        let original = || {
+            enc.set_pipeline(&fused);
+            enc.set_bytes(0, &args);
+            enc.set_tensor(1, gate_bank);
+            enc.set_tensor(2, input);
+            enc.set_tensor(3, ids);
+            enc.set_tensor(4, status);
+            enc.set_tensor(5, output);
+            enc.set_tensor(6, up_bank);
+            enc.dispatch(grid, threads);
+        };
+        #[cfg(feature = "perf-ablations")]
+        return super::decode_bounds::expert(
+            ctx,
+            enc,
+            super::decode_bounds::Expert {
+                bank: gate_bank,
+                bank_b: Some(up_bank),
+                ids,
+                output,
+                row_bytes: args.row_bytes,
+                n_out,
+                experts,
+                channels,
+                grid,
+                threads,
             },
-            MTLSize {
-                width: 128,
-                height: 1,
-                depth: 1,
-            },
+            original,
         );
+        #[cfg(not(feature = "perf-ablations"))]
+        original();
         return Ok(());
     }
     let projection = |pso: Pipeline, bank: &MetalTensor| -> Result<(Pipeline, usize), MetalError> {
@@ -988,6 +1033,7 @@ fn encode_gate_up_with_batch_tile(
     args.mode = operands.mode(0);
     args.row_bytes = gate_bytes;
     dispatch(
+        ctx,
         enc,
         &gate,
         &args,
@@ -997,10 +1043,11 @@ fn encode_gate_up_with_batch_tile(
         status,
         output,
         rows.unwrap_or(1),
-    );
+    )?;
     args.mode = operands.mode(1);
     args.row_bytes = up_bytes;
     dispatch(
+        ctx,
         enc,
         &up,
         &args,
@@ -1010,7 +1057,7 @@ fn encode_gate_up_with_batch_tile(
         status,
         output,
         rows.unwrap_or(1),
-    );
+    )?;
     Ok(())
 }
 
@@ -1231,6 +1278,7 @@ fn encode_down_with_batch_tile(
     args.mode = operands.mode(2);
     args.row_bytes = row_bytes;
     dispatch(
+        ctx,
         enc,
         &pso,
         &args,
@@ -1240,7 +1288,7 @@ fn encode_down_with_batch_tile(
         status,
         output,
         rows.unwrap_or(1),
-    );
+    )?;
     Ok(())
 }
 

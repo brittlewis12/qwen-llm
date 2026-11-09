@@ -204,6 +204,54 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   were not rerun for this attribution-only packet. Opt-in diagnostics,
   exact commands, host/cache/I/O summaries and exclusions:
   **`~/qwen-runs/2026-11-09-m4-glm-residency/summary.json`**.
+## 2026-11-09 - V4.1 Whole-Round Bounds Rule Out Standalone I/O And HC Fusion
+
+- Diagnostic **`6f3436bb`**, M5, production GSQ-RCO IQ2_XS, B=3/32K.
+  One prepared process, identical restored prefixes and 32 teacher steps/cell,
+  full vocabulary readback. Before/after normal **27.746845 / 27.742758 ms**
+  agree within **0.004087 ms**, with identical bits. Hooks require
+  **`perf-ablations`**; counterfactuals are not production execution policies.
+
+  | Counterfactual | Whole round ms | Saving vs mean normal ms |
+  | --- | ---: | ---: |
+  | Attention projection copies + rank norms elided | 26.839449 | **0.905352** |
+  | HC post + FFN controls elided | 26.166743 | **1.578058** |
+  | All current HC pre/post/controls elided | 25.892992 | **1.851809** |
+  | Experts replaced by same-grid reads + held outputs | 24.996400 | **2.748402** |
+  | Experts replaced by held outputs only | 19.449857 | 8.294945 |
+
+- Attention elides **280 copies + 120 norms/round** and norm-only boundaries;
+  post elides **240 kernels/round** and post-only boundaries. Their altered
+  values make these generous, non-additive predictors. The old 6.6-ms isolated
+  HC census is not recoverable native wall time.
+- Expert capture retains real IDs, grids and outputs for **80 calls/frame**.
+  Streaming consumes the same **6.987202560 GB/round**, with checksums and held
+  output copies. Read/no-read trajectories match normal logits **bitwise**.
+  Streaming-only blocks: **6.097013 / 6.108764 ms**, **1146.0 / 1143.8 logical
+  GB/s**, including launch/held-output traffic. No-read costs **0.870132 /
+  0.869945 ms**; it has no meaningful byte rate. Held outputs are an explicitly
+  oracle-like diagnostic, never a runtime shortcut.
+- Ceiling per estimated implementation hour, not achievable-gain promises:
+  **HC post first** (1.58 / 2–4 h = 0.40–0.79 ms/h), **experts second**
+  (2.75 / 8–16 h = 0.17–0.34), **attention I/O last** (0.91 / 4–8 h = 0.11–0.23).
+  The original **2-ms figure was a decision aid, not a per-item kill rule**.
+  HC post plus attention I/O have a roughly 2.5-ms combined ceiling; a realistic
+  half-recovery (~1.2 ms, 4%) is marginal against their implementation cost.
+  Next: a **<=60-minute routed-expert increment** with whole-round measurement;
+  no I/O fusion is built. Even read-only experts leave **25.0 ms**, so 20 ms also
+  needs improvement outside expert unpack/MAC.
+- Reproduce: `nice -n 10 cargo build --offline --locked --release -p qwen-llm
+  --features perf-ablations --example v41_batch_depth`; then `nice -n 10 python3
+  scripts/research/v41-batch/run.py --binary TARGET/release/examples/v41_batch_depth
+  --model MODEL --out RUNS/probe --bounds --steps 32`. Capture/warmup excluded;
+  **48.73 s** total lease, thermal **0 throughout**. Three targeted CPU guard
+  tests pass; full suites defer to shipping. No build lock. Waits: **7.1 min GPU**
+  (including the cancelled first queue), **zero build queue**, **3.43 min executable
+  builds**, **5.87 min lib-test link** (<0.01 s execution). Three old raw-dispatch
+  test callers needed signature updates. Move metadata tests to a small target to
+  avoid monolithic linking. Compact evidence only:
+  **`~/qwen-runs/2026-11-09-v41-batch-bounds/`**. No merge or owned worker remains.
+
 
 
 ## 2026-11-09 - Flash-Next Measured-Only Batch Candidate: Laptop Validation Complete

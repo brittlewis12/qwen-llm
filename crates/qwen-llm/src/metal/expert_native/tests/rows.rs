@@ -751,9 +751,12 @@ fn native_rows_gate_and_up_projection_stores_are_bitwise() {
             let batched = f32_view(&ctx, &vec![f32::NAN; m * top * n], &[m, top * n], 28);
             let scalar = f32_view(&ctx, &vec![f32::NAN; m * top * n], &[m, top * n], 28);
             one_shot(&ctx, |enc| {
-                dispatch(enc, &pso, &args, &bank, &input, &ids, &status, &batched, n);
+                dispatch(
+                    &ctx, enc, &pso, &args, &bank, &input, &ids, &status, &batched, n,
+                )?;
                 for row in 0..n {
                     dispatch(
+                        &ctx,
                         enc,
                         &pso,
                         &args,
@@ -763,7 +766,7 @@ fn native_rows_gate_and_up_projection_stores_are_bitwise() {
                         &status.view_subrange(row as u64, vec![1]),
                         &scalar.view_subrange((row * m * top) as u64, vec![m as u64, top as u64]),
                         1,
-                    );
+                    )?;
                 }
                 Ok(())
             })

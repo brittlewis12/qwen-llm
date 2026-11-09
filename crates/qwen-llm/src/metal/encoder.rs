@@ -272,6 +272,10 @@ impl KernelEncoder {
 
     pub(crate) fn finish(&mut self) {
         if !self.ended {
+            #[cfg(feature = "perf-ablations")]
+            if self.replay.borrow().is_some() {
+                dispatch_profile::decode_wave::capture_encoder_end(&self.parent);
+            }
             self.ended = true;
             self.raw.borrow().endEncoding();
         }
@@ -322,6 +326,10 @@ impl KernelEncoder {
             return;
         }
         self.set_buffer(index, &tensor.buffer, tensor.offset);
+        #[cfg(feature = "perf-ablations")]
+        if let Some(r) = self.replay.borrow_mut().as_mut() {
+            r.tensor(index, tensor);
+        }
     }
 
     /// Bind a small Pod argument struct inline (≤4 KB). Uses Metal's
@@ -403,6 +411,10 @@ impl KernelEncoder {
     pub fn dispatch(&self, grid: MTLSize, threads: MTLSize) {
         if let Some(r) = self.recording.borrow_mut().as_mut() {
             r.dispatch(grid, threads);
+            return;
+        }
+        #[cfg(feature = "perf-ablations")]
+        if super::decode_bounds::skip(self.bound_pipeline_name.borrow().as_deref().unwrap_or("")) {
             return;
         }
         kernel_trace_record_dispatch();

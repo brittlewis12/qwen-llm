@@ -171,6 +171,13 @@ fn sequence_boundary(stages: &mut StageEncoder<'_>) {
         stages.split();
     }
 }
+fn post_sequence_boundary(stages: &mut StageEncoder<'_>) {
+    #[cfg(feature = "perf-ablations")]
+    if metal::decode_bounds::elide_post_boundary() {
+        return;
+    }
+    sequence_boundary(stages);
+}
 
 #[cfg(test)]
 thread_local! {
@@ -573,8 +580,15 @@ fn encode_attention_columns(
             )
             .map_err(err)?;
         }
+        #[cfg(feature = "perf-ablations")]
+        let omit = metal::decode_bounds::elide_norm_phase(workspaces.len());
+        #[cfg(not(feature = "perf-ablations"))]
+        let omit = false;
         for (ws, input) in workspaces.iter_mut().zip(inputs) {
-            sequence_boundary(stages);
+            if !omit {
+                sequence_boundary(stages);
+            }
+            // Preserve the CPU stage transition even when its GPU norm is elided.
             ws.attention
                 .encode_rank_norms(ctx, stages.enc(), id, input.position, w)?;
         }
@@ -636,7 +650,7 @@ fn encode_attention_columns(
         columns::encode_scatter(ctx, stages.enc(), &scratch.output, &outputs).map_err(err)?;
     }
     for (ws, input) in workspaces.iter_mut().zip(inputs) {
-        sequence_boundary(stages);
+        post_sequence_boundary(stages);
         if fold_finite() {
             // attention_output folds the finite check into the post.
             ws.attention.defer_finite();
@@ -760,7 +774,7 @@ fn encode_ffn_columns(
         stages.split();
     }
     for ws in workspaces.iter_mut() {
-        sequence_boundary(stages);
+        post_sequence_boundary(stages);
         ws.ffn_combine(model, stages, id)?;
     }
     Ok(())

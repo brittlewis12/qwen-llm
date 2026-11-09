@@ -429,6 +429,48 @@ No GPU execution or timing. Fixed base a95456865; no main refresh.
   (additional canceled wait **230 s**). Contracts started a separate inventory
   compile and were stopped. No inference optimization ships in this increment.
 
+## 2026-11-09 - Flash-Next M4: Exact Decode Selector Default On
+
+- **Ship the existing scan selector on Apple9 singleton decode**, core
+  **`a777d2b46`**, branch **`perf/m4-fn-decode`**, qualified on main
+  **`466aadb21`**. Existing rollback: **`QWEN_FN_QSA_DECODE_SELECT=0`**.
+  Eligibility only: no shader arithmetic, buffers, packed gates or M5-default
+  changes. Ordinary release dispatch witness: default **12 scan / 0 radix**;
+  rollback **0 scan / 12 radix**.
+- Price before implementation, frozen whole-token causal forward at 8K:
+  **19.177 ms GPU** incumbent; cached selector **18.499**, cached attention
+  **17.893**, actual scan **18.926**. Thus selector / attention ceilings
+  **0.678 / 1.284 ms**, non-additive; scan saves **0.251 ms** in this screen.
+  Cached outputs equal native by construction, not an accuracy acceptance gate.
+- Real GPU-loop autoregression, **12 reverse-order pairs of 15 transitions**
+  per depth, GSQ-RCO IQ3_S, thermal **0**, compilation overlapped:
+  **8K 48.518 -> 49.405 tok/s (+1.83%)**, **12/12** positive wall pairs;
+  saving **0.370 ms/token**, paired bootstrap 95% **[0.300, 0.439] ms**.
+  **32K 45.791 -> 46.684 (+1.95%)**, **10/12** positive wall pairs and
+  **11/12** GPU pairs; wall interval **[-0.132, 0.931] ms** crosses zero.
+  Keep all noisy earlier long arms in compact evidence; do not pool them into
+  the gain. Across **128 teacher targets**, signed **dNLL 0**, KL equals
+  incumbent-repeat roundoff (**-1.16e-19 / +5.08e-19**); logit-error diagnostic **0**.
+- Reproduce measured probe **`36760953b`** (rebased **`bc997b2f9`**):
+  `nice -n 10 cargo build --release -p qwen-llm --features perf-ablations
+  --example fn_m4_qsa`; canonical lease-wrap
+  `target/release/examples/fn_m4_qsa "$MODEL" DEPTH 16 --ab-only`, depths
+  8192/32768, model through `QWEN_MODEL_SEARCH_PATH`. Pricing uses 8192/64
+  without `--ab-only`. Commands, all arms, distributions and receipts:
+  **`~/qwen-runs/2026-11-09-m4-fn-decode/summary.json`**.
+- Full suites once: library **2,466 passed / 2 failed / 777 ignored**;
+  all CLI targets **1,692 / 5 / 72**. All seven failures **pass individually
+  unchanged on the same binaries**: process/global counters, temporary-file
+  collisions and trace assertions; details recorded on **TRI-VBDY**. No test
+  expectations or ignore states changed. CLI doctests pass; contracts pass
+  **`b5add098`**, tree **`d39bb1199ea184c81f83a80b127b65f58eb3d6b4`**,
+  after replacing the probe's local error reducer with the shared F64 helper.
+  Main advanced during qualification; these counts belong to the pinned base.
+- Standing delivered in **11 min**; qualification exceeded the intended short
+  turn: CLI build **29m48s**, route build **28m31s**, doctest build **17m**,
+  overlapping each other. GPU queue wait **229 s**, build-lock wait **0**.
+  Next priced remainder is attention's **1.284-ms** bound. No further kernel
+  experiment this turn; regenerable run bulk removed, no merge or running jobs.
 
 ## 2026-11-09 - V4.1 Expert Grouping Killed; Calibrated Overlap Bounds
 

@@ -48,6 +48,10 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
 ## 2026-11-09 - Flash-Next Measured-Only Batch Candidate: Laptop Validation Complete
 
+- **Cutoff update:** main advanced after validation. Rebased onto `b7eef990`;
+  the combined tree needs a fresh full run before landing. The results below
+  remain evidence for the prior `d510f3e4` base; steady serve is still blocked.
+
 - Landing series rebased on **`d510f3e4`** contains only measured expert,
   GDN/QSA, Q6/head F32 MMA and exact copy stages. Unmeasured variants were
   removed; archive `perf/fn-batch-unmeasured` preserves them separately.

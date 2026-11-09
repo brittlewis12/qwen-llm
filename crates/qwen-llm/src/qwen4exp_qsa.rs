@@ -5418,12 +5418,39 @@ fn encode_select_blocks(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     workspace: &QwenSparseAttentionMetalWorkspace,
-    _visible: usize,
+    visible: usize,
 ) -> Result<(), MetalError> {
     if decode_price_mode() == 1 {
         return Ok(());
     }
     let g = workspace.geometry;
+    if let Some((pso, threads)) =
+        prefill_reuse::wide_decode_selector(ctx, g.block_capacity(), g.block_budget(), visible)?
+    {
+        enc.set_pipeline(&pso);
+        enc.set_bytes(
+            0,
+            &[g.block_capacity() as u32, g.block_budget() as u32, 1, 0],
+        );
+        enc.set_tensor(1, &workspace.scores);
+        enc.set_tensor(2, &workspace.visible_blocks);
+        enc.set_tensor(3, &workspace.selected_blocks);
+        enc.set_tensor(4, &workspace.selected_count);
+        enc.set_tensor(5, &workspace.selector_status);
+        enc.dispatch(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: threads,
+                height: 1,
+                depth: 1,
+            },
+        );
+        return Ok(());
+    }
     encode_select_blocks_tensors(
         ctx,
         enc,
@@ -6476,3 +6503,6 @@ fn expand_ids_parallel() -> bool {
     static PAR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *PAR.get_or_init(|| std::env::var(EXPAND_IDS_PARALLEL_ENV).as_deref() != Ok("0"))
 }
+
+#[cfg(feature = "perf-ablations")]
+pub use prefill_reuse::diagnostic_wide_decode_selector;

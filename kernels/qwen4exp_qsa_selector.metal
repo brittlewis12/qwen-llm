@@ -142,6 +142,156 @@ kernel void kernel_qwen4exp_qsa_select_scan_f32(
     qsa_select_compact(a,scores,visible,ids,counts,status,scratch,shared,lane,query,width,sg,sl);
 }
 
+// Singleton decode form of qsa_select_compact: identical radix-4 threshold,
+// stable index-order compaction, ties and statuses. Each thread keeps one
+// contiguous chunk of at most KPT keys in registers for every pass; per-thread
+// bins are packed counters rather than an indexed local array, each radix pass
+// needs one barrier (double-buffered bins), and compaction uses one packed
+// (greater, equal) scan. The host sizes KPT * width >= the visible count; a
+// violated bound reports status 4 instead of selecting from a truncated row.
+template <uint KPT>
+inline void qsa_select_decode(constant qsa_select_args &a, device const float *row,
+        device const int *visible_counts, device int *out, device int *counts,
+        device int *status, threadgroup uint *bins_tg, threadgroup uint *scan_tg,
+        threadgroup uint *error_tg, uint lane, uint width, ushort sg, ushort sl) {
+    const uint groups = width / 32u;
+    const int visible_i = visible_counts[0];
+    const bool valid = visible_i > 0 && uint(visible_i) <= a.row_capacity
+        && a.top_k > 0u && a.top_k <= a.row_capacity && a.emit_ranked == 0u;
+    const uint visible = valid ? uint(visible_i) : 0u;
+    const uint selected = min(visible, a.top_k);
+    const uint begin = lane * KPT;
+    const uint owned = begin < visible ? min(KPT, visible - begin) : 0u;
+    uint error = valid ? (visible > width * KPT ? 4u : 0u) : 1u;
+    uint keys[KPT];
+    for (uint k = 0u; k < KPT; ++k) {
+        const float x = k < owned ? row[begin + k] : 0.0f;
+        if (k < owned && !isfinite(x)) error = max(error, 2u);
+        keys[k] = qsa_select_key(x);
+    }
+    const uint simd_error = simd_max(error);
+    if (sl == 0u) error_tg[sg] = simd_error;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    error = simd_max(uint(sl) < groups ? error_tg[sl] : 0u);
+    uint prefix = 0u, mask = 0u, rank = selected;
+    if (error == 0u && selected < visible) {
+        uint buffer = 0u;
+        for (int shift = 28; shift >= 0; shift -= 4) {
+            // Four words of four 8-bit bins: at most KPT <= 255 keys per thread.
+            uint w0 = 0u, w1 = 0u, w2 = 0u, w3 = 0u;
+            for (uint k = 0u; k < KPT; ++k) {
+                const uint key = keys[k];
+                if (k < owned && (key & mask) == prefix) {
+                    const uint digit = (key >> uint(shift)) & 15u;
+                    const uint inc = 1u << ((digit & 3u) * 8u);
+                    const uint word = digit >> 2u;
+                    w0 += word == 0u ? inc : 0u;
+                    w1 += word == 1u ? inc : 0u;
+                    w2 += word == 2u ? inc : 0u;
+                    w3 += word == 3u ? inc : 0u;
+                }
+            }
+            // Widen to 16-bit fields: word 2q holds bins 4q, 4q+2 and word 2q+1
+            // holds bins 4q+1, 4q+3. Totals stay below 65536 (visible <= 32768).
+            threadgroup uint *bins = bins_tg + buffer * 256u;
+            const uint words[8] = {w0 & 0x00ff00ffu, (w0 >> 8u) & 0x00ff00ffu,
+                                   w1 & 0x00ff00ffu, (w1 >> 8u) & 0x00ff00ffu,
+                                   w2 & 0x00ff00ffu, (w2 >> 8u) & 0x00ff00ffu,
+                                   w3 & 0x00ff00ffu, (w3 >> 8u) & 0x00ff00ffu};
+            for (uint j = 0u; j < 8u; ++j) {
+                const uint total = simd_sum(words[j]);
+                if (sl == 0u) bins[uint(sg) * 8u + j] = total;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            uint totals[8];
+            for (uint j = 0u; j < 8u; ++j) {
+                totals[j] = simd_sum(uint(sl) < groups ? bins[uint(sl) * 8u + j] : 0u);
+            }
+            uint remaining = rank, chosen = 0u, n = 0u;
+            bool found = false;
+            for (int b = 15; b >= 0; --b) {
+                const uint ub = uint(b);
+                n = (totals[(ub >> 2u) * 2u + (ub & 1u)] >> (((ub >> 1u) & 1u) * 16u)) & 0xffffu;
+                if (remaining <= n) {
+                    chosen = ub;
+                    found = true;
+                    break;
+                }
+                remaining -= n;
+            }
+            if (!found) {
+                error = 3u;
+                break;
+            }
+            prefix |= chosen << uint(shift);
+            mask |= 15u << uint(shift);
+            rank = remaining;
+            if (n == rank || shift == 0) break;
+            buffer ^= 1u;
+        }
+    }
+    if (error == 0u) {
+        uint greater = 0u, equal = 0u;
+        for (uint k = 0u; k < KPT; ++k) {
+            if (k < owned) {
+                greater += uint(keys[k] > prefix);
+                equal += uint(keys[k] == prefix);
+            }
+        }
+        // Low 16 bits count keys above the threshold, high 16 bits ties.
+        const uint packed = greater | (equal << 16u);
+        const uint before_simd = simd_prefix_exclusive_sum(packed);
+        const uint simd_total = simd_sum(packed);
+        if (sl == 0u) scan_tg[sg] = simd_total;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const uint v = uint(sl) < groups ? scan_tg[sl] : 0u;
+        const uint before = before_simd + simd_sum(uint(sl) < uint(sg) ? v : 0u);
+        const uint total = simd_sum(v);
+        const uint equal_before = before >> 16u;
+        error = (total & 0xffffu) + min(total >> 16u, rank) == selected ? 0u : 3u;
+        if (error == 0u) {
+            uint dst = (before & 0xffffu) + min(equal_before, rank);
+            uint seen = 0u;
+            for (uint k = 0u; k < KPT; ++k) {
+                if (k < owned) {
+                    const uint key = keys[k];
+                    const bool at = key == prefix;
+                    const bool take = key > prefix || (at && equal_before + seen < rank);
+                    seen += uint(at);
+                    if (take) out[dst++] = int(begin + k);
+                }
+            }
+            for (uint i = selected + lane; i < a.top_k; i += width) out[i] = -1;
+        }
+    }
+    if (error != 0u) {
+        for (uint i = lane; i < a.top_k; i += width) out[i] = i < selected ? int(i) : -1;
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    if (lane == 0u) {
+        counts[0] = int(selected);
+        status[0] = int(error);
+    }
+}
+
+#define QSA_SELECT_DECODE(N)                                                                    \
+kernel void kernel_qwen4exp_qsa_select_decode##N##_f32(                                         \
+        constant qsa_select_args &a [[buffer(0)]], device const float *scores [[buffer(1)]],    \
+        device const int *visible [[buffer(2)]], device int *ids [[buffer(3)]],                 \
+        device int *counts [[buffer(4)]], device int *status [[buffer(5)]],                     \
+        uint lane [[thread_index_in_threadgroup]], uint width [[threads_per_threadgroup]],      \
+        ushort sg [[simdgroup_index_in_threadgroup]], ushort sl [[thread_index_in_simdgroup]]) { \
+    threadgroup uint bins[2u * 32u * 8u];                                                       \
+    threadgroup uint scan[32];                                                                  \
+    threadgroup uint errors[32];                                                                \
+    qsa_select_decode<N>(a, scores, visible, ids, counts, status, bins, scan, errors, lane,     \
+                         width, sg, sl);                                                        \
+}
+QSA_SELECT_DECODE(8)
+QSA_SELECT_DECODE(16)
+QSA_SELECT_DECODE(32)
+#undef QSA_SELECT_DECODE
+
 kernel void kernel_fn_batch_qsa_select(
         constant qsa_select_args &a [[buffer(0)]], device const float *score0 [[buffer(1)]],
         device const float *score1 [[buffer(2)]], device const float *score2 [[buffer(3)]],

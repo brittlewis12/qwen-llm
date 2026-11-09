@@ -37,6 +37,88 @@ pub(super) fn decode_selector_shape(
 }
 
 crate::env_flag!(
+    /// Default-on M5 singleton QSA decode selector holding each thread's contiguous score chunk in registers across radix passes, up to 1024 threads and 32768 visible blocks. Same radix-4 threshold, index-order compaction, IDs, ties, counts and statuses as QWEN_FN_QSA_DECODE_SELECT; one barrier per radix pass and one packed compaction scan. No added device buffers or dispatches. Set 0 for the existing decode selector; QWEN_FN_QSA_DECODE_SELECT=0 still restores radix4.
+    default_on wide_decode_selector_enabled,
+    "QWEN_FN_QSA_DECODE_SELECT_WIDE"
+);
+
+/// Research override for same-process paired arms: 0 follows the environment,
+/// 1 forces the existing decode selector, 2 forces the wide selector.
+#[cfg(feature = "perf-ablations")]
+static WIDE_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(feature = "perf-ablations")]
+pub fn diagnostic_wide_decode_selector(mode: u8) -> impl Drop {
+    use std::sync::atomic::Ordering;
+    assert!(mode <= 2);
+    struct Guard(u8);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            WIDE_OVERRIDE.store(self.0, Ordering::SeqCst);
+        }
+    }
+    Guard(WIDE_OVERRIDE.swap(mode, Ordering::SeqCst))
+}
+
+fn wide_decode_selector_active() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    match WIDE_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => return false,
+        2 => return true,
+        _ => {}
+    }
+    wide_decode_selector_enabled()
+}
+
+/// Keys per thread compiled for the wide selector, smallest first.
+pub(super) const WIDE_SELECTOR_KEYS: [usize; 3] = [8, 16, 32];
+const WIDE_SELECTOR_MAX_THREADS: usize = 1024;
+
+/// Pipeline and width whose `keys * width` covers `visible` blocks.
+pub(super) fn wide_selector_for(
+    ctx: &MetalContext,
+    visible: usize,
+) -> Result<Option<(Pipeline, usize)>, MetalError> {
+    for keys in WIDE_SELECTOR_KEYS {
+        let name = format!("kernel_qwen4exp_qsa_select_decode{keys}_f32");
+        let pso = match ctx.pipeline(&name) {
+            Ok(p) => p,
+            Err(MetalError::NoFunction(_) | MetalError::Pipeline(_, _)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let threads = pso
+            .maxTotalThreadsPerThreadgroup()
+            .min(WIDE_SELECTOR_MAX_THREADS)
+            / 32
+            * 32;
+        if pso.threadExecutionWidth() == 32
+            && threads > 0
+            && pso.staticThreadgroupMemoryLength() <= ctx.device.maxThreadgroupMemoryLength()
+            && keys * threads >= visible
+        {
+            return Ok(Some((pso, threads)));
+        }
+    }
+    Ok(None)
+}
+
+pub(super) fn wide_decode_selector(
+    ctx: &MetalContext,
+    capacity: usize,
+    budget: usize,
+    visible: usize,
+) -> Result<Option<(Pipeline, usize)>, MetalError> {
+    if !decode_selector_shape(true, capacity, budget, 1)
+        || !ctx.tensor_ops_status().is_available()
+        || !decode_selector_enabled()
+        || !wide_decode_selector_active()
+    {
+        return Ok(None);
+    }
+    wide_selector_for(ctx, visible)
+}
+
+crate::env_flag!(
     /// Flash-Next selected QSA logits at N32 and depth >=32768: reuse original F32 query vectors across eight selected keys, preserving the incumbent dimension and SIMD reduction order. No operand narrowing or new device buffers. Set 0 for the incumbent.
     default_on logits_reuse_enabled,
     "QWEN_FN_QSA_LOGITS_REUSE"

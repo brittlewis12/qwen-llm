@@ -52,6 +52,7 @@ pub(super) fn selected(arith: Arith, mode: StageMode, dtype: GgmlType, rows: usi
         && dtype == GgmlType::IQ3_S
         && (matches!(rows, 1024 | 2048)
             || (rows == 512 && super::short_prefill::enabled())
+            || super::row_policy::small_expanded(rows)
             || super::row_policy::iq_expanded(rows))
 }
 

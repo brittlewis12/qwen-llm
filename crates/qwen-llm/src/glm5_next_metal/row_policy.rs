@@ -1,5 +1,18 @@
 //! Additional qualified command widths; never changes the admitted chunk size.
 crate::env_flag!(
+    /// M5 Fast/Half small-row matrix routes at 128..512 actual command rows. Zero restores the previous matrix gates; enclosing ANY_ROWS, SHORT_PREFILL, precision, tier and per-stage controls still apply. Sparse attention and workspace admission are unchanged.
+    default_on small_requested,
+    "QWEN_GLM53_PREFILL_SMALL_ROWS"
+);
+
+pub(crate) fn small_expanded(rows: usize) -> bool {
+    small_requested()
+        && (128..512).contains(&rows)
+        && expanded(rows)
+        && super::short_prefill::enabled()
+}
+
+crate::env_flag!(
     /// Default-on M5 GLM Fast/Half KDA value4 at 128..=4096 command rows and wide Q6_K at 1025..=4096, including guarded tails. IQ gate/up and IQ3_S down additionally admit 1024..=4096 with PREFILL_IQ_ANY_ROWS; sparse attention retains its qualified row gates. Zero restores the previous 512/1024/2048 row gates. Existing per-stage, short-prefill, precision and tensor-tier rollbacks still apply; no memory-plan change.
     default_on requested,
     "QWEN_GLM53_PREFILL_ANY_ROWS"

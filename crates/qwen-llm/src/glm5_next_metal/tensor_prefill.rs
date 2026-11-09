@@ -106,6 +106,7 @@ impl Tile {
     fn selected_for_rows(dtype: GgmlType, rows: usize) -> Self {
         if dtype == GgmlType::Q6_K
             && ((matches!(rows, 512 | 1024) && super::short_prefill::enabled())
+                || super::row_policy::small_expanded(rows)
                 || (rows == 2048 && large_q6_wide_enabled())
                 || (rows > 1024 && super::row_policy::expanded(rows) && large_q6_wide_enabled()))
         {
@@ -247,7 +248,9 @@ pub(super) fn eligible(
         || arith.precision != FastPrecision::Half
         || mode != StageMode::Fast
         || !matches!(dtype, GgmlType::Q6_K | GgmlType::Q8_0)
-        || (n < MIN_ROWS && !(n == 512 && super::short_prefill::enabled()))
+        || (n < MIN_ROWS
+            && !(n == 512 && super::short_prefill::enabled())
+            && !super::row_policy::small_expanded(n))
     {
         return Ok(false);
     }

@@ -629,9 +629,10 @@ pub(super) fn grouped_down_policy(
     if super::tensor_q5_down::selected(arith, mode, dtype, (ffn, hidden, experts, top_k), rows) {
         GroupedDownPolicy::Q5KTensor
     } else if super::tensor_down::selected(arith, mode, dtype, rows)
-        && (rows != 512 || (ffn, hidden, experts, top_k) == (2048, 4096, 288, 8))
+        && (!(rows == 512 || super::row_policy::small_expanded(rows))
+            || (ffn, hidden, experts, top_k) == (2048, 4096, 288, 8))
     {
-        if rows == 512 {
+        if rows == 512 || super::row_policy::small_expanded(rows) {
             GroupedDownPolicy::Iq3STensorOrSmallCounts
         } else {
             GroupedDownPolicy::Iq3STensor

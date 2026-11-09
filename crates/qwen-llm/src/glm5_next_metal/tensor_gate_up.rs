@@ -21,7 +21,7 @@ pub(super) fn short_selected(
         && arith.precision == FastPrecision::Half
         && mode == StageMode::Fast
         && shape == (4096, 2048, 288, 8)
-        && rows == 512
+        && (rows == 512 || super::row_policy::small_expanded(rows))
         && gate == up
         && matches!(gate, GgmlType::IQ2_S | GgmlType::IQ3_S)
 }

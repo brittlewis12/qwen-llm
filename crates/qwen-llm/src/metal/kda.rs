@@ -46,6 +46,78 @@ pub fn encode_kda_decode(
     norm_eps: f32,
 ) -> Result<(), MetalError> {
     const K: &str = "kda_decode";
+    check_kda_decode(enc, heads, b, lower_bound, norm_eps)?;
+    let pso = ctx.pipeline("kernel_glm53_kda_decode")?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < THREADS {
+        return Err(checks::bad_shape(
+            K,
+            "needs 32-lane simdgroups and 128 threads",
+        ));
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_heads: u32,
+        n_rows: u32,
+        lower_bound: f32,
+        norm_eps: f32,
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_heads: to_u32(K, heads, "heads")?,
+            n_rows: 1,
+            lower_bound,
+            norm_eps,
+        },
+    );
+    for (index, tensor) in [
+        b.q,
+        b.k,
+        b.v,
+        b.raw_gate,
+        b.raw_beta,
+        b.output_gate,
+        b.q_conv,
+        b.k_conv,
+        b.v_conv,
+        b.neg_exp_a_log,
+        b.dt_bias,
+        b.output_norm,
+        b.conv_state,
+        b.state,
+        b.out,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        enc.set_tensor(index + 1, tensor);
+    }
+    enc.set_threadgroup_memory(0, SCRATCH_FLOATS * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: heads,
+            depth: 1,
+        },
+        MTLSize {
+            width: THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+fn check_kda_decode(
+    enc: &KernelEncoder,
+    heads: usize,
+    b: &KdaDecode<'_>,
+    lower_bound: f32,
+    norm_eps: f32,
+) -> Result<(), MetalError> {
+    const K: &str = "kda_decode";
     require_serial(K, enc)?;
     if heads == 0 {
         return Err(checks::bad_shape(K, "head count must be positive"));
@@ -119,32 +191,121 @@ pub fn encode_kda_decode(
         &[(b.conv_state, "conv state"), (b.state, "state")],
     )?;
     check_disjoint(K, b.state, &[(b.conv_state, "conv state")])?;
-    let pso = ctx.pipeline("kernel_glm53_kda_decode")?;
-    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < THREADS {
-        return Err(checks::bad_shape(
+    Ok(())
+}
+
+/// Caller-local M5 batch primitive. Inputs/output are consecutive rows;
+/// recurrence and convolution buffers remain distinct admitted session state.
+pub(crate) fn encode_kda_decode_members(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    heads: usize,
+    b: &KdaDecode<'_>,
+    states: &[(&MetalTensor, &MetalTensor)],
+    lower_bound: f32,
+    norm_eps: f32,
+) -> Result<(), MetalError> {
+    const K: &str = "kda_decode_members";
+    let rows = states.len();
+    if !(2..=4).contains(&rows) || !ctx.device_facts().gpu_families.apple10 {
+        return Err(checks::bad_shape(K, "needs two to four M5 members"));
+    }
+    let width = heads
+        .checked_mul(KDA_HEAD_DIM)
+        .ok_or_else(|| checks::bad_shape(K, "width overflow"))?;
+    for (t, n, name) in [
+        (b.q, width, "q"),
+        (b.k, width, "k"),
+        (b.v, width, "v"),
+        (b.raw_gate, width, "gate"),
+        (b.raw_beta, heads, "beta"),
+        (b.output_gate, width, "output gate"),
+        (b.out, width, "output"),
+    ] {
+        check_tensor(
             K,
-            "needs 32-lane simdgroups and 128 threads",
-        ));
+            t,
+            GgmlType::F32,
+            &[n as u64, rows as u64],
+            name == "output",
+            name,
+        )?;
+    }
+    let inputs = [
+        (b.q, "q"),
+        (b.k, "k"),
+        (b.v, "v"),
+        (b.raw_gate, "gate"),
+        (b.raw_beta, "beta"),
+        (b.output_gate, "output gate"),
+        (b.q_conv, "q conv"),
+        (b.k_conv, "k conv"),
+        (b.v_conv, "v conv"),
+        (b.neg_exp_a_log, "ssm_a"),
+        (b.dt_bias, "bias"),
+        (b.output_norm, "norm"),
+    ];
+    check_disjoint(K, b.out, &inputs)?;
+    for (r, (conv, state)) in states.iter().enumerate() {
+        let v = |t: &MetalTensor, n: usize| t.view_subrange((r * n) as u64, vec![n as u64]);
+        check_kda_decode(
+            enc,
+            heads,
+            &KdaDecode {
+                q: &v(b.q, width),
+                k: &v(b.k, width),
+                v: &v(b.v, width),
+                raw_gate: &v(b.raw_gate, width),
+                raw_beta: &v(b.raw_beta, heads),
+                output_gate: &v(b.output_gate, width),
+                q_conv: b.q_conv,
+                k_conv: b.k_conv,
+                v_conv: b.v_conv,
+                neg_exp_a_log: b.neg_exp_a_log,
+                dt_bias: b.dt_bias,
+                output_norm: b.output_norm,
+                conv_state: conv,
+                state,
+                out: &v(b.out, width),
+            },
+            lower_bound,
+            norm_eps,
+        )?;
+        for t in [*conv, *state] {
+            check_disjoint(K, t, &inputs)?;
+            check_disjoint(K, t, &[(b.out, "output")])?;
+            for (other_conv, other_state) in &states[..r] {
+                check_disjoint(
+                    K,
+                    t,
+                    &[(other_conv, "other conv"), (other_state, "other state")],
+                )?;
+            }
+        }
+    }
+    let pso = ctx.pipeline("kernel_glm53_kda_decode_members")?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < THREADS {
+        return Err(checks::bad_shape(K, "needs 128 threads of 32 lanes"));
     }
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
-        n_heads: u32,
-        n_rows: u32,
-        lower_bound: f32,
-        norm_eps: f32,
+        heads: u32,
+        rows: u32,
+        lower: f32,
+        eps: f32,
     }
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
         &Args {
-            n_heads: to_u32(K, heads, "heads")?,
-            n_rows: 1,
-            lower_bound,
-            norm_eps,
+            heads: to_u32(K, heads, "heads")?,
+            rows: rows as u32,
+            lower: lower_bound,
+            eps: norm_eps,
         },
     );
-    for (index, tensor) in [
+    for (i, t) in [
         b.q,
         b.k,
         b.v,
@@ -157,19 +318,24 @@ pub fn encode_kda_decode(
         b.neg_exp_a_log,
         b.dt_bias,
         b.output_norm,
-        b.conv_state,
-        b.state,
-        b.out,
     ]
     .into_iter()
     .enumerate()
     {
-        enc.set_tensor(index + 1, tensor);
+        enc.set_tensor(i + 1, t);
     }
-    enc.set_threadgroup_memory(0, SCRATCH_FLOATS * std::mem::size_of::<f32>());
+    enc.set_tensor(13, states[0].0);
+    enc.set_tensor(14, states[0].1);
+    enc.set_tensor(15, b.out);
+    for r in 1..4 {
+        let (conv, state) = states[r.min(rows - 1)];
+        enc.set_tensor(14 + 2 * r, conv);
+        enc.set_tensor(15 + 2 * r, state);
+    }
+    enc.set_threadgroup_memory(0, SCRATCH_FLOATS * 4);
     enc.dispatch(
         MTLSize {
-            width: 1,
+            width: rows,
             height: heads,
             depth: 1,
         },
@@ -667,6 +833,169 @@ mod tests {
                 conv_ref,
                 "step {step} conv state"
             );
+        }
+    }
+
+    #[test]
+    fn kda_members_keep_bits_state_offsets_and_disjointness() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        if !ctx.device_facts().gpu_families.apple10 {
+            return;
+        }
+        let heads = 4usize;
+        let width = heads * KDA_HEAD_DIM;
+        let (w, d, h) = (width as u64, KDA_HEAD_DIM as u64, heads as u64);
+        let weights: Vec<_> = [
+            (width * 4, vec![4, 1, w]),
+            (width * 4, vec![4, 1, w]),
+            (width * 4, vec![4, 1, w]),
+            (heads, vec![h]),
+            (width, vec![w]),
+            (KDA_HEAD_DIM, vec![d]),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (n, shape))| tensor(&ctx, &series(n, 70 + i, 0.4), shape))
+        .collect();
+        for b in 2..=4 {
+            let old: Vec<_> = (0..b)
+                .map(|r| {
+                    (
+                        tensor(&ctx, &series(width * 9, 80 + r, 0.2), vec![w, 3, 3]),
+                        tensor(
+                            &ctx,
+                            &series(heads * KDA_HEAD_DIM * KDA_HEAD_DIM, 90 + r, 0.1),
+                            vec![d, d, h],
+                        ),
+                    )
+                })
+                .collect();
+            let new: Vec<_> = (0..b)
+                .map(|r| {
+                    (
+                        tensor(&ctx, &series(width * 9, 80 + r, 0.2), vec![w, 3, 3]),
+                        tensor(
+                            &ctx,
+                            &series(heads * KDA_HEAD_DIM * KDA_HEAD_DIM, 90 + r, 0.1),
+                            vec![d, d, h],
+                        ),
+                    )
+                })
+                .collect();
+            let states: Vec<_> = new.iter().map(|(c, s)| (c, s)).collect();
+            for step in 0..3 {
+                let acts: Vec<_> = (0..6)
+                    .map(|i| {
+                        let n = if i == 4 { heads } else { width };
+                        tensor(
+                            &ctx,
+                            &series(n * b, 100 + step * 6 + i, 0.6),
+                            vec![n as u64, b as u64],
+                        )
+                    })
+                    .collect();
+                let outputs: Vec<_> = (0..2)
+                    .map(|_| tensor(&ctx, &vec![0.; width * b], vec![w, b as u64]))
+                    .collect();
+                let inputs_before: Vec<_> = acts.iter().map(tensor_f32_at_offset).collect();
+                let bindings = KdaDecode {
+                    q: &acts[0],
+                    k: &acts[1],
+                    v: &acts[2],
+                    raw_gate: &acts[3],
+                    raw_beta: &acts[4],
+                    output_gate: &acts[5],
+                    q_conv: &weights[0],
+                    k_conv: &weights[1],
+                    v_conv: &weights[2],
+                    neg_exp_a_log: &weights[3],
+                    dt_bias: &weights[4],
+                    output_norm: &weights[5],
+                    conv_state: states[0].0,
+                    state: states[0].1,
+                    out: &outputs[1],
+                };
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                for r in 0..b {
+                    let views: Vec<_> = acts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| {
+                            let n = if i == 4 { heads } else { width };
+                            t.view_subrange((r * n) as u64, vec![n as u64])
+                        })
+                        .collect();
+                    let out = outputs[0].view_subrange((r * width) as u64, vec![w]);
+                    encode_kda_decode(
+                        &ctx,
+                        &enc,
+                        heads,
+                        &KdaDecode {
+                            q: &views[0],
+                            k: &views[1],
+                            v: &views[2],
+                            raw_gate: &views[3],
+                            raw_beta: &views[4],
+                            output_gate: &views[5],
+                            conv_state: &old[r].0,
+                            state: &old[r].1,
+                            out: &out,
+                            ..bindings
+                        },
+                        -5.,
+                        1e-5,
+                    )
+                    .unwrap();
+                }
+                encode_kda_decode_members(&ctx, &enc, heads, &bindings, &states, -5., 1e-5)
+                    .unwrap();
+                enc.end();
+                command.commit();
+                wait_completed(&command).unwrap();
+                assert_eq!(
+                    tensor_f32_at_offset(&outputs[0]),
+                    tensor_f32_at_offset(&outputs[1])
+                );
+                for r in 0..b {
+                    assert_eq!(
+                        tensor_f32_at_offset(&old[r].0),
+                        tensor_f32_at_offset(&new[r].0)
+                    );
+                    assert_eq!(
+                        tensor_f32_at_offset(&old[r].1),
+                        tensor_f32_at_offset(&new[r].1)
+                    );
+                }
+                for (before, t) in inputs_before.iter().zip(&acts) {
+                    assert_eq!(*before, tensor_f32_at_offset(t));
+                }
+                for t in acts
+                    .iter()
+                    .chain(&outputs)
+                    .chain(old.iter().flat_map(|(c, s)| [c, s]))
+                    .chain(new.iter().flat_map(|(c, s)| [c, s]))
+                {
+                    crate::metal::test_support::assert_offset_guards(t, 16, 20);
+                }
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                assert!(
+                    encode_kda_decode_members(
+                        &ctx,
+                        &enc,
+                        heads,
+                        &bindings,
+                        &vec![states[0]; b],
+                        -5.,
+                        1e-5
+                    )
+                    .is_err()
+                );
+                enc.end();
+            }
         }
     }
 

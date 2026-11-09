@@ -10,6 +10,11 @@ use super::*;
 use crate::metal::encode_copy_offset_f32;
 use objc2_metal::MTLResource;
 
+#[path = "batch_projection.rs"]
+mod projection;
+#[path = "batch_selection.rs"]
+mod selection;
+
 crate::env_flag!(
     /// Default-on four-output-channel IQ2_S gate/up and IQ3_S down grids for qualified M5 Fast/Half independent decode batches of two to four members. Zero restores the original F32 token grids; single-token, Exact/F32 and other primitive policies are unchanged.
     default_on batch_expert_rows_enabled,
@@ -183,6 +188,8 @@ impl Glm5NextBatch {
         if self.logits.buffer.device().registryID() != ctx.device.registryID() {
             return invalid("independent batch device differs");
         }
+        let selection_stride =
+            selection::stride(ctx, &sessions.iter().map(|s| &**s).collect::<Vec<_>>());
         for s in sessions.iter_mut() {
             s.poisoned = true;
         }
@@ -202,7 +209,17 @@ impl Glm5NextBatch {
             }
         }
         let refs: Vec<_> = sessions.iter().map(|s| &**s).collect();
-        refs[0].encode_independent_batch(ctx, &refs, tokens, &self.logits, self.expert_rows)?;
+        if selection_stride.is_some() {
+            selection::prepare(&refs)?;
+        }
+        refs[0].encode_independent_batch(
+            ctx,
+            &refs,
+            tokens,
+            &self.logits,
+            self.expert_rows,
+            selection_stride,
+        )?;
         let p = refs[0].packed.as_ref().expect("preflighted");
         for (block, r) in p.routes.iter().enumerate() {
             if let Some(r) = r {
@@ -222,7 +239,9 @@ impl Glm5NextBatch {
             }
         }
         for (row, s) in refs.iter().enumerate() {
-            if s.position + 1 >= s.weights.config.sparse_frontier() as usize {
+            if selection_stride.is_none()
+                && s.position + 1 >= s.weights.config.sparse_frontier() as usize
+            {
                 let statuses = read_i32(&s.sparse.as_ref().expect("preflighted").select_status)?;
                 if let Some((index, &status)) = statuses
                     .iter()
@@ -237,6 +256,9 @@ impl Glm5NextBatch {
                     });
                 }
             }
+        }
+        if selection_stride.is_some() {
+            selection::validate(&refs)?;
         }
         let vocab = refs[0].weights.config.vocab_size as usize;
         let result = (0..count)
@@ -265,6 +287,9 @@ fn matmat(
     m: usize,
     rows: usize,
 ) -> Result<()> {
+    if projection::matmat(ctx, enc, w, x, y, k, m, rows)? {
+        return Ok(());
+    }
     if matches!(w.dtype, GgmlType::Q6_K | GgmlType::Q8_0)
         && k.is_multiple_of(if w.dtype == GgmlType::Q8_0 { 64 } else { 256 })
     {
@@ -294,6 +319,7 @@ impl Glm5NextSession<'_> {
         tokens: &[u32],
         logits: &MetalTensor,
         expert_rows: bool,
+        selection_stride: Option<usize>,
     ) -> Result<()> {
         let w = self.weights;
         let c = &w.config;
@@ -306,6 +332,8 @@ impl Glm5NextSession<'_> {
             &tokens.iter().map(|t| *t as i32).collect::<Vec<_>>(),
         )?;
         let v = |t: &MetalTensor| rows_view(t, rows);
+        #[cfg(test)]
+        let encode_started = std::time::Instant::now();
         let command = ctx
             .queue
             .commandBuffer()
@@ -335,7 +363,15 @@ impl Glm5NextSession<'_> {
             match &block.mixer {
                 MixerTensors::Kda(kda) => self.encode_batch_kda(ctx, &enc, seqs, index, kda)?,
                 MixerTensors::Mla(mla) => {
-                    self.encode_batch_mla(ctx, &mut enc, seqs, index, mla_index, mla)?;
+                    self.encode_batch_mla(
+                        ctx,
+                        &mut enc,
+                        seqs,
+                        index,
+                        mla_index,
+                        mla,
+                        selection_stride,
+                    )?;
                     mla_index += 1;
                 }
             }
@@ -617,8 +653,15 @@ impl Glm5NextSession<'_> {
             rows,
         )?;
         enc.end();
+        #[cfg(test)]
+        let encode_ms = encode_started.elapsed().as_secs_f64() * 1e3;
         command.commit();
         wait_completed(&command)?;
+        #[cfg(test)]
+        projection::record_timing(
+            encode_ms,
+            (command.GPUEndTime() - command.GPUStartTime()) * 1e3,
+        );
         Ok(())
     }
     fn encode_batch_kda(
@@ -683,34 +726,69 @@ impl Glm5NextSession<'_> {
             width,
             rows,
         )?;
-        for (r, seq) in seqs.iter().enumerate() {
-            let LayerState::Kda { conv, state } = &seq.layers[index] else {
-                return invalid("not KDA");
-            };
-            encode_kda_decode(
+        if projection::features() & projection::KDA != 0 {
+            let states = seqs
+                .iter()
+                .map(|seq| match &seq.layers[index] {
+                    LayerState::Kda { conv, state } => Ok((conv, state)),
+                    _ => invalid("not KDA"),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            crate::metal::encode_kda_decode_members(
                 ctx,
                 enc,
                 c.head_count as usize,
                 &KdaDecode {
-                    q: &row(&p.q, r, width),
-                    k: &row(&p.k, r, width),
-                    v: &row(&p.v, r, width),
-                    raw_gate: &row(&p.raw_gate, r, width),
-                    raw_beta: &row(&p.raw_beta, r, c.head_count as usize),
-                    output_gate: &row(&p.output_gate, r, width),
+                    q: &v(&p.q),
+                    k: &v(&p.k),
+                    v: &v(&p.v),
+                    raw_gate: &v(&p.raw_gate),
+                    raw_beta: &v(&p.raw_beta),
+                    output_gate: &v(&p.output_gate),
                     q_conv: &kda.query_conv,
                     k_conv: &kda.key_conv,
                     v_conv: &kda.value_conv,
                     neg_exp_a_log: &kda.neg_exp_a_log,
                     dt_bias: &kda.decay_bias,
                     output_norm: &kda.output_norm,
-                    conv_state: conv,
-                    state,
-                    out: &row(&p.kda_out, r, width),
+                    conv_state: states[0].0,
+                    state: states[0].1,
+                    out: &v(&p.kda_out),
                 },
+                &states,
                 c.kda_gate_lower_bound,
                 c.rms_epsilon,
             )?;
+        } else {
+            for (r, seq) in seqs.iter().enumerate() {
+                let LayerState::Kda { conv, state } = &seq.layers[index] else {
+                    return invalid("not KDA");
+                };
+                encode_kda_decode(
+                    ctx,
+                    enc,
+                    c.head_count as usize,
+                    &KdaDecode {
+                        q: &row(&p.q, r, width),
+                        k: &row(&p.k, r, width),
+                        v: &row(&p.v, r, width),
+                        raw_gate: &row(&p.raw_gate, r, width),
+                        raw_beta: &row(&p.raw_beta, r, c.head_count as usize),
+                        output_gate: &row(&p.output_gate, r, width),
+                        q_conv: &kda.query_conv,
+                        k_conv: &kda.key_conv,
+                        v_conv: &kda.value_conv,
+                        neg_exp_a_log: &kda.neg_exp_a_log,
+                        dt_bias: &kda.decay_bias,
+                        output_norm: &kda.output_norm,
+                        conv_state: conv,
+                        state,
+                        out: &row(&p.kda_out, r, width),
+                    },
+                    c.kda_gate_lower_bound,
+                    c.rms_epsilon,
+                )?;
+            }
         }
         matmat(
             ctx,
@@ -733,6 +811,7 @@ impl Glm5NextSession<'_> {
         block: usize,
         mla_index: usize,
         mla: &crate::glm5_next::MlaTensors<MetalTensor>,
+        selection_stride: Option<usize>,
     ) -> Result<()> {
         let c = &self.weights.config;
         let p = self.packed.as_ref().unwrap();
@@ -798,22 +877,25 @@ impl Glm5NextSession<'_> {
             kv,
             c.rms_epsilon,
         )?;
-        for (w, y) in [
-            (&mla.indexer.key, &p.index_key),
-            (&mla.indexer.pool_gate, &p.index_gate),
-        ] {
-            matmat(
-                ctx,
-                enc,
-                p.arith(),
-                Stage::MlaProjection,
-                w,
-                &v(&p.normed),
-                &v(y),
-                h,
-                c.indexer_head_dim as usize,
-                rows,
-            )?;
+        let views = projection::features() & projection::MLA != 0;
+        if !views {
+            for (w, y) in [
+                (&mla.indexer.key, &p.index_key),
+                (&mla.indexer.pool_gate, &p.index_gate),
+            ] {
+                matmat(
+                    ctx,
+                    enc,
+                    p.arith(),
+                    Stage::MlaProjection,
+                    w,
+                    &v(&p.normed),
+                    &v(y),
+                    h,
+                    c.indexer_head_dim as usize,
+                    rows,
+                )?;
+            }
         }
         for (r, seq) in seqs.iter().enumerate() {
             let s = &seq.s;
@@ -825,22 +907,44 @@ impl Glm5NextSession<'_> {
             else {
                 return invalid("not MLA");
             };
-            for (src, dst, n) in [
-                (&p.query, &s.query, heads * head_dim),
-                (&p.query_r, &s.query_r, q_rank),
-                (&p.normed, &s.normed, h),
-                (&p.latent, &s.latent, kv),
-                (&p.index_key, &s.index_key, c.indexer_head_dim as usize),
-                (&p.index_gate, &s.index_gate, c.indexer_head_dim as usize),
-            ] {
-                copy(ctx, enc, &row(src, r, n), dst, n)?;
+            if !views {
+                for (src, dst, n) in [
+                    (&p.query, &s.query, heads * head_dim),
+                    (&p.query_r, &s.query_r, q_rank),
+                    (&p.normed, &s.normed, h),
+                    (&p.latent, &s.latent, kv),
+                    (&p.index_key, &s.index_key, c.indexer_head_dim as usize),
+                    (&p.index_gate, &s.index_gate, c.indexer_head_dim as usize),
+                ] {
+                    copy(ctx, enc, &row(src, r, n), dst, n)?;
+                }
             }
-            encode_scatter_offset_f32_to_f16(ctx, enc, &s.latent, latent, seq.position * kv, kv)?;
+            let query = if views {
+                std::borrow::Cow::Owned(row(&p.query, r, heads * head_dim))
+            } else {
+                std::borrow::Cow::Borrowed(&s.query)
+            };
+            let query_r = if views {
+                std::borrow::Cow::Owned(row(&p.query_r, r, q_rank))
+            } else {
+                std::borrow::Cow::Borrowed(&s.query_r)
+            };
+            let normed = if views {
+                std::borrow::Cow::Owned(row(&p.normed, r, h))
+            } else {
+                std::borrow::Cow::Borrowed(&s.normed)
+            };
+            let latent_row = if views {
+                std::borrow::Cow::Owned(row(&p.latent, r, kv))
+            } else {
+                std::borrow::Cow::Borrowed(&s.latent)
+            };
+            encode_scatter_offset_f32_to_f16(ctx, enc, &latent_row, latent, seq.position * kv, kv)?;
             grouped_matvec(
                 ctx,
                 enc,
                 &mla.key_absorb,
-                &s.query,
+                &query,
                 &s.query_latent,
                 head_dim,
                 kv,
@@ -855,7 +959,7 @@ impl Glm5NextSession<'_> {
                 ctx,
                 enc,
                 &mla.indexer.key,
-                &s.normed,
+                &normed,
                 &s.index_key,
                 h,
                 index_dim,
@@ -864,7 +968,7 @@ impl Glm5NextSession<'_> {
                 ctx,
                 enc,
                 &mla.indexer.pool_gate,
-                &s.normed,
+                &normed,
                 &s.index_gate,
                 h,
                 index_dim,
@@ -884,9 +988,20 @@ impl Glm5NextSession<'_> {
             )?;
             let scale = 1.0 / (head_dim as f32).sqrt();
             let visible = seq.position + 1;
-            if visible >= c.sparse_frontier() as usize {
-                seq.encode_sparse_attention(
-                    ctx, enc, mla, latent, pooled, mla_index, visible, scale, block,
+            if let Some(stride) = selection_stride {
+                let scores = p
+                    .sparse
+                    .as_ref()
+                    .unwrap()
+                    .scores
+                    .view_subrange((r * stride) as u64, vec![pooled.shape[1], 1]);
+                seq.encode_sparse_scores(
+                    ctx, enc, mla, pooled, visible, block, &query_r, &normed, &scores,
+                )?;
+            } else if visible >= c.sparse_frontier() as usize {
+                seq.encode_sparse_attention_inputs(
+                    ctx, enc, mla, latent, pooled, mla_index, visible, scale, block, &query_r,
+                    &normed,
                 )?;
             } else {
                 seq.stage(enc, Glm5NextStage::DenseAttention, Some(block))?;
@@ -902,25 +1017,57 @@ impl Glm5NextSession<'_> {
                     scale,
                 )?;
             }
+        }
+        if let Some(stride) = selection_stride {
+            selection::encode(ctx, enc, seqs, mla_index, stride)?;
+        }
+        for (r, seq) in seqs.iter().enumerate() {
+            let s = &seq.s;
+            if selection_stride.is_some() {
+                let LayerState::Mla { latent, .. } = &seq.layers[block] else {
+                    return invalid("not MLA");
+                };
+                let sp = p.sparse.as_ref().unwrap();
+                seq.encode_sparse_selected_attention(
+                    ctx,
+                    enc,
+                    latent,
+                    1.0 / (head_dim as f32).sqrt(),
+                    block,
+                    &sp.row_ids.view_subrange(
+                        (r * c.selection_width() as usize) as u64,
+                        vec![c.selection_width() as u64, 1],
+                    ),
+                    &row(&sp.row_counts, r, 1),
+                    &row(&sp.visible_rows, r, 1),
+                )?;
+            }
+            let heads_out = if views {
+                std::borrow::Cow::Owned(row(&p.heads_out, r, heads * head_dim))
+            } else {
+                std::borrow::Cow::Borrowed(&s.heads_out)
+            };
             seq.stage(enc, Glm5NextStage::MlaOutput, Some(block))?;
             grouped_matvec(
                 ctx,
                 enc,
                 &mla.value_expand,
                 &s.output_latent,
-                &s.heads_out,
+                &heads_out,
                 kv,
                 head_dim,
                 heads,
             )?;
 
-            copy(
-                ctx,
-                enc,
-                &s.heads_out,
-                &row(&p.heads_out, r, heads * head_dim),
-                heads * head_dim,
-            )?;
+            if !views {
+                copy(
+                    ctx,
+                    enc,
+                    &s.heads_out,
+                    &row(&p.heads_out, r, heads * head_dim),
+                    heads * head_dim,
+                )?;
+            }
         }
         matmat(
             ctx,

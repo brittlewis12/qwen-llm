@@ -2151,6 +2151,77 @@ fn try_encode_mat_mat_fewrow_gen_weights(
     n_cols: usize,
     float_weights: bool,
 ) -> Result<bool, MetalError> {
+    try_encode_mat_mat_fewrow_gen_weights_tiling(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_cols,
+        float_weights,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_glm_batch_q6_tile(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_cols: usize,
+    nt: usize,
+    nsg: usize,
+) -> Result<(), MetalError> {
+    if weight.dtype != GgmlType::Q6_K
+        || !(2..=4).contains(&n_cols)
+        || ![1, 2, 4].contains(&nt)
+        || ![8, 16, 32].contains(&nsg)
+    {
+        return Err(super::checks::bad_shape(
+            "glm_batch_q6_tile",
+            "Q6 and two to four columns required",
+        ));
+    }
+    if try_encode_mat_mat_fewrow_gen_weights_tiling(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_cols,
+        true,
+        Some((nt, 1, nsg)),
+    )? {
+        Ok(())
+    } else {
+        Err(super::checks::bad_shape(
+            "glm_batch_q6_tile",
+            "unsupported pipeline capacity",
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_encode_mat_mat_fewrow_gen_weights_tiling(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_cols: usize,
+    float_weights: bool,
+    tiling: Option<(usize, usize, usize)>,
+) -> Result<bool, MetalError> {
     use super::checks::{bad_shape, check_disjoint};
     use super::moe::{checked_moe_product, validate_moe_decode_tensor};
     use objc2_metal::MTLComputePipelineState as _;
@@ -2180,7 +2251,7 @@ fn try_encode_mat_mat_fewrow_gen_weights(
             "encoder and bindings must belong to the context device",
         ));
     }
-    let (nt, rt, mut nsg) = fewrow_gen_tiling(n_in, n_out, n_cols);
+    let (nt, rt, mut nsg) = tiling.unwrap_or_else(|| fewrow_gen_tiling(n_in, n_out, n_cols));
     let flavor = if float_weights {
         "fewrow_gen_f32w"
     } else {
@@ -3871,6 +3942,80 @@ pub fn encode_ffn_fused_swiglu_q4_K_mm_f32(
 mod tests {
     use super::*;
     use crate::metal::test_support::*;
+
+    #[test]
+    fn glm_batch_q6_tiles_keep_bits_offsets_and_guards() {
+        let _lease = crate::metal::acquire_metal_benchmark_lease().expect("GPU lease");
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        if !ctx.device_facts().gpu_families.apple10 {
+            return;
+        }
+        for (k, m, nt, nsg) in [
+            (2048usize, 4096usize, 1usize, 16usize),
+            (8192, 4096, 1, 16),
+            (16384, 4096, 1, 16),
+            (4096, 8192, 2, 8),
+        ] {
+            let mut state = 0x9e3779b9;
+            let mut bytes = Vec::new();
+            for _ in 0..k * m / 256 {
+                bytes.extend_from_slice(&fewrow_gen_random_block(GgmlType::Q6_K, &mut state));
+            }
+            let w = offset_tensor(
+                &ctx,
+                32,
+                &bytes,
+                16,
+                vec![k as u64, m as u64],
+                GgmlType::Q6_K,
+            );
+            for b in [2, 3, 4] {
+                let x: Vec<_> = (0..k * b)
+                    .map(|i| (((i * 37 + 11) % 97) as f32 - 48.) * 0.01)
+                    .collect();
+                let x = offset_tensor(
+                    &ctx,
+                    16,
+                    bytemuck::cast_slice(&x),
+                    16,
+                    vec![k as u64, b as u64],
+                    GgmlType::F32,
+                );
+                let a = offset_tensor(
+                    &ctx,
+                    12,
+                    bytemuck::cast_slice(&vec![f32::NAN; m * b]),
+                    20,
+                    vec![m as u64, b as u64],
+                    GgmlType::F32,
+                );
+                let y = offset_tensor(
+                    &ctx,
+                    12,
+                    bytemuck::cast_slice(&vec![f32::NAN; m * b]),
+                    20,
+                    vec![m as u64, b as u64],
+                    GgmlType::F32,
+                );
+                one_shot(&ctx, |e| {
+                    encode_mat_mat_fewrow_gen_f32_weights(&ctx, e, &w, &x, &a, k, m, b)?;
+                    encode_glm_batch_q6_tile(&ctx, e, &w, &x, &y, k, m, b, nt, nsg)
+                })
+                .unwrap();
+                let av = tensor_f32_at_offset(&a);
+                let bv = tensor_f32_at_offset(&y);
+                assert!(av.iter().chain(&bv).all(|v| v.is_finite()));
+                assert!(
+                    av.iter().zip(&bv).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "{k}x{m} B={b}"
+                );
+                assert_offset_guards(&a, 12, 20);
+                assert_offset_guards(&y, 12, 20);
+            }
+        }
+    }
 
     #[test]
     fn q8_0_fewrow_tiling_follows_upstream_rule() {

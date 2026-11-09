@@ -206,6 +206,61 @@ pub fn encode_select_top_k_ids(
     top_k: usize,
     query_count: usize,
 ) -> Result<(), MetalError> {
+    encode_select_top_k_ids_inner(
+        ctx,
+        enc,
+        b,
+        row_capacity,
+        max_visible_rows,
+        top_k,
+        query_count,
+        false,
+    )
+}
+
+/// Existing exact GLM selector, with one independent member per threadgroup.
+/// Ordinary prefill/multi-query selector dispatch policy is unchanged.
+pub(crate) fn encode_glm_select_top_k_members(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &TopKSelection<'_>,
+    row_capacity: usize,
+    max_visible_rows: usize,
+    query_count: usize,
+) -> Result<(), MetalError> {
+    if !(2..=4).contains(&query_count) || !glm_select_members_supported(ctx) {
+        return Err(bad_shape(
+            "select_top_k_members",
+            "needs M5 GLM top-512 members",
+        ));
+    }
+    encode_select_top_k_ids_inner(
+        ctx,
+        enc,
+        b,
+        row_capacity,
+        max_visible_rows,
+        512,
+        query_count,
+        true,
+    )
+}
+
+pub(crate) fn glm_select_members_supported(ctx: &MetalContext) -> bool {
+    ctx.device_facts().gpu_families.apple10 && glm53_selector_requested()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_select_top_k_ids_inner(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &TopKSelection<'_>,
+    row_capacity: usize,
+    max_visible_rows: usize,
+    top_k: usize,
+    query_count: usize,
+    members: bool,
+) -> Result<(), MetalError> {
     const K: &str = "select_top_k_ids";
     const THREADS: usize = 256;
     require_serial(K, enc)?;
@@ -259,7 +314,7 @@ pub fn encode_select_top_k_ids(
         query_count: u32,
         emit_ranked: u32,
     }
-    let fast = query_count == 1
+    let fast = (query_count == 1 || members)
         && top_k == 512
         && ctx.device_facts().gpu_families.apple10
         && glm53_selector_requested();
@@ -688,6 +743,104 @@ mod tests {
             assert_eq!(&ids[query * K..(query + 1) * K], &want[..], "query {query}");
         }
         assert_ne!(status[4], SELECT_STATUS_OK, "NaN in the visible prefix");
+    }
+
+    /// Independent members retain exact ids/status with unequal visibility,
+    /// shifted bindings, threshold ties, visible NaNs and unread poisoned tails.
+    #[test]
+    fn glm_member_selector_matches_individual_queries_and_guards() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        if !glm_select_members_supported(&ctx) {
+            return;
+        }
+        const CAP: usize = 1103;
+        const TOP: usize = 512;
+        for b in 2..=4 {
+            for bad in [false, true] {
+                let vis = [1100i32, 700, 513, 900][..b].to_vec();
+                let mut values = vec![f32::NAN; CAP * b];
+                for r in 0..b {
+                    for i in 0..vis[r] as usize {
+                        values[r * CAP + i] = match i % 7 {
+                            0 => -0.0,
+                            1 => f32::from_bits(1),
+                            2 => -f32::from_bits(3),
+                            _ => ((i * 71 + r * 13) % 997) as f32,
+                        };
+                    }
+                }
+                if bad {
+                    values[3] = f32::NAN;
+                }
+                let scores = tensor(&ctx, &values, vec![CAP as u64, b as u64], GgmlType::F32);
+                let visible = tensor(&ctx, &vis, vec![b as u64], GgmlType::I32);
+                let ids = tensor(
+                    &ctx,
+                    &vec![-7i32; TOP * b],
+                    vec![TOP as u64, b as u64],
+                    GgmlType::I32,
+                );
+                let counts = tensor(&ctx, &vec![-7i32; b], vec![b as u64], GgmlType::I32);
+                let status = tensor(&ctx, &vec![-7i32; b], vec![b as u64], GgmlType::I32);
+                let reference = tensor(
+                    &ctx,
+                    &vec![-7i32; TOP * b],
+                    vec![TOP as u64, b as u64],
+                    GgmlType::I32,
+                );
+                let rc = tensor(&ctx, &vec![-7i32; b], vec![b as u64], GgmlType::I32);
+                let rs = tensor(&ctx, &vec![-7i32; b], vec![b as u64], GgmlType::I32);
+                let before = tensor_backing_bytes(&scores);
+                run(&ctx, |enc| {
+                    for r in 0..b {
+                        encode_select_top_k_ids(
+                            &ctx,
+                            enc,
+                            &TopKSelection {
+                                scores: &scores
+                                    .view_subrange((r * CAP) as u64, vec![CAP as u64, 1]),
+                                visible_counts: &visible.view_subrange(r as u64, vec![1]),
+                                ids: &reference
+                                    .view_subrange((r * TOP) as u64, vec![TOP as u64, 1]),
+                                counts: &rc.view_subrange(r as u64, vec![1]),
+                                status: &rs.view_subrange(r as u64, vec![1]),
+                            },
+                            CAP,
+                            vis[r] as usize,
+                            TOP,
+                            1,
+                        )
+                        .unwrap();
+                    }
+                    encode_glm_select_top_k_members(
+                        &ctx,
+                        enc,
+                        &TopKSelection {
+                            scores: &scores,
+                            visible_counts: &visible,
+                            ids: &ids,
+                            counts: &counts,
+                            status: &status,
+                        },
+                        CAP,
+                        *vis.iter().max().unwrap() as usize,
+                        b,
+                    )
+                    .unwrap();
+                });
+                assert_eq!(read_i32(&ids), read_i32(&reference));
+                assert_eq!(read_i32(&counts), read_i32(&rc));
+                assert_eq!(read_i32(&status), read_i32(&rs));
+                assert_eq!(before, tensor_backing_bytes(&scores));
+                for t in [
+                    &scores, &visible, &ids, &counts, &status, &reference, &rc, &rs,
+                ] {
+                    crate::metal::test_support::assert_offset_guards(t, 16, 16);
+                }
+            }
+        }
     }
 
     /// Geometry the selector cannot honor is refused before encoding.

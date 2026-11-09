@@ -44,3 +44,24 @@ mod model;
 
 #[path = "batch_packet.rs"]
 mod packet;
+
+#[test]
+fn independent_projection_tiles_keep_k_split_and_singleton_policies() {
+    for b in [2, 3, 4] {
+        for (k, m) in [(2048, 4096), (8192, 4096), (16384, 4096), (4096, 8192)] {
+            let (_, _, sg) = crate::metal::fewrow_gen_tiling(k, m, b);
+            assert_eq!(projection::q6_tile(k, m, b).unwrap().1, sg);
+        }
+    }
+    for (k, m, b) in [
+        (4096, 8192, 1),
+        (4096, 8192, 5),
+        (4096, 154880, 4),
+        (4096, 2048, 4),
+        (4097, 8192, 4),
+    ] {
+        assert!(projection::q6_tile(k, m, b).is_none());
+    }
+}
+#[path = "batch_projection_model.rs"]
+mod projection_model;

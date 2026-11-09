@@ -2255,70 +2255,47 @@ impl<'w> Glm5NextSession<'w> {
         scale: f32,
         block: usize,
     ) -> Result<()> {
-        self.stage(enc, Glm5NextStage::SparseQuery, Some(block))?;
+        self.encode_sparse_attention_inputs(
+            ctx,
+            enc,
+            mla,
+            latent,
+            pooled,
+            mla_index,
+            visible,
+            scale,
+            block,
+            &self.s.query_r,
+            &self.s.normed,
+        )
+    }
+
+    fn encode_sparse_attention_inputs(
+        &self,
+        ctx: &MetalContext,
+        enc: &mut KernelEncoder,
+        mla: &crate::glm5_next::MlaTensors<MetalTensor>,
+        latent: &MetalTensor,
+        pooled: &MetalTensor,
+        mla_index: usize,
+        visible: usize,
+        scale: f32,
+        block: usize,
+        query_r: &MetalTensor,
+        normed: &MetalTensor,
+    ) -> Result<()> {
         let c = &self.weights.config;
-        let s = &self.s;
-        let sp = self.sparse.as_ref().ok_or_else(|| {
-            Glm5NextMetalError::Invalid("sparse position without sparse scratch".into())
-        })?;
-        let (h, q_rank) = (c.hidden_size as usize, c.q_lora_rank as usize);
-        let (ih, id) = (c.indexer_head_count as usize, c.indexer_head_dim as usize);
-        let (heads, kv) = (c.head_count as usize, c.kv_lora_rank as usize);
-        let query_width = ih * id;
-        matvec(
-            ctx,
-            enc,
-            &mla.indexer.query,
-            &s.query_r,
-            &sp.index_query,
-            q_rank,
-            query_width,
-        )?;
-        encode_scatter_offset_f32_to_f16(
-            ctx,
-            enc,
-            &sp.index_query,
-            &sp.index_query_f16,
-            0,
-            query_width,
-        )?;
-        let weights = sp.index_weights.view_subrange(0, vec![ih as u64]);
-        matvec(
-            ctx,
-            enc,
-            &mla.indexer.head_weights,
-            &s.normed,
-            &weights,
-            h,
-            ih,
-        )?;
-        crate::metal::encode_scale_f32_in_place(
-            ctx,
-            enc,
-            &weights,
-            1.0 / (query_width as f32).sqrt(),
+        let sp = self
+            .sparse
+            .as_ref()
+            .ok_or_else(|| Glm5NextMetalError::Invalid("missing sparse scratch".into()))?;
+        self.encode_sparse_scores(
+            ctx, enc, mla, pooled, visible, block, query_r, normed, &sp.scores,
         )?;
         let pool_capacity = pooled.shape[1] as usize;
         let visible_pools = visible / c.indexer_pool as usize;
         let top_pools = c.selected_pool_count() as usize;
         let row_slots = c.selection_width() as usize;
-        self.stage(enc, Glm5NextStage::SparseScores, Some(block))?;
-        crate::metal::encode_lightning_scores_f16_matrix(
-            ctx,
-            enc,
-            &crate::metal::LightningScores {
-                queries: &sp.index_query_f16,
-                head_weights: &sp.index_weights,
-                keys: pooled,
-                visible_counts: &sp.visible_pools,
-                scores: &sp.scores,
-            },
-            ih,
-            id,
-            pool_capacity,
-            visible_pools,
-            1,
-        )?;
         self.stage(enc, Glm5NextStage::SparseSelect, Some(block))?;
         crate::metal::encode_select_top_k_ids(
             ctx,
@@ -2349,6 +2326,103 @@ impl<'w> Glm5NextSession<'w> {
             row_slots,
             1,
         )?;
+        self.encode_sparse_selected_attention(
+            ctx,
+            enc,
+            latent,
+            scale,
+            block,
+            &sp.row_ids,
+            &sp.row_counts,
+            &sp.visible_rows,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_sparse_scores(
+        &self,
+        ctx: &MetalContext,
+        enc: &mut KernelEncoder,
+        mla: &crate::glm5_next::MlaTensors<MetalTensor>,
+        pooled: &MetalTensor,
+        visible: usize,
+        block: usize,
+        query_r: &MetalTensor,
+        normed: &MetalTensor,
+        scores: &MetalTensor,
+    ) -> Result<()> {
+        self.stage(enc, Glm5NextStage::SparseQuery, Some(block))?;
+        let c = &self.weights.config;
+        let sp = self.sparse.as_ref().ok_or_else(|| {
+            Glm5NextMetalError::Invalid("sparse position without sparse scratch".into())
+        })?;
+        let (h, q_rank) = (c.hidden_size as usize, c.q_lora_rank as usize);
+        let (ih, id) = (c.indexer_head_count as usize, c.indexer_head_dim as usize);
+        let query_width = ih * id;
+        matvec(
+            ctx,
+            enc,
+            &mla.indexer.query,
+            query_r,
+            &sp.index_query,
+            q_rank,
+            query_width,
+        )?;
+        encode_scatter_offset_f32_to_f16(
+            ctx,
+            enc,
+            &sp.index_query,
+            &sp.index_query_f16,
+            0,
+            query_width,
+        )?;
+        let weights = sp.index_weights.view_subrange(0, vec![ih as u64]);
+        matvec(ctx, enc, &mla.indexer.head_weights, normed, &weights, h, ih)?;
+        crate::metal::encode_scale_f32_in_place(
+            ctx,
+            enc,
+            &weights,
+            1.0 / (query_width as f32).sqrt(),
+        )?;
+        let pool_capacity = pooled.shape[1] as usize;
+        let visible_pools = visible / c.indexer_pool as usize;
+        self.stage(enc, Glm5NextStage::SparseScores, Some(block))?;
+        crate::metal::encode_lightning_scores_f16_matrix(
+            ctx,
+            enc,
+            &crate::metal::LightningScores {
+                queries: &sp.index_query_f16,
+                head_weights: &sp.index_weights,
+                keys: pooled,
+                visible_counts: &sp.visible_pools,
+                scores,
+            },
+            ih,
+            id,
+            pool_capacity,
+            visible_pools,
+            1,
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_sparse_selected_attention(
+        &self,
+        ctx: &MetalContext,
+        enc: &mut KernelEncoder,
+        latent: &MetalTensor,
+        scale: f32,
+        block: usize,
+        row_ids: &MetalTensor,
+        row_counts: &MetalTensor,
+        visible_rows: &MetalTensor,
+    ) -> Result<()> {
+        let c = &self.weights.config;
+        let s = &self.s;
+        let sp = self.sparse.as_ref().expect("preflighted sparse scratch");
+        let (heads, kv) = (c.head_count as usize, c.kv_lora_rank as usize);
+        let row_slots = c.selection_width() as usize;
         let flat = |t: &MetalTensor| t.view_subrange(0, vec![(kv * heads) as u64, 1]);
         self.stage(enc, Glm5NextStage::SparseAttention, Some(block))?;
         crate::metal::encode_online_selected_attention_split_f16(
@@ -2359,9 +2433,9 @@ impl<'w> Glm5NextSession<'w> {
                 raw_cache: latent,
                 raw_cache_before_chunk: latent,
                 compressed_cache: latent,
-                selected_ids: &sp.row_ids,
-                selected_counts: &sp.row_counts,
-                visible_counts: &sp.visible_rows,
+                selected_ids: row_ids,
+                selected_counts: row_counts,
+                visible_counts: visible_rows,
                 sinks: &s.no_sink,
                 output: &flat(&s.output_latent),
             },

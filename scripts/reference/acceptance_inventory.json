@@ -6074,5 +6074,47 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Leased synthetic full-forward batches at mixed depths, B=1..5, split submission and dirty restores; verifies exact heads and real HC dispatch grids, no production model."
+  },
+  {
+    "target": "lib",
+    "name": "glm5_next_metal::packed::batch::tests::independent_projection_tiles_keep_k_split_and_singleton_policies",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure caller-local Q6 geometry scope; keeps the K split and singleton/unsupported-shape policies."
+  },
+  {
+    "target": "lib",
+    "name": "metal::mat_mat::tests::glm_batch_q6_tiles_keep_bits_offsets_and_guards",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Self-leased, model-free Q6 tile bit identity at stock geometries, B=2/3/4 and shifted views/canaries."
+  },
+  {
+    "target": "lib",
+    "name": "metal::mat_vec_members::tests::members_match_cooperative_bits_shifted_buffers_and_odd_outputs",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Self-leased model-free cooperative F32 members: incumbent bits, shifted views, odd output tails, immutable sources and rejection checks."
+  },
+  {
+    "target": "lib",
+    "name": "glm5_next_metal::packed::batch::tests::projection_model::m5_projection_abba_and_distribution",
+    "class": "model",
+    "ignored": true,
+    "reason": "M5 stock GLM53_GGUF at GLM53_BATCH_DEPTH; full-head/state bits, changing membership, actual expert unions and whole-round ABBA, internal lease."
+  },
+  {
+    "target": "lib",
+    "name": "metal::sparse::tests::glm_member_selector_matches_individual_queries_and_guards",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "M5 independent top-512 grid: exact individual ids/counts/status, shifted bindings, unequal visibility, ties, visible NaNs and poisoned unread tails."
+  },
+  {
+    "target": "lib",
+    "name": "metal::kda::tests::kda_members_keep_bits_state_offsets_and_disjointness",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Self-leased M5 independent KDA grid: per-member output/conv/state bits across steps, shifted views, immutable inputs, canaries and cross-member alias refusal."
   }
 ]

@@ -1,4 +1,5 @@
 //! Private actual-model qualification driver; raw per-position likelihoods.
+use super::super::projection;
 use crate::{gguf::GgufFile, glm5_next_metal::*, metal::*};
 use std::io::Write;
 fn emit(v: serde_json::Value) {
@@ -185,7 +186,14 @@ fn qualify(depth: usize) -> anyhow::Result<()> {
             .iter()
             .filter(|r| r.kernel.starts_with("kernel_expert_native_") && r.grid_depth == 4)
             .count();
-        assert_eq!(gemms, 508);
+        assert_eq!(
+            gemms,
+            if projection::features() & projection::MLA != 0 {
+                486
+            } else {
+                508
+            }
+        );
         assert!(experts >= 80);
         emit(
             serde_json::json!({"event":"census","group":group,"gemms":gemms,"native_expert_grids":experts,"dispatches":census.len()}),

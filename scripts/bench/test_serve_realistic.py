@@ -7,6 +7,7 @@ import tempfile
 import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 import serve_realistic as bench
+import serve_realistic_pair as pair
 
 class SteadyTests(unittest.TestCase):
     def test_serial_arm_is_serial_for_each_family_and_default_clears_inherited_cap(self):
@@ -41,6 +42,18 @@ class SteadyTests(unittest.TestCase):
         self.assertEqual(bench.timing_flags(rows,10,20)['timing_thermal_max'],1)
         self.assertEqual(bench.parse_compilers('17 42.0 /tool/rustc\n18 0.0 /tool/cargo\n19 3.0 /tool/qwen'),
                          [dict(pid=17,executable='rustc',cpu_percent=42.),dict(pid=18,executable='cargo',cpu_percent=0.)])
+
+    def test_pair_keeps_both_orders_and_retains_flagged_results(self):
+        self.assertEqual([v for _,v in pair.schedule()],[False,True,True,False])
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);common=dict(family='glm',seed=42,window_seconds=180,metric='delivered',
+                                    thermal_max=1,thermal_flagged=True,compile_overlapped=True)
+            for label,candidate in pair.schedule():
+                x=root/label;x.mkdir();bench.dump(x/'summary.json',dict(common,aggregate_tps=60 if candidate else 50,window_tokens=10800 if candidate else 9000))
+            r=pair.paired_report(root)
+            self.assertTrue(r['complete']);self.assertFalse(r['opposite_throughput_directions'])
+            self.assertEqual(r['order_effect_spread_percent'],0)
+            self.assertTrue(all(p['thermal_flagged'] and p['compile_overlapped'] for p in r['pairs']))
 
     def population(self):
         return [dict(model='glm',purpose='primary',reused='48000',reuse_source='live',

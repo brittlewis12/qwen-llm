@@ -21,7 +21,10 @@ mod probe {
             .collect()
     }
     fn error(a: &[f32], b: &[f32]) -> f64 {
-        assert!(a.iter().chain(b).all(|x| x.is_finite()), "nonfinite diagnostic boundary");
+        assert!(
+            a.iter().chain(b).all(|x| x.is_finite()),
+            "nonfinite diagnostic boundary"
+        );
         a.iter()
             .zip(b)
             .map(|(&x, &y)| (f64::from(x) - f64::from(y)).abs())
@@ -73,7 +76,10 @@ mod probe {
             qwen_llm::metal::dispatch_census_begin();
             let got = r.forward_token(token)?.to_vec();
             let census = qwen_llm::metal::dispatch_census_take();
-            println!("{}", json!({"kind":"normal_discriminator","mode":mode,"logit_max_abs":error(&normal_logits,&got),"dispatches":census.len(),"fused":census.iter().filter(|r|r.kernel=="kernel_qwen4exp_ffn_epilogue_f32").count(),"tail":KernelEncoder::take_diagnostic_causal_tail()}));
+            println!(
+                "{}",
+                json!({"kind":"normal_discriminator","mode":mode,"logit_max_abs":error(&normal_logits,&got),"dispatches":census.len(),"fused":census.iter().filter(|r|r.kernel=="kernel_qwen4exp_ffn_epilogue_f32").count(),"tail":KernelEncoder::take_diagnostic_causal_tail()})
+            );
             for (i, layer) in layers.into_iter().enumerate() {
                 r.restore_snapshot(&entry)?;
                 r.configure_causal_executor(true);

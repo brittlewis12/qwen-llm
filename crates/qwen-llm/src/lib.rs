@@ -195,3 +195,7 @@ mod metallib_identity_tests {
         assert!(matches!(super::TENSOR_METALLIB_TARGET, "" | "26.0"));
     }
 }
+
+#[cfg(feature = "perf-ablations")]
+#[path = "../examples/support/glm_append_price.rs"]
+pub mod glm_append_price;

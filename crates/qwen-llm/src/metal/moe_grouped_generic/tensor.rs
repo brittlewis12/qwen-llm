@@ -106,6 +106,15 @@ pub fn moe_grouped_tensor_selected(ctx: &MetalContext) -> bool {
     expert_tensor_tile_enabled() && moe_grouped_tensor_available(ctx)
 }
 
+crate::env_flag!(
+    /// Count-adaptive IQ3_S down tensor panels (N16 for 1..=16 slots, N32 for
+    /// 17..=32, N64 above) for the GLM-5.3 Flash 2048x4096x288 down bank at
+    /// 128..=4096 rows. Same half operands and K32 F32 sums as the 32-slot
+    /// tile; only the slot panel width changes. Zero restores the 32-slot tile.
+    default_on iq3_down_panels_enabled,
+    "QWEN_GLM53_IQ3_DOWN_PANELS"
+);
+
 const TENSOR_THREADGROUP_BYTES: usize = 8192;
 const TENSOR_THREADGROUP_BYTES_WIDE: usize = 16384;
 
@@ -188,9 +197,42 @@ pub fn encode_moe_down_f32_grouped_slots_tensor(
     let name =
         moe_grouped_tensor_pipeline_name(MoeGroupedTensorRole::Down, weight.dtype, activation)
             .expect("layout lookup succeeded in generic_mm_args");
-    dispatch_tensor_mm(
-        ctx, enc, &name, &args, weight, inner, counts, ids, out, n_out, n_expert, n_tokens, None,
-    )
+    #[cfg(feature = "perf-ablations")]
+    if weight.dtype == GgmlType::IQ3_S
+        && crate::glm_append_price::before(ctx, enc, 1, out, weight, inner, Some(counts), n_expert)?
+    {
+        return Ok(());
+    }
+    let eligible =
+        iq3_down_adaptive_eligible(weight.dtype, inner.dtype, n_in, n_out, n_expert, n_tokens);
+    // Production uses the env default; the ablation probe overrides it so the
+    // same binary can time both routes.
+    #[cfg(feature = "perf-ablations")]
+    let adaptive = eligible
+        && crate::glm_append_price::down_mode_override()
+            .map_or_else(iq3_down_panels_enabled, |mode| mode != 0);
+    #[cfg(not(feature = "perf-ablations"))]
+    let adaptive = eligible && iq3_down_panels_enabled();
+    let encoded = if adaptive {
+        #[cfg(feature = "perf-ablations")]
+        crate::glm_append_price::note_down();
+        encode_moe_down_iq3_adaptive(
+            ctx, enc, weight, inner, counts, ids, out, n_in, n_out, n_expert, n_tokens,
+        )?
+    } else {
+        false
+    };
+    if !encoded {
+        dispatch_tensor_mm(
+            ctx, enc, &name, &args, weight, inner, counts, ids, out, n_out, n_expert, n_tokens,
+            None,
+        )?;
+    }
+    #[cfg(feature = "perf-ablations")]
+    if weight.dtype == GgmlType::IQ3_S {
+        crate::glm_append_price::after(ctx, enc, 1, out)?;
+    }
+    Ok(())
 }
 
 /// Tensor-tile gate/up: gate into `inner` (Down with `b_div = topk`), then
@@ -604,6 +646,22 @@ fn encode_mat_mat_tensor_f32_impl(
     } else {
         TENSOR_THREADGROUP_BYTES
     };
+    #[cfg(feature = "perf-ablations")]
+    if weight.dtype == GgmlType::Q6_K
+        && wide
+        && crate::glm_append_price::before(
+            ctx,
+            enc,
+            2,
+            &y.view_subrange(0, vec![n_out as u64, n_query as u64]),
+            weight,
+            &x.view_subrange(0, vec![n_in as u64, n_query as u64]),
+            None,
+            1,
+        )?
+    {
+        return Ok(());
+    }
     let pso = ctx.tensor_pipeline(&name)?;
     enc.set_pipeline(&pso);
     enc.set_bytes(0, &args);
@@ -623,6 +681,15 @@ fn encode_mat_mat_tensor_f32_impl(
             depth: 1,
         },
     );
+    #[cfg(feature = "perf-ablations")]
+    if weight.dtype == GgmlType::Q6_K && wide {
+        crate::glm_append_price::after(
+            ctx,
+            enc,
+            2,
+            &y.view_subrange(0, vec![n_out as u64, n_query as u64]),
+        )?;
+    }
     Ok(())
 }
 
@@ -1098,4 +1165,153 @@ pub fn encode_moe_swiglu_adaptive_tensor(
         );
     }
     Ok(())
+}
+
+/// Shape gate for the count-adaptive IQ3_S down panels: the GLM-5.3 Flash
+/// down bank with F32 activation staging at append-sized row counts.
+fn iq3_down_adaptive_eligible(
+    weight: GgmlType,
+    activation: GgmlType,
+    n_in: usize,
+    n_out: usize,
+    n_expert: usize,
+    n_tokens: usize,
+) -> bool {
+    weight == GgmlType::IQ3_S
+        && activation == GgmlType::F32
+        && (n_in, n_out, n_expert) == (2048, 4096, 288)
+        && (128..=4096).contains(&n_tokens)
+}
+
+/// Count-adaptive F32-storage / Half-operand IQ3_S down.
+///
+/// Dispatches one panel per count band: N16 slots for buckets of 1..=16, the
+/// 32-slot tile for 17..=32, and an N64 tile above. Bands are disjoint, so
+/// every slot is computed exactly once with the incumbent's half operands and
+/// K32 F32 accumulation. Returns `Ok(false)` without touching the encoder when
+/// a panel pipeline is missing or cannot fit its threadgroup allocation, so the
+/// caller falls back to the 32-slot tensor tile.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_moe_down_iq3_adaptive(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    w: &MetalTensor,
+    x: &MetalTensor,
+    counts: &MetalTensor,
+    ids: &MetalTensor,
+    out: &MetalTensor,
+    k: usize,
+    m: usize,
+    e: usize,
+    n: usize,
+) -> Result<bool, MetalError> {
+    const K: &str = "iq3_adaptive_down";
+    if crate::metal::expert_tensor_down::check_encoder(ctx, enc).is_err() {
+        return Ok(false);
+    }
+    if w.dtype != GgmlType::IQ3_S || x.dtype != GgmlType::F32 {
+        return Ok(false);
+    }
+    let narrow = moe_grouped_tensor_pipeline_name(
+        MoeGroupedTensorRole::Down,
+        GgmlType::IQ3_S,
+        TensorActivation::F32,
+    )
+    .unwrap();
+    let bands = [
+        (16usize, 1u32, 16u32),
+        (32, 17, 32),
+        (64, 33, i32::MAX as u32),
+    ];
+    let mut passes = Vec::with_capacity(bands.len());
+    for (rows, min, max) in bands {
+        let args = generic_mm_args(K, w, x, counts, ids, out, k, m, e, n, 1, min, max)?;
+        let name = match rows {
+            16 => "kernel_glm_iq3_down_n16",
+            32 => narrow.as_str(),
+            _ => "kernel_glm_iq3_down_n64",
+        };
+        let bytes = match rows {
+            16 => 5120,
+            32 => 8192,
+            _ => 16384,
+        };
+        let Ok(p) = ctx.tensor_pipeline(name) else {
+            return Ok(false);
+        };
+        if p.threadExecutionWidth() != 32
+            || p.maxTotalThreadsPerThreadgroup() < 128
+            || p.staticThreadgroupMemoryLength()
+                .checked_add(bytes)
+                .is_none_or(|n| n > ctx.device.maxThreadgroupMemoryLength())
+        {
+            return Ok(false);
+        }
+        passes.push((p, args, rows, bytes));
+    }
+    for (p, args, rows, bytes) in passes {
+        enc.set_pipeline(&p);
+        enc.set_bytes(0, &args);
+        for (i, t) in [(1, w), (2, x), (3, counts), (4, ids), (5, out)] {
+            enc.set_tensor(i, t);
+        }
+        enc.set_threadgroup_memory(0, bytes);
+        enc.dispatch(
+            MTLSize {
+                width: if rows == 64 { n.div_ceil(64) } else { 1 },
+                height: m.div_ceil(64),
+                depth: e,
+            },
+            MTLSize {
+                width: 128,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod iq3_down_panel_policy_tests {
+    use super::*;
+
+    #[test]
+    fn adaptive_panels_require_the_glm_down_shape_and_row_band() {
+        let glm = |rows| {
+            iq3_down_adaptive_eligible(GgmlType::IQ3_S, GgmlType::F32, 2048, 4096, 288, rows)
+        };
+        for rows in [128, 400, 512, 2000, 2048, 4096] {
+            assert!(glm(rows), "rows {rows}");
+        }
+        for rows in [0, 127, 4097, 8192] {
+            assert!(!glm(rows), "rows {rows}");
+        }
+        assert!(!iq3_down_adaptive_eligible(
+            GgmlType::IQ3_XXS,
+            GgmlType::F32,
+            2048,
+            4096,
+            288,
+            400
+        ));
+        assert!(!iq3_down_adaptive_eligible(
+            GgmlType::IQ3_S,
+            GgmlType::F16,
+            2048,
+            4096,
+            288,
+            400
+        ));
+        for (n_in, n_out, experts) in [(2048, 4096, 287), (2048, 4095, 288), (2049, 4096, 288)] {
+            assert!(!iq3_down_adaptive_eligible(
+                GgmlType::IQ3_S,
+                GgmlType::F32,
+                n_in,
+                n_out,
+                experts,
+                400
+            ));
+        }
+    }
 }

@@ -67,3 +67,11 @@ anyhow.workspace = true
 [[bench]]
 name = "kernels"
 harness = false
+
+[[example]]
+name = "glm_append_counterfactual"
+required-features = ["perf-ablations"]
+
+[[example]]
+name = "glm_append_iq3_down"
+required-features = ["perf-ablations"]

@@ -709,3 +709,283 @@ kernel void v41_dequant_q5_k_f16(
     device half * out = dst + row * n_in + block * 256 + il * 16;
     for (int i = 0; i < 16; ++i) out[i] = reg[i / 4][i % 4];
 }
+
+// Count-adaptive GLM IQ3_S down panels; identical Half operands and K32 sums.
+template <int BYTES, short NL,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &),
+          short EPI, bool DENSE, bool HALF_ACT>
+inline void moe_glm_iq3_n16_body(
+        constant moe_group_generic_mm_args & args,
+        device const uchar * srcA,
+        device const uchar * srcB_bytes,
+        device const int   * counts,
+        device const int   * ids,
+        device       float * dst,
+        threadgroup  uchar * shmem,
+        uint3  tgpig,
+        uint tiitg_wide,
+        float limit) {
+    const ushort tiitg = ushort(tiitg_wide);
+    threadgroup half * sa = (threadgroup half *)(shmem);          // [TT_NR0][TT_NK]
+    threadgroup half * sb = (threadgroup half *)(shmem + 4096);   // [16][TT_NK]
+
+    const int im = DENSE ? 0 : tgpig.z;
+    const int r0 = tgpig.y * TT_NR0;
+    const int r1 = tgpig.x * 16;
+
+    const int count = DENSE ? int(args.N) : counts[im];
+    if (count < 0 || uint(count) > args.N
+        || count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
+
+    const short nr0 = ((int)args.M - r0 < TT_NR0) ? (short)((int)args.M - r0) : TT_NR0;
+    const short nr1 = (count - r1 < 16) ? (short)(count - r1) : 16;
+
+    // Clamp source rows only; every physical fragment has one writer, including
+    // zero-filled tails consumed by the full tensor operation.
+    const short pr0 = (short)tiitg / TT_NL0;
+    const short lr0 = pr0 < nr0 ? pr0 : nr0 - 1;
+    const short il0 = (tiitg % TT_NL0);
+    short il = il0;
+
+    // Activation staging: thread -> (physical slot pr1, 8-element chunk iy).
+    const short pr1 = (short)tiitg / TT_NL1;
+    const short lr1 = pr1 < nr1 ? pr1 : nr1 - 1;
+    const short iy = 8 * (tiitg % TT_NL1);
+
+    const short offset1 = il0 / NL;
+    const ulong expert_stride = (ulong)args.nb01 * args.M;
+    device const uchar * x_ptr = srcA + expert_stride * (ulong)im + (ulong)args.nb01 * (r0 + lr0)
+                                       + (ulong)offset1 * BYTES;
+    const int slot_limit = int(args.slot_limit);
+    const int slot_id = DENSE ? r1 + lr1 : ids[(ulong)im * args.N + (r1 + lr1)];
+    const bool slot_valid = pr1 < nr1 && slot_id >= 0 && slot_id < slot_limit;
+    const int b_row = (slot_valid ? slot_id : 0) / int(args.b_div);
+    const ulong y_off = (ulong)args.stride_b * b_row + (ulong)iy;
+    device const float * y_ptr = (device const float *)srcB_bytes + y_off;
+    device const half * yh_ptr = (device const half *)srcB_bytes + y_off;
+
+    threadgroup half * stage_a = sa + pr0 * TT_NK + 16 * il0;
+    threadgroup half * stage_b = sb + min(pr1, short(15)) * TT_NK + iy;
+    // Padded tails and invalid slots keep their pre-zeroed fragments; full
+    // fragments are rewritten every K iteration.
+    if (pr0 >= nr0) {
+        *(threadgroup half4 *)(stage_a + 0)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 4)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 8)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 12) = half4(0.0h, 0.0h, 0.0h, 0.0h);
+    }
+    if (!slot_valid && pr1 < 16) {
+        *(threadgroup half2x4 *)(stage_b) = half2x4(0.0h);
+    }
+
+    // left = activations [32 slots x 32 k], right = weights [64 rows x 32 k]
+    // read transposed; destination [32 slots x 64 rows] in registers.
+    constexpr auto desc = tensor_ops::matmul2d_descriptor(
+        16, TT_NR0, TT_NK, false, true, false,
+        tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    tensor_ops::matmul2d<desc, execution_simdgroups<4>> op;
+    using left_t = tensor<threadgroup half, extents<int, TT_NK, 16>, tensor_inline>;
+    using right_t = tensor<threadgroup half, extents<int, TT_NK, TT_NR0>, tensor_inline>;
+    left_t left(sb, extents<int, TT_NK, 16>());
+    right_t right(sa, extents<int, TT_NK, TT_NR0>());
+    auto acc = op.template get_destination_cooperative_tensor<left_t, right_t, float>();
+#pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); ++i) {
+        acc[i] = 0.0f;
+    }
+
+    for (uint loop_k = 0; loop_k < args.K; loop_k += TT_NK) {
+        half4x4 temp_a;
+        DEQ(x_ptr, il, temp_a);
+        const half2x4 yv = HALF_ACT ? *((device const half2x4 *)yh_ptr)
+                                    : (half2x4)(*((device const float2x4 *)y_ptr));
+
+        // The previous step's matmul must be done reading the slabs.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (pr0 < nr0) {
+            *(threadgroup half4 *)(stage_a + 0)  = temp_a[0];
+            *(threadgroup half4 *)(stage_a + 4)  = temp_a[1];
+            *(threadgroup half4 *)(stage_a + 8)  = temp_a[2];
+            *(threadgroup half4 *)(stage_a + 12) = temp_a[3];
+        }
+        if (slot_valid) {
+            *(threadgroup half2x4 *)(stage_b) = yv;
+        }
+
+        il = (il + 2 < NL) ? il + 2 : il % 2;
+        x_ptr = (il < 2) ? x_ptr + BYTES * ((2 + NL - 1) / NL) : x_ptr;
+        y_ptr += TT_NK;
+        yh_ptr += TT_NK;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        op.run(left, right, acc);
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float * temp_str = (threadgroup float *)shmem;   // [16][TT_NR0]
+    tensor<threadgroup float, extents<int, TT_NR0, 16>, tensor_inline> out_tile(
+        temp_str, extents<int, TT_NR0, 16>());
+    acc.store(out_tile);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Epilogue: 4 threads per slot, 16 consecutive rows each.
+    const short j = tiitg / 4;
+    const short c0 = (tiitg % 4) * 16;
+    if (j < nr1) {
+        const int slot = DENSE ? r1 + j : ids[(ulong)im * args.N + r1 + j];
+        if (slot >= 0 && slot < slot_limit) {
+            device float * D = dst + (ulong)slot * args.M + r0;
+            threadgroup const float * C = temp_str + j * TT_NR0;
+            const short c1 = (c0 + 16 < nr0) ? c0 + 16 : nr0;
+            for (short i = c0; i < c1; ++i) {
+                if (EPI == 0) {
+                    D[i] = C[i];
+                } else if (EPI == 2) {
+                    D[i] = tt_silu(min(D[i], limit)) * clamp(C[i], -limit, limit);
+                } else {
+                    D[i] = tt_silu(D[i]) * C[i];
+                }
+            }
+        }
+    }
+}
+
+kernel void kernel_glm_iq3_down_n16(
+ constant moe_group_generic_mm_args &a [[buffer(0)]],device const uchar *w [[buffer(1)]],
+ device const float *x [[buffer(2)]],device const int *counts [[buffer(3)]],
+ device const int *ids [[buffer(4)]],device float *y [[buffer(5)]],
+ threadgroup uchar *memory [[threadgroup(0)]],uint3 group [[threadgroup_position_in_grid]],uint tid [[thread_index_in_threadgroup]]) {
+ moe_glm_iq3_n16_body<QT_IQ3_S_BYTES,QT_IQ3_S_NL,qt_dequantize_iq3_s,0,false,false>(a,w,(device const uchar*)x,counts,ids,y,memory,group,tid,0.0f);
+}
+template <int BYTES, short NL,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &)>
+kernel void kernel_glm_iq3_n64_f32_impl(
+        constant moe_group_generic_mm_args & args [[buffer(0)]],
+        device const uchar * srcA         [[buffer(1)]],
+        device const float * srcB         [[buffer(2)]],
+        device const int   * counts       [[buffer(3)]],
+        device const int   * ids          [[buffer(4)]],
+        device       float * dst          [[buffer(5)]],
+        threadgroup  uchar * shmem        [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]]) {
+    constexpr float limit = 0; constexpr int epi = 0;
+    threadgroup half * sa = (threadgroup half *)(shmem);          // [64][32]
+    threadgroup half * sb = (threadgroup half *)(shmem + 4096);   // [64][32]
+    const int im = tgpig.z;
+    const int r0 = tgpig.y * TT_NR0;
+    const int r1 = tgpig.x * TT_NR1_WIDE;
+    const int count = counts[im];
+    if (count < 0 || uint(count) > args.N
+        || count < int(args.min_count) || count > int(args.max_count) || r1 >= count) return;
+
+    const short nr0 = min(int(args.M) - r0, TT_NR0);
+    const short nr1 = min(count - r1, TT_NR1_WIDE);
+    const short pr0 = tiitg / TT_NL0;
+    const short lr0 = min(int(pr0), int(nr0) - 1);
+    const short il0 = tiitg % TT_NL0;
+    short il = il0;
+    const short lr1 = tiitg / TT_NL1; // 0..31
+    const short iy = 8 * (tiitg % TT_NL1);
+    const short slot0 = min(int(lr1), int(nr1) - 1);
+    const short slot1 = min(int(lr1) + 32, int(nr1) - 1);
+    const bool valid0 = lr1 < nr1;
+    const bool valid1 = lr1 + 32 < nr1;
+
+    const int slot_limit = int(args.slot_limit);
+    const int id0 = ids[(ulong)im * args.N + r1 + slot0];
+    const int id1 = ids[(ulong)im * args.N + r1 + slot1];
+    const bool ok0 = valid0 && id0 >= 0 && id0 < slot_limit;
+    const bool ok1 = valid1 && id1 >= 0 && id1 < slot_limit;
+    const int row0 = (ok0 ? id0 : 0) / int(args.b_div);
+    const int row1 = (ok1 ? id1 : 0) / int(args.b_div);
+    device const float * y0 = srcB + (ulong)args.stride_b * row0 + iy;
+    device const float * y1 = srcB + (ulong)args.stride_b * row1 + iy;
+
+    const ulong expert_stride = (ulong)args.nb01 * args.M;
+    device const uchar * x_ptr = srcA + expert_stride * (ulong)im
+        + (ulong)args.nb01 * (r0 + lr0)
+        + (ulong)(il0 / NL) * BYTES;
+    threadgroup half * stage_a = sa + pr0 * TT_NK + 16 * il0;
+    threadgroup half * stage_b0 = sb + lr1 * TT_NK + iy;
+    threadgroup half * stage_b1 = sb + (lr1 + 32) * TT_NK + iy;
+    if (pr0 >= nr0) {
+        *(threadgroup half4 *)(stage_a + 0)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 4)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 8)  = half4(0.0h, 0.0h, 0.0h, 0.0h);
+        *(threadgroup half4 *)(stage_a + 12) = half4(0.0h, 0.0h, 0.0h, 0.0h);
+    }
+
+    constexpr auto desc = tensor_ops::matmul2d_descriptor(
+        TT_NR1_WIDE, TT_NR0, TT_NK, false, true, false,
+        tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    tensor_ops::matmul2d<desc, execution_simdgroups<4>> op;
+    using left_t = tensor<threadgroup half, extents<int, TT_NK, TT_NR1_WIDE>, tensor_inline>;
+    using right_t = tensor<threadgroup half, extents<int, TT_NK, TT_NR0>, tensor_inline>;
+    left_t left(sb, extents<int, TT_NK, TT_NR1_WIDE>());
+    right_t right(sa, extents<int, TT_NK, TT_NR0>());
+    auto acc = op.get_destination_cooperative_tensor<left_t, right_t, float>();
+#pragma clang loop unroll(full)
+    for (ushort i = 0; i < acc.get_capacity(); ++i) acc[i] = 0.0f;
+
+    for (uint loop_k = 0; loop_k < args.K; loop_k += TT_NK) {
+        half4x4 temp_a;
+        DEQ(x_ptr, il, temp_a);
+        const half2x4 yv0 = ok0 ? half2x4(*((device const float2x4 *)y0)) : half2x4(0.0h);
+        const half2x4 yv1 = ok1 ? half2x4(*((device const float2x4 *)y1)) : half2x4(0.0h);
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (pr0 < nr0) {
+            *(threadgroup half4 *)(stage_a + 0)  = temp_a[0];
+            *(threadgroup half4 *)(stage_a + 4)  = temp_a[1];
+            *(threadgroup half4 *)(stage_a + 8)  = temp_a[2];
+            *(threadgroup half4 *)(stage_a + 12) = temp_a[3];
+        }
+        if (valid0) *(threadgroup half2x4 *)(stage_b0) = yv0;
+        else *(threadgroup half2x4 *)(stage_b0) = half2x4(0.0h);
+        if (valid1) *(threadgroup half2x4 *)(stage_b1) = yv1;
+        else *(threadgroup half2x4 *)(stage_b1) = half2x4(0.0h);
+
+        il = (il + 2 < NL) ? il + 2 : il % 2;
+        x_ptr = (il < 2) ? x_ptr + BYTES * ((2 + NL - 1) / NL)
+                         : x_ptr;
+        y0 += TT_NK;
+        y1 += TT_NK;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        op.run(left, right, acc);
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float * temp_str = (threadgroup float *)shmem;   // [64][64]
+    tensor<threadgroup float, extents<int, TT_NR0, TT_NR1_WIDE>, tensor_inline> out_tile(
+        temp_str, extents<int, TT_NR0, TT_NR1_WIDE>());
+    acc.store(out_tile);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const short j = tiitg / 4;
+    const short c0 = (tiitg % 4) * 16;
+#pragma clang loop unroll(full)
+    for (short s = 0; s < TT_NR1_WIDE; s += 32) {
+        const short js = j + s;
+        if (js < nr1) {
+            const int slot = ids[(ulong)im * args.N + r1 + js];
+            if (slot >= 0 && slot < slot_limit) {
+                device float * D = dst + (ulong)slot * args.M + r0;
+                threadgroup const float * C = temp_str + js * TT_NR0;
+                const short c1 = (c0 + 16 < nr0) ? c0 + 16 : nr0;
+                for (short i = c0; i < c1; ++i) {
+                    if (epi == 0) {
+                        D[i] = C[i];
+                    } else if (epi == 2) {
+                        D[i] = tt_silu(min(D[i], limit)) * clamp(C[i], -limit, limit);
+                    } else {
+                        D[i] = tt_silu(D[i]) * C[i];
+                    }
+                }
+            }
+        }
+    }
+}
+
+typedef decltype(kernel_glm_iq3_n64_f32_impl<QT_IQ3_S_BYTES,QT_IQ3_S_NL,qt_dequantize_iq3_s>) glm_iq3_n64_t;
+template [[host_name("kernel_glm_iq3_down_n64")]] kernel glm_iq3_n64_t kernel_glm_iq3_n64_f32_impl<QT_IQ3_S_BYTES,QT_IQ3_S_NL,qt_dequantize_iq3_s>;

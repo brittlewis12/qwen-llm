@@ -494,6 +494,7 @@ mod tests {
         );
         let native = make(&residual);
         let fused = make(&residual);
+        let rewritten = make(&residual);
         let sum = MetalTensor::zeros_f32(&ctx, vec![hidden as u64]).unwrap();
         let cmd = ctx.queue.commandBuffer().unwrap();
         let enc = KernelEncoder::begin(&cmd);
@@ -536,6 +537,33 @@ mod tests {
         enc.end();
         cmd.commit();
         wait_completed(&cmd).unwrap();
+        let cmd = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin_causal(&cmd);
+        let copied = MetalTensor::zeros_f32(&ctx, vec![hidden as u64]).unwrap();
+        encode_moe_weighted_sum_f32(&ctx, &enc, &e, &w, &sum, hidden, topk).unwrap();
+        encode_axpy_scalar_f32(&ctx, &enc, &s, &gate, &sum).unwrap();
+        encode_copy_offset_f32(&ctx, &enc, &sum, 0, &copied, hidden).unwrap();
+        enc.set_pipeline(&ctx.pipeline("kernel_qwen4exp_hc_inject_f32").unwrap());
+        enc.set_bytes(0, &[branches as u32, hidden as u32]);
+        enc.set_tensor(1, &copied);
+        enc.set_tensor(2, &r);
+        enc.set_tensor(3, &rewritten);
+        enc.dispatch(
+            MTLSize {
+                width: hidden.div_ceil(256),
+                height: branches,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        enc.finish_causal_scope(&ctx, true).unwrap();
+        enc.end();
+        cmd.commit();
+        wait_completed(&cmd).unwrap();
         let read = |t: &MetalTensor| unsafe {
             std::slice::from_raw_parts(
                 t.buffer.contents().as_ptr().cast::<f32>(),
@@ -543,6 +571,11 @@ mod tests {
             )
         };
         let (a, b) = (read(&native), read(&fused));
+        assert_eq!(
+            read(&rewritten),
+            b,
+            "recorded epilogue rewrite differs from direct leaf"
+        );
         let mut error = [(0f64, 0f64); 2];
         for branch in 0..branches {
             for j in 0..hidden {

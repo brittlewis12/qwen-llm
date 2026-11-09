@@ -355,6 +355,7 @@ impl Qwen4ExpTextSessionMetalGeometry {
     }
 }
 
+#[derive(Clone)]
 pub struct Qwen4ExpTextSessionMetalWeights<'a> {
     pub geometry: Qwen4ExpTextSessionMetalGeometry,
     pub zero_one: Qwen4ExpLayersZeroOneMetalWeights<'a>,

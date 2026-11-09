@@ -39,10 +39,12 @@ use std::ops::Range;
 use std::time::Instant;
 
 mod dflash;
+mod factory;
 pub use dflash::{
     Qwen4ExpDFlashAdapter, Qwen4ExpDFlashError, Qwen4ExpDFlashFinish, Qwen4ExpDFlashPacket,
     Qwen4ExpDFlashState, Qwen4ExpDFlashStats,
 };
+pub use factory::Qwen4ExpSessionFactory;
 
 #[cfg(test)]
 #[path = "qwen4exp_prefill_admission_tests.rs"]
@@ -412,6 +414,22 @@ fn plan_qwen4exp_prefill_execution_from(
     })
 }
 
+fn prefill_command_ranges_from(
+    start: usize,
+    count: usize,
+    rows: Option<usize>,
+    selected: bool,
+    dense_end: usize,
+) -> Result<Vec<Range<usize>>, Qwen4ExpRuntimeError> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let plan = plan_qwen4exp_prefill_execution_from(start, count, rows, selected, dense_end)?;
+    let mut ranges = plan.packed_ranges;
+    ranges.extend((plan.scalar_start..start + count).map(|p| p..p + 1));
+    Ok(ranges)
+}
+
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct Qwen4ExpPackedProfileEncodeTiming {
@@ -569,6 +587,7 @@ pub struct Qwen4ExpLoadedModel<'gguf> {
     ple_table: PleIq4NlTable<'gguf>,
     workspace: Option<Qwen4ExpTextSessionMetalWorkspace>,
     workspace_session_id: u64,
+    session_plan: Qwen4ExpTextSessionPlan,
     capacity: Qwen4ExpSessionCapacity,
     admission: Qwen4ExpRuntimeAdmission,
     observed_weight_bytes: u64,
@@ -984,6 +1003,7 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             ple_table,
             workspace_session_id: workspace.session_id(),
             workspace: Some(workspace),
+            session_plan,
             capacity,
             admission: Qwen4ExpRuntimeAdmission {
                 aggregate,
@@ -1479,6 +1499,25 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
 
     pub fn packed_prefill_capacity(&self) -> Option<usize> {
         self.workspace.packed_prefill_capacity()
+    }
+
+    /// Read the exact native command boundaries of a segment, without changing
+    /// state. Owner schedulers must yield at these boundaries rather than
+    /// inventing smaller chunks or replanning the dense-to-selected frontier.
+    pub fn prefill_command_ranges(
+        &self,
+        range: Range<usize>,
+    ) -> Result<Vec<Range<usize>>, Qwen4ExpRuntimeError> {
+        if range.start > range.end || range.end > self.capacity.forward_limit {
+            return invalid("prefill command range exceeds logical capacity");
+        }
+        prefill_command_ranges_from(
+            range.start,
+            range.len(),
+            self.workspace.packed_prefill_capacity(),
+            self.workspace.packed_selected_capable() && qwen4exp_packed_selected_qsa_enabled(),
+            self.packed_qsa_dense_end()?,
+        )
     }
 
     fn prefill_continuation_inner<F>(

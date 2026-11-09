@@ -6018,5 +6018,47 @@
     "class": "model",
     "ignored": true,
     "reason": "Actual M5 UD-IQ3_XXS teacher-forced bits and same-binary ABBA; GLM53_GGUF and GLM53_BATCH_DEPTH, internal lease."
+  },
+  {
+    "target": "lib",
+    "name": "qwen4exp_runtime::factory::tests::command_quanta_preserve_frontier_geometry_and_scalar_tails",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure native prefill planner boundaries and scalar tails; no Metal, model or dispatch."
+  },
+  {
+    "target": "lib",
+    "name": "qwen4exp_runtime::factory::tests::command_quanta_keep_unadmitted_selected_tokens_scalar",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure native prefill planner boundaries and scalar tails; no Metal, model or dispatch."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_qwen4exp::concurrent::tests::limits_default_to_four_and_allow_a_single_owner_rollback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure owner limits, fake member transition/failure lifecycle and idle selection; no Metal or model."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_qwen4exp::concurrent::tests::ordinary_group_does_not_replay_partial_progress",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure owner limits, fake member transition/failure lifecycle and idle selection; no Metal or model."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_qwen4exp::concurrent::tests::ordinary_group_keeps_member_order_and_refuses_before_mutation",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure owner limits, fake member transition/failure lifecycle and idle selection; no Metal or model."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_qwen4exp::concurrent::tests::idle_choice_retains_unrelated_warm_states_until_the_limit",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure owner limits, fake member transition/failure lifecycle and idle selection; no Metal or model."
   }
 ]

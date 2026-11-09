@@ -30,6 +30,7 @@ use std::time::Instant;
 
 const FAMILY: &str = "Qwen3.8-Flash-Next";
 
+mod concurrent;
 mod dflash;
 mod reuse;
 use reuse::*;
@@ -45,6 +46,7 @@ pub(super) struct Prepared {
     capacity: Qwen4ExpSessionCapacity,
     decode_options: qwen_llm::qwen4exp_runtime::Qwen4ExpDecodeOptions,
     drafter: Option<crate::drafter_policy::PreparedDrafter>,
+    batching: concurrent::Config,
 }
 
 impl Prepared {
@@ -115,6 +117,7 @@ impl Prepared {
             capacity,
             decode_options,
             drafter,
+            batching: concurrent::Config::from_env()?,
         })
     }
 }
@@ -158,7 +161,15 @@ pub(super) fn start(
     let warm_up_ms = backend.warm_up()?;
     tracing::info!(target: "qwen_diag", "serve startup: family=qwen4exp load_ms={load_ms:.1} warm_up_ms={warm_up_ms:.1}");
     crate::shutdown::checkpoint()?;
-    listening.serve(load_ms, &mut backend)
+    if backend.batching.active > 1
+        && backend.dflash_head.is_none()
+        && backend.ctx.device_facts().gpu_families.apple10
+    {
+        let mut owner = concurrent::Owner::new(&mut backend)?;
+        listening.serve(load_ms, &mut owner)
+    } else {
+        listening.serve(load_ms, &mut backend)
+    }
 }
 
 pub(crate) struct FlashNextBackend {
@@ -180,6 +191,7 @@ pub(crate) struct FlashNextBackend {
     cache: SnapshotCache<Checkpoint>,
     turns: TurnConfig,
     live: Option<Live>,
+    batching: concurrent::Config,
     pub(super) snapshot_cache_plan: super::SnapshotCachePlan,
     /// Deployment default for `x_qwen.template_style` (`--template-style`).
     pub(super) template_style: super::items::TemplateStyle,
@@ -330,6 +342,7 @@ impl FlashNextBackend {
             im_start: prepared.im_start,
             turns: TurnConfig::from_env(),
             live: None,
+            batching: prepared.batching,
             cache: SnapshotCache::new(snapshot_cache_plan.bytes, snapshot_cache_plan.policy)
                 .with_checkpoint_ladder(prepared.checkpoint_ladder),
             snapshot_cache_plan,

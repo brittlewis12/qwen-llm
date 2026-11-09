@@ -118,6 +118,35 @@ def pressure():
         ["notifyutil", "-g", "com.apple.system.thermalpressurelevel"], text=True).split()[-1])
 
 
+def thermal_exceeds_limit(level, maximum=1):
+    return level < 0 or level > maximum
+
+
+def parse_compilers(output):
+    # Conservative build/compiler presence, including waiting cargo processes.
+    names = {'cargo','rustc','clang','clang++','metal','metalfe','metallib','air-lld','ld','ld64.lld'}
+    found=[]
+    for line in output.splitlines():
+        fields=line.strip().split(None,2)
+        if len(fields)!=3:continue
+        pid,cpu,command=fields
+        if Path(command).name in names:
+            found.append(dict(pid=int(pid),executable=Path(command).name,cpu_percent=float(cpu)))
+    return found
+
+
+def compiler_snapshot():
+    return parse_compilers(subprocess.check_output(['ps','-ww','-axo','pid=,pcpu=,comm='],text=True))
+
+
+def timing_flags(samples, begin, end):
+    window=[s for s in samples if begin <= s['time'] < end]
+    return dict(thermal_flagged=any(s['thermal']==1 for s in samples),
+                timing_thermal_max=max((s['thermal'] for s in window),default=0),
+                compile_observed=any(s.get('compilers') for s in samples),
+                compile_overlapped=any(s.get('compilers') for s in window))
+
+
 def kv(line):
     return {a: b.strip('"') for a, b in re.findall(r'(\w+)=("[^"\n]*"|\[[^\]]*\]|[^ \n]+)', line)}
 
@@ -193,8 +222,8 @@ class Arm:
         try:
             while not self.monitor_done.is_set():
                 p = pressure()
-                self.samples.append(dict(time=time.time(), thermal=p))
-                if p or time.monotonic() > self.deadline:
+                self.samples.append(dict(time=time.time(), thermal=p, compilers=compiler_snapshot()))
+                if thermal_exceeds_limit(p,self.args.max_thermal_pressure) or time.monotonic() > self.deadline:
                     self.abort.set()
                     self.finish.set()
                     self.emit(event='abort', thermal=p)
@@ -302,8 +331,8 @@ class Arm:
         dump(self.out/'plan.json', self.plan)
         time.sleep(args.cool)
         for _ in range(3):
-            if pressure():
-                raise RuntimeError('nonzero thermal before arm')
+            if thermal_exceeds_limit(pressure(),args.max_thermal_pressure):
+                raise RuntimeError('thermal pressure exceeds arm limit before arm')
             time.sleep(3)
         occupied = subprocess.run(['lsof','-nP',f'-iTCP:{args.port}','-sTCP:LISTEN'],stdout=subprocess.DEVNULL)
         if occupied.returncode != 1:
@@ -317,6 +346,7 @@ class Arm:
              command=command, harness_command=sys.argv, arm=args.arm,
              harness_commit=args.harness_commit,
              cool_seconds=args.cool, ramp_seconds=args.ramp, context=args.context,
+             max_thermal_pressure=args.max_thermal_pressure, thermal_policy='retain flagged level1; abort above limit',
              runtime_env={k:v for k,v in env.items() if k.startswith('QWEN_')},
              corpus_sha256=digest(args.corpus), protocol='steady-own-history-v2'))
         started = time.time()
@@ -347,7 +377,7 @@ class Arm:
                 histories.append(body['input']+history_items(final.get('output',[])))
             warmed=time.time()
             self.emit(event='warmed',startup_s=ready-started,warmup_s=warmed-ready)
-            if pressure():raise RuntimeError('nonzero thermal after warm-up')
+            if thermal_exceeds_limit(pressure(),args.max_thermal_pressure):raise RuntimeError('thermal pressure exceeds arm limit after warm-up')
             barrier=threading.Barrier(4)
             self.window_begin=time.time()+args.ramp
             self.window_end=self.window_begin+self.plan['window_seconds']
@@ -409,6 +439,8 @@ class Arm:
         result.update(startup_s=ready-started,warmup_s=warmed-ready,arm=args.arm,
                       family=self.plan['family'],seed=self.plan['seed'],thermal_max=max(x['thermal'] for x in self.samples),
                       metric='delivered text+reasoning tokens retokenized; excludes EOS/format control')
+        result.update(timing_flags(self.samples,self.window_begin,self.window_end))
+        result['max_thermal_pressure']=args.max_thermal_pressure
         detailed=result.pop('rows')
         dump(self.out/'summary.json',result)
         with (self.out/'calls.jsonl').open('w') as f:
@@ -503,7 +535,10 @@ def compare(reference,candidate):
         raise ValueError('different rate protocols')
     return dict(reference_tps=a['aggregate_tps'],candidate_tps=b['aggregate_tps'],
                 throughput_ratio=b['aggregate_tps']/a['aggregate_tps'],
-                reference_window_tokens=a['window_tokens'],candidate_window_tokens=b['window_tokens'])
+                reference_window_tokens=a['window_tokens'],candidate_window_tokens=b['window_tokens'],
+                reference_thermal_max=a.get('thermal_max',0),candidate_thermal_max=b.get('thermal_max',0),
+                thermal_flagged=bool(a.get('thermal_flagged') or b.get('thermal_flagged')),
+                compile_overlapped=bool(a.get('compile_overlapped') or b.get('compile_overlapped')))
 
 
 def main():
@@ -519,6 +554,8 @@ def main():
     p.add_argument('--port',type=int,default=18737);p.add_argument('--cool',type=float,default=25)
     p.add_argument('--timeout',type=float,default=900);p.add_argument('--keep-bulk',action='store_true')
     p.add_argument('--harness-commit',default='working-tree')
+    p.add_argument('--max-thermal-pressure',type=int,choices=(0,1),default=1,
+                   help='retain level1 arms with flags by default; 0 restores strict pressure0')
     p=sub.add_parser('analyze');p.add_argument('directory',type=Path)
     p=sub.add_parser('compare');p.add_argument('reference',type=Path);p.add_argument('candidate',type=Path)
     args=parser.parse_args()

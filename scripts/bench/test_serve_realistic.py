@@ -21,6 +21,27 @@ class SteadyTests(unittest.TestCase):
             self.assertTrue(all(k not in default for k in knobs.values()))
             self.assertEqual(default['QWEN_FN_BATCH_GDN'], '0')
 
+    def test_pressure1_is_flagged_and_pressure2_aborts_by_default(self):
+        self.assertFalse(bench.thermal_exceeds_limit(0))
+        self.assertFalse(bench.thermal_exceeds_limit(1))
+        self.assertTrue(bench.thermal_exceeds_limit(2))
+        self.assertTrue(bench.thermal_exceeds_limit(1,0))
+        self.assertTrue(bench.thermal_exceeds_limit(-1))
+
+    def test_compile_and_pressure_flags_distinguish_warmup_from_window(self):
+        rows=[dict(time=1,thermal=1,compilers=[dict(pid=7)]),
+              dict(time=11,thermal=0,compilers=[]),dict(time=21,thermal=0,compilers=[])]
+        flags=bench.timing_flags(rows,10,20)
+        self.assertTrue(flags['thermal_flagged'])
+        self.assertTrue(flags['compile_observed'])
+        self.assertFalse(flags['compile_overlapped'])
+        self.assertEqual(flags['timing_thermal_max'],0)
+        rows[1].update(thermal=1,compilers=[dict(pid=8)])
+        self.assertTrue(bench.timing_flags(rows,10,20)['compile_overlapped'])
+        self.assertEqual(bench.timing_flags(rows,10,20)['timing_thermal_max'],1)
+        self.assertEqual(bench.parse_compilers('17 42.0 /tool/rustc\n18 0.0 /tool/cargo\n19 3.0 /tool/qwen'),
+                         [dict(pid=17,executable='rustc',cpu_percent=42.),dict(pid=18,executable='cargo',cpu_percent=0.)])
+
     def population(self):
         return [dict(model='glm',purpose='primary',reused='48000',reuse_source='live',
                      call=f'glm/{i}',new=str(5+i),generated=str(20+i),tool_union_ms=str(i*10))

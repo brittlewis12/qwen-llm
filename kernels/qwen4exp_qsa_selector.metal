@@ -164,7 +164,7 @@ inline void qsa_select_decode(constant qsa_select_args &a, device const float *r
     const uint owned = begin < visible ? min(KPT, visible - begin) : 0u;
     uint error = valid ? (visible > width * KPT ? 4u : 0u) : 1u;
     uint keys[KPT];
-    for (uint k = 0u; k < KPT; ++k) {
+    _Pragma("unroll") for (uint k = 0u; k < KPT; ++k) {
         const float x = k < owned ? row[begin + k] : 0.0f;
         if (k < owned && !isfinite(x)) error = max(error, 2u);
         keys[k] = qsa_select_key(x);
@@ -179,7 +179,7 @@ inline void qsa_select_decode(constant qsa_select_args &a, device const float *r
         for (int shift = 28; shift >= 0; shift -= 4) {
             // Four words of four 8-bit bins: at most KPT <= 255 keys per thread.
             uint w0 = 0u, w1 = 0u, w2 = 0u, w3 = 0u;
-            for (uint k = 0u; k < KPT; ++k) {
+            _Pragma("unroll") for (uint k = 0u; k < KPT; ++k) {
                 const uint key = keys[k];
                 if (k < owned && (key & mask) == prefix) {
                     const uint digit = (key >> uint(shift)) & 15u;
@@ -198,18 +198,18 @@ inline void qsa_select_decode(constant qsa_select_args &a, device const float *r
                                    w1 & 0x00ff00ffu, (w1 >> 8u) & 0x00ff00ffu,
                                    w2 & 0x00ff00ffu, (w2 >> 8u) & 0x00ff00ffu,
                                    w3 & 0x00ff00ffu, (w3 >> 8u) & 0x00ff00ffu};
-            for (uint j = 0u; j < 8u; ++j) {
+            _Pragma("unroll") for (uint j = 0u; j < 8u; ++j) {
                 const uint total = simd_sum(words[j]);
                 if (sl == 0u) bins[uint(sg) * 8u + j] = total;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             uint totals[8];
-            for (uint j = 0u; j < 8u; ++j) {
+            _Pragma("unroll") for (uint j = 0u; j < 8u; ++j) {
                 totals[j] = simd_sum(uint(sl) < groups ? bins[uint(sl) * 8u + j] : 0u);
             }
             uint remaining = rank, chosen = 0u, n = 0u;
             bool found = false;
-            for (int b = 15; b >= 0; --b) {
+            _Pragma("unroll") for (int b = 15; b >= 0; --b) {
                 const uint ub = uint(b);
                 n = (totals[(ub >> 2u) * 2u + (ub & 1u)] >> (((ub >> 1u) & 1u) * 16u)) & 0xffffu;
                 if (remaining <= n) {
@@ -232,7 +232,7 @@ inline void qsa_select_decode(constant qsa_select_args &a, device const float *r
     }
     if (error == 0u) {
         uint greater = 0u, equal = 0u;
-        for (uint k = 0u; k < KPT; ++k) {
+        _Pragma("unroll") for (uint k = 0u; k < KPT; ++k) {
             if (k < owned) {
                 greater += uint(keys[k] > prefix);
                 equal += uint(keys[k] == prefix);
@@ -252,7 +252,7 @@ inline void qsa_select_decode(constant qsa_select_args &a, device const float *r
         if (error == 0u) {
             uint dst = (before & 0xffffu) + min(equal_before, rank);
             uint seen = 0u;
-            for (uint k = 0u; k < KPT; ++k) {
+            _Pragma("unroll") for (uint k = 0u; k < KPT; ++k) {
                 if (k < owned) {
                     const uint key = keys[k];
                     const bool at = key == prefix;
@@ -290,6 +290,7 @@ kernel void kernel_qwen4exp_qsa_select_decode##N##_f32(                         
 QSA_SELECT_DECODE(8)
 QSA_SELECT_DECODE(16)
 QSA_SELECT_DECODE(32)
+QSA_SELECT_DECODE(64)
 #undef QSA_SELECT_DECODE
 
 kernel void kernel_fn_batch_qsa_select(

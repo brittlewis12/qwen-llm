@@ -25,7 +25,7 @@ mod probe {
         let args: Vec<_> = std::env::args().collect();
         let visible: Vec<usize> = args
             .get(1)
-            .map_or("2048,8192,32768", String::as_str)
+            .map_or("2048,4096,8192,16384,32768", String::as_str)
             .split(',')
             .map(|s| s.parse().unwrap())
             .collect();
@@ -48,15 +48,15 @@ mod probe {
                 ),
                 ("kernel_qwen4exp_qsa_select_scan_f32".into(), 256, 1024),
             ];
-            for keys in [8usize, 16, 32] {
-                for threads in [256usize, 512, 1024] {
-                    if keys * threads >= n {
-                        arms.push((
-                            format!("kernel_qwen4exp_qsa_select_decode{keys}_f32"),
-                            threads,
-                            0,
-                        ));
-                    }
+            for keys in [8usize, 16, 32, 64] {
+                // Exact sizing: the fewest whole SIMD groups covering the row.
+                let threads = n.div_ceil(keys).div_ceil(32).max(1) * 32;
+                if threads <= 1024 {
+                    arms.push((
+                        format!("kernel_qwen4exp_qsa_select_decode{keys}_f32"),
+                        threads,
+                        0,
+                    ));
                 }
             }
             for (name, threads, dynamic) in arms {

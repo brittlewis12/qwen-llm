@@ -6,6 +6,7 @@ use objc2_metal::MTLBinding;
 #[cfg(any(test, feature = "perf-ablations"))]
 thread_local! {
     static REPLAY_MODE:Cell<u8>=const {Cell::new(3)};
+    static TAIL_ENABLED:Cell<bool>=const {Cell::new(false)};
     static TAIL_TRACE:std::cell::RefCell<Vec<serde_json::Value>>=const {std::cell::RefCell::new(Vec::new())};
 }
 #[inline]
@@ -195,13 +196,17 @@ impl KernelEncoder {
     #[cfg(any(test, feature = "perf-ablations"))]
     pub fn diagnostic_causal_replay(mode: u8) -> impl Drop {
         assert!(mode < 4);
-        struct Guard(u8);
+        struct Guard(u8, bool);
         impl Drop for Guard {
             fn drop(&mut self) {
                 REPLAY_MODE.with(|m| m.set(self.0));
+                TAIL_ENABLED.with(|m| m.set(self.1));
             }
         }
-        Guard(REPLAY_MODE.with(|m| m.replace(mode)))
+        Guard(
+            REPLAY_MODE.with(|m| m.replace(mode)),
+            TAIL_ENABLED.with(|m| m.replace(true)),
+        )
     }
     /// Begin a bounded causal scope within a concurrent pass. Scopes and
     /// independent sequence owners compose without sharing mutable session state.
@@ -251,7 +256,7 @@ impl KernelEncoder {
             (0..spans.len()).map(|i| vec![i]).collect()
         };
         #[cfg(any(test, feature = "perf-ablations"))]
-        if recording.nodes.len() < 10 {
+        if recording.nodes.len() < 10 && TAIL_ENABLED.with(Cell::get) {
             let rows:Vec<_>=recording.nodes.iter().zip(&spans).map(|(n,s)|serde_json::json!({"kernel":n.name(),"args":n.state.words(0),"spans":s.iter().map(|a|serde_json::json!({"buffer":a.buffer,"lo":a.lo,"hi":a.hi,"write":a.write})).collect::<Vec<_>>()})).collect();
             TAIL_TRACE.with(|t| {
                 t.borrow_mut()

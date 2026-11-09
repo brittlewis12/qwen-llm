@@ -43,6 +43,38 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Compact commit/command results, actual memory/IO summaries and excluded
   superseded attempts: **`~/qwen-runs/2026-11-09-m4-glm-peak-first/summary.json`**.
   Regenerable run bulk removed; no merge or owned worker remains.
+## 2026-11-09 - Flash-Next Combined Batch Handoff Passes; Keep The Executor
+
+- Tested **unmodified `d01b5aa8`**, including native expert/causal batching
+  **`d206b6ed`**, on M5 Ultra. **Keep the causal executor and its rollback**:
+  it helps after the GPU token loop removes host encoding from the critical
+  path. Three same-snapshot/seed trials per arm, alternating order, 64 tokens,
+  temperature 0.8 / K20 / p0.95 / minP0.02; steady transition tok/s:
+
+  | Context | GPU loop alone | GPU loop + executor | Gain |
+  | --- | ---: | ---: | ---: |
+  | 8K | 79.55 | 86.22 | **8.38%** |
+  | 32K | 77.79 | 84.05 | **8.05%** |
+
+- Every sampled pair gains **8.05–8.84%**; greedy medians gain
+  **8.65% / 8.02%**. GPU time falls **0.956 / 0.963 ms/token**. All timing
+  samples are thermal pressure **0** (49 / 65). Whole-model teacher-forced
+  loop/executor comparisons remain at incumbent-repeat dNLL/KL noise, max
+  logit delta **0**, at both depths. No production code or knob removed.
+- GPU→native **B2/B3/B4**→GPU handoff passes: **32** alternating-order fork
+  rounds exact, final continuation max logit error **0**. New native stages
+  versus serial have mean signed dNLL **-1.25e-5..-7.60e-6**, KL
+  **6.80e-9..1.35e-8**, repeat noise **0**; these differ from the exact handoff
+  comparison. Concurrent serve smoke passes, including native peer rounds,
+  lone GPU bursts, disconnect and recovery (GPU transitions 240/0/2/60;
+  native batched transitions 0/60/60/0).
+- Build: `taskpolicy -b` under the build lock, **12m45s**, negligible lock
+  wait. GPU lease ledger waits: **32.0s** for interop/measurement and
+  **110.5s** for serve smoke. Measurement processes hold no build lock.
+  Compact commands, metrics and filtered ledger rows:
+  **`~/qwen-runs/2026-11-09-fn-combined-interop/`**, mirrored locally.
+  Combined unit suites remain the landing lane's check; not duplicated here.
+  Verification only, **no merge**; QSA follow-up remains unstarted.
 
 ## 2026-11-09 - GLM Append F32 Tensor Attention: First Screen Killed
 

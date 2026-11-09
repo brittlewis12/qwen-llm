@@ -340,6 +340,7 @@ pub(crate) type Library = Retained<ProtocolObject<dyn MTLLibrary>>;
 /// census is inactive.
 #[derive(Clone)]
 pub struct Pipeline {
+    pub(crate) function: Retained<ProtocolObject<dyn MTLFunction>>,
     pub(crate) raw: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     pub(crate) name: Arc<str>,
     pub(crate) accesses: Arc<OnceLock<Arc<Vec<(usize, bool)>>>>,

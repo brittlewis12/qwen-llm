@@ -142,16 +142,11 @@ impl MetalContext {
         if let Some(a) = p.accesses.get() {
             return Ok(a.clone());
         }
-        let name = NSString::from_str(&p.name);
-        let function = self
-            .library
-            .newFunctionWithName(&name)
-            .ok_or_else(|| MetalError::NoFunction(p.name.to_string()))?;
         let mut reflection = None;
         unsafe {
             self.device
                 .newComputePipelineStateWithFunction_options_reflection_error(
-                    &function,
+                    &p.function,
                     objc2_metal::MTLPipelineOption::BindingInfo,
                     Some(&mut reflection),
                 )

@@ -1290,6 +1290,7 @@ impl MetalContext {
             MetalError::Pipeline(name.to_string(), error.localizedDescription().to_string())
         })?;
         let pso = Pipeline {
+            function,
             raw: pso,
             name: Arc::from(name),
             accesses: Arc::new(OnceLock::new()),
@@ -1350,6 +1351,7 @@ impl MetalContext {
             MetalError::Pipeline(name.to_string(), e.localizedDescription().to_string())
         })?;
         let pso = Pipeline {
+            function,
             raw: pso,
             name: Arc::from(name),
             accesses: Arc::new(OnceLock::new()),

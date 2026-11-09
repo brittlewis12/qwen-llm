@@ -75,6 +75,59 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   **`~/qwen-runs/2026-11-09-fn-combined-interop/`**, mirrored locally.
   Combined unit suites remain the landing lane's check; not duplicated here.
   Verification only, **no merge**; QSA follow-up remains unstarted.
+## 2026-11-09 - GLM Append F32 Attention: Native Win, Steady Pair Thermal-Blocked
+
+- Code **`46da45cfd`**, rebased on **`d206b6edd`**. Default-on
+  **`QWEN_GLM53_PREFILL_ATTN_F32`**; **`=0`** restores split attention at
+  irregular 128..4096 command rows. F32 query/probability operands, native F16
+  cache, existing partial scratch; no added GPU buffer or cache format.
+  Exact/F32, enclosing rollbacks and aligned Half gates retain their routes.
+  The failed Half widening stays excluded. Probes live in **`examples/`**.
+- M5 Ultra, unchanged UD-IQ3_XXS, common 65536-token code prefix restored
+  outside timers; excluded off/on warm calls, **ABBA + BAAB**, four retained
+  calls/arm/shape, complete finite endpoint/status checks, Metal validation
+  off, thermal pressure **0**. Whole-append means:
+
+  | Rows | Incumbent ms | F32 tensor ms | Speedup |
+  | ---: | ---: | ---: | ---: |
+  | 400 | 669.27 | **618.58** | **1.082x** |
+  | 2000 | 2338.61 | **2080.19** | **1.124x** |
+
+- Eight frozen code/prose documents, **128 targets per document/shape**.
+  Signed dNLL: **+0.004711** at 400 (90% document/32-token-block bootstrap
+  **[-0.003063, +0.013637]**), **-0.000563** at 2K
+  (**[-0.004888, +0.004802]**). KL **0.005855 / 0.003796** versus
+  **0.006080 / 0.004050** for the separate same-F32-operand 127-key partition
+  order reference (both 17 partitions). **Exact incumbent repeats: dNLL=KL=0**
+  on all documents. Candidate-versus-order-reference KL intervals include zero;
+  no resolved quality loss beyond that measured order sensitivity. Nonzero
+  distribution changes are retained explicitly; compensation was not needed.
+- F64 is an absolute diagnostic. Synthetic 64-query RMS **2.97e-9** versus
+  actual F32-to-F16 cache rounding RMS **3.82e-5**. Captured model-operand
+  tensor RMS **1.15e-7 / 1.13e-7**, maxima **1.59e-6 / 9.96e-7**;
+  accepted aligned Half attention replay RMS **9.72e-6 / 1.16e-5**, maxima
+  **6.21e-5 / 5.76e-5**. Observed-cache Half-ULP RMS bounds are about
+  **1.54e-4**; original unrounded model-cache values are unavailable.
+- Default steady harness, three 48K roots and 180-second window: rollback
+  **78.46 tok/s**, per-agent median TTFT **0.681 / 0.531 / 0.603 s**.
+  **Both default-arm attempts aborted at thermal pressure 1 during warm-up**,
+  including a cooled retry after full suites. **No default TTFT or steady-rate
+  comparison qualifies.** Retain the native/accuracy win on this default-on
+  branch; steady qualification and the **450 ms / 1.5 s targets remain open**.
+- Performance/accuracy artifacts precede the rebase; frozen serve binaries
+  are **`eee835a0`**. All six GLM prefill/operator/witness files are byte-identical
+  across the rebase; shared additions use disjoint Flash-Next shapes. Full
+  current-tree suites ran once on **`46da45cfd`**: lib **2485 / 0 / 751 ignored**,
+  CLI **1693 / 0 / 72 ignored**, additional lib integration **49 / 0 / 56 ignored**;
+  public witness and **`scripts/check-contracts.sh` pass**. No new ignored tests.
+  No build lock. Acquired-lease queue waits **475.7 s** (an old-base test waiter
+  was also canceled); current lib/CLI builds
+  **7m18s / 4m10s**. Raw sources, commands, bootstrap results, waits and rejected
+  thermal attempts: **`~/qwen-runs/2026-11-09-glm-append-attn-distribution/`**.
+  Build `cargo build --release -p qwen-llm --example glm_append_attention`, then
+  lease-wrap **`target/release/examples/glm_append_attention`**. Models resolve
+  through **`QWEN_MODEL_SEARCH_PATH`**. Regenerable binaries, targets and full
+  dispatch traces pruned; compact census and raw append/quality rows retained.
 
 ## 2026-11-09 - GLM Append F32 Tensor Attention: First Screen Killed
 

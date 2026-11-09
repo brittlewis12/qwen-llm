@@ -31,6 +31,9 @@ TARGETS = {
 }
 SCOPES = {
     "lib": [
+        "metal::causal::tests::",
+        "metal::token_feedback::tests::",
+        "metal::token_loop::tests::",
         "deepseek_v41::",
         "glm5_next_metal::packed::batch::tests::",
         "metal::expert_native::tests::batch_tiles::",
@@ -54,12 +57,14 @@ SCOPES = {
     ],
     "oracle": [],
     "bench": [
+        "family_options::tests::qwen4exp_decode_flags_follow_the_documented_contract",
         "v41_ced_pair::",
         "family_bench::tests::v41_",
         "family_options::tests::v41_",
         "paired_startup_tests::",
     ],
     "qwen": [
+        "family_options::tests::qwen4exp_decode_flags_follow_the_documented_contract",
         "deepseek_v41::tests::",
         "serve::backend_v41::",
         "serve::batching::driver::tests::",

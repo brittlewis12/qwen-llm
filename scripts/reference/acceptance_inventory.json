@@ -6123,5 +6123,61 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Self-leased model-free Metal differential: mixed private QSA lengths, B=2/3/4, reversed members, exact selection/attention and immutable caches."
+  },
+  {
+    "target": "lib",
+    "name": "metal::causal::tests::waves_preserve_read_write_and_alias_dependencies",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure host dependency graph with overlapping ranges; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "metal::causal::tests::ffn_epilogue_f64_error_no_worse_than_unfused_chain",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal FFN epilogue against unfused leaves and an F64 oracle."
+  },
+  {
+    "target": "lib",
+    "name": "metal::token_feedback::tests::gpu_sampler_orders_candidates_filters_and_async_reads",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal candidate ordering, filtering and asynchronous token readback against the CPU sampler."
+  },
+  {
+    "target": "lib",
+    "name": "metal::token_feedback::tests::gpu_sampler_greedy_ties_nan_and_infinity_contracts",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal argmax tie, NaN and infinity semantics."
+  },
+  {
+    "target": "lib",
+    "name": "metal::token_loop::tests::stop_eos_and_limit_discard_prepared_model_work_without_extra_draws",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal feedback driver stop ordering and request-local RNG accounting; no real model."
+  },
+  {
+    "target": "lib",
+    "name": "metal::token_loop::tests::failed_preencoding_drains_the_committed_command",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal feedback failure drains committed work before releasing its model owner."
+  },
+  {
+    "target": "qwen",
+    "name": "family_options::tests::qwen4exp_decode_flags_follow_the_documented_contract",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Strict default-on decode rollback parsing, including invalid and non-UTF-8 values; no environment mutation or Metal context."
+  },
+  {
+    "target": "bench",
+    "name": "family_options::tests::qwen4exp_decode_flags_follow_the_documented_contract",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Strict default-on decode rollback parsing, including invalid and non-UTF-8 values; no environment mutation or Metal context."
   }
 ]

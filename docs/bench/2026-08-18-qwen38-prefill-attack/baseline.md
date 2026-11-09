@@ -1,5 +1,10 @@
 # Prefill-attack baseline — Qwen 3.8-27B-Q4_K_M
 
+> Historical recipe: selected timing entry points referenced below were retired in the
+> [2026-11-09 cleanup batch](../2026-11-09-ignored-sweep-batch1.md). The ledger lists the retired names. Use the frozen
+> pre-cleanup source `d3087f8d3` (or this packet’s original commit) to reproduce them.
+
+
 First step in closing the ~4× M4-adjusted prefill gap to MLX.fast leaderboard
 record. Model: `Qwen3.8-27B-Q4_K_M.gguf` SHA
 `7b2aec3b9ababdfd75aa17552ee95607d866e44decf547f6f12fcef85cc89f1b`.

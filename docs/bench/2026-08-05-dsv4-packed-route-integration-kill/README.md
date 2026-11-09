@@ -1,5 +1,10 @@
 # DeepSeek V4 Packed GPU Route Integration KILL
 
+> Historical recipe: selected timing entry points referenced below were retired in the
+> [2026-11-09 cleanup batch](../2026-11-09-ignored-sweep-batch1.md). The ledger lists the retired names. Use the frozen
+> pre-cleanup source `d3087f8d3` (or this packet’s original commit) to reproduce them.
+
+
 Status: integrated packed GPU routing is `KILL` under the current arithmetic
 contract. The exact test-only route/schedule topology remains qualified
 diagnostics. Ordinary packed prefill keeps Rust routing, its 542-allocation

@@ -1,5 +1,10 @@
 # DeepSeek V4 Packed Post-Route Attribution
 
+> Historical recipe: selected timing entry points referenced below were retired in the
+> [2026-11-09 cleanup batch](../2026-11-09-ignored-sweep-batch1.md). The ledger lists the retired names. Use the frozen
+> pre-cleanup source `d3087f8d3` (or this packet’s original commit) to reproduce them.
+
+
 Status: the diagnostics-only observer and its bounded current-asset attribution
 are `GO`. Ordinary packed execution retains one post-route encoder and does not
 query Metal command timestamps unless existing tracing or this test-only

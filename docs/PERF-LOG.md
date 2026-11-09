@@ -196,6 +196,15 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   lease-wrap **`target/release/examples/glm_append_attention`**. Models resolve
   through **`QWEN_MODEL_SEARCH_PATH`**. Regenerable binaries, targets and full
   dispatch traces pruned; compact census and raw append/quality rows retained.
+## 2026-11-09 - Retire ignored timing/research probes, batch 1
+
+Remove 61 ignored entry points (59 old timing/attribution probes plus two
+closed research candidates) and exclusive helpers from the lib test build.
+Keep registered/inventoried witnesses, maintained-script callers, active-lane
+files, all live CPU subprocess helpers and mixed DFlash numerical checks.
+No production math, kernel or policy changes. Old measurements and frozen
+artifacts remain; dated recipes now point to their historical source.
+[Deletion ledger, deferred cases and validation protocol](bench/2026-11-09-ignored-sweep-batch1.md).
 
 ## 2026-11-09 - GLM Append F32 Tensor Attention: First Screen Killed
 

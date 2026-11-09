@@ -1,5 +1,10 @@
 # DeepSeek V4 Packed Attention Attribution
 
+> Historical recipe: selected timing entry points referenced below were retired in the
+> [2026-11-09 cleanup batch](../2026-11-09-ignored-sweep-batch1.md). The ledger lists the retired names. Use the frozen
+> pre-cleanup source `d3087f8d3` (or this packet’s original commit) to reproduce them.
+
+
 Status: combined attention family `GO`; attention body `KILL` as a standalone
 N=128 optimization; attention output pipeline `GO` as the next packed-prefill
 target. Ordinary execution is unchanged.

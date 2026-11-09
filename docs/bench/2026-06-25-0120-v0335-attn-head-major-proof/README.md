@@ -1,5 +1,10 @@
 # Attention Head-Major KV Proof - v0.335
 
+> Historical recipe: selected timing entry points referenced below were retired in the
+> [2026-11-09 cleanup batch](../2026-11-09-ignored-sweep-batch1.md). The ledger lists the retired names. Use the frozen
+> pre-cleanup source `d3087f8d3` (or this packet’s original commit) to reproduce them.
+
+
 Synthetic v4 attention microproof for the proposed head-major F16 K/V layout.
 This is an ignored test/bench harness only: production cache layout is unchanged.
 The proof isolates K/V address layout by comparing the canonical token-major

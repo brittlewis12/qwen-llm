@@ -1,5 +1,10 @@
 # M5 Ultra native toolchain baseline
 
+> Historical recipe: selected timing entry points referenced below were retired in the
+> [2026-11-09 cleanup batch](../2026-11-09-ignored-sweep-batch1.md). The ledger lists the retired names. Use the frozen
+> pre-cleanup source `d3087f8d3` (or this packet’s original commit) to reproduce them.
+
+
 Source: `d47eeced1d77b2d780c14315363c27bd8623089a`, clean detached worker checkout.
 No shared kernels or qualification policies changed for this run. The pending
 capability-gate maintenance work was not yet on main.

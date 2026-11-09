@@ -1,5 +1,10 @@
 # GLM-5.3-Flash short-K Q8_0 mat-vec for KDA (2026-10-05)
 
+> Historical recipe: selected timing entry points referenced below were retired in the
+> [2026-11-09 cleanup batch](../2026-11-09-ignored-sweep-batch1.md). The ledger lists the retired names. Use the frozen
+> pre-cleanup source `d3087f8d3` (or this packet’s original commit) to reproduce them.
+
+
 Leverage map 2026-10-05 #2. UD-IQ3_XXS, M4 Max 128 GB, AC power. Parent
 `344da7e7` vs `dc2d5ada` (short-K from `b7655f61`). Same session, back to
 back, untraced, `QWEN_METAL_LEASE_WAIT=1`.

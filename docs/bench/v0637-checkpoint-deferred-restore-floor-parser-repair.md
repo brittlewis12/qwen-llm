@@ -1,5 +1,10 @@
 # v0.637 Deferred-Restore Floor Parser Repair
 
+> Historical recipe: selected timing entry points referenced below were retired in the
+> [2026-11-09 cleanup batch](2026-11-09-ignored-sweep-batch1.md). The ledger lists the retired names. Use the frozen
+> pre-cleanup source `d3087f8d3` (or this packet’s original commit) to reproduce them.
+
+
 Status: runner-only preregistration. No v0.637 gate, floor, model, GPU, or
 product work has run.
 

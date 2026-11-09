@@ -165,6 +165,13 @@ pub(crate) fn generate(
     mut emit: impl FnMut(i32, &[f32]) -> bool,
 ) -> Result<Qwen4ExpGpuDecodeStats, Qwen4ExpTextSessionError> {
     let started = Instant::now();
+    if crate::metal::dispatch_profile_records() {
+        // Per-dispatch profiling rebuilds encoders and intentionally removes
+        // concurrency. Its replay cannot represent indirect control writes.
+        return invalid(
+            "GPU feedback requires ordinary dispatches; use token forwards while profiling",
+        );
+    }
     workspace.require_idle()?;
     if workspace.is_poisoned() || !workspace.logits_ready {
         return invalid("GPU generation requires healthy completed logits");

@@ -347,6 +347,7 @@ pub use completion::*;
 pub use context::*;
 pub use device_facts::{DEVICE_FACTS_VERSION, DeviceFacts, GpuFamilySupport, os_build_version};
 pub use dflash::*;
+pub(crate) use dispatch_profile::dispatch_profile_records;
 pub use dispatch_profile::{
     DispatchProfileGuard, DispatchProfileReport, DispatchProfileRow, dispatch_profile_begin,
     dispatch_profile_finish, dispatch_profile_label,

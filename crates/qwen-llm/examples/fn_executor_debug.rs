@@ -25,10 +25,9 @@ mod probe {
             a.iter().chain(b).all(|x| x.is_finite()),
             "nonfinite diagnostic boundary"
         );
-        a.iter()
-            .zip(b)
-            .map(|(&x, &y)| (f64::from(x) - f64::from(y)).abs())
-            .fold(0., f64::max)
+        let error = qwen_llm::compare::report_max_abs_diff_f64(a, b);
+        assert!(error.is_finite(), "invalid diagnostic boundary");
+        error
     }
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let a: Vec<_> = std::env::args().collect();

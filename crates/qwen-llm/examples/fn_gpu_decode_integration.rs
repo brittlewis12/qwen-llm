@@ -37,11 +37,8 @@ fn distribution(a: &[f32], b: &[f32], target: usize) -> serde_json::Value {
         .map(|(&x, &y)| (f64::from(x) - la).exp() * (f64::from(x) - la - f64::from(y) + lb))
         .sum::<f64>();
     let dnll = lb - f64::from(b[target]) - la + f64::from(a[target]);
-    let max_abs = a
-        .iter()
-        .zip(b)
-        .map(|(&x, &y)| (f64::from(x) - f64::from(y)).abs())
-        .fold(0., f64::max);
+    let max_abs = qwen_llm::compare::report_max_abs_diff_f64(a, b);
+    assert!(max_abs.is_finite(), "invalid diagnostic comparison");
     json!({"dnll":dnll,"kl":kl,"max_abs":max_abs})
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {

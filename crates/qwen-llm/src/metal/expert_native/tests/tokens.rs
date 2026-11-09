@@ -34,7 +34,15 @@ fn native_token_rows_equal_one_dispatch_per_token_bitwise() {
         let id_values: Vec<i32> = (0..tokens)
             .flat_map(|t| {
                 IDS.iter()
-                    .map(move |&id| if t == 1 { id } else { (id + t as i32) % 5 - 1 })
+                    // IDS includes both i32 extremes; preserve release-mode
+                    // route generation in overflow-checked test builds too.
+                    .map(move |&id| {
+                        if t == 1 {
+                            id
+                        } else {
+                            id.wrapping_add(t as i32) % 5 - 1
+                        }
+                    })
             })
             .collect();
         let ids = offset_tensor(

@@ -41,8 +41,31 @@ fn distribution(a: &[f32], b: &[f32], target: usize) -> serde_json::Value {
     assert!(max_abs.is_finite(), "invalid diagnostic comparison");
     json!({"dnll":dnll,"kl":kl,"max_abs":max_abs})
 }
+fn conditions() -> serde_json::Value {
+    let thermal = std::process::Command::new("notifyutil")
+        .args(["-g", "com.apple.system.thermalpressurelevel"])
+        .output()
+        .unwrap();
+    let ps = std::process::Command::new("ps")
+        .args(["-axo", "rss=,comm="])
+        .output()
+        .unwrap();
+    let mut count = 0;
+    let mut rss = 0u64;
+    for line in String::from_utf8(ps.stdout).unwrap().lines() {
+        let mut v = line.split_whitespace();
+        if let (Some(r), Some(c)) = (v.next(), v.next()) {
+            if c.rsplit('/').next() == Some("rustc") {
+                count += 1;
+                rss += r.parse::<u64>().unwrap() * 1024;
+            }
+        }
+    }
+    json!({"thermal":String::from_utf8(thermal.stdout).unwrap().split_whitespace().last().unwrap().parse::<u32>().unwrap(),"compiler_count":count,"compiler_rss":rss})
+}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
+    let standing = args.iter().any(|a| a == "--standing");
     let depth: usize = args[2].parse()?;
     let count: usize = args.get(3).map(|x| x.parse()).transpose()?.unwrap_or(64);
     assert!(count >= 4);
@@ -74,7 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{}",
         json!({"kind":"gpu_loop_cold","depth":depth,"wall_ms":cold.wall_ms,"first_token_ms":cold.first_token_ready_ms})
     );
-    for temperature in [0., 0.8] {
+    for temperature in if standing { vec![0.] } else { vec![0., 0.8] } {
         let sampling = SamplingConfig {
             temperature,
             top_k: 20,
@@ -82,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             min_p: 0.02,
             seed: 19,
         };
-        for rep in 0..3 {
+        for rep in 0..if standing { 2 } else { 3 } {
             let mut arms = [
                 (false, false, false),
                 (true, false, false),
@@ -93,12 +116,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if rep % 2 != 0 {
                 arms.reverse();
             }
-            for (causal, gpu, burst) in arms {
+            for (causal, gpu, burst) in arms.into_iter().filter(|a| !standing || !a.2) {
+                if standing {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                }
+                let before = conditions();
+                runner.configure_gpu_token_loop(true);
                 runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
                 runner.configure_causal_executor(causal);
                 runner.generate_gpu_tokens(&mut Sampler::new(sampling)?, 2, &[], |_| true)?;
                 runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
                 let mut sampler = Sampler::new(sampling)?;
+                runner.configure_gpu_token_loop(gpu);
                 let now = Instant::now();
                 let (wall_ms, gpu_ms, encode_ms, wait_ms, first_ms) = if gpu {
                     let (mut remaining, mut gpu_ms, mut encode_ms, mut wait_ms) =
@@ -156,11 +185,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 assert_eq!(runner.next_position(), start + count - 1);
                 println!(
                     "{}",
-                    json!({"kind":"whole_model","depth":depth,"temperature":temperature,"rep":rep,"causal":causal,"gpu_loop":gpu,"burst":burst,"tokens":count,"transitions":count-1,"wall_ms":wall_ms,"transition_tps":(count-1) as f64*1e3/(wall_ms-first_ms),"gpu_ms":gpu_ms,"encode_ms":encode_ms,"wait_ms":wait_ms,"first_ms":first_ms,"sampler_version":sampler.algorithm_version()})
+                    json!({"kind":"whole_model","conditions_before":before,"conditions_after":conditions(),"depth":depth,"temperature":temperature,"rep":rep,"causal":causal,"gpu_loop":gpu,"burst":burst,"tokens":count,"transitions":count-1,"wall_ms":wall_ms,"transition_tps":(count-1) as f64*1e3/(wall_ms-first_ms),"gpu_ms":gpu_ms,"encode_ms":encode_ms,"wait_ms":wait_ms,"first_ms":first_ms,"sampler_version":sampler.algorithm_version()})
                 );
             }
         }
     }
+    if standing {
+        return Ok(());
+    }
+    runner.configure_gpu_token_loop(true);
     // GPU autoregression supplies teacher inputs; replay exactly those inputs
     // on the incumbent twice to establish its repeat floor, then the executor.
     for (causal, burst) in [(false, false), (true, false), (true, true)] {

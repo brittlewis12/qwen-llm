@@ -896,7 +896,9 @@ impl<'a> Runtime for Owner<'a> {
         sink: &mut dyn GenerationSink,
         reserve: u64,
     ) -> Option<Result<Advance, BackendFailure>> {
-        if !run.state.runner.gpu_token_loop_enabled() {
+        if !run.state.runner.gpu_token_loop_enabled()
+            || (!run.state.runner.gpu_token_loop_warm() && cursor.remaining_tokens() < 128)
+        {
             return None;
         }
         run.reserve = reserve;

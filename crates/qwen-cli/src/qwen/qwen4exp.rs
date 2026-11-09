@@ -20,7 +20,10 @@ pub(crate) fn try_generate_qwen4exp_gpu(
         qwen_llm::qwen4exp_text_session::Qwen4ExpGpuDecodeStats,
     )>,
 > {
-    if !runner.gpu_token_loop_enabled() {
+    // Measured first-use import/registration costs about 0.23 s, versus about
+    // 2 ms saved per token. Keep short cold requests on the host; warm owners
+    // amortize setup across every subsequent request, including short tails.
+    if !runner.gpu_token_loop_enabled() || (!runner.gpu_token_loop_warm() && max_tokens < 128) {
         return Ok(None);
     }
     ensure!(max_tokens > 0, "max_tokens must be >= 1");

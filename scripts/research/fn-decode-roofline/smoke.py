@@ -26,7 +26,7 @@ def main():
     manifest = {'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'thermal_before': thermal(), 'commands': []}
     prompt = 'Count from 1 to 200, separating each number with a comma.'
     for enabled in [False, True]:
-        command = [binary, 'run', '--model', model, '--user', prompt, '--no-thinking', '--temp', '0', '--seed', '19', '--max-tokens', '32', '--max-context-tokens', '4096']
+        command = [binary, 'run', '--model', model, '--user', prompt, '--no-thinking', '--temp', '0', '--seed', '19', '--max-tokens', '128', '--max-context-tokens', '4096']
         env = {**os.environ, 'QWEN4EXP_GPU_TOKEN_LOOP': str(int(enabled))}
         manifest['commands'].append({'argv': command, 'env': {'QWEN4EXP_GPU_TOKEN_LOOP': str(int(enabled))}})
         result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=180, pass_fds=lease_fds)
@@ -58,7 +58,7 @@ def main():
                     time.sleep(0.2)
 
             def request(label, disconnect=False):
-                body = {'model': model_id, 'input': prompt+f' Request {label}.', 'stream': True, 'max_output_tokens': 64 if not disconnect else 512, 'temperature': 0, 'seed': 19}
+                body = {'model': model_id, 'input': prompt+f' Request {label}.', 'stream': True, 'max_output_tokens': (256 if label == 'lone' else 64) if not disconnect else 512, 'temperature': 0, 'seed': 19}
                 req = urllib.request.Request(base+'/v1/responses', json.dumps(body).encode(), {'Content-Type': 'application/json'})
                 events = []
                 with urllib.request.urlopen(req, timeout=120) as r:

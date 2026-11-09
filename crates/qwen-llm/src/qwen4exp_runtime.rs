@@ -1216,6 +1216,12 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         self.workspace.gpu_token_loop
     }
 
+    /// Whether this member already owns its immutable GPU PLE views. Frontends
+    /// can avoid paying their one-time setup for a short, cold generation.
+    pub fn gpu_token_loop_warm(&self) -> bool {
+        self.workspace.gpu_inputs.is_some()
+    }
+
     /// Independent rollback for the feedback driver. This does not select a
     /// batching strategy or change another session's policy.
     pub fn configure_gpu_token_loop(&mut self, enabled: bool) {

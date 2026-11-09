@@ -804,7 +804,7 @@ command, decoding earns measured service credit at
 nonpreemptible. No fixed 512-row reblocking is introduced.
 
 `QWEN_SERVE_FN_NATIVE_BATCH=0` keeps the fair owner while using ordinary
-member forwards. The native path shares HC, dense projections and the head;
+member forwards. The native path shares HC, exact Q6 projections and the Q6 head;
 GDN/QSA causal state and routed experts remain private. Startup warms an
 independent step before listening. Unsupported heads or scratch admission keep
 the ordinary group seam.
@@ -812,7 +812,9 @@ the ordinary group seam.
 `x_qwen.phases.batch` reports logical scheduler widths and fair-prefill service.
 `decode_impl` distinguishes ordinary member forwards from native shared work.
 Width greater than one alone does not establish that GPU work was shared.
-See [PERF-LOG](PERF-LOG.md) for the realistic warm-agent qualification.
+The M5 qualification measured 1.10x aggregate throughput with per-agent p95
+TTFT falling from 55.4/43.8/15.4 to 14.6/2.9/4.3 seconds; all 14 response
+bodies were identical. See [PERF-LOG](PERF-LOG.md) for the protocol and checks.
 
 ## GLM-5.3-Flash continuous batching
 

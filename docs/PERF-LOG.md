@@ -6,6 +6,65 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-09 - Flash-Next Native Independent Decode And Concurrent Serve
+
+- **Default on for M5 ordinary serving**, base `0bdb9ca5`, native core
+  **`81aec21e`**, final owner **`1de079fa`**, GSQ-RCO **IQ3_S**.
+  `QWEN_SERVE_FN_MAX_ACTIVE=1` restores the original serial owner;
+  `QWEN_SERVE_FN_NATIVE_BATCH=0` retains fair interleaving with ordinary
+  member forwards. M4 and DFlash serving remain serial.
+- One resident-weight factory lends independent live causal runners. A native
+  round shares HC norm/down/injection/up launches, exact multicolumn Q6 dense
+  projections and the output head; GDN/QSA state and routed experts stay
+  private. B=3 pads the projection to four columns, without a fourth state.
+  All members preflight before mutation; failures/unwinds after work starts
+  poison/retire the whole group, preventing replay of consumed tokens. Startup
+  warms the independent path. The common owner driver supplies slow-client
+  parking, cancellation and fair normal-geometry prefill; residency activity
+  belongs to synchronous owner quanta, with failures closing the window.
+- Genuine independent-state step costs (not consecutive-token appends), two
+  code/prose streams with distinct offsets, depths `D + [0,17,34,51]`, 128
+  teacher-forced rounds/width, first eight excluded from timing; full-head
+  readback included, prefill/RAM checkpoint restore outside the timer:
+
+  | D | B | B serial steps ms | Native step ms | Aggregate gain |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 8192 | 2 | 26.413 | 23.408 | **1.128x** |
+  | 8192 | 3 | 39.556 | 34.271 | **1.154x** |
+  | 8192 | 4 | 52.695 | 42.737 | **1.233x** |
+  | 32768 | 2 | 27.018 | 24.081 | **1.122x** |
+  | 32768 | 3 | 40.475 | 35.220 | **1.149x** |
+  | 32768 | 4 | 53.894 | 43.917 | **1.227x** |
+
+- **2,304 complete heads bitwise**, signed dNLL/mean KL **0**; 144 repeated
+  serial heads establish a zero noise floor. **64 native fork steps exact**
+  after snapshot restore and member-order changes. HC axes B=2/3/4 and Q6
+  projections preserve incumbent bits, offsets and guards under Metal API
+  validation on M4, hence F64 error is identical. The existing full-F32 MMA
+  alternative stayed out: its M4 operator check had roughly 3x serial F64 RMS
+  error at production projection dimensions. No new quant dequantizer ships.
+- Same-binary realistic warm-agent protocol, harness
+  **`bench/realistic-concurrency@1abcd236`**, same seeded plan as below, three
+  distinct 48K warm roots and 14 turns with each arm's own replies:
+  **205.590 s serial / 187.219 s default, 1.098x aggregate**;
+  **58.57 -> 64.32 output tok/s**. Both perform **39,065 new / 12,041 generated**
+  tokens; all 14 response bodies are identical. Per-agent p95 TTFT
+  **55.44 / 43.77 / 15.43 -> 14.61 / 2.86 / 4.28 s**; queue request-seconds
+  **266.39 -> 2.17**. Thermal maximum/after **0** in both arms. Native width
+  transitions: **106 / 4,748 / 7,173** at B=1/2/3; startup confirms native on.
+- Remaining costs: private routed-expert unpacking and causal GDN/QSA work,
+  plus gather/scatter launches around exact Q6 sharing. The byte-sharing bound
+  is not an achievable throughput prediction for this partial implementation.
+- Checks: full release library **2,473 passed, 747 ignored**; all 11 CLI test
+  executables **1,693 passed, 72 ignored**; `scripts/check-contracts.sh` passed.
+  Reproduce native steps with `cargo build --release -p qwen-llm --example
+  fn_native_batch_check`, then under the Metal lease
+  `target/release/examples/fn_native_batch_check MODEL CODE PROSE 8192|32768 128`.
+  Serve arms use `cargo build --release -p qwen-cli --bin qwen`, the harness
+  command below, and explicit `QWEN_SERVE_FN_MAX_ACTIVE=1|4`; final source is
+  `1de079fa`. Builds hold `build.lock`; timing takes only the Metal lease.
+  Retain commands, summaries and hashes; regenerate binaries and raw events.
+
 ## 2026-11-08 - Flash-Next Fair Continuous Serve: Ordinary-Member Owner
 
 - Base **`0bdb9ca5`**, owner arithmetic **`ccd1ae11`**, M5 Ultra GSQ-RCO

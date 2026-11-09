@@ -151,6 +151,79 @@ last-expert regressions and shared state hashing. No GPU timing or inference.
 [Exact deletions, retained cases and validation protocol](bench/2026-11-09-ignored-sweep-batch2.md).
 
 
+
+## 2026-11-09 - Flash-Next Direct Outputs And Steady Concurrent Serve: +25%
+
+- Pinned to **`4b44117e`**, no rebase. **Keep direct native outputs**, default
+  on; rollback **`QWEN_FN_BATCH_DIRECT_OUTPUT=0`**. GDN/QSA output projections
+  and native MoE scatter write into parent residual buffers. Private batch
+  APIs write their declared destination buffers and return completion; existing
+  device/shape/alias validation is shared with the ordinary copy API.
+  Unsupported expert routes retain their ordinary copies. No arithmetic,
+  causal-state, allocation-plan, scalar or prefill policy changes.
+- Source **`eaf39c4f`**, M5 GSQ-RCO IQ3_S, independent B4, code/prose,
+  depths plus member offsets 0/17/34/51. Same-process AB/BA, 128 rounds,
+  first eight excluded; direct-path engagement asserted:
+
+  | Depth | Copies / direct, ms per B4 round | Gain | GPU / encode saving |
+  | --- | ---: | ---: | ---: |
+  | 8K | 30.599 / 29.837 | **2.55%** | 0.609 / 0.134 ms |
+  | 32K | 31.031 / 30.256 | **2.56%** | 0.621 / 0.139 ms |
+
+  All **512 full-head vectors/depth bitwise equal**, signed dNLL/KL **0**,
+  repeat noise **0**, 32 exact fork rounds/depth. Every arm has compile
+  overlap flagged; thermal start/max/end **0/0/0**, no redo.
+- Production build without perf features, 64 rounds, B4: four serial steps
+  **55.893 / 54.165 ms**, native **30.038 / 30.119 ms** at 8K/32K:
+  **1.861x / 1.798x** aggregate. The 32K result is essentially the 1.8x
+  target when rounded. Compile overlap flagged, thermal
+  **0/0/0** both arms. Full-model dNLL/KL remain at the prior norms result;
+  32 exact forks/depth and GPU/native roundtrip error **0**.
+- **The previously blocked steady serve A/B finally ran.** One matched
+  seeded pair, harness `scripts/bench/serve_realistic.py`, default **180 s**
+  continuous window, **three disjoint 48K warm roots**, real append/reply/tool
+  draws, natural EOS, ramp/cancellation excluded. Current complete batching
+  stack versus **`QWEN_SERVE_FN_MAX_ACTIVE=1`**, not a direct-output-only A/B:
+
+  | Policy | Delivered tokens / 180 s | Aggregate tok/s | Per-agent observed TTFT p95 | Queue exposure, total |
+  | --- | ---: | ---: | --- | ---: |
+  | MAX_ACTIVE=1 | 13,656 | 75.867 | 116.08 / 68.98 / 60.79 s | 372.95 s |
+  | Default | 17,091 | 94.950 | 3.36 / 3.22 / 1.19 s | 20.39 s |
+
+  **1.2515x aggregate (+25.15%)**; passes the 0.98x throughput floor while
+  removing long-agent queue waits. Censored TTFTs **2 / 1** remain in queue
+  exposure; percentiles cover observed first tokens.
+  Warm-up **81.00 / 81.33 s**. Thermal maxima **1 serial / 0 default**, both
+  compile-overlapped: accepted under the requested level-1 policy, **not an
+  isolated thermal-matched effect estimate**. No thermal-2 arm or redo.
+  Stream-overlap traces are not physical native-kernel batch-width counts.
+- Harness adds opt-in **`--max-thermal 1`**, recording all samples and
+  aborting above that ceiling; default **0** remains strict for other lanes.
+  New CPU regression plus existing harness tests: **9 passed**. Targeted M4
+  GDN abandonment/retry and QSA ownership/poison/reset: **2 passed** under
+  Metal API validation. `scripts/check-contracts.sh` **passes** at probe
+  **`eaf39c4f`**, tree **`c0c7110eae638e36d172852a967869ca00ea6b6a`**, identical
+  to curated code **`1be88888`**. Full lib/CLI suites were not rerun; the
+  user's combined validation handoff remains in place. No new `#[ignore]`.
+- Reproduce on M5: `nice -n 10 cargo build --release -p qwen-llm --features
+  perf-ablations --example fn_batch_counterfactual`; leased example args
+  `"$MODEL" "$CODE" "$PROSE" DEPTH 128 4 pair-direct`.
+  Production build: `nice -n 10 cargo build --release -p qwen-cli -p qwen-llm
+  --bin qwen --bin qwen-tok --example fn_native_batch_check`; leased native
+  example args `"$MODEL" "$CODE" "$PROSE" DEPTH 64 4`.
+  Serve plan: `python3 scripts/bench/serve_realistic.py plan --family fn --out "$PLAN"`.
+  Run each arm under its own lease with `serve_realistic.py run --arm
+  serial|default --binary target/release/qwen --tokenizer target/release/qwen-tok
+  --model "$MODEL" --corpus "$CORPUS" --plan "$PLAN" --out "$OUT"
+  --port 18749 --max-thermal 1`; all other harness geometry uses defaults.
+  Source tag **`fn-direct-output-probe-20261109`**; compact commands, metrics,
+  thermal/compile flags and lease rows: **`~/qwen-runs/2026-11-09-fn-direct/`**.
+- Waits (overlapped): M5 lease **1182.5 s / 19.71 min**, builds **3m56s**;
+  M4 targeted build/check **10m20s**, contracts **10m59s**. No custom build
+  lock or `taskpolicy -b`. MBX again rejected a **~339 KB** build-script cache
+  payload against its **256 KB** ceiling. Recorded child PIDs/groups only;
+  both servers stopped normally at cutoff, no owned worker or bulk retained.
+
 ## 2026-11-09 - Flash-Next QSA SIMD Norms: Native B4 Reaches 1.75x
 
 - Pinned to **`e22ce32a2`** (main **`fdd087b74`** plus the prior measured

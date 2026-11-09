@@ -3,7 +3,7 @@ use super::*;
 use crate::serve::decode_cursor::{Advance, DecodeCursor};
 pub(super) fn advance(
     ctx: &qwen_llm::metal::MetalContext,
-    tokenizer: &dyn qwen_llm::tokenizer::Tokenize,
+    tokenizer: &qwen_llm::tokenizer::NativeTokenizer,
     session: &mut Glm5NextSession<'_>,
     sampler: &mut qwen_llm::sampling::Sampler,
     cursor: &mut DecodeCursor,

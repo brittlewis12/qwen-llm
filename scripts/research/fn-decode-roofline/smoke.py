@@ -21,6 +21,7 @@ def main():
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     binary, model = str(a.binary.resolve()), str(a.model.resolve())
+    lease_fds = (int(os.environ['QWEN_METAL_LEASE_FD']),)
     thermal = lambda: subprocess.check_output(['notifyutil', '-g', 'com.apple.system.thermalpressurelevel'], text=True).strip()
     manifest = {'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(), 'thermal_before': thermal(), 'commands': []}
     prompt = 'Count from 1 to 200, separating each number with a comma.'
@@ -28,7 +29,7 @@ def main():
         command = [binary, 'run', '--model', model, '--user', prompt, '--no-thinking', '--temp', '0', '--seed', '19', '--max-tokens', '32', '--max-context-tokens', '4096']
         env = {**os.environ, 'QWEN4EXP_GPU_TOKEN_LOOP': str(int(enabled))}
         manifest['commands'].append({'argv': command, 'env': {'QWEN4EXP_GPU_TOKEN_LOOP': str(int(enabled))}})
-        result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=180)
+        result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=180, pass_fds=lease_fds)
         (a.out/f'run-{int(enabled)}.log').write_text(result.stderr)
         (a.out/f'run-{int(enabled)}.txt').write_text(result.stdout)
         result.check_returncode()
@@ -41,7 +42,7 @@ def main():
     command = [binary, 'serve', '--model', model, '--addr', f'127.0.0.1:{port}', '--max-context-tokens', '4096', '--max-tokens', '64', '--snapshot-cache-mib', '0', '--durable-snapshot-dir', 'off']
     manifest['commands'].append({'argv': command})
     with (a.out/'serve.log').open('w') as log:
-        proc = subprocess.Popen(command, stdout=log, stderr=log, start_new_session=True)
+        proc = subprocess.Popen(command, stdout=log, stderr=log, start_new_session=True, pass_fds=lease_fds)
         try:
             deadline = time.monotonic()+180
             while True:

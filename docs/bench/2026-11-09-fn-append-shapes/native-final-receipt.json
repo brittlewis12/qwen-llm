@@ -1,0 +1,20 @@
+{
+  "commit": "76cce044f6c9b39e3b9b2b883fe169cfd129327c",
+  "command": [
+    "$WORKTREE/target/release/deps/qwen_llm-60655e5b0ca7422c",
+    "qwen4exp_runtime::tests::append_shapes::native_append_shape_packet",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "env": {
+    "FLASH_PREFILL_MODEL": "$MODELS/ISTA-DASLab-Qwen3.8-Flash-Next-GSQ-RCO-GGUF/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+    "FLASH_PREFILL_OUT": "$RUNS/native-final.jsonl",
+    "FLASH_APPEND_PLAN": "$RUNS/inputs/timing-65536.json"
+  },
+  "returncode": 0,
+  "wall_s": 70.3060691356659,
+  "thermal_max": 0,
+  "aborts": []
+}

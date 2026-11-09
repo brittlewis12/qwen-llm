@@ -1,0 +1,77 @@
+{
+  "source": "76cce044f6c9b39e3b9b2b883fe169cfd129327c",
+  "suites": [
+    {
+      "binary": "qwen_llm-60655e5b0ca7422c",
+      "passed": 2471,
+      "failed": 0,
+      "ignored": 779
+    },
+    {
+      "binary": "qwen_cli-6a2b567551855eaa",
+      "passed": 122,
+      "failed": 0,
+      "ignored": 5
+    },
+    {
+      "binary": "qwen-54a48f68afbe97af",
+      "passed": 1069,
+      "failed": 0,
+      "ignored": 50
+    },
+    {
+      "binary": "qwen_bench-192a4c3115ca9050",
+      "passed": 143,
+      "failed": 0,
+      "ignored": 2
+    },
+    {
+      "binary": "qwen_census-68b414d92a1e9237",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "binary": "qwen_grammar_oracle-91d6db5146e0cb52",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "binary": "qwen_lens-14f84b7f6536f9ce",
+      "passed": 303,
+      "failed": 0,
+      "ignored": 6
+    },
+    {
+      "binary": "qwen_tok-e3a5bb58c6437729",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "binary": "cli_ux-ba26e843b61740df",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "binary": "deepseek_v41_oracle-2f9d9c1aad61faf3",
+      "passed": 33,
+      "failed": 0,
+      "ignored": 8
+    },
+    {
+      "binary": "run_baselines-21b25dd49c456a76",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "binary": "run_front_info-b144f60d0ce0b27b",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    }
+  ]
+}

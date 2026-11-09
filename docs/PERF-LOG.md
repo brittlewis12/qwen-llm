@@ -513,6 +513,35 @@ No GPU execution or timing. Fixed base a95456865; no main refresh.
   overlapping each other. GPU queue wait **229 s**, build-lock wait **0**.
   Next priced remainder is attention's **1.284-ms** bound. No further kernel
   experiment this turn; regenerable run bulk removed, no merge or running jobs.
+## 2026-11-09 - Flash-Next Shape-Complete Appends: 400 Rows 580 → 313 ms
+
+- **Default-on candidate**, source **`76cce044`**, main base **`fe0df5796`**,
+  M5 Ultra / GSQ-RCO IQ3_S. Same 64K snapshot, native **ABBA + BAAB**, four
+  retained samples/policy, full endpoint readback: **400 rows 580.12 → 313.35
+  ms (1.851x)**; **2,000 rows 1,522.94 → 1,126.16 ms (1.352x)**. Aligned
+  controls: 512 **387.15 → 360.74**, 2,048 **1,064.23 → 1,063.10 ms**.
+  All accepted campaigns thermal **0**; timing uses the lease, no build lock.
+- Complete bounded native-quant/expert/bucket, masked HC/narrow-F32 and
+  qualified Q5 rows. Preserve incumbent activation values, no padded model
+  timesteps/new persistent buffers; decode <128 rows and non-tensor hardware
+  keep their routes. **`QWEN_FN_APPEND_SHAPES=0`** restores prior gates;
+  independent down/HC rollbacks are documented in ENV. Smaller expert panels
+  recovered no whole-append time; aggressive HC and Q5 N12288 failed peak F64,
+  aligned Q5 M2048 was slower. Those candidates are not promoted.
+- Six teacher-forced code/manual cohorts at 8K/irregular 8K/64K pass the frozen
+  signed ΔNLL/control-envelope and **mean KL ≤0.01** gates, with 16/32/64-block
+  sensitivity. Largest positive pooled mean **+0.00212**. Primary 64K/2K
+  **code-only +0.00603** prompted one frozen disjoint code holdout:
+  **−0.00216**, KL **0.00323**; equal-window code mean **+0.00194**. Both
+  windows and per-document results remain visible. Actual-operand F64 SSE
+  **and peak no worse**, guarded tail/dispatch tests and bitwise same-policy
+  snapshot replay pass. No greedy-text-equality gate.
+- Steady serve result pending the final paired arms.
+- Release library **2,471 passed**, all CLI targets **1,697 passed**; explicit
+  model-backed Q5/routed F64 tests, script tests and contracts pass. Evidence,
+  caveats and commit-plus-command reproduction:
+  [packet](bench/2026-11-09-fn-append-shapes.md). Unmerged branch
+  **`perf/fn-append-shapes`**.
 
 ## 2026-11-09 - V4.1 Expert Grouping Killed; Calibrated Overlap Bounds
 

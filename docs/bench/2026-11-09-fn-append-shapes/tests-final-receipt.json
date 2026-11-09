@@ -1,0 +1,12 @@
+{
+  "commit": "76cce044f6c9b39e3b9b2b883fe169cfd129327c",
+  "command": [
+    "/bin/bash",
+    "$RUNS/tests-final.sh"
+  ],
+  "env": {},
+  "returncode": 0,
+  "wall_s": 180.34210991859436,
+  "thermal_max": 0,
+  "aborts": []
+}

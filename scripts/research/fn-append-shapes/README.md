@@ -1,6 +1,7 @@
 # Flash-Next shape-complete appends
 
-Base `2e2f14e6`. Initial signal: ordinary fresh-process policy off/on, real
+Started from decomposition base `2e2f14e6`; final production/test snapshot
+`76cce044`, based on main `fe0df5796`. Initial signal: ordinary fresh-process policy off/on, real
 400/512/2000/2048 rows at 65536, then native common-prefix **ABBA + BAAB**.
 No profiling/census or validation in retained timing; full endpoint readback.
 The qualification test restores the same persistent snapshot outside timing.
@@ -33,6 +34,12 @@ No sampled targets use generated feedback. Contexts: 8192/65536; an additional
 prefix is executed independently per policy: long requests cross 2051 and can
 end with an irregular packed chunk even when the total is 2048-aligned. The
 native timing packet instead holds one baseline prefix snapshot fixed.
+
+The reported confirmatory code holdout is regenerated from `quality-65536.json`:
+keep the first four documents, set each offset to 2304, rows to `[2000]` and
+targets to 256. This disjoint window was frozen after inspecting the primary
+code subgroup and before running the holdout. Report both windows separately;
+the holdout is not a replacement for an unfavorable primary slice.
 
 Prespecified decision: per depth/row cohort, hierarchical document/32-target-block
 bootstrap, seed 20261109, 10000 resamples. Signed candidate-minus-baseline dNLL

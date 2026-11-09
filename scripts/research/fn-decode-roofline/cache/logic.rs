@@ -436,6 +436,7 @@ impl LayerVariant {
                             k.contains("qsa_select_scan") || k == "kernel_gdn_step_decay_f32"
                         }
                         "route" => k.contains("topk"),
+                        "expert" => k.contains("swiglu"),
                         "publish" => k.contains("pool_publish"),
                         _ => false,
                     }
@@ -461,7 +462,10 @@ impl LayerVariant {
                 }
             } else if (placement == "start" && n == 0)
                 || (placement == "tail" && n + 1 == self.waves.len())
-                || ((placement == "chain" || placement == "route" || placement == "publish")
+                || ((placement == "chain"
+                    || placement == "route"
+                    || placement == "publish"
+                    || placement == "expert")
                     && n == one)
             {
                 for p in packets {

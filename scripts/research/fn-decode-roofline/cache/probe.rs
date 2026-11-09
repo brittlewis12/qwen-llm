@@ -293,7 +293,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 let placements = [
-                    "none", "serial", "chain", "publish", "route", "tail", "spread",
+                    "none", "serial", "chain", "publish", "route", "expert", "tail", "spread",
                 ];
                 for rep in 0..6 {
                     let mut order = placements.to_vec();

@@ -203,6 +203,54 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `$HOME/qwen-runs/2026-11-08-realistic-steady/` on both hosts; regenerable
   M5 worktree/target/bundle removed, no owned processes remain. No merge/push.
 
+## 2026-11-08 - V4.1 Batched Decode Census At Agent Depth
+
+- Base **`09a3a521`**, M5 Ultra, production four-shard
+  **DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS** (all 384 experts, top-6, native mixed
+  expert storage and disk Engram), P4 soft mapping **4 GiB**. Three independent code
+  histories: common exact-CED prefix, distinct 4096-token Full suffixes, 16 excluded
+  teacher steps; measured positions **32784 / 65552**. Restore the same three entries
+  before serial, batch, repeated batch and isolated-dispatch arms. Eight ordinary
+  teacher-forced rounds/arm; one sampled B=3 round/depth. One **69.93 s** leased
+  campaign, build lock, nice 10; one-second thermal watchdog, **0 throughout**, no
+  work left running.
+- Ordinary B=3 GPU envelopes are **28.22 / 28.42 ms** at 32K and **28.58 / 28.60 ms**
+  at 64K. CPU encode **1.31-1.38 ms/round** remains hidden. Wall means are **28.94 /
+  31.72 ms** and **32.56 / 29.28 ms**: keep the scheduling outliers (one repeat
+  includes a **24.65 ms** driver interval). This is a short census, not an ABBA speed
+  qualification. Serial controls are **71.29 / 69.41 aggregate tok/s**. No
+  per-sequence CPU-overlap hypothesis is needed.
+- Isolated encoder samples remove normal overlap and add transitions; these sums
+  **must not be added to ordinary wall time**. They rank the work to attack:
+
+  | Family | 32K B=3 ms/round | 64K B=3 ms/round |
+  | --- | ---: | ---: |
+  | Routed experts, route/combine copies included | **10.32** | **10.33** |
+  | Attention QKV / output, copies and norms | 8.15 | 8.21 |
+  | HC pre / post and FFN post controls | **6.60** | **6.44** |
+  | Attention core | 4.60 | 4.56 |
+  | Shared expert | 3.48 | 3.42 |
+  | Index / selection | 2.41 | 3.03 |
+  | Router | 1.07 | 1.06 |
+  | Head, Engram projection, owner transitions | 1.26 | 1.24 |
+
+- **2340 / 2355 dispatches/round**, no sample overflow. Routed experts already use one
+  token grid across sequences. Their largest native kernels are IQ2_XXS fused gate/up
+  (**29 calls, 4.10 ms**) and down (**18 calls, 1.65 ms**); at 64K their requested
+  bank bytes imply **774 / 596 GB/s**, respectively (logical selected weight bytes,
+  not measured DRAM traffic or cache misses). HC pre alone is **240 calls, 3.18 ms**;
+  attention flash partials **114 calls, 2.86 ms**. Index grows with depth but is
+  smaller than routed and HC work. First/last full-vocabulary batch heads match
+  bitwise between ordinary, repeated and isolated execution; profiling changes no
+  endpoint bits.
+- Next kill: wider native IQ2_XXS output-channel tiles sharing activation loads across
+  more channels, preserving each channel's accumulation order. A prepared
+  multi-sequence selector is deferred behind this larger bucket. Raw helpers, build
+  identities, full dispatch records and thermal controller:
+  **`~/qwen-runs/2026-11-08-v41-batch-depth/`** on both hosts. No performance default
+  changes in this census.
+
+
 ## 2026-11-08 - Warm Agent Concurrency: Observed Capacity, EOS Fails Exact-Work Gate
 
 - Clean engine **`09a3a521`**, M5 Ultra **256 GiB**, unchanged tier-1 artifacts

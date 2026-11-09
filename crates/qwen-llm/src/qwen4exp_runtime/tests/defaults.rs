@@ -18,6 +18,24 @@ fn decode_policy_defaults_and_independent_qualification() {
     // Pipeline capability decides; the GPU's name does not.
     assert_eq!(on.qualified([true; 2]), on);
     assert_eq!(on.qualified([false; 2]), off);
+    for bits in 0..16 {
+        let requested = Qwen4ExpDecodeOptions {
+            causal_executor: bits & 1 != 0,
+            gpu_token_loop: bits & 2 != 0,
+            guarded_topk: bits & 4 != 0,
+            hc_up_mix: bits & 8 != 0,
+        };
+        for capabilities in [[false; 2], [true; 2], [false, true], [true, false]] {
+            let qualified = requested.qualified(capabilities);
+            assert_eq!(qualified.causal_executor, requested.causal_executor);
+            assert_eq!(qualified.gpu_token_loop, requested.gpu_token_loop);
+            assert_eq!(
+                qualified.guarded_topk,
+                requested.guarded_topk && capabilities[0]
+            );
+            assert_eq!(qualified.hc_up_mix, requested.hc_up_mix && capabilities[1]);
+        }
+    }
     for bits in 0..4 {
         let flags = [bits & 1 != 0, bits & 2 != 0];
         let expected = Qwen4ExpDecodeOptions {

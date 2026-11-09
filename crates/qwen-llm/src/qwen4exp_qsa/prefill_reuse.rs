@@ -22,7 +22,7 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    /// Default-on M5 singleton QSA top-512 selector using the existing exact radix-prefix and stable SIMD-compaction kernel. Same scores, IDs, ties, status, scratch and dispatch count. Packed callers retain their existing gates. Set 0 for the incumbent decode selector.
+    /// Default-on singleton QSA top-512 selector on Apple9 GPUs and the tensor tier, using the existing exact radix-prefix and stable SIMD-compaction kernel. Same scores, IDs, ties, status, scratch and dispatch count. Packed callers retain their existing gates. Set 0 for the incumbent decode selector.
     default_on decode_selector_enabled,
     "QWEN_FN_QSA_DECODE_SELECT"
 );
@@ -79,7 +79,9 @@ pub(super) fn selector_pipeline(
 ) -> Result<Option<Pipeline>, MetalError> {
     let decode = decode_selector_shape(singleton, capacity, budget, count)
         && decode_price_mode() != 4
-        && (ctx.tensor_ops_status().is_available() || decode_price_mode() == 2)
+        && (ctx.tensor_ops_status().is_available()
+            || ctx.device.supportsFamily(objc2_metal::MTLGPUFamily::Apple9)
+            || decode_price_mode() == 2)
         && decode_selector_enabled();
     let packed = !singleton
         && compact_selector_enabled()

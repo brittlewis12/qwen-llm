@@ -6242,5 +6242,12 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Model-free Metal differential: B2/3/4, QSA128/256 RMS and RoPE, private positions, shifted buffers, guards, exact gate layout and F64-scale diagnostics."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::solo_causal_waves_keep_forks_trace_and_failure_contracts",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "M5 synthetic V4.1 Metal state/fork/trace and partial-commit failure checks under solo causal waves and native rollback; no real model import."
   }
 ]

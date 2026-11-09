@@ -214,7 +214,7 @@ fn batch_head_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var(BATCH_HEAD_ENV).as_deref() != Ok("0"))
 }
 
-/// Layer-sized causal waves for M5 V4.1 B=3. `0` keeps native encoder cuts.
+/// Layer-sized causal waves for M5 V4.1 B=2..4. `0` keeps native encoder cuts.
 const BATCH_CAUSAL_ENV: &str = "QWEN_V41_BATCH_CAUSAL_EXECUTOR";
 #[cfg(test)]
 thread_local! { pub(super) static BATCH_CAUSAL_OVERRIDE: std::cell::Cell<Option<bool>> = const {std::cell::Cell::new(None)}; }

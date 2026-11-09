@@ -263,8 +263,10 @@ fn split_submission() -> bool {
 /// cover encoding the remaining layers on the host.
 const SPLIT_SUBMIT_MIDDLE_LAYERS: usize = 3;
 
-/// Solo M5 causal-wave screen; explicit 1 opts in until qualified.
+/// Default-on solo M5 causal waves with split submission; 0 keeps native encoders.
 const SOLO_CAUSAL_ENV: &str = "QWEN_V41_CAUSAL_EXECUTOR";
+#[cfg(test)]
+thread_local! { static SOLO_CAUSAL_OVERRIDE: std::cell::Cell<Option<bool>> = const {std::cell::Cell::new(None)}; }
 fn solo_causal_enabled(ctx: &MetalContext) -> bool {
     if !ctx.device_facts().gpu_families.apple10
         || metal::dispatch_census_is_active()
@@ -273,16 +275,19 @@ fn solo_causal_enabled(ctx: &MetalContext) -> bool {
         return false;
     }
     #[cfg(feature = "perf-ablations")]
-    {
-        if metal::decode_bounds::is_active() {
-            return false;
-        }
-        if let Some(enabled) = metal::decode_bounds::batch_causal_override() {
-            return enabled;
-        }
+    if metal::decode_bounds::is_active() {
+        return false;
+    }
+    #[cfg(test)]
+    if let Some(enabled) = SOLO_CAUSAL_OVERRIDE.with(std::cell::Cell::get) {
+        return enabled;
+    }
+    #[cfg(feature = "perf-ablations")]
+    if let Some(enabled) = metal::decode_bounds::batch_causal_override() {
+        return enabled;
     }
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| crate::env_flag::read_default_off(SOLO_CAUSAL_ENV))
+    *ENABLED.get_or_init(|| crate::env_flag::read_default_on(SOLO_CAUSAL_ENV))
 }
 
 crate::env_flag!(

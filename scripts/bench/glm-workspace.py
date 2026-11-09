@@ -87,6 +87,7 @@ def main():
     log = None
     sample_lock = threading.Lock()
     stop = threading.Event()
+    monitor_errors = []
 
     def thermal():
         value = subprocess.check_output(
@@ -115,7 +116,11 @@ def main():
 
     def monitor():
         while not stop.wait(1):
-            sample()
+            try:
+                sample()
+            except Exception as error:
+                monitor_errors.append(repr(error))
+                stop.set()
 
     if thermal() != 0:
         raise RuntimeError("nonzero thermal pressure before arm")
@@ -211,6 +216,7 @@ def main():
         watcher.join()
         thermal()
     result["thermal_samples"] = thermals
+    result["monitor_errors"] = monitor_errors
     result["thermal_valid"] = all(value == 0 for value in thermals)
     # End observations lag their diagnostic writes by at most one poll. A
     # two-second guard conservatively includes both ends of each decode.
@@ -226,6 +232,8 @@ def main():
             "compiler_peak_rss_bytes": max(observed, default=0),
             "no_compiler_observed": bool(observed) and not any(observed)})
     print(json.dumps(result), flush=True)
+    if monitor_errors:
+        raise RuntimeError("memory/thermal monitor failed; arm excluded")
     if not result["thermal_valid"]:
         raise RuntimeError("thermal pressure changed; arm excluded")
 

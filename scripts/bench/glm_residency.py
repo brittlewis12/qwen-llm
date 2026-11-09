@@ -16,17 +16,33 @@ class Usage(ctypes.Structure):
         "disk_read", "disk_written")]
 
 
+class Task(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint64) for name in
+                ("virtual_bytes", "resident_bytes", "user", "system", "threads_user", "threads_system")] + [
+        (name, ctypes.c_int32) for name in
+        ("policy", "faults", "pageins", "cow_faults", "messages_sent", "messages_received",
+         "mach_calls", "unix_calls", "switches", "thread_count", "running_threads", "priority")]
+
+
 LIB = ctypes.CDLL("libproc.dylib", use_errno=True)
 LIB.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
 LIB.proc_pid_rusage.restype = ctypes.c_int
+LIB.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                            ctypes.c_void_p, ctypes.c_int]
+LIB.proc_pidinfo.restype = ctypes.c_int
 
 
 def usage(pid):
     result = Usage()
     if LIB.proc_pid_rusage(pid, 2, ctypes.byref(result)) != 0:
         return None
-    return {key: getattr(result, key) for key in
-            ("pageins", "wired", "rss", "footprint", "disk_read", "disk_written")}
+    values = {key: getattr(result, key) for key in
+              ("pageins", "wired", "rss", "footprint", "disk_read", "disk_written", "user_time", "system_time")}
+    task = Task()
+    if LIB.proc_pidinfo(pid, 4, 0, ctypes.byref(task), ctypes.sizeof(task)) == ctypes.sizeof(task):
+        values.update({key: getattr(task, key) for key in
+                       ("faults", "cow_faults", "virtual_bytes", "switches")})
+    return values
 
 
 def host():
@@ -68,8 +84,12 @@ class Observer:
         if (self.memory_map and self.mapping is None and pid and log and log.exists()
                 and '"phase":"after_session"' in log.read_text()):
             started = time.monotonic()
-            result = subprocess.run(["vmmap", "-w", str(pid)], capture_output=True,
-                                    text=True, timeout=30)
+            try:
+                result = subprocess.run(["vmmap", "-w", str(pid)], capture_output=True,
+                                        text=True, timeout=5)
+            except subprocess.TimeoutExpired:
+                self.mapping = {"status": "timeout", "wall_ms": (time.monotonic()-started)*1000}
+                return
             lines = result.stdout.splitlines()
             # Keep compact mapping rows and the OS summary, without host paths.
             gguf = [line[:line.rfind(" /")] + " " + line.rsplit("/", 1)[-1]
@@ -102,6 +122,12 @@ class Observer:
                 "host_ranges": ranges, "samples": len(observed),
                 "compiler_rss_peak_bytes": max((s["compiler_rss_bytes"] for s in observed), default=0),
                 "compiler_footprint_peak_bytes": max((s["compiler_footprint_bytes"] for s in observed), default=0)})
+            for process in ("qwen", "driver"):
+                readings = [sample[process] for sample in observed if sample[process] is not None]
+                phases[-1][process + "_ranges"] = {
+                    key: {"min": min(values), "max": max(values), "delta": values[-1]-values[0]}
+                    for key in set.intersection(*(set(row) for row in readings))
+                    if (values := [row[key] for row in readings])} if readings else {}
         return {"events": events, "phases": phases, "mapping": self.mapping,
                 "sample_count": len(self.samples), "sample_guard_seconds": 1,
                 "initial_host": self.samples[0] if self.samples else None,

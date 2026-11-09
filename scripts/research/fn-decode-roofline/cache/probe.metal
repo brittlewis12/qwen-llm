@@ -1,6 +1,6 @@
 #include <metal_stdlib>
 using namespace metal;
-struct cache_banks { device const uint4 *bank[32] [[id(0)]]; };
+struct cache_banks { array<device const uint4 *,32> bank [[id(0)]]; };
 struct cache_args { uint count; uint total_blocks; uint vectors[32]; uint prefix[33]; };
 
 // One group reads 64 KiB. Repeating the grid over a small working set keeps

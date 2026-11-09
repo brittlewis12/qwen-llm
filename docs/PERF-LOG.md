@@ -831,6 +831,69 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   thermal samples **0**. Compact JSON under
   `$HOME/qwen-runs/2026-11-08-realistic-steady/` on both hosts; regenerable
   M5 worktree/target/bundle removed, no owned processes remain. No merge/push.
+## 2026-11-08 - Flash-Next Causal Layer Prototype: Staged Fusion Misses Roofline Gates
+
+- **Kill this design for the 120+ target; research only.** Base **`8f2dedac`**,
+  unchanged **`09a3a521`** production runtime and two-shard GSQ-RCO IQ3_S,
+  M5 Ultra, width 1, 8K. Prototype complete layers 2/3: both HC reads/injections,
+  mixer, real dynamic top-10 routing, routed and shared experts. All dependencies
+  remain causal. Topological waves use ordinary Metal buffer barriers; fused
+  kernels use only local threadgroup barriers. **No inter-group spin barrier.**
+- Build lock/nice 10, timing outside the lock, canonical Metal lease/wait.
+  Salted 8192-token prefix + 64 warm steps as before. Each sample warms a full
+  token, restores layer entry, flushes 1 GiB, then times one cold-weight layer.
+  All prep/checks are outside timing. Twelve retained samples/cell/phase,
+  alternating order; table weights ordinary/publication medians at positions
+  **8256/8259** by **3:1**. Six-sample screen agrees. **480** retained layer
+  samples in total; **25 thermal monitor readings, all 0**, plus zero checks
+  around every layer packet. No timing sample discarded.
+
+  | Layer | Useful bytes / floor at 1.17 TB/s | Incumbent us | Best causal us | On-chip mixer fusion us | Kill gate us |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | GDN 2 | 105.224 MB / **89.935 us** | 199.719 | **184.677** | 190.417, 2 partitions | **140: fail** |
+  | QSA 3 | 90.018 MB / **76.939 us** | 326.151 | **274.219** | 285.188, 64 splits | **180: fail** |
+
+- Floor comes from actual used mixed-type weights and useful state/KV traffic,
+  not DRAM counters. GDN weights/state **98.686/6.537 MB**; QSA **85.292/4.727**.
+  Scratch/repeated traffic is excess over this useful floor. GDN partition `P`
+  additionally reads/recomputes `(P-1) * 3,145,728` state bytes; its immutable
+  old-state buffer models ping-pong state, requiring **108 MiB** more admission
+  over 36 layers if integrated. No hidden per-token state copy or spin wait.
+- Best is **DAG + FFN reduction/shared accumulation/HC-injection fusion + copy
+  elision**, ordinary dispatches **24->20 / 36->32**. Pure DAG gives
+  **194.844/284.094 us**. Best saves **15.042/51.932 us**, but reaches only
+  **48.7%/28.1%** of the layer byte roofs. Fused GDN recurrence/norm/gate
+  loses at partitions 1/2/4/8; QSA on-chip QK/block-softmax/PV plus separate
+  merge loses at splits 16/32/64/128. Shared SiLU/IQ4_NL-down fusion also loses.
+  Fewer scratch writes do not compensate these implementations' occupancy,
+  repeated-work and reuse tradeoffs. This rejects the tested executor, not all
+  possible fusion/layout redesigns.
+- Numerical evidence: best/native hyper residual, GDN state/conv and QSA cache
+  boundaries are exact at both entries; F64 operator error is unchanged. All
+  GDN fusion variants also match these boundaries/F64 error. QSA Flash has
+  ~1e-7 hyper relative L2; fastest fused attention's F64 RMS is **1.205x/1.126x**
+  incumbent across ordinary/publication entries. No Flash variant passes both
+  RMS/max no-worse screens at both entries. No bitwise text criterion or relaxed
+  tolerance is substituted. Broad teacher-forced dNLL/KL qualification is not
+  claimed after the performance kill. MoE READY/selector status and finite
+  outputs pass; the preserved initial setup wrongly expected READY=0 and stopped
+  before retained layer rows, corrected to READY=1 without changing kernels.
+- **Projection, not measured whole-model throughput:** apply representative
+  36/12 layer deltas to the prior native **11.994 GPU + 1.397 host ms**:
+  **1.165 ms GPU saved**, **12.226 ms / 81.79 tok/s**. Perfect encode hiding:
+  **88.00 tok/s**. Cheap independent host-lane probe: real-logit exact GPU greedy
+  argmax writes the ID directly into native embedding gather, **60.80/60.88 us**
+  per pair, CPU token ID check passes. Charging that feedback yields an ideal
+  resident-loop bound **91.83 tok/s** for this executor, **82.96** incumbent.
+  GPU PLE gathers, dynamic position/cache arguments, stochastic sampling and
+  stop/stream handling remain unimplemented; the loop bound is optimistic.
+- Stop at the verdict, no integration/default/merge. Release example build,
+  retained replay/status checks, Python syntax and patch/whitespace checks pass.
+  Committed production sources remain unchanged. Research/reproduction:
+  **`scripts/research/fn-decode-roofline/layer/`**. Raw samples, F64 references,
+  exact binary/source hashes, failed setup and controller/build/thermal logs:
+  **`~/qwen-runs/2026-11-09-fn-layer-prototype/`**, mirrored locally. No owned
+  worker or waiter remains.
 
 ## 2026-11-08 - V4.1 Batched Decode Census At Agent Depth
 

@@ -402,7 +402,7 @@ impl<'a, 'w> Glm5NextDFlashRunner<'a, 'w> {
         }
         let verify_capacity = match options.verification {
             Glm5NextDFlashVerification::Serial => block,
-            _ => block.min(target.packed.as_ref().map_or(0, |p| p.rows())),
+            _ => block.min(target.prefill_rows()),
         };
         if verify_capacity == 0 {
             return Err(Glm5NextDFlashError::Invalid(

@@ -447,6 +447,7 @@ impl Glm5NextSession<'_> {
             bank,
             ranges: bank.plan.ranges(self.position, tokens.len(), false)?,
         };
+        self.prepare_prefill(ctx, 0)?;
         if let Some(rows) = self.packed.as_ref().map(|p| p.rows()) {
             for chunk in tokens.chunks(rows) {
                 checkpoint().map_err(Glm5NextMetalError::Cancelled)?;

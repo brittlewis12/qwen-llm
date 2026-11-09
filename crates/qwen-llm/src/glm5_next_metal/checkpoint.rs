@@ -480,7 +480,7 @@ impl Glm5NextAppendTransaction<'_, '_> {
         if self.phase != Phase::Ready {
             return invalid("packed verify requires a restored baseline");
         }
-        if self.inputs.len() > self.session.packed.as_ref().map_or(0, |p| p.rows()) {
+        if self.inputs.len() > self.session.prefill_rows() {
             return invalid("packed append needs sufficient packed rows; use serial verify");
         }
         self.run_verify(Glm5NextVerificationArithmetic::Packed {

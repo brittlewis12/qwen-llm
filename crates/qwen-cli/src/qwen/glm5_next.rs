@@ -709,6 +709,7 @@ pub(crate) fn run(
             let logits = session.prefill_packed_with_checkpoint(&ctx, &tokens, &mut || {
                 shutdown::checkpoint().map_err(|e| e.to_string())
             })?;
+            session.prepare_decode(&ctx)?;
             let prefill_ms = resident_t0.elapsed().as_secs_f64() * 1e3;
             let generation = generate_serial(
                 logits,

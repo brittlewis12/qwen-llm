@@ -1056,6 +1056,8 @@ pub struct Glm5NextSession<'w> {
     /// Present when `capacity` reaches the sparse frontier.
     sparse: Option<SparseScratch>,
     packed: Option<packed::PackedScratch>,
+    prefill_config: Option<workspace::PrefillConfig>,
+    release_prefill_for_decode: bool,
     ledger: Glm5NextMemoryLedger,
     /// Net device-counter change across buffer construction (diagnostic).
     observed_allocation_delta: u64,
@@ -1179,6 +1181,11 @@ impl<'w> Glm5NextSession<'w> {
             routes,
             s,
             sparse,
+            prefill_config: packed.as_ref().map(|packed| workspace::PrefillConfig {
+                rows: prefill_rows,
+                arith: packed.arith(),
+            }),
+            release_prefill_for_decode: workspace::release_policy(ctx, weights, &ledger),
             packed,
             ledger,
             observed_allocation_delta,
@@ -1194,63 +1201,69 @@ impl<'w> Glm5NextSession<'w> {
     /// without mutation, so the state (and any snapshot of it) never carries
     /// one lineage's arithmetic under the other's label.
     pub fn set_packed_lineage(&mut self, lineage: PackedLineage) -> Result<()> {
-        let Some(packed) = self.packed.as_mut() else {
+        let Some(arith) = self.prefill_arith() else {
             return Ok(());
         };
-        if packed.lineage == lineage {
+        if arith.lineage == lineage {
             return Ok(());
         }
         if self.position > 0 {
-            return Err(Glm5NextMetalError::Invalid(format!(
+            return invalid(format!(
                 "packed lineage cannot change from {:?} to {lineage:?} after {} committed tokens; start a fresh session",
-                packed.lineage, self.position
-            )));
+                arith.lineage, self.position
+            ));
         }
-        packed.lineage = lineage;
+        self.prefill_config
+            .as_mut()
+            .expect("prefill policy")
+            .arith
+            .lineage = lineage;
+        if let Some(packed) = &mut self.packed {
+            packed.lineage = lineage;
+        }
         Ok(())
     }
 
-    /// The packed-prefill lineage, or `None` for a serial-only session.
+    /// The packed-prefill lineage, retained even when prompt scratch is absent.
     pub fn packed_lineage(&self) -> Option<PackedLineage> {
-        self.packed.as_ref().map(|packed| packed.lineage)
+        self.prefill_arith().map(|arith| arith.lineage)
     }
 
-    /// Selects the operand precision of Fast packed prefill before the
-    /// session commits work (no effect without packed scratch or in Exact
-    /// lineage). As with the lineage, re-selecting the current precision is
-    /// accepted and changing it after committed tokens is refused without
-    /// mutation, so state and snapshots never mix precisions.
+    /// Select Fast operand precision before work commits. Releasing prompt
+    /// buffers never unlocks this policy or changes snapshot compatibility.
     pub fn set_fast_precision(&mut self, precision: FastPrecision) -> Result<()> {
-        let Some(packed) = self.packed.as_mut() else {
+        let Some(arith) = self.prefill_arith() else {
             return Ok(());
         };
-        if packed.precision == precision {
+        if arith.precision == precision {
             return Ok(());
         }
         if self.position > 0 {
-            return Err(Glm5NextMetalError::Invalid(format!(
+            return invalid(format!(
                 "Fast precision cannot change from {:?} to {precision:?} after {} committed tokens; start a fresh session",
-                packed.precision, self.position
-            )));
+                arith.precision, self.position
+            ));
         }
-        packed.precision = precision;
+        self.prefill_config
+            .as_mut()
+            .expect("prefill policy")
+            .arith
+            .precision = precision;
+        if let Some(packed) = &mut self.packed {
+            packed.precision = precision;
+        }
         Ok(())
     }
 
-    /// The selected Fast operand precision, or `None` for a serial-only
-    /// session.
+    /// Selected Fast precision, including while prompt scratch is absent.
     pub fn fast_precision(&self) -> Option<FastPrecision> {
-        self.packed.as_ref().map(|packed| packed.precision)
+        self.prefill_arith().map(|arith| arith.precision)
     }
 
-    /// The precision that shapes this session's state: the selected one in
-    /// Fast lineage, `None` for Exact or serial sessions (precision has no
-    /// effect there).
     fn effective_fast_precision(&self) -> Option<FastPrecision> {
-        self.packed
-            .as_ref()
-            .filter(|packed| packed.lineage == PackedLineage::Fast)
-            .map(|packed| packed.precision)
+        self.prefill_arith()
+            .filter(|arith| arith.lineage == PackedLineage::Fast)
+            .map(|arith| arith.precision)
     }
 
     pub fn position(&self) -> usize {
@@ -1353,13 +1366,14 @@ impl<'w> Glm5NextSession<'w> {
         ctx: &MetalContext,
         tokens: &[u32],
     ) -> Result<(Vec<f32>, Glm5NextStageReport)> {
-        let rows = self.packed.as_ref().map_or(0, |packed| packed.rows());
+        let rows = self.prefill_rows();
         if tokens.is_empty() || tokens.len() > rows {
             return invalid(format!(
                 "a profiled chunk has 1..={rows} tokens, not {}",
                 tokens.len()
             ));
         }
+        self.prepare_prefill(ctx, 0)?;
         self.stage_profiled(ctx, |session| session.prefill_packed(ctx, tokens))
     }
 
@@ -1496,6 +1510,8 @@ impl<'w> Glm5NextSession<'w> {
         probes: &[Glm5NextProbe],
         observer: &mut dyn FnMut(Glm5NextProbe, usize, &[f32]),
     ) -> Result<Vec<f32>> {
+        self.validate_request(&[token])?;
+        self.prepare_decode(ctx)?;
         Ok(self
             .step(ctx, token, true, probes, observer)?
             .expect("logits requested"))
@@ -2490,6 +2506,7 @@ pub use interventions::{
     Glm5NextCapturePoint, Glm5NextModuleIntervention, Glm5NextSite, Glm5NextSiteCapture,
 };
 mod snapshot;
+mod workspace;
 pub use lens::Glm5NextCapture;
 pub use packed::batch::{GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch};
 pub use packed::{FastPrecision, PackedLineage};

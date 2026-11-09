@@ -733,7 +733,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         self.session.as_ref().is_some_and(|session| {
             !session.is_poisoned()
                 && session.ledger().capacity() == self.prepared.capacity as u64
-                && session.ledger().prefill_rows() == rows as u64
+                && session.prefill_rows() == rows
                 && session.packed_lineage().is_none_or(|live| live == lineage)
                 && (lineage != PackedLineage::Fast
                     || session
@@ -1370,6 +1370,19 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             return Ok(true);
         }
         let ctx = self.ctx;
+        // Re-admit only prompt scratch; the live state and its frozen command
+        // width survive a decode phase. Optional cache/idle relief is shared
+        // with normal session admission, and no prefix has advanced yet.
+        {
+            let session = self.session.as_mut().expect("session present");
+            scheduler::with_session_relief(
+                &mut self.cache,
+                &mut self.idle_sessions,
+                run.protect,
+                || session.prepare_prefill(ctx, run.reserve),
+            )
+            .map_err(session_error)?;
+        }
         let tokens = &run.tokens;
         let lineage = run.lineage;
         let namespace = run.namespace;
@@ -1493,6 +1506,11 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             self.session = None;
             return Err(BackendFailure::Aborted(abort));
         }
+        self.session
+            .as_mut()
+            .expect("session present")
+            .prepare_decode(self.ctx)
+            .map_err(session_error)?;
         run.chunk_capture_ms = run.chunk_capture.as_ref().map_or(0.0, |c| c.elapsed_ms);
         run.capture_ms += run.chunk_capture_ms;
         run.prefill_ms = run.prefill_t0.elapsed().as_secs_f64() * 1e3 - run.capture_ms;

@@ -1716,6 +1716,7 @@ impl Glm5NextSession<'_> {
         after_chunk: &mut dyn FnMut(&Glm5NextSession, usize),
     ) -> Result<Vec<f32>> {
         self.validate_request(tokens)?;
+        self.prepare_prefill(ctx, 0)?;
         let mut check = || before_chunk().map_err(Glm5NextMetalError::Cancelled);
         let Some(rows) = self.packed.as_ref().map(|p| p.rows) else {
             let (&last, head) = tokens.split_last().expect("validated nonempty");
@@ -1771,13 +1772,14 @@ impl Glm5NextSession<'_> {
         output: Option<&capture::RowOutput<'_>>,
     ) -> Result<Option<Vec<f32>>> {
         self.validate_request(tokens)?;
-        let rows = self.packed.as_ref().map_or(0, |p| p.rows);
+        let rows = self.prefill_rows();
         if tokens.len() > rows {
             return invalid(format!(
                 "packed chunk has {} tokens, scratch holds {rows}",
                 tokens.len()
             ));
         }
+        self.prepare_prefill(ctx, 0)?;
         let c = &self.weights.config;
         // Rows from `dense` on attend over the indexer's selection.
         let dense = self.dense_rows_remaining().min(tokens.len());

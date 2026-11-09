@@ -122,3 +122,19 @@ layer times. Failure to approach that weighted layer budget ends this design
 before full-model integration. Persistent scheduling also needs a valid Metal
 synchronization/forward-progress scheme; the frozen control proves no such
 scheme. No runtime change or default is shipped by these predictors.
+
+## Production integration receipts
+
+`fn_gpu_decode_integration` exercises the production runner, not the earlier
+captured layer executor. It measures host and GPU feedback with independent
+causal-executor flags, including 16-token bursts separated by native forwards.
+Full vocabulary rows remain in RAM for signed dNLL/KL against repeated incumbent
+replay. Dense QSA, natural input with PLE EOS history, native continuation and
+stop contracts run after timing. See the newest PERF-LOG entry for the verdict.
+
+Build with the normal production features under the shared build lock. Run
+`integrate.py --model "$MODEL" --binary target/release/examples/fn_gpu_decode_integration
+--out "$RUNS" --depths 8192 32768 --steps 64` outside that lock; the controller
+uses the canonical GPU lease and records thermal pressure. Retain the source
+commit, command and compact metrics. Delete binaries, captured traces and
+snapshots after their run; no sealed source or executable copies are needed.

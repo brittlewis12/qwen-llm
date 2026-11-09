@@ -253,5 +253,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{}",
         json!({"kind":"stop_contracts","depth":depth,"passed":true})
     );
+    // Dense QSA and an EOS cut in PLE history exercise paths the long-context
+    // timing arms never take. Use the repository's natural teacher input.
+    runner.reset()?;
+    runner.configure_causal_executor(false);
+    let natural = include_bytes!(
+        "../../../docs/bench/2026-08-29-qwen4exp-selected-semantic/natural-ssh.u32le"
+    );
+    let mut short: Vec<u32> = natural
+        .chunks_exact(4)
+        .take(128)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .collect();
+    short.push(config.ple.as_ref().unwrap().eos_token_id);
+    short.extend(ids(2, config.vocab_size, 31));
+    runner.prefill(&short)?;
+    let dense = runner.capture_snapshot()?;
+    let dense_logits = runner.logits()?.to_vec();
+    for causal in [false, true] {
+        runner.restore_snapshot_with_logits(&dense, &dense_logits)?;
+        runner.configure_causal_executor(causal);
+        let mut selected = Vec::new();
+        let mut observed = Vec::new();
+        runner.generate_gpu_tokens_observed(
+            &mut Sampler::new(SamplingConfig::default())?,
+            8,
+            &[],
+            |t, row| {
+                selected.push(t);
+                observed.push(row.to_vec());
+                true
+            },
+        )?;
+        runner.restore_snapshot_with_logits(&dense, &dense_logits)?;
+        runner.configure_causal_executor(false);
+        let mut comparisons = Vec::new();
+        for (i, &t) in selected.iter().enumerate() {
+            comparisons.push(distribution(
+                runner.logits()?.as_slice(),
+                &observed[i],
+                t as usize,
+            ));
+            if i + 1 < selected.len() {
+                runner.forward_token(t as u32)?;
+            }
+        }
+        println!(
+            "{}",
+            json!({"kind":"dense_ple_eos_contract","depth":depth,"causal":causal,"rows":comparisons})
+        );
+    }
     Ok(())
 }

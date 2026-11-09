@@ -86,6 +86,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = runner.next_position();
     let entry = runner.capture_snapshot()?;
     let entry_logits = runner.logits()?.to_vec();
+    if args.iter().any(|a| a == "--route") {
+        runner.configure_causal_executor(true);
+        qwen_llm::metal::dispatch_census_begin();
+        runner.forward_token(ids(1, config.vocab_size, 13)[0])?;
+        let rows = qwen_llm::metal::dispatch_census_take();
+        println!(
+            "{}",
+            json!({"kind":"selector_route","depth":depth,"scan":rows.iter().filter(|r|r.kernel=="kernel_qwen4exp_qsa_select_scan_f32").count(),"radix":rows.iter().filter(|r|r.kernel=="kernel_deepseek_v4_select_top_k_radix4_ids_f32").count()})
+        );
+        return Ok(());
+    }
     // Import PLE banks and compile feedback pipelines before steady-state arms.
     let cold = runner.generate_gpu_tokens(
         &mut Sampler::new(SamplingConfig::default())?,

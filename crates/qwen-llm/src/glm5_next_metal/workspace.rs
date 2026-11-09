@@ -9,7 +9,7 @@ use std::cell::RefCell;
 
 crate::env_flag!(
     /// GPU-fill newly admitted GLM prompt/session scratch before warming weights on memory-tight non-Apple10 devices. Ordinary scratch-only commands; no model residency or pinning. Zero restores lazy allocation and startup prefetch order. Experimental until the residency gate passes.
-    default_off peak_requested,
+    default_on peak_requested,
     "QWEN_GLM53_PREFILL_PEAK_FIRST"
 );
 
@@ -250,6 +250,50 @@ impl Glm5NextSession<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scratch_commit_preserves_nonzero_initialization_and_rejects_overbudget() {
+        let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
+        let ctx = MetalContext::new().unwrap();
+        let previous = COMMIT_BUFFERS.with(|buffers| buffers.replace(Some(Vec::new())));
+        let commit = CommitScope {
+            previous,
+            maximum_bytes: 1 << 20,
+        };
+        let specs = [
+            BufferSpec {
+                name: "zero",
+                dtype: BufferType::F32,
+                shape: vec![16385],
+                fill: 0.0,
+            },
+            BufferSpec {
+                name: "nonzero",
+                dtype: BufferType::F32,
+                shape: vec![16385],
+                fill: -1.25,
+            },
+        ];
+        let mut allocated = SpecBuffers::allocate(&ctx, "commit_witness", &specs).unwrap();
+        let zero = allocated.take("zero").unwrap();
+        let nonzero = allocated.take("nonzero").unwrap();
+        allocated.finish().unwrap();
+        commit.finish(&ctx).unwrap();
+        assert!(read_f32(&zero).unwrap().iter().all(|&x| x == 0.0));
+        assert!(read_f32(&nonzero).unwrap().iter().all(|&x| x == -1.25));
+        assert!(COMMIT_BUFFERS.with(|buffers| buffers.borrow().is_none()));
+        let previous =
+            COMMIT_BUFFERS.with(|buffers| buffers.replace(Some(vec![zero.buffer.clone()])));
+        assert!(
+            CommitScope {
+                previous,
+                maximum_bytes: 0
+            }
+            .finish(&ctx)
+            .is_err()
+        );
+        assert!(COMMIT_BUFFERS.with(|buffers| buffers.borrow().is_none()));
+    }
 
     #[test]
     fn cpu_workspace_policy_requires_tight_memory_and_excludes_independent_batches() {

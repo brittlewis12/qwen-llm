@@ -175,7 +175,12 @@ fn batch_expert_tiles_match_generic_bits_routes_offsets_and_guards() {
                 let census = dispatch_census_take();
                 assert_eq!(census.len(), 2);
                 let selected = n > 1 && offset % 16 == 0;
-                assert_eq!(census[1].kernel.contains("_r4"), selected);
+                if selected {
+                    let (name, _) = batch_tile_pipeline(ty, k, m, offset as u64, fused).unwrap();
+                    assert_eq!(census[1].kernel, name);
+                } else {
+                    assert!(!census[1].kernel.contains("_r4"));
+                }
                 let av = tensor_f32_at_offset(&a);
                 let bv = tensor_f32_at_offset(&b);
                 assert!(av.iter().chain(&bv).all(|v| v.is_finite()));

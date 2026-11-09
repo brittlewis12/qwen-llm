@@ -920,6 +920,152 @@ EXPERT_NATIVE_SPEC_ROWS("iq2_s", QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_
 EXPERT_NATIVE_SPEC("iq2_s", "4096", "4", QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_iq2_s, 4096, 4)
 EXPERT_NATIVE_SPEC("iq3_s", "2048", "4", QT_IQ3_S_BYTES, QT_IQ3_S_NL, latent_dequantize_iq3_s, 2048, 4)
 
+// GLM batch decode schedule: the shipped `_k4096_r4` / `_k2048_r4` kernels
+// run four simdgroups per threadgroup; the `_tg64` instances below keep the
+// same per-channel lane map, decoder, F32 chain and SIMD reduction but use two
+// simdgroups (64 threads). Outputs are bitwise equal.
+
+template <ushort BYTES, ushort NL,
+          void (*DEQ)(device const uchar *, short, thread float4x4 &),
+          uint K, ushort ROWS>
+inline void glm_rows_dot(device const uchar * row0, device const float * x,
+                         ushort lane, thread float * sum) {
+    constexpr ulong ROW_BYTES = ulong(K / (16u * NL)) * BYTES;
+    #pragma clang loop unroll(disable)
+    for (uint k = uint(lane) * 16u; k < K; k += 512u) {
+        float xv[16];
+        expert_load_x16(x + k, xv);
+        const ulong block = ulong(k / (16u * NL)) * BYTES;
+        const short il = short((k / 16u) % NL);
+        QT_FOR_UNROLL (ushort r = 0; r < ROWS; ++r) {
+            float4x4 decoded;
+            DEQ(row0 + ulong(r) * ROW_BYTES + block, il, decoded);
+            QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
+                sum[r] = fma(decoded[i / 4][i % 4], xv[i], sum[r]);
+            }
+        }
+    }
+}
+
+// Down: SGS x ROWS channels per threadgroup.
+// Grid: (n_out / (SGS * ROWS), top_k, rows), 32 * SGS threads.
+template <ushort BYTES, ushort NL,
+          void (*DEQ)(device const uchar *, short, thread float4x4 &),
+          uint K, ushort ROWS, uint SGS>
+inline void glm_batch_down(
+        constant expert_native_args & args, device const uchar * bank,
+        device const float * input, device const int * ids, device const int * status,
+        device float * output, uint3 group, ushort lane, ushort simd) {
+    constexpr ulong ROW_BYTES = ulong(K / (16u * NL)) * BYTES;
+    const uint first = (group.x * SGS + uint(simd)) * ROWS;
+    const uint slot = group.y;
+    const uint token = group.z;
+    if (first >= args.n_out || slot >= args.top_k) return;
+    const ulong selected = ulong(token) * args.top_k + slot;
+    const ulong out_first = selected * args.n_out + first;
+    if (status[token] != 1) {
+        if (lane < ROWS) output[out_first + lane] = 0.0f;
+        return;
+    }
+    const int expert = ids[selected];
+    if (expert < 0 || uint(expert) >= args.experts) {
+        if (lane < ROWS) output[out_first + lane] = 0.0f;
+        return;
+    }
+    device const uchar * row0 = bank + (ulong(expert) * args.n_out + first) * ROW_BYTES;
+    const uint projection = args.mode & EXPERT_NATIVE_PROJECTION_MASK;
+    device const float * x = input + (projection == 2 ? selected : ulong(token)) * K;
+    float sum[ROWS];
+    QT_FOR_UNROLL (ushort r = 0; r < ROWS; ++r) sum[r] = 0.0f;
+    glm_rows_dot<BYTES, NL, DEQ, K, ROWS>(row0, x, lane, sum);
+    QT_FOR_UNROLL (ushort r = 0; r < ROWS; ++r) {
+        const float value = simd_sum(sum[r]);
+        if (lane == 0) output[out_first + r] = value;
+    }
+}
+
+// Gate/up: SGS / 2 gate simdgroups then SGS / 2 up simdgroups, ROWS channels
+// each. Grid: (n_out / (SGS / 2 * ROWS), top_k, rows), 32 * SGS threads.
+template <ushort BYTES, ushort NL,
+          void (*DEQ)(device const uchar *, short, thread float4x4 &),
+          uint K, ushort ROWS, uint SGS>
+inline void glm_batch_gate_up(
+        constant expert_native_args & args, device const uchar * gate_bank,
+        device const float * input, device const int * ids, device const int * status,
+        device float * output, device const uchar * up_bank, threadgroup float * up_values,
+        uint3 group, ushort lane, ushort simd) {
+    constexpr ulong ROW_BYTES = ulong(K / (16u * NL)) * BYTES;
+    constexpr uint HALF = SGS / 2u;
+    const bool up = simd >= HALF;
+    const uint local = uint(simd) % HALF;
+    const uint first = (group.x * HALF + local) * ROWS;
+    const uint slot = group.y;
+    const uint token = group.z;
+    const bool active = first < args.n_out && slot < args.top_k;
+    const ulong selected = ulong(token) * args.top_k + slot;
+    bool ready = active && status[token] == 1;
+    const int expert = ready ? ids[selected] : -1;
+    ready = ready && expert >= 0 && uint(expert) < args.experts;
+    float sum[ROWS];
+    QT_FOR_UNROLL (ushort r = 0; r < ROWS; ++r) sum[r] = 0.0f;
+    if (ready) {
+        device const uchar * row0 = (up ? up_bank : gate_bank)
+            + (ulong(expert) * args.n_out + first) * ROW_BYTES;
+        glm_rows_dot<BYTES, NL, DEQ, K, ROWS>(row0, input + ulong(token) * K, lane, sum);
+    }
+    QT_FOR_UNROLL (ushort r = 0; r < ROWS; ++r) {
+        const float value = simd_sum(sum[r]);
+        if (up && lane == 0) up_values[local * ROWS + r] = value;
+        sum[r] = value;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (!up && lane == 0 && active) {
+        const ulong out_first = selected * args.n_out + first;
+        QT_FOR_UNROLL (ushort r = 0; r < ROWS; ++r) {
+            if (!ready) {
+                output[out_first + r] = 0.0f;
+            } else {
+                const float g = min(sum[r], args.clamp);
+                const float u = clamp(up_values[local * ROWS + r], -args.clamp, args.clamp);
+                output[out_first + r] = (g / (1.0f + exp(-g))) * u;
+            }
+        }
+    }
+}
+
+#define GLM_BATCH_IQ(VNAME, SGS, DEQ2, DEQ3) \
+    [[max_total_threads_per_threadgroup(32 * SGS)]] \
+    kernel void kernel_glm_batch_iq3_s_down_k2048_##VNAME( \
+            constant expert_native_args & args [[buffer(0)]], \
+            device const uchar * bank [[buffer(1)]], \
+            device const float * input [[buffer(2)]], \
+            device const int * ids [[buffer(3)]], \
+            device const int * status [[buffer(4)]], \
+            device float * output [[buffer(5)]], \
+            uint3 group [[threadgroup_position_in_grid]], \
+            ushort lane [[thread_index_in_simdgroup]], \
+            ushort simd [[simdgroup_index_in_threadgroup]]) { \
+        glm_batch_down<QT_IQ3_S_BYTES, QT_IQ3_S_NL, DEQ3, 2048, 4, SGS>( \
+            args, bank, input, ids, status, output, group, lane, simd); \
+    } \
+    [[max_total_threads_per_threadgroup(32 * SGS)]] \
+    kernel void kernel_glm_batch_iq2_s_gate_up_k4096_##VNAME( \
+            constant expert_native_args & args [[buffer(0)]], \
+            device const uchar * gate_bank [[buffer(1)]], \
+            device const float * input [[buffer(2)]], \
+            device const int * ids [[buffer(3)]], \
+            device const int * status [[buffer(4)]], \
+            device float * output [[buffer(5)]], \
+            device const uchar * up_bank [[buffer(6)]], \
+            uint3 group [[threadgroup_position_in_grid]], \
+            ushort lane [[thread_index_in_simdgroup]], \
+            ushort simd [[simdgroup_index_in_threadgroup]]) { \
+        threadgroup float up_values[SGS / 2 * 4]; \
+        glm_batch_gate_up<QT_IQ2_S_BYTES, QT_IQ2_S_NL, DEQ2, 4096, 4, SGS>( \
+            args, gate_bank, input, ids, status, output, up_bank, up_values, group, lane, simd); \
+    }
+GLM_BATCH_IQ(tg64, 2, latent_dequantize_iq2_s, latent_dequantize_iq3_s)
+
 // Two dense Q8_0 projections of one F32 activation in one dispatch (the V4.1
 // decode query-rank and KV-latent projections both read the layer input).
 // One threadgroup per output row with K split across its four simdgroups

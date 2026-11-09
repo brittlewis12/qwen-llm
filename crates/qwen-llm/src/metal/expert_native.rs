@@ -139,6 +139,54 @@ fn native_spec_pipeline(
     Some((name, if fused { 2 * rows } else { 4 * rows }))
 }
 
+/// GLM batch decode schedule: (pipeline, channels per threadgroup, threads per
+/// threadgroup). The two-simdgroup `_tg64` instances keep the shipped
+/// per-channel lane map, decoder, F32 chain and SIMD reduction; index 0 of the
+/// screen list is the shipped four-simdgroup kernel.
+const GLM_BATCH_IQ_GATE_UP: [(&str, usize, usize); 1] =
+    [("kernel_glm_batch_iq2_s_gate_up_k4096_tg64", 4, 64)];
+const GLM_BATCH_IQ_DOWN: [(&str, usize, usize); 1] =
+    [("kernel_glm_batch_iq3_s_down_k2048_tg64", 8, 64)];
+fn glm_batch_threads(name: &str) -> usize {
+    GLM_BATCH_IQ_GATE_UP
+        .iter()
+        .chain(&GLM_BATCH_IQ_DOWN)
+        .find(|(n, ..)| *n == name)
+        .map_or(128, |(_, _, t)| *t)
+}
+crate::env_flag!(
+    /// Two-simdgroup (64-thread) GLM batch IQ gate/up and down schedule. Keeps the shipped lane map, decoder, F32 chain and SIMD reduction, so outputs are bitwise equal; zero restores the shipped four-simdgroup kernels.
+    default_on glm_batch_iq_tg64, "QWEN_GLM53_IQ_TG64"
+);
+/// Screen variant names, index = variant.
+#[cfg(feature = "perf-ablations")]
+pub const GLM_BATCH_IQ_VARIANTS: [&str; 2] = ["shipped", "tg64"];
+#[cfg(feature = "perf-ablations")]
+thread_local! {static GLM_BATCH_IQ: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };}
+fn glm_batch_iq_variant() -> usize {
+    #[cfg(feature = "perf-ablations")]
+    {
+        let v = GLM_BATCH_IQ.with(|c| c.get());
+        if v != usize::MAX {
+            return v;
+        }
+    }
+    if glm_batch_iq_tg64() { 1 } else { 0 }
+}
+/// Encode `f` with GLM batch IQ load-schedule `variant` (screen only).
+#[cfg(feature = "perf-ablations")]
+pub fn with_glm_batch_iq<T>(variant: usize, f: impl FnOnce() -> T) -> T {
+    assert!(variant < GLM_BATCH_IQ_VARIANTS.len());
+    struct Reset(usize);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            GLM_BATCH_IQ.with(|c| c.set(self.0));
+        }
+    }
+    let _reset = Reset(GLM_BATCH_IQ.with(|c| c.replace(variant)));
+    f()
+}
+
 /// Qualified batched GLM and Flash-Next geometries. No global dispatch widening.
 fn batch_tile_pipeline(
     dtype: GgmlType,
@@ -150,7 +198,16 @@ fn batch_tile_pipeline(
     if !offset.is_multiple_of(16) {
         return None;
     }
+    let glm = glm_batch_iq_variant();
     match (dtype, k, m, fused) {
+        (GgmlType::IQ2_S, 4096, 2048, true) if glm > 0 => {
+            let (name, channels, _) = GLM_BATCH_IQ_GATE_UP[glm - 1];
+            Some((name, channels))
+        }
+        (GgmlType::IQ3_S, 2048, 4096, false) if glm > 0 => {
+            let (name, channels, _) = GLM_BATCH_IQ_DOWN[glm - 1];
+            Some((name, channels))
+        }
         (GgmlType::IQ2_S, 4096, 2048, true) => {
             Some(("kernel_expert_native_gate_up_iq2_s_f32_k4096_r4", 8))
         }
@@ -501,7 +558,7 @@ fn check_device(
 fn dispatch(
     ctx: &MetalContext,
     enc: &KernelEncoder,
-    (pso, channels): &(Pipeline, usize),
+    pso: &(Pipeline, usize),
     args: &NativeArgs,
     bank: &MetalTensor,
     input: &MetalTensor,
@@ -510,13 +567,32 @@ fn dispatch(
     output: &MetalTensor,
     rows: usize,
 ) -> Result<(), MetalError> {
+    dispatch_threads(
+        ctx, enc, pso, args, bank, input, ids, status, output, rows, 128,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_threads(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    (pso, channels): &(Pipeline, usize),
+    args: &NativeArgs,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    rows: usize,
+    width: usize,
+) -> Result<(), MetalError> {
     let grid = MTLSize {
         width: (args.n_out as usize).div_ceil(*channels),
         height: args.top_k as usize,
         depth: rows,
     };
     let threads = MTLSize {
-        width: 128,
+        width,
         height: 1,
         depth: 1,
     };
@@ -957,6 +1033,7 @@ fn encode_gate_up_with_batch_tile(
         None
     };
     let mut fused = fused.map(|pso| (pso, native_channels_per_threadgroup(gate_bank.dtype) / 2));
+    let mut width = 128;
     if fused.is_some() && spec {
         if let Some((name, channels)) =
             native_spec_pipeline(gate_bank.dtype, n_in, n_out, input, true)
@@ -973,6 +1050,7 @@ fn encode_gate_up_with_batch_tile(
             batch_tile_pipeline(gate_bank.dtype, n_in, n_out, input.offset, true)
         {
             fused = Some((ctx.pipeline(name)?, channels));
+            width = glm_batch_threads(name);
         }
     }
     if let Some((fused, channels)) = fused {
@@ -985,7 +1063,7 @@ fn encode_gate_up_with_batch_tile(
             depth: rows.unwrap_or(1),
         };
         let threads = MTLSize {
-            width: 128,
+            width,
             height: 1,
             depth: 1,
         };
@@ -1264,12 +1342,16 @@ fn encode_down_with_batch_tile(
         Some((name, channels)) => (ctx.pipeline(&name)?, channels),
         None => (pso, native_channels_per_threadgroup(bank.dtype)),
     };
+    let mut width = 128;
     let pso = if batch_tile
         && matches!(operands, NativeOperands::F32)
         && (2..=4).contains(&rows.unwrap_or(1))
     {
         match batch_tile_pipeline(bank.dtype, n_in, n_out, input.offset, false) {
-            Some((name, channels)) => (ctx.pipeline(name)?, channels),
+            Some((name, channels)) => {
+                width = glm_batch_threads(name);
+                (ctx.pipeline(name)?, channels)
+            }
             None => pso,
         }
     } else {
@@ -1277,7 +1359,7 @@ fn encode_down_with_batch_tile(
     };
     args.mode = operands.mode(2);
     args.row_bytes = row_bytes;
-    dispatch(
+    dispatch_threads(
         ctx,
         enc,
         &pso,
@@ -1288,6 +1370,7 @@ fn encode_down_with_batch_tile(
         status,
         output,
         rows.unwrap_or(1),
+        width,
     )?;
     Ok(())
 }

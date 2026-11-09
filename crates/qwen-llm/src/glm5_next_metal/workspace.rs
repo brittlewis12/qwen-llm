@@ -3,6 +3,54 @@
 
 use super::*;
 use objc2_metal::MTLResource;
+use std::cell::Cell;
+
+crate::env_flag!(
+    /// Commit admitted GLM prompt-phase pages before warming weights on memory-tight non-Apple10 devices. Preserves width and arithmetic; zero restores lazy allocation and startup prefetch order. Experimental until the residency gate passes.
+    default_off peak_requested,
+    "QWEN_GLM53_PREFILL_PEAK_FIRST"
+);
+
+thread_local! { static COMMIT_PAGE: Cell<usize> = const { Cell::new(0) }; }
+
+pub(super) struct CommitScope(usize);
+
+impl CommitScope {
+    pub(super) fn new(ctx: &MetalContext, ledger: &Glm5NextMemoryLedger) -> Result<Self> {
+        let page = if Glm5NextSession::prefill_peak_first(ctx, ledger) {
+            crate::metal::host_page_size_bytes()?
+        } else {
+            0
+        };
+        Ok(Self(COMMIT_PAGE.with(|value| value.replace(page))))
+    }
+}
+
+impl Drop for CommitScope {
+    fn drop(&mut self) {
+        COMMIT_PAGE.with(|value| value.set(self.0));
+    }
+}
+
+/// Called only on fresh, initialized, owned shared buffers before publication.
+pub(super) fn commit_new_tensor(tensor: &MetalTensor) {
+    COMMIT_PAGE.with(|page| {
+        let page = page.get();
+        if page == 0 {
+            return;
+        }
+        let pointer = tensor.buffer.contents().as_ptr().cast::<u8>();
+        let bytes = tensor.buffer.length();
+        // Writing the existing byte faults in a private physical page without
+        // changing zero or nonzero initialization. No GPU can own this tensor.
+        for offset in (0..bytes).step_by(page) {
+            unsafe {
+                let address = pointer.add(offset);
+                address.write_volatile(address.read_volatile());
+            }
+        }
+    });
+}
 
 crate::env_flag!(
     /// Default-on release of GLM prompt workspace before ordinary decode when the session peak reaches 75% of physical memory and independent batching is unsupported. The configured prefill width, lineage and F32/Half operand policy survive release; later appends re-admit the same buffers before mutation. Zero retains prompt scratch. Supported M5 independent batches keep their existing workspace and F32-weight contract.
@@ -38,6 +86,17 @@ pub(super) fn release_policy(
 }
 
 impl Glm5NextSession<'_> {
+    /// Whether ordinary prompt setup commits its admitted physical peak first.
+    /// Apple10 paths retain their independent batch allocation contract.
+    pub fn prefill_peak_first(ctx: &MetalContext, ledger: &Glm5NextMemoryLedger) -> bool {
+        peak_requested()
+            && ledger.prefill_rows() > 0
+            && memory_tight(
+                ledger.peak_bytes(),
+                ctx.device_facts().physical_memory_bytes,
+                ctx.device_facts().gpu_families.apple10,
+            )
+    }
     /// The configured prefill ceiling, including while its buffers are released.
     pub fn prefill_rows(&self) -> usize {
         self.prefill_config.map_or(0, |config| config.rows)
@@ -133,6 +192,7 @@ impl Glm5NextSession<'_> {
                 advice: CapacityAdvice::NotEvaluated,
             });
         }
+        let _commit = CommitScope::new(ctx, &ledger)?;
         let mut packed = packed::PackedScratch::new_with_options(
             ctx,
             &self.weights.config,

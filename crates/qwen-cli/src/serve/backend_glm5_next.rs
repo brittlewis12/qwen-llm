@@ -128,6 +128,7 @@ struct CacheNamespace {
 /// CPU startup facts: the admitted artifact, its verified chat profile and
 /// the fixed context capacity and maximum prefill workspace width.
 pub(super) struct Prepared<'g> {
+    source: &'g GgufFile,
     artifact: Glm5NextPreparedArtifact<'g>,
     pub(super) capacity: usize,
     default_max: usize,
@@ -186,6 +187,7 @@ impl<'g> Prepared<'g> {
         );
         crate::shutdown::checkpoint()?;
         Ok(Self {
+            source: gguf,
             artifact,
             capacity,
             default_max,
@@ -247,6 +249,7 @@ pub(super) fn load(
             Err(error) => return Err(error).context("admit GLM-5.3 serve session"),
         }
     }
+    crate::glm5_next::residency::sample(ctx, gguf, "before_prefetch");
     let prefetch =
         prefetch_retained_with_cancel(ctx, gguf, 0.98, &|| crate::shutdown::checkpoint().is_err())
             .context("prefetch GLM-5.3 retained windows")?;
@@ -258,6 +261,7 @@ pub(super) fn load(
         prefetch.bytes_read,
         prefetch.wall.as_secs_f64() * 1e3
     );
+    crate::glm5_next::residency::sample(ctx, gguf, "after_prefetch");
     crate::shutdown::checkpoint()?;
     Glm5NextWeights::load(ctx, gguf).context("load GLM-5.3 weights")
 }
@@ -1357,6 +1361,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             prefill_ms: 0.0,
             chunk_capture_ms: 0.0,
             ready: false,
+            peak_prepared: false,
         })))
     }
 
@@ -1384,6 +1389,19 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             .map_err(session_error)?;
         }
         let tokens = &run.tokens;
+        if !run.peak_prepared {
+            crate::glm5_next::residency::sample(ctx, self.prepared.source, "before_model_use");
+            let session = self.session.as_ref().expect("session present");
+            if Glm5NextSession::prefill_peak_first(ctx, session.ledger()) {
+                crate::glm5_next::residency::sample(ctx, self.prepared.source, "before_prefetch");
+                prefetch_retained_with_cancel(ctx, self.prepared.source, 0.98, &|| {
+                    crate::shutdown::checkpoint().is_err()
+                })
+                .map_err(session_error)?;
+                crate::glm5_next::residency::sample(ctx, self.prepared.source, "after_prefetch");
+            }
+            run.peak_prepared = true;
+        }
         let lineage = run.lineage;
         let namespace = run.namespace;
         let reserve = run.reserve;
@@ -1402,6 +1420,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         let session = self.session.as_mut().expect("session present");
         let mut checkpoint_abort: Option<io::Error> = None;
         let mut before = || {
+            crate::glm5_next::residency::sample(ctx, self.prepared.source, "prefill_chunk_begin");
             sink.tick().map_err(|error| {
                 checkpoint_abort = Some(error);
                 "transport aborted during GLM-5.3 prefill".into()
@@ -1511,6 +1530,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             .expect("session present")
             .prepare_decode(self.ctx)
             .map_err(session_error)?;
+        crate::glm5_next::residency::sample(self.ctx, self.prepared.source, "after_prefill");
         run.chunk_capture_ms = run.chunk_capture.as_ref().map_or(0.0, |c| c.elapsed_ms);
         run.capture_ms += run.chunk_capture_ms;
         run.prefill_ms = run.prefill_t0.elapsed().as_secs_f64() * 1e3 - run.capture_ms;
@@ -1617,6 +1637,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 "rows": selected_rows,
             }));
         }
+        crate::glm5_next::residency::sample(self.ctx, self.prepared.source, "after_decode");
         tracing::info!(target: "qwen_diag",
             "serve native: family=glm5_next transitions={} transition_ms={:.3} first_transition_ms={:.3}",
             generation.transitions, generation.transition_ms, generation.first_transition_ms.unwrap_or(0.0));

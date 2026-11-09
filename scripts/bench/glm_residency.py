@@ -84,7 +84,7 @@ class Observer:
     def finish(self, text):
         events = [json.loads(line.split("glm residency: ", 1)[1])
                   for line in text.splitlines() if "glm residency: " in line]
-        if not events or events[0]["phase"] != "before_prefetch" or events[-1]["phase"] != "after_decode":
+        if not events or not any(e["phase"] == "before_prefetch" for e in events) or events[-1]["phase"] != "after_decode":
             raise RuntimeError("missing complete native phase observations; use the instrumented engine commit")
         phases = []
         for before, after in zip(events, events[1:]):

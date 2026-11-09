@@ -10,7 +10,7 @@ qwen_llm::env_flag!(
     "QWEN_GLM53_RESIDENCY_TRACE"
 );
 
-pub(super) fn sample(ctx: &MetalContext, gguf: &GgufFile, phase: &str) {
+pub(crate) fn sample(ctx: &MetalContext, gguf: &GgufFile, phase: &str) {
     if !enabled() {
         return;
     }

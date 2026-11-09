@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 #[path = "glm5_next/dflash.rs"]
 mod dflash;
 #[path = "glm5_next/residency.rs"]
-mod residency;
+pub(crate) mod residency;
 
 const FAMILY: &str = "GLM-5.3-Flash";
 
@@ -435,7 +435,7 @@ fn preflight(
     prefill_rows: usize,
     has_head: bool,
     drafter_request_bytes: u64,
-) -> Result<usize> {
+) -> Result<(usize, bool)> {
     match with_prefill_policy(prefill_rows, has_head, |rows| {
         preflight_session(ctx, gguf, prepared.model(), capacity, rows)
     }) {
@@ -448,7 +448,10 @@ fn preflight(
                     "GLM target and DFlash request scratch",
                 )?;
             }
-            Ok(rows)
+            Ok((
+                rows,
+                !has_head && Glm5NextSession::prefill_peak_first(ctx, &plan.ledger),
+            ))
         }
         Err(error @ Glm5NextMetalError::MemoryAdmission { advice, .. }) => {
             if drafter_request_bytes > 0 {
@@ -594,7 +597,7 @@ pub(crate) fn run(
         Some(head) => dflash::packed_rows(prefill_rows, capacity, head.config.block_size as usize)?,
         None => prefill_rows,
     };
-    let prefill_rows = timing.measure(Phase::MemoryPreflight, || {
+    let (prefill_rows, peak_first) = timing.measure(Phase::MemoryPreflight, || {
         let request_bytes = head
             .as_ref()
             .map(|head| {
@@ -625,19 +628,20 @@ pub(crate) fn run(
     // Warm cold retained windows with parallel reads before the zero-copy
     // weights are first touched; demand paging would otherwise land in the
     // first prefill at a fraction of the storage bandwidth.
-    residency::sample(&ctx, gguf, "before_prefetch");
-    let prefetch = timing.measure(Phase::Prefetch, || {
-        prefetch_retained_with_cancel(&ctx, gguf, 0.98, &|| shutdown::checkpoint().is_err())
-            .context("prefetch GLM-5.3 retained windows")
-    })?;
-    eprintln!(
-        "glm5_next prefetch: windows={} cold_windows={} bytes_read={} wall_ms={:.1}",
-        prefetch.windows,
-        prefetch.cold_windows,
-        prefetch.bytes_read,
-        prefetch.wall.as_secs_f64() * 1e3
-    );
-    residency::sample(&ctx, gguf, "after_prefetch");
+    let warm = |timing: &mut Timing| -> Result<_> {
+        residency::sample(&ctx, gguf, "before_prefetch");
+        let report = timing.measure(Phase::Prefetch, || {
+            prefetch_retained_with_cancel(&ctx, gguf, 0.98, &|| shutdown::checkpoint().is_err())
+                .context("prefetch GLM-5.3 retained windows")
+        })?;
+        residency::sample(&ctx, gguf, "after_prefetch");
+        Ok(report)
+    };
+    let early_prefetch = if peak_first {
+        None
+    } else {
+        Some(warm(&mut timing)?)
+    };
     let weights = timing.measure(Phase::ModelLoad, || {
         Glm5NextWeights::load(&ctx, gguf).context("load GLM-5.3 weights")
     })?;
@@ -648,8 +652,18 @@ pub(crate) fn run(
         })
         .context("create GLM-5.3 session")
     })?;
-
     residency::sample(&ctx, gguf, "after_session");
+    let prefetch = match early_prefetch {
+        Some(report) => report,
+        None => warm(&mut timing)?,
+    };
+    eprintln!(
+        "glm5_next prefetch: windows={} cold_windows={} bytes_read={} wall_ms={:.1}",
+        prefetch.windows,
+        prefetch.cold_windows,
+        prefetch.bytes_read,
+        prefetch.wall.as_secs_f64() * 1e3
+    );
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
     // Chat prints the decoded bytes (text) or one Responses object; raw

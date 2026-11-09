@@ -36,11 +36,12 @@ def main():
     parser.add_argument("--engine-commit", required=True,
                         help="commit used to build the existing executable; driver identity is separate")
     parser.add_argument("--residency", action="store_true")
+    parser.add_argument("--peak-first", choices=["on", "off"], default="off")
+    parser.add_argument("--idle-seconds", type=float, default=0)
+    parser.add_argument("--corpus-commit", default="74f6709ae")
     parser.add_argument("--background-gib", type=int, choices=range(9), default=0,
                         help="bounded incompressible anonymous background, not a compiler simulation")
     args = parser.parse_args()
-    if args.residency and args.workload != "run":
-        raise ValueError("phase residency observations currently support run only")
     fd = int(os.environ["QWEN_METAL_LEASE_FD"])
     os.fstat(fd)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -54,6 +55,7 @@ def main():
     binary = ROOT / "target/release/qwen"
     tok = ROOT / "target/release/qwen-tok"
     env = dict(os.environ, MTL_DEBUG_LAYER="0")
+    env["QWEN_GLM53_PREFILL_PEAK_FIRST"] = "1" if args.peak_first == "on" else "0"
     observer = None
     background = []
     if args.residency:
@@ -76,13 +78,17 @@ def main():
         return subprocess.check_output([str(tok), "-m", str(model), "--decode-ids", "-"],
                                        input="\n".join(ids[:count]), text=True, env=env, pass_fds=(fd,))
 
+    def corpus_file(name):
+        return subprocess.check_output(["git", "show", args.corpus_commit + ":" + name],
+                                       text=True, cwd=ROOT)
+
     corpus = "Review these Rust inference paths for memory lifetime bugs.\n" + "\n".join(
-        (ROOT / name).read_text() for name in [
+        corpus_file(name) for name in [
             "crates/qwen-cli/src/serve/backend_glm5_next.rs",
             "crates/qwen-llm/src/glm5_next_metal.rs"])
     prompt = cut(corpus, 8192)
     append = cut("Explain the memory admission and snapshot behavior of this code.\n" +
-                 (ROOT / "crates/qwen-llm/src/glm5_next_metal/snapshot.rs").read_text(), 512)
+                 corpus_file("crates/qwen-llm/src/glm5_next_metal/snapshot.rs"), 512)
     thermals = []
     compiler_samples = []
     decode_ends = []
@@ -186,6 +192,8 @@ def main():
 
                     history = [{"role": "user", "content": prompt}]
                     first = request(history)
+                    if args.idle_seconds:
+                        time.sleep(args.idle_seconds)
                     history += first["output"] + [{"role": "user", "content": append}]
                     second = request(history)
                     # A third turn exercises re-admission after a captured

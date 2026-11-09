@@ -60,8 +60,6 @@ pub(crate) mod split_decode;
 pub(crate) mod split_decode_probe;
 #[cfg(test)]
 pub(crate) mod value_mma_probe;
-#[cfg(test)]
-pub(crate) mod value_probe_binding;
 
 crate::env_flag!(
     default_on configured_qwen4exp_qsa_gqa4_logits_enabled,
@@ -5941,23 +5939,6 @@ fn encode_attention_softmax_value_packed(
     query_count: usize,
     selected_value_scratch: Option<(&selected_value::Pipelines, &MetalTensor)>,
 ) -> Result<(), MetalError> {
-    #[cfg(test)]
-    if value_probe_binding::encode(
-        ctx,
-        enc,
-        query_gate_projection,
-        value_cache,
-        token_ids,
-        selected_count,
-        selector_status,
-        logits,
-        attention,
-        geometry,
-        start_position,
-        query_count,
-    )? {
-        return Ok(());
-    }
     encode_attention_softmax_value_packed_route(
         ctx,
         enc,

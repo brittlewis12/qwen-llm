@@ -1,5 +1,10 @@
 # Grouped Native Latent Matrix Execution
 
+> Historical timing recipe: The recorded A/B/precision drivers and neutral scalar8 experiment were retired in
+> [ignored-test batch 3](../2026-11-09-ignored-sweep-batch3.md). Use frozen source `a95456865` or the packet’s original
+> commit for those commands. Shipped primitive, product/F64 and model quality checks remain.
+
+
 Base: main `27b49476`. The refreshed leverage map initially ranked this bounded
 GLM prefill optimization before a wider expert-down experiment and deep attention.
 Maya's 11 executed MLA blocks use Q6_K absorption/expansion; UD uses Q8_0 and

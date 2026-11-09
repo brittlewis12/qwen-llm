@@ -1,5 +1,10 @@
 # Half latent MMA: fixed task subset
 
+> Historical timing recipe: The `grouped_latent_production_ab` timing driver were retired in
+> [ignored-test batch 3](../2026-11-09-ignored-sweep-batch3.md). Use frozen source `a95456865` or the packet’s original
+> commit for those commands. Shipped primitive, product/F64 and model quality checks remain.
+
+
 Reoriented on `73d13835`, with the Oct 11 GLM arithmetic and the updated
 MSL 3.1/macOS 14 target. The initial task screen and forced-arm timing preceded
 the Half policy promotion; production verification followed. Retired

@@ -1,52 +1,31 @@
-//! TEST ONLY selected Flash prefill value leaf. No routing or runtime knob.
-//!
-//! Native test integration: allocate `Scratch::new(ctx, max_queries)` before
-//! encoding/measurement. After the unchanged selected-ID/logits work, call the
-//! free `encode` function instead of the packed softmax/value leaf, on a serial
-//! encoder. Its signature mirrors that leaf with `&Scratch` appended.
-//! Logits are destructively converted to masses, as in production. Denominators
-//! for active rows are fully overwritten; unused scratch rows are untouched.
-//! Keep Scratch immutably borrowed through command completion. Reuse it between
-//! serial bands/layers, not across concurrent commands. The caller owns the
-//! test-only binding hook and its completion/lifetime discipline.
-//!
-//! Extra logical scratch: 96 * max_queries bytes (3072 at N32), device-priced as
-//! one allocation. Two dispatches: GQA4 stats (3,2,N)/256 threads/144 TGM bytes;
-//! gathered PV (4,2,N)/128 threads/10240 TGM bytes. F32 operands and K32 partials
-//! preserve operand precision, not the scalar PV reduction order.
-//! `Scratch::new_gqa12` selects the single scalar-reuse falsifier instead: the
-//! same stats stage, then PV (1,2,N)/256 threads/no TGM. Its twelve named F32
-//! accumulators retain production slot order; exact output bits are the leaf
-//! gate. Do not promote either candidate if this arithmetic-preserving gate fails.
+//! Shared GQA12 reference fixture and F64/guard oracle for shipped scalar and
+//! split selected-value paths. The rejected MMA experiment and its timing
+//! drivers were retired in the 2026-11-09 ignored-test cleanup. The research
+//! scalar reference, product checks and scratch/admission contracts remain.
 
 use super::*;
 use crate::metal::Pipeline;
 use objc2_metal::MTLCommandQueue;
 
 pub(crate) const SOFTMAX: &str = "kernel_qwen4exp_qsa_selected_softmax_gqa4_f32_test";
-pub(crate) const VALUE: &str = "kernel_qwen4exp_qsa_selected_value_m16d64k32_f32_test";
 pub(crate) const VALUE_GQA12: &str = "kernel_qwen4exp_qsa_selected_value_gqa12_f32_test";
 const BASELINE: &str = "kernel_qwen4exp_qsa_attention_softmax_value_packed_gqa4_f16";
 const STATS_TGM: usize = 4 * 9 * 4;
-const VALUE_TGM: usize = (16 * 32 + 32 * 64) * 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ValueVariant {
-    Mma,
     Gqa12,
 }
 
 impl ValueVariant {
     fn kernel(self) -> &'static str {
         match self {
-            Self::Mma => VALUE,
             Self::Gqa12 => VALUE_GQA12,
         }
     }
 
     fn launch(self, query_count: usize) -> (MTLSize, usize, usize) {
         match self {
-            Self::Mma => (size(4, 2, query_count), 128, VALUE_TGM),
             Self::Gqa12 => (size(1, 2, query_count), 256, 0),
         }
     }
@@ -68,14 +47,8 @@ pub(crate) struct Scratch {
 }
 
 impl Scratch {
-    /// Prepare both pipelines, then price/admit and allocate one denominator
-    /// buffer under the normal allocation transaction and dynamic reserve.
-    pub(crate) fn new(ctx: &MetalContext, max_queries: usize) -> Result<Self, Qwen4ExpQsaError> {
-        Self::new_variant(ctx, max_queries, ValueVariant::Mma)
-    }
-
-    /// Same storage/lifetime contract as `new`, but scalar GQA12 PV. This is the
-    /// only arithmetic-preserving follow-up, gated on production-exact leaf bits.
+    /// Prepare both pipelines, then price/admit one denominator buffer.
+    /// The scalar GQA12 reference is gated on production-exact leaf bits.
     pub(crate) fn new_gqa12(
         ctx: &MetalContext,
         max_queries: usize,
@@ -155,7 +128,7 @@ pub(crate) fn encode(
     scratch_logical_bytes(scratch.max_queries).map_err(metal_error)?;
     if query_count > scratch.max_queries {
         return Err(MetalError::BadShape {
-            kernel: VALUE,
+            kernel: VALUE_GQA12,
             detail: format!(
                 "query count {query_count} exceeds scratch capacity {}",
                 scratch.max_queries
@@ -194,7 +167,7 @@ fn metal_error(error: Qwen4ExpQsaError) -> MetalError {
     match error {
         Qwen4ExpQsaError::Metal(error) => error,
         error => MetalError::BadShape {
-            kernel: VALUE,
+            kernel: VALUE_GQA12,
             detail: error.to_string(),
         },
     }
@@ -409,10 +382,6 @@ enum Case {
 }
 
 impl Fixture {
-    fn new(ctx: &MetalContext, start: usize, n: usize, layers: usize, case: Case) -> Self {
-        Self::new_variant(ctx, start, n, layers, case, ValueVariant::Mma)
-    }
-
     fn new_variant(
         ctx: &MetalContext,
         start: usize,
@@ -427,7 +396,6 @@ impl Fixture {
         let g = QwenSparseAttentionMetalGeometry::from_config(&config, 3, capacity).unwrap();
         validate_shape(g, start, n).unwrap();
         let scratch = match variant {
-            ValueVariant::Mma => Scratch::new(ctx, 32),
             ValueVariant::Gqa12 => Scratch::new_gqa12(ctx, 32),
         }
         .unwrap();
@@ -891,11 +859,7 @@ fn bounded_shape_and_scratch_contract() {
     g.head_dim = 128;
     assert!(validate_shape(g, 8192, 32).is_err());
     assert_eq!(size_of::<PackedAttentionArgs>(), 40);
-    assert_eq!(VALUE_TGM, 10240);
-    for (variant, kernel, width, threads, tgm) in [
-        (ValueVariant::Mma, VALUE, 4, 128, VALUE_TGM),
-        (ValueVariant::Gqa12, VALUE_GQA12, 1, 256, 0),
-    ] {
+    for (variant, kernel, width, threads, tgm) in [(ValueVariant::Gqa12, VALUE_GQA12, 1, 256, 0)] {
         assert_eq!(variant.kernel(), kernel);
         let (grid, actual_threads, actual_tgm) = variant.launch(32);
         assert_eq!((grid.width, grid.height, grid.depth), (width, 2, 32));
@@ -942,72 +906,6 @@ fn cpu_reference_retains_invalid_id_mass_and_masked_zero_semantics() {
         &mut output,
     );
     assert_eq!(output, vec![0.0; 256]);
-}
-
-#[test]
-#[ignore = "production GPU lease; selected prefill N1/7/31/32 CPU + production leaf qualification"]
-fn selected_value_mma_correctness() {
-    require_gpu_workflow();
-    let _lease =
-        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
-    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
-        return;
-    };
-    for start in [2051, 8192] {
-        for n in [1, 7, 31, 32] {
-            qualify(&ctx, start, n, Case::Ordinary);
-        }
-        for case in [
-            Case::InvalidIds,
-            Case::NoIds,
-            Case::AllMasked,
-            Case::Metadata,
-            Case::Cancellation,
-        ] {
-            qualify(&ctx, start, 32, case);
-        }
-    }
-}
-
-#[test]
-#[ignore = "production GPU lease; GQA12 exact output bits vs production GQA4, existing 18 cases"]
-fn selected_value_gqa12_correctness() {
-    require_gpu_workflow();
-    let _lease =
-        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
-    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
-        return;
-    };
-    for start in [2051, 8192] {
-        for n in [1, 7, 31, 32] {
-            qualify_fixture(
-                &ctx,
-                Fixture::new_variant(&ctx, start, n, 1, Case::Ordinary, ValueVariant::Gqa12),
-                Case::Ordinary,
-            );
-        }
-        for case in [
-            Case::InvalidIds,
-            Case::NoIds,
-            Case::AllMasked,
-            Case::Metadata,
-            Case::Cancellation,
-        ] {
-            qualify_fixture(
-                &ctx,
-                Fixture::new_variant(&ctx, start, 32, 1, case, ValueVariant::Gqa12),
-                case,
-            );
-        }
-    }
-}
-
-fn qualify(ctx: &MetalContext, start: usize, n: usize, case: Case) {
-    qualify_fixture(ctx, Fixture::new(ctx, start, n, 1, case), case);
-}
-
-fn qualify_fixture(ctx: &MetalContext, f: Fixture, case: Case) {
-    qualify_fixture_with_product(ctx, f, case, None);
 }
 
 fn qualify_fixture_with_product(
@@ -1095,11 +993,11 @@ fn qualify_fixture_with_product(
         );
         compare(&candidate, &expected, "GQA12/F64");
     } else {
-        compare(&candidate, &expected, "MMA/F64");
+        compare(&candidate, &expected, "split product/F64");
         compare(
             &candidate,
             &baseline.iter().map(|&v| f64::from(v)).collect::<Vec<_>>(),
-            "MMA/production",
+            "split product/production",
         );
     }
     for (i, (a, b)) in read::<f32>(&f.logits[0]).iter().zip(&masses).enumerate() {
@@ -1206,7 +1104,6 @@ fn selected_value_split_product_matches_f64() {
 
 fn check_refusals(ctx: &MetalContext, f: &Fixture) {
     for max_queries in [0, 33, usize::MAX] {
-        assert!(Scratch::new(ctx, max_queries).is_err());
         assert!(Scratch::new_gqa12(ctx, max_queries).is_err());
     }
     let command = ctx.queue.commandBuffer().unwrap();
@@ -1251,91 +1148,4 @@ fn check_refusals(ctx: &MetalContext, f: &Fixture) {
     }
     assert!(crate::metal::dispatch_census_take().is_empty());
     encoder.end(); // Intentionally never submitted.
-}
-
-#[test]
-#[ignore = "production GPU lease; model-free N32 12-layer leaf-only GPU ABBA/BAAB timing"]
-fn selected_value_mma_timing_n32() {
-    require_gpu_workflow();
-    let _lease =
-        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
-    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
-        return;
-    };
-    timing_n32(&ctx, ValueVariant::Mma);
-}
-
-#[test]
-#[ignore = "production GPU lease; GQA12 N32 exact gate, then 12-layer leaf GPU ABBA/BAAB timing"]
-fn selected_value_gqa12_timing_n32() {
-    require_gpu_workflow();
-    let _lease =
-        crate::metal::acquire_metal_benchmark_lease().expect("production GPU lease required");
-    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
-        return;
-    };
-    timing_n32(&ctx, ValueVariant::Gqa12);
-}
-
-fn timing_n32(ctx: &MetalContext, variant: ValueVariant) {
-    for start in [2051, 8192] {
-        let f = Fixture::new_variant(ctx, start, 32, 12, Case::Ordinary, variant);
-        let expected = f.reference();
-        for arm in [false, true, true, false] {
-            f.reset();
-            f.run(ctx, arm);
-        }
-        let exact_reference = if variant == ValueVariant::Gqa12 {
-            let baseline = read::<f32>(&f.baseline);
-            assert_output_bits(&read::<f32>(&f.candidate), &baseline);
-            Some(baseline)
-        } else {
-            None
-        };
-        let mut a = Vec::new();
-        let mut b = Vec::new();
-        for order in [[false, true, true, false], [true, false, false, true]] {
-            let mut times = Vec::new();
-            for arm in order {
-                f.reset(); // Host reset is outside timed calls and GPU command times.
-                let ms = f.run(ctx, arm);
-                times.push(ms);
-                if arm {
-                    b.push(ms);
-                } else {
-                    a.push(ms);
-                }
-                let observed = read::<f32>(if arm { &f.candidate } else { &f.baseline });
-                if let Some(reference) = &exact_reference {
-                    assert_output_bits(&observed, reference);
-                }
-                compare(
-                    &observed,
-                    &expected,
-                    if arm && variant == ValueVariant::Gqa12 {
-                        "timed GQA12/F64"
-                    } else if arm {
-                        "timed MMA/F64"
-                    } else {
-                        "timed production/F64"
-                    },
-                );
-                f.check_guards();
-            }
-            eprintln!(
-                "value_mma timing variant={variant:?} start={start} N=32 layers=12 order={order:?} gpu_ms_per_layer={times:?}"
-            );
-        }
-        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
-        let control = mean(&a);
-        let candidate = mean(&b);
-        let spread = (a.iter().copied().fold(f64::NEG_INFINITY, f64::max)
-            - a.iter().copied().fold(f64::INFINITY, f64::min))
-            / control;
-        eprintln!(
-            "value_mma timing variant={variant:?} start={start} N=32 production_ms={control:.6} candidate_ms={candidate:.6} saved_pct={:.3} control_spread={spread:.6} inconclusive={} leaf_only=true extra_dispatch=1 extra_scratch_logical=3072",
-            (1.0 - candidate / control) * 100.0,
-            spread > 0.05
-        );
-    }
 }

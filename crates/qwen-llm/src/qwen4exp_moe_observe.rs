@@ -19,9 +19,6 @@ pub(crate) mod intervals;
 #[path = "qwen4exp_moe_topk_screen.rs"]
 pub(crate) mod topk_screen;
 
-#[path = "qwen4exp_moe_topk_native.rs"]
-pub(crate) mod topk_native;
-
 #[path = "qwen4exp_topk_compat.rs"]
 mod topk_compat;
 

@@ -86,4 +86,3 @@ template [[host_name("kernel_latent_grouped_bf16_f32")]] kernel latent_grouped_n
 // slots add four F32 accumulators per lane and amortize each decode over twice
 // as many tokens, with no threadgroup/persistent scratch. Whole-model timing was
 // neutral; host selection is test-only, not a production optimization.
-template [[host_name("kernel_latent_grouped_q6_K_f32_scalar8")]] kernel latent_grouped_native_t kernel_latent_grouped_native_f32<QT_Q6_K_BYTES, QT_Q6_K_NL, latent_dequantize_q6_K, 8>;

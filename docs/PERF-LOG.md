@@ -111,6 +111,17 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   and validation: **`~/qwen-runs/2026-11-09-glm-loop-qualify/`**, especially
   `qualification.json` and `lease-waits.json`. Reproduce with
   `glm_gpu_loop_check MODEL DEPTH 128` and the recorded frontend commands.
+## 2026-11-09 - Ignored-test cleanup, batch 3
+
+Remove 19 ignored tests (eight model/artifact, three other-GPU, eight timing)
+and four exclusive ordinary helper tests. Retire neutral scalar8 and rejected
+selected-value MMA research paths, superseded finite-top-k/validation probes,
+duplicate metadata/reference checks and printouts. Preserve shipped product/F64,
+quality, default/rollback and safety checks and shared planner/reference code.
+Review all 13 new lease-fix ignores: delete the load stopwatch; retain twelve
+actual artifact checks or inventoried timing probes for runner migration.
+No GPU execution or timing. Fixed base a95456865; no main refresh.
+[Decisions, exact deletions, 13-test migration list and validation](bench/2026-11-09-ignored-sweep-batch3.md).
 
 ## 2026-11-09 - V4.1 Expert Grouping Killed; Calibrated Overlap Bounds
 

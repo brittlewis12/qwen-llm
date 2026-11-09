@@ -52,15 +52,6 @@ fn state_hashes(snapshot: &SessionSnapshot) -> Value {
 }
 
 #[test]
-#[ignore = "CPU-only; requires QWEN_EMBED_RESIDENCY_MODEL"]
-fn dense_q8_embedding_metadata_witness() {
-    let path = std::env::var("QWEN_EMBED_RESIDENCY_MODEL").unwrap();
-    let gguf = GgufFile::open(&path).unwrap();
-    let model = Model::from_gguf(&gguf).unwrap();
-    eprintln!("embedding-metadata {}", metadata(&model));
-}
-
-#[test]
 #[ignore = "serial Metal; requires QWEN_EMBED_RESIDENCY_MODEL, QWEN_EMBED_ORACLE_OUT and native-embed override"]
 fn dense_q8_embedding_residency_and_state_witness() {
     use crate::metal::{encode_get_rows_f32, one_shot, read_back_f32};

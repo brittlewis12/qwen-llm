@@ -13,9 +13,6 @@ mod hc_up_product;
 #[path = "moe_observe.rs"]
 mod moe_observe;
 
-#[path = "topk_native.rs"]
-mod topk_native;
-
 #[path = "topk_product.rs"]
 mod topk_product;
 
@@ -27,9 +24,6 @@ mod parent_ledger;
 
 #[path = "child_ledger.rs"]
 mod child_ledger;
-
-#[path = "validation_ceiling.rs"]
-mod validation_ceiling;
 
 #[path = "router_width.rs"]
 mod router_width;

@@ -1718,32 +1718,26 @@ fn encode_singleton_router(
             g.expert_count,
         )?;
     }
-    #[cfg(test)]
-    let probed = singleton_observe::topk_native::encode_if_active(ctx, enc, buffers, g);
-    #[cfg(not(test))]
-    let probed = false;
-    if !probed {
-        if buffers.guarded_topk && guarded_topk::eligible(g.expert_count, g.experts_per_token) {
-            guarded_topk::encode_with_status(
-                ctx,
-                enc,
-                buffers.router_logits,
-                buffers.topk_ids,
-                buffers.topk_weights,
-                buffers.route_status,
-            )?;
-        } else {
-            encode_topk_logits_softmax_f32_status(
-                ctx,
-                enc,
-                buffers.router_logits,
-                buffers.topk_ids,
-                buffers.topk_weights,
-                buffers.route_status,
-                g.expert_count,
-                g.experts_per_token,
-            )?;
-        }
+    if buffers.guarded_topk && guarded_topk::eligible(g.expert_count, g.experts_per_token) {
+        guarded_topk::encode_with_status(
+            ctx,
+            enc,
+            buffers.router_logits,
+            buffers.topk_ids,
+            buffers.topk_weights,
+            buffers.route_status,
+        )?;
+    } else {
+        encode_topk_logits_softmax_f32_status(
+            ctx,
+            enc,
+            buffers.router_logits,
+            buffers.topk_ids,
+            buffers.topk_weights,
+            buffers.route_status,
+            g.expert_count,
+            g.experts_per_token,
+        )?;
     }
     if !projections {
         let gate = if gate_wide() {

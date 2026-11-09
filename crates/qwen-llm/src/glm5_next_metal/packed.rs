@@ -64,10 +64,6 @@ mod f32_down_ab;
 mod hc_decode_ab;
 
 #[cfg(test)]
-#[path = "tests/latent_mma_ab.rs"]
-mod latent_mma_ab;
-
-#[cfg(test)]
 #[path = "tests/prefill_cost.rs"]
 mod prefill_cost;
 

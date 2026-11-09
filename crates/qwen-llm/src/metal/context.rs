@@ -2423,15 +2423,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "M4 Max host memory-probe characterization; measured values are host-specific"]
-    fn metal_memory_probes_match_local_m4_max() {
-        let ctx = MetalContext::new().expect("Metal context");
-        let signals = ctx.memory_signals();
-        assert_eq!(signals.recommended_max_bytes, 103_079_215_104);
-        assert_eq!(signals.process_limit_remaining_bytes, Some(0));
-    }
-
-    #[test]
     fn metal_context_initializes() {
         let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
             return;

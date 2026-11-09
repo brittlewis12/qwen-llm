@@ -1,5 +1,10 @@
 # Flash Selected Value Reuse
 
+> Historical timing recipe: The native ABBA/parent drivers, failed MMA variant and duplicate research-only gate were retired in
+> [ignored-test batch 3](../2026-11-09-ignored-sweep-batch3.md). Use frozen source `a95456865` or the packet’s original
+> commit for those commands. Shipped primitive, product/F64 and model quality checks remain.
+
+
 Promote **chronological twelve-head value reuse**, not matrix-multiply PV.
 On the saved native gameplay request, two brackets reduce mean prefill time
 **4-6%** and request time **3-4%**, with the same generated token sequence.

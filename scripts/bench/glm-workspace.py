@@ -3,8 +3,10 @@
 
 Evidence is the committed tree plus this command. Temporary responses, logs
 and prompts are removed at exit; stdout retains compact measurements only.
-Run ABBA as separate short leases, cooling between arms. No build lock is
-taken by timing. Model discovery uses QWEN_MODEL_SEARCH_PATH.
+Run comparisons as separate short leases, cooling between arms. This driver
+does not acquire the build lock. Isolated GLM timing on a memory-tight M4
+should hold it externally; residency attribution arms explicitly allow builds
+and record their memory use. Model discovery uses QWEN_MODEL_SEARCH_PATH.
 """
 
 import argparse
@@ -34,10 +36,11 @@ def main():
     parser.add_argument("--engine-commit", required=True,
                         help="commit used to build the existing executable; driver identity is separate")
     parser.add_argument("--residency", action="store_true")
-    parser.add_argument("--memory-map", action="store_true", help="one intrusive vmmap observation; attribution only")
     parser.add_argument("--background-gib", type=int, choices=range(9), default=0,
                         help="bounded incompressible anonymous background, not a compiler simulation")
     args = parser.parse_args()
+    if args.residency and args.workload != "run":
+        raise ValueError("phase residency observations currently support run only")
     fd = int(os.environ["QWEN_METAL_LEASE_FD"])
     os.fstat(fd)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -55,11 +58,11 @@ def main():
     background = []
     if args.residency:
         from glm_residency import Observer
-        observer = Observer(args.memory_map)
+        observer = Observer()
         env["QWEN_GLM53_RESIDENCY_TRACE"] = "1"
         background = [os.urandom(64 * 1024 * 1024) for _ in range(args.background_gib * 16)]
-    elif args.background_gib or args.memory_map:
-        raise ValueError("background and mapping observations require --residency")
+    elif args.background_gib:
+        raise ValueError("background observations require --residency")
     env.pop("QWEN_GLM53_RELEASE_PREFILL", None)
     if args.release == "off":
         env["QWEN_GLM53_RELEASE_PREFILL"] = "0"
@@ -220,7 +223,7 @@ def main():
     result["thermal_valid"] = all(value == 0 for value in thermals)
     # End observations lag their diagnostic writes by at most one poll. A
     # two-second guard conservatively includes both ends of each decode.
-    # Setup builds are allowed; timing never acquires the build lock.
+    # The caller controls build exclusion; this driver records compiler use.
     result["compiler_poll_seconds"] = 1
     result["compiler_window_guard_seconds"] = 2
     result["decode_windows"] = []

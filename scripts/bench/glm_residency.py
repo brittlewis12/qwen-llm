@@ -1,6 +1,7 @@
 """Read-only macOS process/host observations for glm-workspace.py."""
 
 import ctypes
+import json
 import os
 import re
 import subprocess
@@ -60,10 +61,8 @@ def host():
 
 
 class Observer:
-    def __init__(self, memory_map=False):
+    def __init__(self):
         self.samples = []
-        self.memory_map = memory_map
-        self.mapping = None
 
     def sample(self, rows, log):
         now = time.time()
@@ -81,29 +80,12 @@ class Observer:
                                       if int(pid) in compilers),
             "compiler_footprint_bytes": sum(u["footprint"] for u in compiler_usage),
             "driver": usage(os.getpid()), "qwen": usage(pid) if pid else None})
-        if (self.memory_map and self.mapping is None and pid and log and log.exists()
-                and '"phase":"after_session"' in log.read_text()):
-            started = time.monotonic()
-            try:
-                result = subprocess.run(["vmmap", "-w", str(pid)], capture_output=True,
-                                        text=True, timeout=5)
-            except subprocess.TimeoutExpired:
-                self.mapping = {"status": "timeout", "wall_ms": (time.monotonic()-started)*1000}
-                return
-            lines = result.stdout.splitlines()
-            # Keep compact mapping rows and the OS summary, without host paths.
-            gguf = [line[:line.rfind(" /")] + " " + line.rsplit("/", 1)[-1]
-                    for line in lines if ".gguf" in line and " /" in line]
-            summary = lines[next((i for i, line in enumerate(lines)
-                                  if "REGION TYPE" in line and "VIRTUAL" in line), len(lines)):]
-            self.mapping = {"status": result.returncode,
-                "wall_ms": (time.monotonic()-started)*1000,
-                "gguf_rows": gguf, "summary": summary[-100:],
-                "stderr": result.stderr[-500:]}
 
     def finish(self, text):
-        events = [__import__("json").loads(line.split("glm residency: ", 1)[1])
+        events = [json.loads(line.split("glm residency: ", 1)[1])
                   for line in text.splitlines() if "glm residency: " in line]
+        if not events or events[0]["phase"] != "before_prefetch" or events[-1]["phase"] != "after_decode":
+            raise RuntimeError("missing complete native phase observations; use the instrumented engine commit")
         phases = []
         for before, after in zip(events, events[1:]):
             observed = [sample for sample in self.samples
@@ -128,7 +110,7 @@ class Observer:
                     key: {"min": min(values), "max": max(values), "delta": values[-1]-values[0]}
                     for key in set.intersection(*(set(row) for row in readings))
                     if (values := [row[key] for row in readings])} if readings else {}
-        return {"events": events, "phases": phases, "mapping": self.mapping,
+        return {"events": events, "phases": phases,
                 "sample_count": len(self.samples), "sample_guard_seconds": 1,
                 "initial_host": self.samples[0] if self.samples else None,
                 "final_host": self.samples[-1] if self.samples else None}

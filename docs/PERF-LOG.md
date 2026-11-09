@@ -124,8 +124,8 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   rounds: matrix rollback **28.401499 ms**, live-column scalar SIMD
   **32.672990 ms**, **4.271491 ms slower (+15.0% latency)**. A separate
   **`732a7f57`** rollback is **28.106214 ms**, with identical complete logit-stream
-  hashes to the first rollback. All candidate outputs are finite; its changed
-  reduction changes hashes. No accuracy, 64K, ABBA or serve qualification was
+  hashes to the first rollback. All candidate outputs are finite; hashes differ.
+  No accuracy, 64K, ABBA or serve qualification was
   spent on the failed candidate. No isolated-kernel speed claim substitutes for
   this decision.
 - Committed probe: `cargo build --offline --locked --release -p qwen-llm
@@ -150,6 +150,13 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   **`~/qwen-runs/2026-11-08-v41-batch-depth`** bulk is deleted on both hosts.
   Retain only compact results, waits and commands under
   **`~/qwen-runs/2026-11-09-v41-batch-attn/`**; delete regenerable build/run bulk.
+- Post-decision continuation: rebased on **`51ff3826`**, zero production-source
+  changes. M5 `nice -n 10 cargo test --offline --locked --release -p qwen-llm
+  --example v41_batch_depth comparison_tests` passes **4/4 CPU tests**: analytic
+  KL, additive-logit invariance, finite/matching data, exact file extents. No
+  build lock or GPU lease is used for these tests. Full lib/CLI/contracts are
+  deferred to a runtime candidate that clears the kill gate. No owned process or
+  model server remains; no merge.
 
 ## 2026-11-09 - Share V4.1 HC Pre Grids Across Concurrent Decode Sequences
 

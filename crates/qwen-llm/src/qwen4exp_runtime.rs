@@ -692,6 +692,7 @@ impl Drop for PleCacheWarm {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Qwen4ExpDecodeOptions {
     pub causal_executor: bool,
+    pub gpu_token_loop: bool,
     pub guarded_topk: bool,
     pub hc_up_mix: bool,
 }
@@ -700,6 +701,7 @@ impl Default for Qwen4ExpDecodeOptions {
     fn default() -> Self {
         Self {
             causal_executor: true,
+            gpu_token_loop: true,
             guarded_topk: true,
             hc_up_mix: true,
         }
@@ -711,6 +713,7 @@ impl Qwen4ExpDecodeOptions {
     fn qualified(self, capabilities: [bool; 2]) -> Self {
         Self {
             causal_executor: self.causal_executor,
+            gpu_token_loop: self.gpu_token_loop,
             guarded_topk: self.guarded_topk && capabilities[0],
             hc_up_mix: self.hc_up_mix && capabilities[1],
         }
@@ -999,6 +1002,7 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             workspace.configure_hc_up_mix(ctx, true)?;
         }
         workspace.causal_executor = decode.causal_executor;
+        workspace.gpu_token_loop = decode.gpu_token_loop;
         let session_admission = workspace.admission();
         let aggregate = session_plan
             .memory_plan()
@@ -1165,6 +1169,58 @@ impl Qwen4ExpCapturedRows<'_> {
 }
 
 impl Qwen4ExpTextRunner<'_, '_, '_> {
+    /// Generate from completed logits with GPU token feedback and one command
+    /// prepared ahead. `emit=false` stops after that token; EOS is not emitted.
+    /// The final emitted token is retained by the caller, as in ordinary decode,
+    /// and has not been forwarded. No prepared command is committed after stop.
+    pub fn generate_gpu_tokens(
+        &mut self,
+        sampler: &mut crate::sampling::Sampler,
+        max_tokens: usize,
+        eos: &[i32],
+        mut emit: impl FnMut(i32) -> bool,
+    ) -> Result<crate::qwen4exp_text_session::Qwen4ExpGpuDecodeStats, Qwen4ExpRuntimeError> {
+        self.generate_gpu_tokens_observed(sampler, max_tokens, eos, move |token, _| emit(token))
+    }
+
+    /// Borrow the completed full logits row at each emitted token for numerical
+    /// qualification. No row is copied unless the observer chooses to copy it.
+    pub fn generate_gpu_tokens_observed(
+        &mut self,
+        sampler: &mut crate::sampling::Sampler,
+        max_tokens: usize,
+        eos: &[i32],
+        emit: impl FnMut(i32, &[f32]) -> bool,
+    ) -> Result<crate::qwen4exp_text_session::Qwen4ExpGpuDecodeStats, Qwen4ExpRuntimeError> {
+        if !self.workspace.gpu_token_loop {
+            return invalid("GPU token loop is disabled");
+        }
+        if max_tokens.saturating_sub(1) > self.remaining_forwards() {
+            return invalid("GPU generation exceeds logical forward limit");
+        }
+        let stats = crate::qwen4exp_text_session::generate_gpu_tokens(
+            self.ctx,
+            self.ple_table,
+            &self.weights,
+            &mut self.workspace,
+            sampler,
+            max_tokens,
+            eos,
+            emit,
+        )?;
+        self.last_token_timing = None;
+        Ok(stats)
+    }
+
+    pub fn gpu_token_loop_enabled(&self) -> bool {
+        self.workspace.gpu_token_loop
+    }
+
+    /// Independent rollback for the feedback driver. This does not select a
+    /// batching strategy or change another session's policy.
+    pub fn configure_gpu_token_loop(&mut self, enabled: bool) {
+        self.workspace.gpu_token_loop = enabled;
+    }
     /// Select causal dependency waves and scalar FFN epilogues for subsequent
     /// single-row forwards. Packed prefill and independent session owners keep
     /// their existing scheduling. The exclusive runner borrow excludes in-flight
@@ -2262,9 +2318,14 @@ fn execute_qwen4exp_text_token_with_post_layer_hyper_probe_sync(
     };
     drop(pending);
     if encoder.causal_mode {
-        encoder
-            .finish_causal_scope(ctx, false)
-            .map_err(Qwen4ExpTextSessionError::from)?;
+        if let Err(error) = encoder.finish_causal_scope(ctx, false) {
+            encoder.cancel_causal_scope();
+            encoder.end();
+            unsafe {
+                workspace.abandon_uncommitted()?;
+            }
+            return Err(Qwen4ExpTextSessionError::from(error).into());
+        }
     }
     encoder.end();
     let encode_cpu_ms = wall_started.elapsed().as_secs_f64() * 1e3;

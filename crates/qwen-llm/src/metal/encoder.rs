@@ -14,6 +14,9 @@ use super::*;
 pub struct KernelEncoder {
     pub(crate) recording: std::cell::RefCell<Option<causal::Recording>>,
     pub(crate) causal_mode: bool,
+    /// Set only while an exclusive device-decode session owns all nested state.
+    /// No child command ownership or CPU input staging is acquired in that mode.
+    gpu_position: Option<usize>,
     // Swapped only by the opt-in per-dispatch profiler (`dispatch_profile`).
     pub(crate) raw: std::cell::RefCell<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>>,
     pub(crate) parent: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -52,6 +55,7 @@ impl KernelEncoder {
         Self {
             recording: std::cell::RefCell::new(None),
             causal_mode: false,
+            gpu_position: None,
             raw: std::cell::RefCell::new(raw),
             parent: parent.clone(),
             ended: false,
@@ -96,6 +100,25 @@ impl KernelEncoder {
         enc.causal_mode = true;
         enc.begin_causal_scope();
         enc
+    }
+
+    pub(crate) fn gpu_owned(&self) -> bool {
+        self.gpu_position.is_some()
+    }
+
+    pub(crate) fn gpu_position(&self) -> Option<usize> {
+        self.gpu_position
+    }
+
+    /// Delegate child ownership and CPU staging to an enclosing device session.
+    ///
+    /// # Safety
+    /// The caller must hold exclusive logical ownership of the entire session,
+    /// supply GPU inputs/controls, submit commands in causal order, and drain all
+    /// committed commands before publishing metadata or releasing that owner.
+    pub(crate) unsafe fn delegate_session_owner(&mut self, position: usize) {
+        assert!(self.gpu_position.is_none());
+        self.gpu_position = Some(position);
     }
 
     pub(crate) fn parent_command_buffer(&self) -> Retained<ProtocolObject<dyn MTLCommandBuffer>> {

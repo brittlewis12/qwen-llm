@@ -256,7 +256,9 @@ impl KernelEncoder {
             (0..spans.len()).map(|i| vec![i]).collect()
         };
         #[cfg(any(test, feature = "perf-ablations"))]
-        if TAIL_ENABLED.with(Cell::get) && (recording.nodes.len() < 10 || TAIL_TRACE.with(|t| t.borrow().len() < 3)) {
+        if TAIL_ENABLED.with(Cell::get)
+            && (recording.nodes.len() < 10 || TAIL_TRACE.with(|t| t.borrow().len() < 3))
+        {
             let rows:Vec<_>=recording.nodes.iter().zip(&spans).map(|(n,s)|serde_json::json!({"kernel":n.name(),"args":n.state.words(0),"spans":s.iter().map(|a|serde_json::json!({"buffer":a.buffer,"lo":a.lo,"hi":a.hi,"write":a.write})).collect::<Vec<_>>()})).collect();
             TAIL_TRACE.with(|t| {
                 t.borrow_mut()
@@ -351,7 +353,8 @@ fn fuse_flash_next(ctx: &MetalContext, nodes: &mut Vec<Node>, mode: u8) -> Resul
     let inject = nodes
         .iter()
         .rposition(|n| n.name() == "kernel_qwen4exp_hc_inject_f32");
-    if let (true, Some(sum), Some(axpy), Some(inject)) = (mode < 4 || mode >= 6, sum, axpy, inject) {
+    if let (true, Some(sum), Some(axpy), Some(inject)) = (mode < 4 || mode >= 6, sum, axpy, inject)
+    {
         if sum < axpy && axpy + 2 == inject && nodes[axpy + 1].name() == "kernel_copy_offset_f32" {
             let s = &nodes[sum];
             let a = &nodes[axpy];
@@ -408,7 +411,9 @@ fn fuse_flash_next(ctx: &MetalContext, nodes: &mut Vec<Node>, mode: u8) -> Resul
         }
     }
     // A scalar mixer copy followed immediately by injection has no other reader.
-    if mode >= 6 { return Ok(()); }
+    if mode >= 6 {
+        return Ok(());
+    }
     let mut i = 0;
     while i + 1 < nodes.len() {
         if nodes[i].name() == "kernel_copy_offset_f32"

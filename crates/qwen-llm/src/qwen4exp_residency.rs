@@ -285,11 +285,11 @@ impl Qwen4ExpPleSourcePlan {
         if !self.descriptor.matches(desc) {
             return invalid("PLE descriptor changed after weight planning");
         }
-        Ok(PleIq4NlTable::new(
-            desc,
-            gguf.try_slice(desc)?,
-            self.logical_row_count,
-        )?)
+        let table = PleIq4NlTable::new(desc, gguf.try_slice(desc)?, self.logical_row_count)?;
+        let mmap = gguf
+            .shard_mmap_ref(desc.shard_idx)
+            .ok_or_else(|| Qwen4ExpResidencyError::Invalid("PLE mapping is missing".into()))?;
+        Ok(table.with_backing(mmap, desc.shard_idx, desc.data_offset as usize))
     }
 }
 

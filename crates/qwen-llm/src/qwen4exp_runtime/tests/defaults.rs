@@ -4,11 +4,13 @@ use super::*;
 fn decode_policy_defaults_and_independent_qualification() {
     let on = Qwen4ExpDecodeOptions {
         causal_executor: true,
+        gpu_token_loop: true,
         guarded_topk: true,
         hc_up_mix: true,
     };
     let off = Qwen4ExpDecodeOptions {
         causal_executor: true,
+        gpu_token_loop: true,
         guarded_topk: false,
         hc_up_mix: false,
     };
@@ -20,6 +22,7 @@ fn decode_policy_defaults_and_independent_qualification() {
         let flags = [bits & 1 != 0, bits & 2 != 0];
         let expected = Qwen4ExpDecodeOptions {
             causal_executor: true,
+            gpu_token_loop: true,
             guarded_topk: flags[0],
             hc_up_mix: flags[1],
         };

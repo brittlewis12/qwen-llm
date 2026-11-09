@@ -1575,6 +1575,9 @@ fn reserve_command(
     scratch: &mut GatedResidualMetalScratch,
     enc: &KernelEncoder,
 ) -> Result<(), Qwen4ExpMetalError> {
+    if enc.gpu_owned() {
+        return Ok(());
+    }
     let command = enc.parent_command_buffer();
     match scratch.active_command.as_ref() {
         None => {

@@ -99,6 +99,7 @@ fn product_guarded_topk_shared_prefix() {
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
             causal_executor: true,
+            gpu_token_loop: true,
             guarded_topk: true,
             hc_up_mix: false,
         },

@@ -303,6 +303,7 @@ pub enum SamplingError {
 
 #[derive(Clone, Debug)]
 pub struct Sampler {
+    gpu_sampling_used: bool,
     config: SamplingConfig,
     rng: Xoshiro256PlusPlus,
     draws: usize,
@@ -311,9 +312,30 @@ pub struct Sampler {
 }
 
 impl Sampler {
+    /// Peek the request-local draw for a command being pre-encoded. A discarded
+    /// command consumes no RNG state. GPU categorical arithmetic is version 2.
+    pub(crate) fn gpu_uniform(&self, ahead: usize) -> f32 {
+        if self.config.temperature == 0.0 {
+            return 0.0;
+        }
+        let mut rng = self.rng.clone();
+        for _ in 0..ahead {
+            rng.next_u64();
+        }
+        (rng.next_unit_f64() as f32).min(f32::from_bits(0x3f7fffff))
+    }
+
+    pub(crate) fn commit_gpu_draw(&mut self) {
+        if self.config.temperature > 0.0 {
+            self.gpu_sampling_used = true;
+            self.rng.next_u64();
+            self.draws += 1;
+        }
+    }
     pub fn new(config: SamplingConfig) -> Result<Self, SamplingError> {
         let config = config.validate()?;
         Ok(Self {
+            gpu_sampling_used: false,
             config,
             rng: Xoshiro256PlusPlus::from_seed(config.seed),
             draws: 0,
@@ -334,6 +356,14 @@ impl Sampler {
 
     pub fn config(&self) -> SamplingConfig {
         self.config
+    }
+
+    pub fn algorithm_version(&self) -> u32 {
+        if self.gpu_sampling_used {
+            crate::metal::GPU_SAMPLER_ALGORITHM_VERSION
+        } else {
+            SAMPLER_ALGORITHM_VERSION
+        }
     }
 
     pub fn draws(&self) -> usize {

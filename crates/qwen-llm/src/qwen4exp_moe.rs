@@ -1360,6 +1360,14 @@ impl Qwen4ExpMoePackedMotorScratch {
 }
 
 impl Qwen4ExpMoeMetalWorkspace {
+    pub(crate) fn gpu_route_status(&self) -> MetalTensor {
+        self.route_status.clone()
+    }
+
+    pub(crate) fn validate_gpu_decode_status(&self) -> Result<(), Qwen4ExpMoeError> {
+        crate::metal::check_moe_route_status("qwen4exp_gpu_decode", &self.route_status, 1)
+            .map_err(|e| Qwen4ExpMoeError::Invalid(e.to_string()))
+    }
     pub(crate) fn validate_topk_binding(&self, ctx: &MetalContext) -> Result<(), Qwen4ExpMoeError> {
         self.require_idle()?;
         if self.state_poisoned {
@@ -1524,11 +1532,13 @@ impl Qwen4ExpMoeMetalOutput<'_> {
     ) -> Result<(), Qwen4ExpMoeError> {
         validate_encoder(ctx, enc)?;
         let command = enc.parent_command_buffer();
-        let Some(owner) = self.workspace.active_command.as_ref() else {
-            return invalid("MoE output has no owning command buffer");
-        };
-        if !std::ptr::addr_eq(Retained::as_ptr(owner), Retained::as_ptr(&command)) {
-            return invalid("MoE output must be copied by its owning command buffer");
+        if !enc.gpu_owned() {
+            let Some(owner) = self.workspace.active_command.as_ref() else {
+                return invalid("MoE output has no owning command buffer");
+            };
+            if !std::ptr::addr_eq(Retained::as_ptr(owner), Retained::as_ptr(&command)) {
+                return invalid("MoE output must be copied by its owning command buffer");
+            }
         }
         require_tensor(
             "MoE copied output destination",
@@ -3661,6 +3671,9 @@ fn reserve_command(
     workspace: &mut Qwen4ExpMoeMetalWorkspace,
     enc: &KernelEncoder,
 ) -> Result<(), Qwen4ExpMoeError> {
+    if enc.gpu_owned() {
+        return Ok(());
+    }
     workspace.require_idle()?;
     workspace.active_command = Some(enc.parent_command_buffer());
     Ok(())

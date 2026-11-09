@@ -60,6 +60,10 @@ mod capture;
 mod checkpoint;
 pub(crate) mod decode_batch;
 mod device_checkpoint;
+mod gpu_decode;
+mod gpu_inputs;
+pub use gpu_decode::Qwen4ExpGpuDecodeStats;
+pub(crate) use gpu_decode::generate as generate_gpu_tokens;
 mod row_logits;
 mod snapshot;
 mod snapshot_copy;
@@ -1007,7 +1011,9 @@ impl Qwen4ExpTextPackedScratch {
 use crate::qwen4exp_metal::encode_final_gated_residual_mix;
 
 pub struct Qwen4ExpTextSessionMetalWorkspace {
+    gpu_inputs: Option<gpu_inputs::GpuInputs>,
     pub(crate) causal_executor: bool,
+    pub(crate) gpu_token_loop: bool,
     checkpoint_lineage: CheckpointLineage,
     geometry: Qwen4ExpTextSessionMetalGeometry,
     zero_one: Qwen4ExpLayersZeroOneMetalWorkspace,
@@ -1106,7 +1112,9 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             None
         };
         let workspace = Self {
+            gpu_inputs: None,
             causal_executor: true,
+            gpu_token_loop: true,
             checkpoint_lineage: CheckpointLineage::fresh()?,
             zero_one: Qwen4ExpLayersZeroOneMetalWorkspace::new(ctx, geometry.zero_one)?,
             packed,

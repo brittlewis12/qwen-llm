@@ -45,6 +45,7 @@ pub enum PleGatherError {
 
 #[derive(Clone, Copy)]
 pub struct PleIq4NlTable<'a> {
+    backing: Option<(&'a std::sync::Arc<memmap2::Mmap>, usize, usize)>,
     bytes: &'a [u8],
     row_width: usize,
     row_count: usize,
@@ -53,6 +54,21 @@ pub struct PleIq4NlTable<'a> {
 }
 
 impl<'a> PleIq4NlTable<'a> {
+    pub(crate) fn with_backing(
+        mut self,
+        mmap: &'a std::sync::Arc<memmap2::Mmap>,
+        shard: usize,
+        offset: usize,
+    ) -> Self {
+        self.backing = Some((mmap, shard, offset));
+        self
+    }
+    pub(crate) fn gpu_backing(&self) -> Option<(&'a std::sync::Arc<memmap2::Mmap>, usize, usize)> {
+        self.backing
+    }
+    pub(crate) fn gpu_bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
     pub fn new(
         desc: &TensorDesc,
         bytes: &'a [u8],
@@ -95,6 +111,7 @@ impl<'a> PleIq4NlTable<'a> {
         }
 
         Ok(Self {
+            backing: None,
             bytes,
             row_width,
             row_count,

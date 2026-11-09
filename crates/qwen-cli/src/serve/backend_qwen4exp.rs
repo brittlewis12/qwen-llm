@@ -660,19 +660,46 @@ impl GenerationBackend for FlashNextBackend {
             };
             let mut retention_ms = 0.0;
             let mut completed_capture_ms = 0.0;
-            let generation = decode_loop::decode_serial(
-                decode_loop::DecodeRequest {
-                    family: FAMILY,
-                    logits,
-                    max_tokens,
-                    stop_tokens: &self.stop_tokens,
-                    vocab_size: self.vocab_size,
-                },
+            let mut transport_abort = None;
+            let gpu = crate::qwen4exp::try_generate_qwen4exp_gpu(
+                &mut runner,
+                max_tokens,
+                &self.stop_tokens,
                 &mut sampler,
-                &self.tokenizer,
-                sink,
-                |token| Ok(runner.forward_token(token)?.to_vec()),
-            )?;
+                |token| {
+                    let bytes = self
+                        .tokenizer
+                        .try_decode_piece_bytes_exact(token)
+                        .with_context(|| format!("decode {FAMILY} token {token}"))?;
+                    sink.piece(&bytes)
+                        .and_then(|()| sink.tick())
+                        .map_err(|error| {
+                            transport_abort = Some(error);
+                            anyhow::anyhow!("client disconnected during GPU decode")
+                        })
+                },
+            )
+            .map_err(|error| match transport_abort {
+                Some(error) => BackendFailure::Aborted(error),
+                None => ServeError::server_error(format!("{FAMILY} GPU decode: {error:#}")).into(),
+            })?;
+            let generation = if let Some((generation, _)) = gpu {
+                generation
+            } else {
+                decode_loop::decode_serial(
+                    decode_loop::DecodeRequest {
+                        family: FAMILY,
+                        logits,
+                        max_tokens,
+                        stop_tokens: &self.stop_tokens,
+                        vocab_size: self.vocab_size,
+                    },
+                    &mut sampler,
+                    &self.tokenizer,
+                    sink,
+                    |token| Ok(runner.forward_token(token)?.to_vec()),
+                )?
+            };
 
             // Keep exactly the consumed prefix; the final sampled token has
             // not been forwarded. Completed state stays live until a branch

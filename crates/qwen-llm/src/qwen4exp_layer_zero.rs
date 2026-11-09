@@ -276,6 +276,16 @@ pub struct Qwen4ExpLayerZeroMetalWorkspace {
 }
 
 impl Qwen4ExpLayerZeroMetalWorkspace {
+    pub(crate) fn gpu_token_input(&self) -> MetalTensor {
+        self.token_id.clone()
+    }
+    pub(crate) fn gpu_route_status(&self) -> MetalTensor {
+        self.moe.gpu_route_status()
+    }
+    pub(crate) fn validate_gpu_decode_status(&self) -> Result<(), Qwen4ExpLayerZeroError> {
+        self.moe.validate_gpu_decode_status()?;
+        Ok(())
+    }
     pub fn new(
         ctx: &MetalContext,
         geometry: Qwen4ExpLayerZeroMetalGeometry,
@@ -558,11 +568,13 @@ impl Qwen4ExpLayerZeroMetalOutput<'_> {
     ) -> Result<(), Qwen4ExpLayerZeroError> {
         validate_encoder(ctx, enc)?;
         let command = enc.parent_command_buffer();
-        let Some(owner) = self.workspace.active_command.as_ref() else {
-            return invalid("layer-zero output has no owning command buffer");
-        };
-        if !std::ptr::addr_eq(Retained::as_ptr(owner), Retained::as_ptr(&command)) {
-            return invalid("layer-zero output must be copied by its owning command buffer");
+        if !enc.gpu_owned() {
+            let Some(owner) = self.workspace.active_command.as_ref() else {
+                return invalid("layer-zero output has no owning command buffer");
+            };
+            if !std::ptr::addr_eq(Retained::as_ptr(owner), Retained::as_ptr(&command)) {
+                return invalid("layer-zero output must be copied by its owning command buffer");
+            }
         }
         require_tensor(
             "layer-zero copied output destination",
@@ -622,7 +634,9 @@ pub fn encode_qwen4exp_layer_zero<'a>(
         ));
     }
     validate_contract(ctx, weights, workspace)?;
-    write_token_id(&workspace.token_id, token_id as i32)?;
+    if !enc.gpu_owned() {
+        write_token_id(&workspace.token_id, token_id as i32)?;
+    }
     reserve_command(workspace, enc)?;
 
     if let Err(error) = encode_step(ctx, enc, weights, workspace) {
@@ -975,6 +989,9 @@ fn reserve_command(
     workspace: &mut Qwen4ExpLayerZeroMetalWorkspace,
     enc: &KernelEncoder,
 ) -> Result<(), Qwen4ExpLayerZeroError> {
+    if enc.gpu_owned() {
+        return Ok(());
+    }
     workspace.require_idle()?;
     workspace.active_command = Some(enc.parent_command_buffer());
     workspace.encode_failed = false;

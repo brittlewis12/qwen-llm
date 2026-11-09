@@ -263,6 +263,30 @@ pub struct Qwen4ExpLayersZeroOneMetalWorkspace {
 }
 
 impl Qwen4ExpLayersZeroOneMetalWorkspace {
+    pub(crate) fn gpu_input_buffers(&self) -> (MetalTensor, MetalTensor) {
+        (
+            self.layer_zero.gpu_token_input(),
+            self.ple.gpu_packed_rows(),
+        )
+    }
+    pub(crate) fn gpu_route_statuses(&self) -> [MetalTensor; 2] {
+        [
+            self.layer_zero.gpu_route_status(),
+            self.layer_one_moe.gpu_route_status(),
+        ]
+    }
+    pub(crate) fn validate_gpu_decode_status(&self) -> Result<(), Qwen4ExpLayersZeroOneError> {
+        self.layer_zero.validate_gpu_decode_status()?;
+        self.layer_one_moe.validate_gpu_decode_status()?;
+        Ok(())
+    }
+    pub(crate) fn publish_gpu_decode_history(&mut self, history: PleHistory) {
+        debug_assert!(self.active_command.is_none() && self.pending_history.is_none());
+        self.history = history;
+    }
+    pub(crate) fn gpu_decode_history(&self) -> PleHistory {
+        self.history.clone()
+    }
     pub fn new(
         ctx: &MetalContext,
         geometry: Qwen4ExpLayersZeroOneMetalGeometry,
@@ -600,11 +624,15 @@ impl Qwen4ExpLayersZeroOneMetalOutput<'_> {
     ) -> Result<(), Qwen4ExpLayersZeroOneError> {
         validate_encoder(ctx, enc)?;
         let command = enc.parent_command_buffer();
-        let Some(owner) = self.workspace.active_command.as_ref() else {
-            return invalid("layers-zero-one output has no owning command buffer");
-        };
-        if !std::ptr::addr_eq(Retained::as_ptr(owner), Retained::as_ptr(&command)) {
-            return invalid("layers-zero-one output must be copied by its owning command buffer");
+        if !enc.gpu_owned() {
+            let Some(owner) = self.workspace.active_command.as_ref() else {
+                return invalid("layers-zero-one output has no owning command buffer");
+            };
+            if !std::ptr::addr_eq(Retained::as_ptr(owner), Retained::as_ptr(&command)) {
+                return invalid(
+                    "layers-zero-one output must be copied by its owning command buffer",
+                );
+            }
         }
         require_tensor(
             "layers-zero-one copied output destination",
@@ -662,11 +690,13 @@ pub(crate) fn encode_qwen4exp_layers_zero_one_staged<'a>(
     next_history: PleHistory,
     workspace: &'a mut Qwen4ExpLayersZeroOneMetalWorkspace,
 ) -> Result<Qwen4ExpLayersZeroOneMetalRead<'a>, Qwen4ExpLayersZeroOneError> {
-    if !workspace.ple.has_staged_rows() {
+    if !enc.gpu_owned() && !workspace.ple.has_staged_rows() {
         return invalid("layers-zero-one PLE rows were not staged by the parent");
     }
     reserve_command(workspace, enc)?;
-    workspace.pending_history = Some(next_history);
+    if !enc.gpu_owned() {
+        workspace.pending_history = Some(next_history);
+    }
     if let Err(error) = encode_step(ctx, enc, token_id, weights, workspace) {
         workspace.encode_failed = true;
         workspace.state_poisoned = true;
@@ -1577,6 +1607,9 @@ fn reserve_command(
     workspace: &mut Qwen4ExpLayersZeroOneMetalWorkspace,
     enc: &KernelEncoder,
 ) -> Result<(), Qwen4ExpLayersZeroOneError> {
+    if enc.gpu_owned() {
+        return Ok(());
+    }
     workspace.require_idle()?;
     workspace.active_command = Some(enc.parent_command_buffer());
     workspace.encode_failed = false;

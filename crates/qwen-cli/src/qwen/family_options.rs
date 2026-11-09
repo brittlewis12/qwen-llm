@@ -174,6 +174,14 @@ pub(crate) const QWEN4EXP_HC_UP_MIX_ENV: &str = "QWEN4EXP_HC_UP_MIX";
 /// `qwen serve` backend construction, and per `qwen-bench` setup.
 pub(crate) const QWEN4EXP_GUARDED_TOPK_ENV: &str = "QWEN4EXP_GUARDED_TOPK";
 
+/// Enable causal dependency waves and the scalar FFN epilogue. Defaults on;
+/// accepts only 0/1. Shared by Flash-Next run and serve initialization.
+pub(crate) const QWEN4EXP_CAUSAL_EXECUTOR_ENV: &str = "QWEN4EXP_CAUSAL_EXECUTOR";
+
+/// Enable GPU sampling/PLE inputs and one-command-ahead serial generation.
+/// Defaults on; accepts only 0/1. Independent from the causal executor rollback.
+pub(crate) const QWEN4EXP_GPU_TOKEN_LOOP_ENV: &str = "QWEN4EXP_GPU_TOKEN_LOOP";
+
 /// Enables Muse split decode for `qwen run`. Defaults on; accepts `0` (off)
 /// or `1` (on); other UTF-8 values error with
 /// `QWEN_MUSE_SPLIT_DECODE must be 0 or 1, got {value:?}`, and non-UTF-8
@@ -206,8 +214,12 @@ pub(crate) const DEEPSEEK_V4_PREFILL_CHUNK_ENV: &str = "QWEN_DSV4_PREFILL_CHUNK_
 pub(crate) fn qwen4exp_decode_options_from_env() -> Result<Qwen4ExpDecodeOptions> {
     Ok(Qwen4ExpDecodeOptions {
         causal_executor: parse_qwen4exp_decode_flag(
-            std::env::var_os("QWEN4EXP_CAUSAL_EXECUTOR").as_deref(),
-            "QWEN4EXP_CAUSAL_EXECUTOR",
+            std::env::var_os(QWEN4EXP_CAUSAL_EXECUTOR_ENV).as_deref(),
+            QWEN4EXP_CAUSAL_EXECUTOR_ENV,
+        )?,
+        gpu_token_loop: parse_qwen4exp_decode_flag(
+            std::env::var_os(QWEN4EXP_GPU_TOKEN_LOOP_ENV).as_deref(),
+            QWEN4EXP_GPU_TOKEN_LOOP_ENV,
         )?,
         guarded_topk: parse_qwen4exp_decode_flag(
             std::env::var_os(QWEN4EXP_GUARDED_TOPK_ENV).as_deref(),
@@ -676,7 +688,12 @@ mod tests {
 
     #[test]
     fn qwen4exp_decode_flags_follow_the_documented_contract() {
-        for name in [QWEN4EXP_GUARDED_TOPK_ENV, QWEN4EXP_HC_UP_MIX_ENV] {
+        for name in [
+            QWEN4EXP_GUARDED_TOPK_ENV,
+            QWEN4EXP_HC_UP_MIX_ENV,
+            QWEN4EXP_CAUSAL_EXECUTOR_ENV,
+            QWEN4EXP_GPU_TOKEN_LOOP_ENV,
+        ] {
             for (value, expected) in [
                 (None, true),
                 (Some(OsStr::new("0")), false),

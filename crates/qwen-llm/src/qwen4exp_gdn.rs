@@ -523,11 +523,13 @@ impl GatedDeltaNetMetalOutput<'_> {
             return invalid("dependent GDN output copies require a serial encoder");
         }
         let command = enc.parent_command_buffer();
-        let Some(owner) = self.workspace.active_command.as_ref() else {
-            return invalid("GDN output has no owning command buffer");
-        };
-        if !std::ptr::addr_eq(Retained::as_ptr(owner), Retained::as_ptr(&command)) {
-            return invalid("GDN output must be copied by its owning command buffer");
+        if !enc.gpu_owned() {
+            let Some(owner) = self.workspace.active_command.as_ref() else {
+                return invalid("GDN output has no owning command buffer");
+            };
+            if !std::ptr::addr_eq(Retained::as_ptr(owner), Retained::as_ptr(&command)) {
+                return invalid("GDN output must be copied by its owning command buffer");
+            }
         }
         require_f32(
             "GDN copied output destination",
@@ -1805,6 +1807,9 @@ fn reserve_command(
     workspace: &mut GatedDeltaNetMetalWorkspace,
     enc: &KernelEncoder,
 ) -> Result<(), Qwen4ExpGdnError> {
+    if enc.gpu_owned() {
+        return Ok(());
+    }
     let command = enc.parent_command_buffer();
     match workspace.active_command.as_ref() {
         None => {

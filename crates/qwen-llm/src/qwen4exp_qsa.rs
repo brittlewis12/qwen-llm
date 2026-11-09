@@ -1552,6 +1552,32 @@ impl QwenSparseAttentionSelectedPackedScratch {
 }
 
 impl QwenSparseAttentionMetalWorkspace {
+    pub(crate) fn gpu_control_tensors(&self) -> [(MetalTensor, u32); 3] {
+        [
+            (self.visible_blocks.clone(), self.geometry.ratio as u32),
+            (self.selector_status.clone(), 0),
+            (self.selected_count.clone(), 0),
+        ]
+    }
+    pub(crate) fn validate_gpu_decode_status(
+        &self,
+        position: usize,
+    ) -> Result<(), Qwen4ExpQsaError> {
+        let status = read_i32_scalar(&self.selector_status)?;
+        let count = read_i32_scalar(&self.selected_count)?;
+        let expected =
+            ((position + 1) / self.geometry.ratio).min(self.geometry.block_budget()) as i32;
+        if status != 0 || count != expected {
+            return invalid(format!(
+                "device QSA status={status} count={count} expected={expected}"
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn publish_gpu_decode_length(&mut self, length: usize) {
+        debug_assert!(self.active_command.is_none() && self.pending_length.is_none());
+        self.committed_length = length;
+    }
     pub fn new(
         ctx: &MetalContext,
         geometry: QwenSparseAttentionMetalGeometry,
@@ -1923,11 +1949,13 @@ impl QwenSparseAttentionMetalOutput<'_> {
     ) -> Result<(), Qwen4ExpQsaError> {
         validate_encoder(ctx, enc)?;
         let command = enc.parent_command_buffer();
-        let Some(owner) = self.workspace.active_command.as_ref() else {
-            return invalid("QSA output has no owning command buffer");
-        };
-        if !std::ptr::addr_eq(Retained::as_ptr(owner), Retained::as_ptr(&command)) {
-            return invalid("QSA output must be copied by its owning command buffer");
+        if !enc.gpu_owned() {
+            let Some(owner) = self.workspace.active_command.as_ref() else {
+                return invalid("QSA output has no owning command buffer");
+            };
+            if !std::ptr::addr_eq(Retained::as_ptr(owner), Retained::as_ptr(&command)) {
+                return invalid("QSA output must be copied by its owning command buffer");
+            }
         }
         require_tensor(
             "QSA copied output destination",
@@ -1984,7 +2012,14 @@ pub fn encode_qwen_sparse_attention_text<'a>(
     validate_contract(ctx, input, weights, workspace)?;
     preflight(ctx, weights)?;
 
-    let (position, sequence_length) = prepare_control_scalars(workspace)?;
+    let (position, sequence_length) = if let Some(position) = enc.gpu_position() {
+        if position >= workspace.geometry.capacity {
+            return invalid("device decode exceeds QSA capacity");
+        }
+        (position, position + 1)
+    } else {
+        prepare_control_scalars(workspace)?
+    };
     reserve_command(workspace, enc, sequence_length, 0)?;
 
     let encoded = encode_step(
@@ -6175,6 +6210,9 @@ fn reserve_command(
     pending_length: usize,
     pending_selected_bands: usize,
 ) -> Result<(), Qwen4ExpQsaError> {
+    if enc.gpu_owned() {
+        return Ok(());
+    }
     workspace.require_idle()?;
     workspace.active_command = Some(enc.parent_command_buffer());
     workspace.pending_length = Some(pending_length);

@@ -115,6 +115,7 @@ fn qualify_hc_product(guarded: bool, split_baseline: bool) {
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
             causal_executor: true,
+            gpu_token_loop: true,
             guarded_topk: guarded,
             hc_up_mix: true,
         },

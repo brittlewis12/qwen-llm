@@ -5,6 +5,87 @@ use super::*;
 #[path = "qwen4exp/dflash.rs"]
 mod dflash;
 
+/// Keep the serial token lifecycle (publish, stop, then consume) while the GPU
+/// owns feedback. A setup decline is eligible for CPU fallback before any draw
+/// or model transition. Failures after submission are surfaced, never replayed.
+pub(crate) fn try_generate_qwen4exp_gpu(
+    runner: &mut qwen_llm::qwen4exp_runtime::Qwen4ExpTextRunner<'_, '_, '_>,
+    max_tokens: usize,
+    stop_tokens: &[i32],
+    sampler: &mut Sampler,
+    mut on_token: impl FnMut(i32) -> Result<()>,
+) -> Result<
+    Option<(
+        GenerationResult,
+        qwen_llm::qwen4exp_text_session::Qwen4ExpGpuDecodeStats,
+    )>,
+> {
+    if !runner.gpu_token_loop_enabled() {
+        return Ok(None);
+    }
+    ensure!(max_tokens > 0, "max_tokens must be >= 1");
+    shutdown::checkpoint()?;
+    let draws = sampler.draws();
+    let mut tokens = Vec::with_capacity(max_tokens);
+    let mut callback_error = None;
+    let result = runner.generate_gpu_tokens(sampler, max_tokens, stop_tokens, |token| {
+        tokens.push(token);
+        let result = (|| {
+            shutdown::checkpoint()?;
+            on_token(token)?;
+            shutdown::checkpoint()
+        })();
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                callback_error = Some(error);
+                false
+            }
+        }
+    });
+    if let Some(error) = callback_error {
+        return Err(error);
+    }
+    let stats = match result {
+        Ok(stats) => stats,
+        Err(error) if !runner.is_poisoned() && tokens.is_empty() && sampler.draws() == draws => {
+            tracing::info!(target:"qwen_diag","Flash-Next GPU loop declined before generation: {error}");
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if stats.stopped_on_eos {
+        tokens.push(
+            stats
+                .terminal_token
+                .context("GPU EOS result omitted token")?,
+        );
+    }
+    ensure!(
+        tokens.len() == stats.sampled_tokens,
+        "GPU token accounting disagrees"
+    );
+    tracing::debug!(target:"qwen_diag","Flash-Next GPU loop: sampler_version={} stats={stats:?}",sampler.algorithm_version());
+    Ok(Some((
+        GenerationResult {
+            tokens,
+            wall_ms: stats.wall_ms,
+            first_token_selection_ms: stats.first_token_selection_ms,
+            first_token_ready_ms: stats.first_token_ready_ms,
+            first_token_callback_ms: stats.first_token_callback_ms,
+            transitions: stats.forwarded_tokens,
+            transition_ms: stats.transition_ms,
+            first_transition_ms: stats.first_transition_ms,
+            stop_reason: if stats.stopped_on_eos {
+                StopReason::Eos
+            } else {
+                StopReason::TokenLimit
+            },
+        },
+        stats,
+    )))
+}
+
 fn request_stats_preparation_ms(initial_ms: f64, packed_capacity_validation_ms: f64) -> f64 {
     initial_ms + packed_capacity_validation_ms
 }
@@ -114,6 +195,19 @@ pub(crate) struct Qwen4ExpTimingTotals {
 }
 
 impl Qwen4ExpTimingTotals {
+    pub(crate) fn record_gpu_loop(
+        &mut self,
+        stats: qwen_llm::qwen4exp_text_session::Qwen4ExpGpuDecodeStats,
+    ) {
+        // This counter represents command coverage (packed prefill already uses
+        // that convention), including the initial sampling-only command.
+        self.forwards += stats.sampled_tokens;
+        self.gpu_samples += stats.sampled_tokens;
+        self.encode_cpu_ms += stats.encode_cpu_ms;
+        self.completion_wait_ms += stats.completion_wait_ms;
+        self.gpu_ms += stats.gpu_ms;
+        self.total_wall_ms += stats.wall_ms;
+    }
     pub(crate) fn record(&mut self, timing: Qwen4ExpTokenTiming) {
         self.forwards += 1;
         self.encode_cpu_ms += timing.encode_cpu_ms;
@@ -879,26 +973,37 @@ pub(crate) fn run_qwen4exp_single_turn(
             let post_prefill_t0 = Instant::now();
             let mut sampler =
                 Sampler::new(sampling).context("initialize Qwen3.8-Flash-Next sampler")?;
-            let generation = generate_serial(
-                logits,
+            let generation = if let Some((generation, stats)) = try_generate_qwen4exp_gpu(
+                &mut runner,
                 args.tokens,
                 &stop_tokens,
                 &mut sampler,
                 &mut on_token,
-                |token| {
-                    let token = checked_token_id(token, vocab_size, "generated")?;
-                    let next_logits = runner
-                        .forward_token(token)
-                        .context("forward generated Qwen3.8-Flash-Next token")?
-                        .to_vec();
-                    decode_timing.record(
-                        runner
-                            .last_token_timing()
-                            .expect("successful Flash-Next forward records timing"),
-                    );
-                    Ok(next_logits)
-                },
-            )?;
+            )? {
+                decode_timing.record_gpu_loop(stats);
+                generation
+            } else {
+                generate_serial(
+                    logits,
+                    args.tokens,
+                    &stop_tokens,
+                    &mut sampler,
+                    &mut on_token,
+                    |token| {
+                        let token = checked_token_id(token, vocab_size, "generated")?;
+                        let next_logits = runner
+                            .forward_token(token)
+                            .context("forward generated Qwen3.8-Flash-Next token")?
+                            .to_vec();
+                        decode_timing.record(
+                            runner
+                                .last_token_timing()
+                                .expect("successful Flash-Next forward records timing"),
+                        );
+                        Ok(next_logits)
+                    },
+                )?
+            };
             let generator_return = Instant::now();
             let reported_pass =
                 measured_prefill_ms.map(|reported_ms| (reported_ms, post_prefill_t0));

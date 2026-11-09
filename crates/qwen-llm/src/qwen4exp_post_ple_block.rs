@@ -440,6 +440,28 @@ pub struct Qwen4ExpPostPleBlockMetalWorkspace {
 }
 
 impl Qwen4ExpPostPleBlockMetalWorkspace {
+    pub(crate) fn gpu_control_tensors(&self) -> Vec<(MetalTensor, u32)> {
+        let mut out = vec![(self.moe.gpu_route_status(), 0)];
+        if let Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(qsa) = &self.mixer {
+            out.extend(qsa.gpu_control_tensors());
+        }
+        out
+    }
+    pub(crate) fn validate_gpu_decode_status(
+        &self,
+        position: usize,
+    ) -> Result<(), Qwen4ExpPostPleBlockError> {
+        self.moe.validate_gpu_decode_status()?;
+        if let Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(qsa) = &self.mixer {
+            qsa.validate_gpu_decode_status(position)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn publish_gpu_decode_length(&mut self, length: usize) {
+        if let Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(qsa) = &mut self.mixer {
+            qsa.publish_gpu_decode_length(length);
+        }
+    }
     pub fn new(
         ctx: &MetalContext,
         geometry: Qwen4ExpPostPleBlockMetalGeometry,
@@ -833,7 +855,9 @@ pub fn encode_qwen4exp_post_ple_block<'workspace, 'resources>(
     workspace: &'workspace mut Qwen4ExpPostPleBlockMetalWorkspace,
 ) -> Result<Qwen4ExpPostPleBlockMetalRead<'workspace, 'resources>, Qwen4ExpPostPleBlockError> {
     validate_encoder(ctx, enc)?;
-    validate_and_preflight(ctx, position, hyper_residual, weights, workspace)?;
+    if !enc.gpu_owned() {
+        validate_and_preflight(ctx, position, hyper_residual, weights, workspace)?;
+    }
     reserve_command(workspace, enc)?;
     if let Err(error) = encode_step(ctx, enc, hyper_residual, weights, workspace) {
         workspace.encode_failed = true;
@@ -1835,6 +1859,9 @@ fn reserve_command(
     workspace: &mut Qwen4ExpPostPleBlockMetalWorkspace,
     enc: &KernelEncoder,
 ) -> Result<(), Qwen4ExpPostPleBlockError> {
+    if enc.gpu_owned() {
+        return Ok(());
+    }
     workspace.require_idle()?;
     workspace.active_command = Some(enc.parent_command_buffer());
     workspace.encode_failed = false;

@@ -44,6 +44,7 @@ fn native_parallel_topk_shared_prefix() {
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
             causal_executor: true,
+            gpu_token_loop: true,
             guarded_topk: false,
             hc_up_mix: false,
         },

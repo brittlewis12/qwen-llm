@@ -384,6 +384,9 @@ impl Qwen4ExpPlePackedMotorScratch {
 }
 
 impl Qwen4ExpPleMetalWorkspace {
+    pub(crate) fn gpu_packed_rows(&self) -> MetalTensor {
+        self.packed_rows.clone()
+    }
     pub fn new(
         ctx: &MetalContext,
         geometry: Qwen4ExpPleMetalGeometry,
@@ -590,11 +593,13 @@ impl Qwen4ExpPleMetalOutput<'_> {
     ) -> Result<(), Qwen4ExpPleMetalError> {
         validate_encoder(ctx, enc)?;
         let command = enc.parent_command_buffer();
-        let Some(owner) = self.workspace.active_command.as_ref() else {
-            return invalid("PLE output has no owning command buffer");
-        };
-        if !std::ptr::addr_eq(Retained::as_ptr(owner), Retained::as_ptr(&command)) {
-            return invalid("PLE output must be copied by its owning command buffer");
+        if !enc.gpu_owned() {
+            let Some(owner) = self.workspace.active_command.as_ref() else {
+                return invalid("PLE output has no owning command buffer");
+            };
+            if !std::ptr::addr_eq(Retained::as_ptr(owner), Retained::as_ptr(&command)) {
+                return invalid("PLE output must be copied by its owning command buffer");
+            }
         }
         require_tensor(
             "PLE copied output destination",
@@ -638,7 +643,7 @@ pub fn encode_qwen4exp_ple<'a>(
         return invalid("workspace causal state is indeterminate; reset it before reuse");
     }
     workspace.require_idle()?;
-    if !workspace.rows_staged {
+    if !enc.gpu_owned() && !workspace.rows_staged {
         return invalid("PLE rows must be staged before encoding a token");
     }
     if weights.geometry != workspace.geometry {
@@ -647,7 +652,9 @@ pub fn encode_qwen4exp_ple<'a>(
     validate_contract(ctx, hyper_input, weights, workspace)?;
     preflight(ctx, weights)?;
     reserve_command(workspace, enc)?;
-    workspace.rows_staged = false;
+    if !enc.gpu_owned() {
+        workspace.rows_staged = false;
+    }
     if let Err(error) = encode_step(ctx, enc, hyper_input, weights, workspace) {
         workspace.encode_failed = true;
         workspace.state_poisoned = true;
@@ -1590,6 +1597,9 @@ fn reserve_command(
     workspace: &mut Qwen4ExpPleMetalWorkspace,
     enc: &KernelEncoder,
 ) -> Result<(), Qwen4ExpPleMetalError> {
+    if enc.gpu_owned() {
+        return Ok(());
+    }
     workspace.require_idle()?;
     workspace.active_command = Some(enc.parent_command_buffer());
     workspace.encode_failed = false;

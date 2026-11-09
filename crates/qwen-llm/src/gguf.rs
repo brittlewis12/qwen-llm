@@ -275,6 +275,10 @@ impl GgufFile {
             .map(|shard| Arc::clone(&shard.mmap))
     }
 
+    pub(crate) fn shard_mmap_ref(&self, shard_idx: usize) -> Option<&Arc<Mmap>> {
+        self.shards.get(shard_idx).map(|s| &s.mmap)
+    }
+
     /// Slice into the mmap for `desc`. Slice lifetime is tied to `&self`.
     ///
     /// Public callers get a fallible boundary so forged or stale descriptors

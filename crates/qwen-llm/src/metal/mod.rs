@@ -287,6 +287,12 @@ use crate::tensor::{GgmlType, TensorDesc, checked_shape_elements, ggml_type_layo
 mod attn;
 mod bench;
 mod causal;
+mod token_feedback;
+pub use token_feedback::{AsyncTokenReadback, GPU_SAMPLER_ALGORITHM_VERSION, GpuTokenSampler};
+mod token_loop;
+pub use token_loop::{
+    GpuTokenLoopDriver, GpuTokenLoopStats, PreparedTokenStep, run_preencoded_tokens,
+};
 mod census;
 pub(crate) mod checks;
 mod completion;

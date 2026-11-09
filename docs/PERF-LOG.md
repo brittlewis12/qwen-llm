@@ -45,6 +45,40 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   invalid preflight/checker attempts as rejected evidence; prototype full-test
   build was interrupted, not a passing qualification. Regenerable bulk deleted.
 
+
+## 2026-11-09 - Flash-Next Measured-Only Batch Candidate: Laptop Validation Complete
+
+- Landing series rebased on **`d510f3e4`** contains only measured expert,
+  GDN/QSA, Q6/head F32 MMA and exact copy stages. Unmeasured variants were
+  removed; archive `perf/fn-batch-unmeasured` preserves them separately.
+- Laptop/M4 validation on **`581c8e2f`**, tree
+  **`5eacfc7eac6f5f7982f3eda3799677c53d57484f`**: full lib **2,479 passed,
+  750 ignored**; full CLI **1,693 passed, 72 ignored**; contracts passed.
+  A test-only repair compares default native transport with the direct F32
+  MMA operator and retains strict serial-bit checks under exact-NC and
+  member-projection rollbacks; all three targeted cases pass. F64 thresholds
+  were unchanged. No production math changed in this repair.
+- Canonical steady serve before/after, engine **`b54931bc`** built on M5,
+  seed 20261109, three 48K roots, default 180 s continuous-loop windows, was
+  scripted and queued at 09:10:20UTC. No arm ran: the outside 50-minute lease
+  became another 60-minute lease at 09:31:30UTC. The queued packet was stopped
+  near the 60-minute turn cutoff, leaving no job running. **Serve acceptance
+  remains pending; this is not a rollout.** Last native standing remains
+  **1.60x at 8K / 1.53x at 32K** (copy increment unmeasured at 32K).
+- Next isolated stage: **`perf/fn-batch-other-dense`**, a 40-line change sharing
+  remaining Q4/Q5/IQ4/Q8 mixer projections through existing full-F32 templates.
+  Profile motivation: private Q5/Q4 matvec families ~2.38 / 1.36 ms per B4 round.
+  M5 vehicle **`5edc7fa4`** built successfully in 67.90 s; source tag
+  `fn-batch-other-dense-probe-20261109`. Prepared A/B sets only
+  `QWEN_FN_BATCH_OTHER_DENSE_MMA=0|1`, with independent 8K B2/3/4 states,
+  64 teacher-forced rounds and the same NLL/KL/noise/fork witness. It remains
+  on the side branch until measured and qualified.
+- No custom build locks or locks across test execution. Core M5 build 157 s;
+  laptop builds 6m50s + 4m38s, with a 9m22s library rebuild for the test repair;
+  contracts 12m14s. These overlapped GPU queueing. Removable friction includes
+  the renewed long GPU reservation, and build-script cache records rejected
+  at 335,542 bytes against a 262,144-byte limit. No frozen binaries/snapshots.
+
 ## 2026-11-09 - Flash-Next Member-Grid Decode Screen: Gate Passed, Qualification Pending
 
 - **Work in progress, not a rollout.** Base `22046c76`, M5 Ultra, GSQ-RCO

@@ -75,7 +75,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             runner.restore_snapshot(&entry)?;
             runner.configure_causal_executor(causal);
             // Excluded warm command compiles reflection and establishes each arm.
+            qwen_llm::metal::dispatch_census_begin();
             runner.forward_token(targets[0])?;
+            let census = qwen_llm::metal::dispatch_census_take();
+            let fused = census
+                .iter()
+                .filter(|r| r.kernel == "kernel_qwen4exp_ffn_epilogue_f32")
+                .count();
+            assert_eq!(
+                fused,
+                if causal {
+                    config.layer_count as usize - 2
+                } else {
+                    0
+                },
+                "executor dispatch witness"
+            );
+            assert_eq!(census.iter().any(|r| r.encoder_concurrent), causal);
+            println!(
+                "{}",
+                json!({"kind":"executor_witness","depth":depth,"rep":rep,"causal":causal,"fused":fused,"dispatches":census.len()})
+            );
             runner.restore_snapshot(&entry)?;
             let mut logits = Vec::with_capacity(steps);
             let mut samples = Vec::new();

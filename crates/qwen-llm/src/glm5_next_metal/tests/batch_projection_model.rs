@@ -203,6 +203,22 @@ fn run() -> anyhow::Result<()> {
                 }
             }
         }
+        // Borrowed packed sparse/activation scratch must also survive the
+        // transition back to a real append, including four-row workspaces.
+        let mut appended = Vec::new();
+        for r in 0..4 {
+            appended.push(ss[r].prefill_packed(
+                &ctx,
+                &docs[[1, 10, 17, 11][r]][consumed[r]..consumed[r] + 13],
+            )?);
+        }
+        if variant == control {
+            reference.push(appended);
+        } else {
+            for (a, b) in reference[32].iter().zip(&appended) {
+                eq(a, b);
+            }
+        }
         if variant == control {
             for s in &ss {
                 states.push(s.capture_snapshot()?);
@@ -213,7 +229,9 @@ fn run() -> anyhow::Result<()> {
             }
         }
     }
-    emit(serde_json::json!({"event":"membership","rounds":32,"state_and_logits_bitwise":true}));
+    emit(
+        serde_json::json!({"event":"membership","rounds":32,"append_after_batch":13,"state_and_logits_bitwise":true}),
+    );
     drop(reference);
     drop(states);
     for width in [2, 3, 4] {

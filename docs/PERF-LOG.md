@@ -879,6 +879,67 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   **`~/qwen-runs/2026-11-08-v41-batch-depth/`** on both hosts. No performance default
   changes in this census.
 
+## 2026-11-08 - Flash-Next Decode: Launch And Dependency Roofline Predictors
+
+- **Decision packet only; no runtime rollout.** Base **`09a3a521`**, M5 Ultra,
+  unchanged two-shard **GSQ-RCO IQ3_S**, width 1. Read FN-5M7T and the Nov 6
+  census through Nov 8 QSA receipts. Research capture/replay extends the old
+  exact graph harness; committed production sources remain unchanged. Batching
+  integration is untouched. Build lock/nice 10, timing outside that lock,
+  canonical Metal lease/wait; **83 thermal samples, all 0**.
+- Same census stream: 8192 salted input IDs, 64 excluded warm decode steps,
+  three restored-entry repetitions of 32 known-input steps, full logits copied.
+  Native **13.391 ms/token / 74.68 tok/s**, GPU **11.994**, CPU encode **0.863**;
+  after-probe native **13.322 ms**, identical stream hash. Checked 1 GiB reads:
+  **1170.77 GB/s** retained median. Prior unchanged useful logical traffic
+  **5.603241 GB/token**, not DRAM counters, implies **208.95 tok/s**.
+
+  | Additive model of native token | ms/token |
+  | --- | ---: |
+  | Useful bytes / measured streaming bandwidth | **4.786** |
+  | Command/control, checked empty-launch curve | **1.866** |
+  | Remaining kernel excess: occupancy, unpacking, scratch/repeated traffic | **5.342** |
+  | Host outside GPU span: encode + other | **1.397** = 0.863 + 0.534 |
+  | Total | **13.391** |
+
+- Empty controls cover **48/96/192/384/768/1316 calls**, eight samples/count,
+  alternating order; checked dependent nonzero output. Fit **1.421 us/call**.
+  The 1316-call floor varies **1.548–2.152 ms** in alternating populations:
+  command allocation is model-sensitive; the remaining kernel excess is
+  correspondingly about **5.06–5.66 ms**, not all proved recoverable. Reducing
+  launches to 48 while keeping that work predicts only **86 tok/s**.
+- Real replay: **1316 dispatches**, one encoder/command, full logits exact.
+  Serial/conservative concurrent GPU medians **11.884/11.590 ms**, **1153**
+  buffer-hazard barriers: about **76.4 tok/s** after applying the delta to
+  native. No topological reordering. First serial replay **16.937 ms** remains
+  in raw data; all eight samples/mode retained, controls use medians.
+- Freeze actual inputs per dispatch, preserve its aliases, share immutable
+  weights and privatize mutable buffers; run original arithmetic independently.
+  Eight samples/mode: serial **12.560 ms GPU**, concurrent inside 97 HC branches
+  **7.923**, globally concurrent **6.311**. Every mode/repetition matches all
+  **400,774,256 reflected output bytes**, including state. Private buffers
+  alter traffic/cache reuse and serial cost. **These break model causality**;
+  direct replacement versus serial-delta correction gives optimistic bounds:
+  branch concurrency **107–114 tok/s**, branch concurrency plus perfect encode
+  hiding **118–127**, global independence with original host **130–140**.
+  These ranges are not confidence intervals or measured candidate throughput;
+  do not add launch savings to concurrency savings.
+- **Design decision:** occupancy-focused multi-stage layer execution plus
+  preencoding merits one causal layer prototype; launch removal or the simple
+  concurrent encoder alone cannot reach 120. Optimistic design budget about
+  **120 tok/s**, not established feasibility. Next kill budget, before days of
+  integration: **36 × 140 us GDN + 12 × 180 us QSA + 0.60 ms head/tail +
+  0.53 ms host = 8.33 ms/token**; preserve the large Q6 head stream. A persistent
+  implementation still needs valid Metal synchronization/forward progress.
+  Future arithmetic changes require signed teacher-forced dNLL/KL with a repeat
+  noise floor and F64 error no worse; equality here validates predictors only.
+- Research sources/reproduction:
+  **`scripts/research/fn-decode-roofline/`**. Release example build, checked
+  replays/counters/checksums, native after-check and Python syntax checks pass;
+  no redundant full-suite campaign for a research/docs-only committed tree.
+  Raw packet, thermal/controller/build logs, exact capture patch, frozen source
+  hashes and binary: **`~/qwen-runs/2026-11-09-fn-decode-roofline/`**, mirrored
+  locally. Branch unmerged; no owned work left running.
 ## 2026-11-08 - Warm Agent Concurrency: Observed Capacity, EOS Fails Exact-Work Gate
 
 - Clean engine **`09a3a521`**, M5 Ultra **256 GiB**, unchanged tier-1 artifacts

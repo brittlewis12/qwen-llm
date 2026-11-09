@@ -1,5 +1,7 @@
 //! Real independent states, full-vocabulary distribution witness and step costs.
-//! MODEL CODE PROSE DEPTH [STEPS=128] [WIDTHS=2,3,4] [profile]. Keep all heads/checkpoints in RAM.
+//! MODEL CODE PROSE DEPTH [STEPS=128] [WIDTHS=1,2,3,4] [FLAGS=profile,both].
+//! `both` runs the listed widths ascending then descending; `profile` reports one
+//! dispatch census after the width measurements. Keep all heads/checkpoints in RAM.
 use qwen_llm::{
     gguf::GgufFile,
     metal::MetalContext,
@@ -25,7 +27,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| s.split(',').map(str::parse).collect())
         .transpose()?
         .unwrap_or(vec![2, 3, 4]);
-    assert!(!widths.is_empty() && widths.iter().all(|b| (2..=4).contains(b)));
+    assert!(!widths.is_empty() && widths.iter().all(|b| (1..=4).contains(b)));
+    let flags = a.get(7).map(String::as_str).unwrap_or("");
+    let both = flags.split(',').any(|f| f == "both");
+    let profile = flags.split(',').any(|f| f == "profile");
+    let mut sequence = widths.clone();
+    if both {
+        sequence.extend(widths.iter().rev().copied());
+    }
     let ctx = MetalContext::new()?;
     let gg = GgufFile::open(&a[1])?;
     let c = Qwen4ExpConfig::from_gguf(&gg)?;
@@ -70,7 +79,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         checkpoints.push(r.capture_snapshot()?);
     }
     let mut native = Qwen4ExpDecodeBatch::new(&runners[0], 4)?;
-    for width in widths {
+    for (index, width) in sequence.iter().copied().enumerate() {
+        let order = if !both {
+            "single"
+        } else if index < widths.len() {
+            "asc"
+        } else {
+            "desc"
+        };
         for (r, s) in runners.iter_mut().zip(&checkpoints) {
             r.reset()?;
             r.restore_snapshot(s)?;
@@ -216,10 +232,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         println!(
             "{}",
-            serde_json::json!({"depth":depth,"width":width,"steps":steps,"serial_step_ms":serial_ms/(steps-8) as f64,"native_step_ms":native_ms/(steps-8) as f64,"aggregate_speedup":serial_ms/native_ms,"signed_dNLL":dnll,"mean_KL":kl,"member_dNLL_KL":per_member,"max_logit_error":max_abs,"bitwise_vectors":exact,"noise_exact_vectors":noise_exact,"noise_dNLL":0.,"noise_KL":0.,"fork_exact":fork_exact,"stream_hash":hash.finalize().to_hex().to_string()})
+            serde_json::json!({"depth":depth,"width":width,"order":order,"steps":steps,"serial_step_ms":serial_ms/(steps-8) as f64,"native_step_ms":native_ms/(steps-8) as f64,"aggregate_speedup":serial_ms/native_ms,"signed_dNLL":dnll,"mean_KL":kl,"member_dNLL_KL":per_member,"max_logit_error":max_abs,"bitwise_vectors":exact,"noise_exact_vectors":noise_exact,"noise_dNLL":0.,"noise_KL":0.,"fork_exact":fork_exact,"stream_hash":hash.finalize().to_hex().to_string()})
         );
     }
-    if a.get(7).is_some_and(|v| v == "profile") {
+    if profile {
         // Profile four independent histories, after the fork witness has
         // finished. Warm the restored states without including those dispatches.
         for (r, s) in runners.iter_mut().zip(&checkpoints) {

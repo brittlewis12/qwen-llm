@@ -65,6 +65,10 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 
 [[example]]
+name = "dispatch_deadtime"
+required-features = ["perf-ablations"]
+
+[[example]]
 name = "fn_m4_qsa"
 required-features = ["perf-ablations"]
 

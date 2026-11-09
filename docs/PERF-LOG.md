@@ -6,6 +6,95 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-09 - Flash-Next Widths And Dispatch Dead Time Measured
+
+- Base **`bcb1b46b8`** (current main), M5 Ultra, GSQ-RCO IQ3_S. Two bench-only
+  probes, no production change: `fn_native_batch_check` now accepts B=1 and a
+  `both` width order in one process; new `dispatch_deadtime` (perf-ablations)
+  with `kernels/research/dispatch_deadtime.metal` chains dependent dispatches
+  in one command buffer. Both examples are under `crates/qwen-llm/examples/`.
+- **FN width/depth.** Independent restored states at depth plus 0/17/34/51,
+  full-head readback, eight excluded warm rounds. 32K used two processes
+  (ascending and descending), 64 steps, 56 retained rounds. 48K used one
+  process with both orders, 32 steps, 24 retained rounds: 64-step 48K arms
+  repeatedly entered thermal level 2 under other lanes' compiles. Native
+  `step()` ms/round:
+
+  | Depth | B=1 asc / desc | B=2 asc / desc | B=3 asc / desc | B=4 asc / desc |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 32K | 13.994 / 13.686 | 21.338 / 20.952 | 26.465 / 25.709 | 31.512 / 30.850 |
+  | 48K | 13.669 / 13.569 | 20.919 / 20.919 | 25.710 / 25.623 | 30.747 / 30.662 |
+
+  Pooled means and least-squares fits (ms, `round = F + m*B`). B=1 is the
+  ordinary forward path, not the batched encoder; the B=2..4 fit is the
+  batched-width model.
+
+  | Depth | B=1 | B=2 | B=3 | B=4 | F,m all widths | F,m B=2..4 |
+  | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 32K | 13.840 | 21.145 | 26.087 | 31.181 | 8.822, 5.697 | 11.084, 5.018 |
+  | 48K | 13.619 | 20.919 | 25.667 | 30.704 | 8.727, 5.600 | 11.086, 4.893 |
+
+  Measured B=3 is **25.67-26.09 ms**, below the serve ledger's inferred
+  **~27.0 ms** (range 24.2-30.1). B=4 is 30.70-31.18 ms. The batched model is
+  shared **F ~= 11.1 ms**, marginal **m ~= 4.9-5.0 ms/row**. The all-width fit
+  is pulled by B=1's different code path. The 32K ascending arm overlapped
+  more compiles and ran 0.3-0.7 ms slower than descending; 32K descending
+  alone fits **F=10.990, m=4.949**, consistent with 48K. Pooled means above
+  are conservative.
+- **Acceptance.** Every accepted cell passed the probe's full-vocabulary
+  checks. Worst |dNLL| **1.29e-5**, worst mean KL **3.63e-7** (bounds
+  0.005 / 1e-2); B=1 full vectors bitwise (64 at 32K, 32 at 48K); 32 exact
+  fork rounds at B=4 per arm; GPU/native roundtrip max logit error **0**.
+- **Dispatch dead time.** N=1..1024 dispatches in one command buffer, with
+  serial dependent (same region plus payload read-back), serial independent
+  (disjoint regions), and concurrent independent encoders. Slopes are
+  us/dispatch from the N sweep. Pass 2 was thermal **0** with no compile
+  overlap; pass 1 (thermal 1) matched within **~0.05 us** on the stable grids.
+
+  | Shape | Grid x threads | Payload | Serial dep | Serial indep | Concurrent |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | tg1x128 | 1x128 | 0 KiB | 3.30 | 2.65 | 0.19 |
+  | tg8x128 | 8x128 | 0 KiB | 1.42 | 1.27 | 0.15 |
+  | tg64x128 | 64x128 | 0 KiB | 1.40 | 1.32 | 0.55 |
+  | tg384x128 | 384x128 | 0 KiB | 1.70 | 1.57 | 0.59 |
+  | tg1536x128 | 1536x128 | 0 KiB | 2.43 | 2.15 | 1.27 |
+  | tg64x32 | 64x32 | 0 KiB | 1.39 | 1.30 | 0.54 |
+  | tg64x1024 | 64x1024 | 0 KiB | 1.60 | 1.39 | 0.58 |
+  | bytes16 | 16x128 | 128 KiB | 2.60 | 2.09 | 0.53 |
+  | bytes64 | 16x128 | 512 KiB | 3.56 | 3.44 | 0.60 |
+  | norm | 32x128 | 16 KiB | 1.95 | 1.66 | 0.48 |
+  | expert-wide | 384x64 | 384 KiB | 2.25 | 1.83 | 0.75 |
+
+  Moderate decode grids (8-384 groups, 32-512 threads) cost **1.40-1.70 us**
+  per dependent dispatch and **1.27-1.57 us** independent; concurrent dispatch
+  inside one encoder cuts that to **0.15-0.59 us**. One threadgroup exposes
+  more dependency latency (1x128: **3.30** dependent, 2.65 independent, 0.19
+  concurrent; one-threadgroup fits are noisy). A very wide 1536x128 grid
+  costs **2.43 / 2.15 / 1.27**. Payload is visible serially: 0 -> 512 KiB
+  raises **1.53 -> 3.56 us** dependent; concurrent stays **0.45-0.60 us**.
+  The repo's **1.4 us** empty-launch additive floor is reproduced for
+  moderate grids. The outside **4.7-5.5 us** per-dispatch estimate is **not**
+  reproduced by bare dependent launches; it is not a fixed launch constant.
+  The remaining gap is likely graph dependencies/barriers or other work
+  removed by the frozen-graph experiments, not launch geometry alone.
+  Practical reading: critical-path dispatch count is the primary target at
+  moderate grids; concurrent encoding is the one rule that lowers every
+  kernel where dependencies allow; grid and bytes matter at the extremes.
+- **Measurement hygiene.** Accepted arms: 32K asc 104 s, 32K desc 103 s, 48K
+  both 132 s, dead-time 1 s. Thermal start/max/end: **0/0/0**, **0/0/0**,
+  **0/1/1**, **0/0/0**. Compile overlap was flagged on all three width arms
+  (32K asc 144 samples, 32K desc 6, 48K 6); dead-time had none. Rejected
+  level-2 attempts were discarded, not averaged. Lease queue rows include
+  28.1 s, 82.7 s and 102.7 s waits behind other lanes.
+- **Reproduce:** build production with `nice -n 10 cargo build --offline
+  --locked --release -p qwen-llm --example fn_native_batch_check`, and build
+  the probe with `nice -n 10 cargo build --offline --locked --release
+  -p qwen-llm --features perf-ablations --example dispatch_deadtime`. Under
+  `scripts/bench/with-metal-lease`, run
+  `fn_native_batch_check MODEL CODE PROSE 32768 64 1,2,3,4` (also `4,3,2,1`)
+  or `... 48000 32 1,2,3,4 both`, and `dispatch_deadtime` with no arguments.
+  Compact evidence: `~/qwen-runs/2026-11-09-fn-widths-deadtime/` on M5.
+
 ## 2026-11-09 - V4.1 Causal Waves At Solo, B=2 And B=4: Default On
 
 - **All three widths win; ship default-on** on M5 (Apple10). Solo decode uses

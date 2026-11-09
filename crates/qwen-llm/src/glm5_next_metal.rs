@@ -1557,25 +1557,6 @@ impl<'w> Glm5NextSession<'w> {
         hooks: &mut interventions::Hooks<'_, '_>,
         output: Option<&capture::RowOutput<'_>>,
     ) -> Result<Option<Vec<f32>>> {
-        if self.release_prefill_for_decode {
-            objc2::rc::autoreleasepool(|_| {
-                self.step_with_row_output_inner(ctx, token, logits, probes, observer, hooks, output)
-            })
-        } else {
-            self.step_with_row_output_inner(ctx, token, logits, probes, observer, hooks, output)
-        }
-    }
-
-    fn step_with_row_output_inner(
-        &mut self,
-        ctx: &MetalContext,
-        token: u32,
-        logits: bool,
-        probes: &[Glm5NextProbe],
-        observer: &mut dyn FnMut(Glm5NextProbe, usize, &[f32]),
-        hooks: &mut interventions::Hooks<'_, '_>,
-        output: Option<&capture::RowOutput<'_>>,
-    ) -> Result<Option<Vec<f32>>> {
         if self.poisoned {
             return Err(Glm5NextMetalError::Poisoned);
         }

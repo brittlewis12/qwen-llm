@@ -221,7 +221,7 @@ def main():
                 result["residency"] = observer.finish(text)
                 result["background_anonymous_bytes"] = len(background) * 64 * 1024 * 1024
             result["diagnostics"] = [line for line in text.splitlines()
-                if any(key in line for key in ["glm workspace:", "glm5_next stats:",
+                if any(key in line for key in ["glm workspace:", "glm peak:", "serve idle residency:", "glm5_next stats:",
                                                 "glm native:", "serve native:",
                                                 "serve phases:", "serve stats:"])]
     finally:

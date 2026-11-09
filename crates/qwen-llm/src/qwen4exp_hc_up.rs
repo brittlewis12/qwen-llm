@@ -11,7 +11,7 @@ pub(super) fn eligible(scratch: &GatedResidualMetalScratch, dtype: GgmlType) -> 
 /// whenever the HC up-mix decode option is on.
 const HC_UP_MIX_BF16_ENV: &str = "QWEN_FN_HC_UP_MIX_BF16";
 
-fn bf16_enabled() -> bool {
+pub(super) fn bf16_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var(HC_UP_MIX_BF16_ENV).as_deref() != Ok("0"))
 }

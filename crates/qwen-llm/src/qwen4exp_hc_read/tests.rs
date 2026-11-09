@@ -172,3 +172,146 @@ fn fused_hc_matches_incumbent_bits_with_offsets_and_keeps_fallbacks() {
         }
     }
 }
+
+#[test]
+fn native_hc_axis_matches_member_reductions_and_guards() {
+    let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+        return;
+    };
+    let mut seed = 0x6a09e667f3bcc909u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % 20001) as f32 / 10000. - 1.
+    };
+    let f = |v: &[f32], shape| guarded(&ctx, bytemuck::cast_slice(v), shape, GgmlType::F32);
+    let down: Vec<half::bf16> = (0..10240 * 320)
+        .map(|_| half::bf16::from_f32(next() * 0.03))
+        .collect();
+    let up: Vec<half::bf16> = (0..320 * 10240)
+        .map(|_| half::bf16::from_f32(next() * 0.03))
+        .collect();
+    let down = guarded(
+        &ctx,
+        bytemuck::cast_slice(&down),
+        vec![10240, 320],
+        GgmlType::BF16,
+    );
+    let up = guarded(
+        &ctx,
+        bytemuck::cast_slice(&up),
+        vec![320, 10240],
+        GgmlType::BF16,
+    );
+    let norm = f(&vec![1.; 10240], vec![10240]);
+    let iw: Vec<_> = (0..10240 * 4).map(|_| next() * 0.03).collect();
+    let inject = f(&iw, vec![10240, 4]);
+    let b: Vec<_> = (0..2560).map(|_| next()).collect();
+    let output = f(&b, vec![2560]);
+    let values: Vec<Vec<_>> = (0..4)
+        .map(|s| {
+            (0..10240)
+                .map(|i| {
+                    if s == 3 {
+                        if i % 2 == 0 { 1. } else { -1. }
+                    } else {
+                        next() * 3.
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    let weights = GatedResidualMetalReadWeights {
+        norm: &norm,
+        down: &down,
+        up: &up,
+    };
+    let make = |n: usize| {
+        let xs: Vec<_> = values[..n].iter().map(|x| f(x, vec![10240])).collect();
+        let scratches: Vec<_> = (0..n)
+            .map(|_| {
+                let mut s = GatedResidualMetalScratch::new(&ctx, 4, 2560, 320).unwrap();
+                s.bind_hc_up_mix(true);
+                s.normalized = f(&vec![f32::NAN; 10240], vec![10240]);
+                s.low = f(&vec![f32::NAN; 320], vec![320]);
+                s.raw_gate = f(&vec![f32::NAN; 10240], vec![10240]);
+                s.mixed = f(&vec![f32::NAN; 2560], vec![2560]);
+                s.injection = f(&vec![f32::NAN; 4], vec![4]);
+                s
+            })
+            .collect();
+        (xs, scratches)
+    };
+    let (baseline, mut original) = make(4);
+    let cmd = ctx.queue.commandBuffer().unwrap();
+    let enc = KernelEncoder::begin(&cmd);
+    for (x, s) in baseline.iter().zip(&mut original) {
+        encode_gated_residual_mix(&ctx, &enc, x, &output, 1e-6, weights, &inject, s)
+            .unwrap()
+            .encode_combine()
+            .unwrap();
+    }
+    enc.end();
+    cmd.commit();
+    for s in &mut original {
+        s.release_after().unwrap();
+    }
+    for width in [2, 3, 4] {
+        let (actual, mut scratch) = make(width);
+        let cmd = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&cmd);
+        let members = actual
+            .iter()
+            .zip(&mut scratch)
+            .map(
+                |(input, scratch)| crate::qwen4exp_metal::decode_batch::Member {
+                    input,
+                    output: &output,
+                    scratch,
+                },
+            )
+            .collect();
+        crate::metal::dispatch_census_begin();
+        let reads = crate::qwen4exp_metal::decode_batch::encode(
+            &ctx, &enc, 1e-6, weights, &inject, members,
+        )
+        .unwrap();
+        let census = crate::metal::dispatch_census_take();
+        assert_eq!(census.len(), 3);
+        assert!(census.iter().all(|d| d.grid_height == width as u64));
+        for r in reads {
+            r.encode_combine().unwrap();
+        }
+        enc.end();
+        cmd.commit();
+        for s in &mut scratch {
+            s.release_after().unwrap();
+        }
+        for i in 0..width {
+            assert_eq!(bits(&actual[i]), bits(&baseline[i]));
+            guard(&actual[i]);
+            for (a, b) in [
+                &scratch[i].normalized,
+                &scratch[i].low,
+                &scratch[i].raw_gate,
+                &scratch[i].mixed,
+                &scratch[i].injection,
+            ]
+            .into_iter()
+            .zip([
+                &original[i].normalized,
+                &original[i].low,
+                &original[i].raw_gate,
+                &original[i].mixed,
+                &original[i].injection,
+            ]) {
+                assert_eq!(bits(a), bits(b));
+                guard(a);
+            }
+        }
+    }
+    for t in [&down, &up, &norm, &inject, &output] {
+        guard(t);
+    }
+}

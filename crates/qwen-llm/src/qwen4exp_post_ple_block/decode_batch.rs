@@ -1,0 +1,120 @@
+//! Layer-major independent owners: grouped HC, private causal mixers and MoE.
+use super::*;
+use crate::qwen4exp_metal::decode_batch::{self as hc, Member};
+pub(crate) fn encode(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    positions: &[usize],
+    inputs: &[&MetalTensor],
+    weights: Qwen4ExpPostPleBlockMetalWeights<'_>,
+    members: &mut [&mut Qwen4ExpPostPleBlockMetalWorkspace],
+    projection: &crate::qwen4exp_metal::decode_projection::Scratch,
+) -> Result<(), Qwen4ExpPostPleBlockError> {
+    validate_encoder(ctx, enc)?;
+    for ((w, &p), &x) in members.iter().zip(positions).zip(inputs) {
+        validate_and_preflight(ctx, p, x, weights, w)?;
+    }
+    for w in members.iter_mut() {
+        reserve_command(w, enc)?;
+        w.encode_failed = true;
+    }
+    let mut hc_members = Vec::with_capacity(members.len());
+    let mut rest = Vec::with_capacity(members.len());
+    for (w, &x) in members.iter_mut().zip(inputs) {
+        let Qwen4ExpPostPleBlockMetalWorkspace {
+            residual,
+            mixer,
+            mixer_output,
+            ..
+        } = &mut **w;
+        hc_members.push(Member {
+            input: x,
+            output: mixer_output,
+            scratch: residual,
+        });
+        rest.push(mixer);
+    }
+    let reads = hc::encode(
+        ctx,
+        enc,
+        weights.geometry.eps,
+        weights.attention_residual.read,
+        weights.attention_residual.inject,
+        hc_members,
+    )?;
+    let mixed: Vec<_> = reads.iter().map(|r| r.mixed()).collect();
+    match weights.mixer {
+        Qwen4ExpPostPleMixerMetalWeights::GatedDeltaNet(w) => {
+            let states = rest
+                .into_iter()
+                .map(|m| match m {
+                    Qwen4ExpPostPleMixerMetalWorkspace::GatedDeltaNet(s) => Ok(s.as_mut()),
+                    _ => invalid("native mixer variant mismatch"),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let results =
+                crate::qwen4exp_gdn::decode_batch::encode(ctx, enc, &mixed, w, states, projection)?;
+            for (result, read) in results.into_iter().zip(&reads) {
+                result
+                    .output()
+                    .encode_copy_to(ctx, enc, read.block_output())?;
+            }
+        }
+        Qwen4ExpPostPleMixerMetalWeights::QwenSparseAttention(w) => {
+            let states = rest
+                .into_iter()
+                .map(|m| match m {
+                    Qwen4ExpPostPleMixerMetalWorkspace::QwenSparseAttention(s) => Ok(s.as_mut()),
+                    _ => invalid("native mixer variant mismatch"),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let results =
+                crate::qwen4exp_qsa::decode_batch::encode(ctx, enc, &mixed, w, states, projection)?;
+            for (result, read) in results.into_iter().zip(&reads) {
+                result
+                    .output()
+                    .encode_copy_to(ctx, enc, read.block_output())?;
+            }
+        }
+    }
+    drop(mixed);
+    for read in reads {
+        read.encode_combine()?;
+    }
+    let mut hc_members = Vec::with_capacity(members.len());
+    let mut rest = Vec::with_capacity(members.len());
+    for (w, &x) in members.iter_mut().zip(inputs) {
+        let Qwen4ExpPostPleBlockMetalWorkspace {
+            residual,
+            moe,
+            moe_output,
+            ..
+        } = &mut **w;
+        hc_members.push(Member {
+            input: x,
+            output: moe_output,
+            scratch: residual,
+        });
+        rest.push(moe);
+    }
+    let reads = hc::encode(
+        ctx,
+        enc,
+        weights.geometry.eps,
+        weights.ffn_residual.read,
+        weights.ffn_residual.inject,
+        hc_members,
+    )?;
+    for (read, moe) in reads.into_iter().zip(rest) {
+        let result = encode_qwen4exp_moe(ctx, enc, read.mixed(), weights.moe, moe)?;
+        result
+            .output()
+            .encode_copy_to(ctx, enc, read.block_output())?;
+        drop(result);
+        read.encode_combine()?;
+    }
+    for w in members {
+        w.encode_failed = false;
+    }
+    Ok(())
+}

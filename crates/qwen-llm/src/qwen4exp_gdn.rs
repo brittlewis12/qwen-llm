@@ -7,6 +7,8 @@ use crate::metal::{
     encode_gdn_step_decay_packed_prefill_f32, encode_l2_norm_pair_batched_f32,
     encode_mat_vec_f32_sigmoid, encode_sigmoid_f32, encode_ssm_conv_silu_f32,
 };
+pub(crate) mod decode_batch;
+
 use crate::metal_forward::{MfError, encode_mat_vec_dispatch, encode_qwen4exp_prefill_mat_mat};
 use crate::qwen4exp::{MixerKind, Qwen4ExpConfig};
 use crate::qwen4exp_profile::{
@@ -584,24 +586,7 @@ pub fn encode_gated_delta_net<'a>(
     weights: GatedDeltaNetMetalWeights<'_>,
     workspace: &'a mut GatedDeltaNetMetalWorkspace,
 ) -> Result<GatedDeltaNetMetalRead<'a>, Qwen4ExpGdnError> {
-    let encoder_device = enc.parent_command_buffer().device().registryID();
-    if encoder_device != ctx.device.registryID() {
-        return invalid(format!(
-            "encoder belongs to Metal device registry {encoder_device}, context is {}",
-            ctx.device.registryID()
-        ));
-    }
-    if enc.is_concurrent() {
-        return invalid("dependent GDN dispatches require a serial encoder");
-    }
-    if workspace.state_poisoned {
-        return invalid("workspace causal state is indeterminate; reset it before reuse");
-    }
-    if weights.geometry != workspace.geometry {
-        return invalid("GDN weight and workspace geometry differ");
-    }
-    validate_contract(ctx, input, weights, workspace)?;
-    preflight(ctx, weights)?;
+    validate_decode(ctx, enc, input, weights, workspace)?;
     reserve_command(workspace, enc)?;
 
     let geometry = workspace.geometry;
@@ -623,6 +608,56 @@ pub fn encode_gated_delta_net<'a>(
         geometry.hidden_size,
         geometry.value_width(),
     )?;
+    encode_recurrence(ctx, enc, input, weights, workspace)?;
+    encode_mat_vec_dispatch(
+        ctx,
+        enc,
+        weights.output,
+        &workspace.normalized,
+        &workspace.output,
+        geometry.value_width(),
+        geometry.hidden_size,
+    )?;
+
+    Ok(GatedDeltaNetMetalRead { workspace })
+}
+
+fn validate_decode(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: GatedDeltaNetMetalWeights<'_>,
+    workspace: &GatedDeltaNetMetalWorkspace,
+) -> Result<(), Qwen4ExpGdnError> {
+    let encoder_device = enc.parent_command_buffer().device().registryID();
+    if encoder_device != ctx.device.registryID() {
+        return invalid(format!(
+            "encoder belongs to Metal device registry {encoder_device}, context is {}",
+            ctx.device.registryID()
+        ));
+    }
+    if enc.is_concurrent() {
+        return invalid("dependent GDN dispatches require a serial encoder");
+    }
+    if workspace.state_poisoned {
+        return invalid("workspace causal state is indeterminate; reset it before reuse");
+    }
+    if weights.geometry != workspace.geometry {
+        return invalid("GDN weight and workspace geometry differ");
+    }
+    validate_contract(ctx, input, weights, workspace)?;
+    preflight(ctx, weights)?;
+    workspace.require_idle()?;
+    Ok(())
+}
+fn encode_recurrence(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: GatedDeltaNetMetalWeights<'_>,
+    workspace: &GatedDeltaNetMetalWorkspace,
+) -> Result<(), Qwen4ExpGdnError> {
+    let geometry = workspace.geometry;
     let fusion = controls::try_encode(ctx, enc, input, weights, workspace)?;
     if fusion == controls::Fusion::Incumbent {
         encode_mat_vec_f32_sigmoid(
@@ -711,17 +746,7 @@ pub fn encode_gated_delta_net<'a>(
         &workspace.normalized,
         geometry,
     )?;
-    encode_mat_vec_dispatch(
-        ctx,
-        enc,
-        weights.output,
-        &workspace.normalized,
-        &workspace.output,
-        geometry.value_width(),
-        geometry.hidden_size,
-    )?;
-
-    Ok(GatedDeltaNetMetalRead { workspace })
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

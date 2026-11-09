@@ -58,6 +58,7 @@ use std::time::Instant;
 mod capture;
 #[cfg(test)]
 mod checkpoint;
+pub(crate) mod decode_batch;
 mod device_checkpoint;
 mod row_logits;
 mod snapshot;

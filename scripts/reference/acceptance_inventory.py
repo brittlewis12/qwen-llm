@@ -39,6 +39,7 @@ SCOPES = {
         "qwen4exp_runtime::tests::snapshot::live_checkpoint_observer_restores_exact_state",
         "qwen4exp_runtime::retained_tests::",
         "qwen4exp_runtime::factory::tests::",
+        "qwen4exp_metal::hc_read::tests::native_hc_axis_matches_member_reductions_and_guards",
         "qwen4exp_qsa::tests::pool_publish::",
         "qwen4exp_qsa::tests::decode_selector::",
         "qwen4exp_text_session::snapshot_copy::tests::",

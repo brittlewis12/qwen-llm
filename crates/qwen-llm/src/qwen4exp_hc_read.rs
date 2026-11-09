@@ -6,8 +6,12 @@ crate::env_flag!(
     "QWEN_FN_HC_READ_FUSED"
 );
 
+pub(super) fn route_enabled() -> bool {
+    enabled()
+}
+
 const DOWN: &str = "kernel_qwen4exp_hc_down_silu_bf16";
-fn incumbent_tg_enabled() -> bool {
+pub(super) fn incumbent_tg_enabled() -> bool {
     static TG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *TG.get_or_init(|| std::env::var("QWEN_MAT_VEC_BF16_TG").as_deref() != Ok("0"))
 }

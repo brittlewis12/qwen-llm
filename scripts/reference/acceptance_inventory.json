@@ -6060,5 +6060,12 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Pure owner limits, fake member transition/failure lifecycle and idle selection; no Metal or model."
+  },
+  {
+    "target": "lib",
+    "name": "qwen4exp_metal::hc_read::tests::native_hc_axis_matches_member_reductions_and_guards",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Independent HC batch axes, incumbent reductions and guarded offsets require Metal."
   }
 ]

@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - Flash-Next Fair Continuous Serve: Ordinary-Member Owner
+
+- Base **`0bdb9ca5`**, owner arithmetic **`ccd1ae11`**, M5 Ultra GSQ-RCO
+  **IQ3_S**. This supersedes the earlier proxy's interpretation: its roughly
+  180 ms packed-append floor is not a measurement of native independent decode.
+- Reuse the GLM owner driver: four independent live runners, ordinary forwards
+  back to back behind a replaceable group seam, normal admitted prefill commands
+  with their original frontier/header/transcript cuts, fair measured decode
+  credit, shared slow-client/cancel/failure handling. A partially advanced group
+  cannot be replayed. Snapshots remain optional; active states are never evicted.
+  **Default four on M5; `QWEN_SERVE_FN_MAX_ACTIVE=1` restores the original serial
+  owner and single live state.** M4 and DFlash retain the serial path.
+- Realistic warm-agent harness **`bench/realistic-concurrency@1abcd236`**, seed
+  20261108, frozen `realistic-fn-plan.json` SHA256
+  `93f055854faed1799ad9a2338453818e910a7512b7e1892240a68a7023603edb`:
+  three separately warmed 48K roots, 14 agent turns, each arm's own actual reply
+  history. Same **39,065 new / 12,041 generated** tokens and per-call generated
+  counts; both have the same two early stops. Fresh serial/default arms:
+  **206.803 / 206.084 s, 1.0035x aggregate**, **58.22 / 58.43 output tok/s**.
+  Agent p95 TTFT **55.46 / 48.00 / 16.84 -> 14.73 / 7.51 / 4.30 s**;
+  queue request-seconds **277.14 -> 1.09**. Thermal maximum/after **0** in both.
+  Logical group widths in this arm are scheduler widths, not native GPU batches.
+- Correctness: `fn_sessions_check MODEL CODE PROSE DEPTH 128`, depths **8192
+  and 32768**, three independent prose/code streams, 1,084/1,123/1,596-token
+  appends plus unrelated decoder interposition. **768 complete heads bitwise**,
+  signed dNLL/KL **0**, **64 fork continuation heads exact**. M4 8K witness also
+  passed (384 heads +32 fork heads) with Metal API validation. M5 API validation
+  aborts in the ordinary 8K baseline prefill with the existing `tiitg` 65536
+  limit assertion; the M5 full-model witnesses ran without that API layer.
+- Reproduce: build the owner commit under `build.lock`; timing takes only the
+  Metal lease. Run the harness `run --binary target/release/qwen --model MODEL
+  --plan PLAN --reference SERIAL_INPUTS --history own --arm serial|default
+  --out OUT`, explicitly setting **`QWEN_SERVE_FN_MAX_ACTIVE=1|4`** (the study
+  script's serial switch only knew GLM/V4.1). Analyze/compare with `--history
+  own`. Evidence summaries/commands: `$RUNS_ROOT/2026-11-09-fn-serve-batch/`;
+  no frozen executables or on-disk model checkpoints are required.
+
 ## 2026-11-09 - Steady Agent Concurrency: V4.1 1.308x, GLM 1.730x; 128K Rooflines
 
 - Clean engine **`9b193b38`**, M5 Ultra 256 GiB, current tier-1 artifacts;
@@ -231,6 +268,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   full lib/CLI/contracts were not rerun for this report.
   Exact binaries, patches, all attempts, thermal/I/O traces and **`summary.json`**:
   **`~/qwen-runs/2026-11-08-glm-m4-roofline/`**. No merge or owned worker remains.
+
 
 ## 2026-11-08 - Flash-Next Concurrency: Current Few-Row Vehicle Killed
 

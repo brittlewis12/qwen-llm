@@ -38,8 +38,10 @@ use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
 use std::ops::Range;
 use std::time::Instant;
 
+mod decode_batch;
 mod dflash;
 mod factory;
+pub use decode_batch::Qwen4ExpDecodeBatch;
 pub use dflash::{
     Qwen4ExpDFlashAdapter, Qwen4ExpDFlashError, Qwen4ExpDFlashFinish, Qwen4ExpDFlashPacket,
     Qwen4ExpDFlashState, Qwen4ExpDFlashStats,

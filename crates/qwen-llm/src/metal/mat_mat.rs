@@ -4390,6 +4390,11 @@ mod tests {
         };
         for (case, (dtype, k, m, b)) in [
             (GgmlType::Q6_K, 256, 17, 2),
+            (GgmlType::Q6_K, 2560, 65, 2),
+            (GgmlType::Q6_K, 2560, 65, 4),
+            (GgmlType::Q6_K, 2560, 8192, 2),
+            (GgmlType::Q6_K, 2560, 8192, 4),
+            (GgmlType::Q6_K, 4096, 2560, 2),
             (GgmlType::Q6_K, 4096, 65, 3),
             (GgmlType::Q6_K, 4096, 2048, 4),
             (GgmlType::Q8_0, 64, 9, 4),
@@ -4433,8 +4438,9 @@ mod tests {
                         .sum()
                 })
                 .collect();
-            let mut mse = [0.0; 2];
-            for (full_precision, error) in [false, true].into_iter().zip(&mut mse) {
+            let mut mse = [0.0; 3];
+            let mut serial = Vec::new();
+            for (route, error) in (0..3).zip(&mut mse) {
                 let y = offset_tensor(
                     &ctx,
                     16,
@@ -4444,7 +4450,26 @@ mod tests {
                     GgmlType::F32,
                 );
                 one_shot(&ctx, |enc| {
-                    if full_precision {
+                    if route == 2 {
+                        for c in 0..b {
+                            crate::metal_forward::encode_mat_vec_dispatch(
+                                &ctx,
+                                enc,
+                                &w,
+                                &xt.view_subrange((c * k) as u64, vec![k as u64]),
+                                &y.view_subrange((c * m) as u64, vec![m as u64]),
+                                k,
+                                m,
+                            )
+                            .map_err(|e| {
+                                crate::metal::checks::bad_shape(
+                                    "fewrow_serial_reference",
+                                    e.to_string(),
+                                )
+                            })?;
+                        }
+                        Ok(())
+                    } else if route == 1 {
                         encode_mat_mat_fewrow_gen_f32_weights(&ctx, enc, &w, &xt, &y, k, m, b)
                     } else {
                         encode_mat_mat_fewrow_gen_f32(&ctx, enc, &w, &xt, &y, k, m, b)
@@ -4463,11 +4488,68 @@ mod tests {
                     )
                 };
                 assert!(got.iter().all(|v| v.is_finite()));
+                if route == 2 {
+                    serial = got.to_vec();
+                }
                 *error = got
                     .iter()
                     .zip(&expected)
                     .map(|(a, e)| (*a as f64 - e).powi(2))
                     .sum::<f64>();
+            }
+            eprintln!("[fewrow-f64] {dtype:?} K={k} M={m} B={b} half/f32/serial SSE={mse:?}");
+            if dtype == GgmlType::Q6_K {
+                let columns = b.next_power_of_two();
+                let scratch = crate::qwen4exp_metal::decode_projection::Scratch {
+                    inputs: MetalTensor::zeros_f32(&ctx, vec![k as u64, columns as u64]).unwrap(),
+                    outputs: MetalTensor::zeros_f32(&ctx, vec![m as u64, columns as u64]).unwrap(),
+                };
+                let y = offset_tensor(
+                    &ctx,
+                    16,
+                    bytemuck::cast_slice(&vec![f32::NAN; b * m]),
+                    6,
+                    vec![m as u64, b as u64],
+                    GgmlType::F32,
+                );
+                let xs: Vec<_> = (0..b)
+                    .map(|i| xt.view_subrange((i * k) as u64, vec![k as u64]))
+                    .collect();
+                let ys: Vec<_> = (0..b)
+                    .map(|i| y.view_subrange((i * m) as u64, vec![m as u64]))
+                    .collect();
+                one_shot(&ctx, |enc| {
+                    scratch
+                        .project(
+                            &ctx,
+                            enc,
+                            &w,
+                            &xs.iter().collect::<Vec<_>>(),
+                            &ys.iter().collect::<Vec<_>>(),
+                        )
+                        .map_err(|e| {
+                            crate::metal::checks::bad_shape("native_exact_q6", e.to_string())
+                        })
+                })
+                .unwrap();
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        y.buffer.contents().as_ptr().cast::<u8>(),
+                        y.buffer.length(),
+                    )
+                };
+                assert_eq!(
+                    &bytes[y.offset as usize..y.offset as usize + b * m * 4],
+                    bytemuck::cast_slice::<f32, u8>(&serial),
+                    "Q6 native versus current serial K={k} M={m} B={b}"
+                );
+                assert!(bytes[..16].iter().all(|&v| v == 0xa5));
+                assert!(
+                    bytes[y.offset as usize + b * m * 4..y.offset as usize + b * m * 4 + 6]
+                        .iter()
+                        .all(|&v| v == 0x5a)
+                );
+                eprintln!("[native-q6-f64] K={k} M={m} B={b}: serial bits and F64 error identical");
             }
             let reference_energy = expected.iter().map(|v| v * v).sum::<f64>();
             assert!(

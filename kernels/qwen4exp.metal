@@ -19,17 +19,10 @@ struct hc_branch_args {
     uint hidden_size;
 };
 
-kernel void kernel_qwen4exp_hc_rms_norm_f32(
-        constant hc_norm_args & args [[buffer(0)]],
-        device const float * input [[buffer(1)]],
-        device const float * weight [[buffer(2)]],
-        device float * normalized [[buffer(3)]],
-        threadgroup float * partial [[threadgroup(0)]],
-        uint branch [[threadgroup_position_in_grid]],
-        uint tid [[thread_position_in_threadgroup]],
-        ushort simdgroup [[simdgroup_index_in_threadgroup]],
-        ushort lane [[thread_index_in_simdgroup]],
-        uint thread_count [[threads_per_threadgroup]]) {
+inline void fn_hc_rms_norm(constant hc_norm_args & args,
+        device const float * input, device const float * weight,
+        device float * normalized, threadgroup float * partial,
+        uint branch, uint tid, ushort simdgroup, ushort lane, uint thread_count) {
     if (branch >= args.branch_count) return;
     const ulong base = (ulong)branch * args.hidden_size;
     float sum_square = 0.0f;
@@ -48,6 +41,41 @@ kernel void kernel_qwen4exp_hc_rms_norm_f32(
         const ulong index = base + hidden;
         normalized[index] = input[index] * scale * weight[index];
     }
+}
+
+kernel void kernel_qwen4exp_hc_rms_norm_f32(
+        constant hc_norm_args & args [[buffer(0)]],
+        device const float * input [[buffer(1)]],
+        device const float * weight [[buffer(2)]],
+        device float * normalized [[buffer(3)]],
+        threadgroup float * partial [[threadgroup(0)]],
+        uint branch [[threadgroup_position_in_grid]],
+        uint tid [[thread_position_in_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]],
+        uint thread_count [[threads_per_threadgroup]]) {
+    fn_hc_rms_norm(args, input, weight, normalized, partial, branch, tid, simdgroup, lane, thread_count);
+}
+
+kernel void kernel_qwen4exp_hc_rms_norm_batch(
+        constant hc_norm_args & args [[buffer(0)]],
+        device const float * input0 [[buffer(1)]],
+        device const float * input1 [[buffer(2)]],
+        device const float * input2 [[buffer(3)]],
+        device const float * input3 [[buffer(4)]],
+        device const float * weight [[buffer(5)]],
+        device float * normalized0 [[buffer(6)]],
+        device float * normalized1 [[buffer(7)]],
+        device float * normalized2 [[buffer(8)]],
+        device float * normalized3 [[buffer(9)]],
+        threadgroup float * partial [[threadgroup(0)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        uint2 local [[thread_position_in_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]],
+        uint2 threads [[threads_per_threadgroup]]) {
+    const uint seq = group.y;
+    fn_hc_rms_norm(args, seq == 0 ? input0 : seq == 1 ? input1 : seq == 2 ? input2 : input3, weight, seq == 0 ? normalized0 : seq == 1 ? normalized1 : seq == 2 ? normalized2 : normalized3, partial, group.x, local.x, simdgroup, lane, threads.x);
 }
 
 kernel void kernel_qwen4exp_hc_low_silu_f32(

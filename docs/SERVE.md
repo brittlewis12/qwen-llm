@@ -70,7 +70,7 @@ connection with `QWEN_SERVE_QUEUE_DEPTH=1`, fails fast with
 `503 Service Unavailable`, `Retry-After: 1`, and a `server_busy` envelope
 instead of waiting silently in the listen backlog. Connections still queued at
 shutdown receive the same busy response. The Lens/control acceptor keeps its
-own execution gate. DeepSeek V4.1 and supported M5 GLM Fast/Half serving
+own execution gate. DeepSeek V4.1 and supported M5 GLM Fast/Half and Flash-Next serving
 keep several requests in flight by default (see the continuous batching
 sections below); queue depth still bounds active plus waiting connections.
 
@@ -97,7 +97,8 @@ construction returns ownership on failure so residency remains recoverable.
 family-neutral: bounded request admission, one decode round over ready members,
 chunked prefill between rounds, nonblocking output, and isolated cancellation.
 [DeepSeek V4.1](#deepseek-v41-continuous-batching) and supported
-[M5 GLM Fast/Half](#glm-53-flash-continuous-batching) enable it by default.
+[M5 GLM Fast/Half](#glm-53-flash-continuous-batching) and
+[M5 Flash-Next](#flash-next-continuous-batching) enable it by default.
 Qwen/DS4 remain serial.
 
 **F7 — Long-context performance stability.** Measured overnight
@@ -782,6 +783,36 @@ before listening.
 Limits: one owner thread; no preemption of a running prefill call; a
 waiting request is admitted only when fewer than N are active; no survivor
 recovery after a post-start batch failure.
+
+## Flash-Next continuous batching
+
+On M5, `QWEN_SERVE_FN_MAX_ACTIVE` defaults to **4**. **`=1` restores the
+original serial owner and single live session.** M4 and DFlash remain serial.
+`QWEN_SERVE_FN_LIVE_STATES` (default 4, range 1..=4) bounds idle causal states;
+active requests are never evicted. The longest compatible exact live prefix
+wins, otherwise the existing checkpoint ladder supplies a restore. Under memory
+pressure, optional snapshots are released before unused idle states; active
+states retain their normal admission and prefill geometry. Refusals are typed
+503s.
+
+The common owner driver handles admission, slow-client parking, cancellation,
+peer failures and exactly-once completion. Prefill yields at its original native
+command boundaries, preserving header/transcript cuts and frontier geometry.
+It keeps its normal admitted row capacity under load. After a mixed-load prefill
+command, decoding earns measured service credit at
+`QWEN_SERVE_FN_DECODE_PERCENT` (default 10, range 1..=90); commands remain
+nonpreemptible. No fixed 512-row reblocking is introduced.
+
+`QWEN_SERVE_FN_NATIVE_BATCH=0` keeps the fair owner while using ordinary
+member forwards. The native path shares HC, dense projections and the head;
+GDN/QSA causal state and routed experts remain private. Startup warms an
+independent step before listening. Unsupported heads or scratch admission keep
+the ordinary group seam.
+
+`x_qwen.phases.batch` reports logical scheduler widths and fair-prefill service.
+`decode_impl` distinguishes ordinary member forwards from native shared work.
+Width greater than one alone does not establish that GPU work was shared.
+See [PERF-LOG](PERF-LOG.md) for the realistic warm-agent qualification.
 
 ## GLM-5.3-Flash continuous batching
 

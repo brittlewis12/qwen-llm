@@ -9,7 +9,11 @@ use crate::serve::{
     decode_cursor::{Advance, DecodeCursor},
     http::PreparedResponse,
 };
-use qwen_llm::qwen4exp_runtime::Qwen4ExpSessionFactory;
+use qwen_llm::qwen4exp_runtime::{Qwen4ExpDecodeBatch, Qwen4ExpSessionFactory};
+qwen_llm::env_flag!(
+    /// Share independent Flash-Next M5 decode HC/dense/head work. 0 retains the fair owner with ordinary member forwards. MAX_ACTIVE=1 restores serial serving.
+    default_on native_enabled, "QWEN_SERVE_FN_NATIVE_BATCH"
+);
 use std::collections::VecDeque;
 
 type Runner<'a> = Qwen4ExpTextRunner<'a, 'a, 'static>;
@@ -116,11 +120,23 @@ pub(super) struct Owner<'a> {
     im_start: Option<u32>,
     control_reserve: u64,
     head_reserve: u64,
+    native: Option<Qwen4ExpDecodeBatch>,
 }
 impl<'a> Owner<'a> {
     pub fn new(base: &'a mut FlashNextBackend) -> anyhow::Result<Self> {
         let (factory, runner) = base.loaded.session_factory(&base.ctx)?;
-        let idle = VecDeque::from([Idle {
+        let mut native = if native_enabled() {
+            match Qwen4ExpDecodeBatch::new(&runner, base.batching.active) {
+                Ok(batch) => Some(batch),
+                Err(e) => {
+                    tracing::info!(target:"qwen_diag","serve native batch declined: family=qwen4exp reason={e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let mut idle = VecDeque::from([Idle {
             state: State {
                 runner,
                 failed: false,
@@ -130,8 +146,47 @@ impl<'a> Owner<'a> {
                 conversation: None,
             }),
         }]);
-        tracing::info!(target:"qwen_diag", "serve batch: family=qwen4exp max_active={} live_states={} arithmetic=ordinary prefills=normal",base.batching.active,base.batching.live);
+        // Warm the actual independent path before any client can measure a
+        // first-use pipeline compile. The legacy startup runner is empty here.
+        if native.is_some()
+            && idle[0].state.runner.next_position() == 0
+            && idle[0].live.tokens.is_empty()
+        {
+            match factory.create_runner(&base.ctx) {
+                Ok(mut second) => {
+                    let first = &mut idle[0].state.runner;
+                    let result = native
+                        .as_mut()
+                        .unwrap()
+                        .step(&mut [&mut *first, &mut second], &[0, 0]);
+                    first.reset()?;
+                    second.reset()?;
+                    if let Err(e) = result {
+                        tracing::info!(target:"qwen_diag","serve native warmup declined: family=qwen4exp reason={e}");
+                        native = None;
+                    }
+                    if base.batching.live > 1 {
+                        idle.push_back(Idle {
+                            state: State {
+                                runner: second,
+                                failed: false,
+                            },
+                            live: Live {
+                                tokens: Vec::new(),
+                                conversation: None,
+                            },
+                        });
+                    }
+                }
+                Err(e) => {
+                    tracing::info!(target:"qwen_diag","serve native warmup admission declined: family=qwen4exp reason={e}");
+                    native = None;
+                }
+            }
+        }
+        tracing::info!(target:"qwen_diag", "serve batch: family=qwen4exp max_active={} live_states={} native={} prefills=normal",base.batching.active,base.batching.live,native.is_some());
         Ok(Self {
+            native,
             ctx: &base.ctx,
             tokenizer: &base.tokenizer,
             factory,
@@ -600,7 +655,7 @@ impl<'a> Owner<'a> {
             self.cache.record_tip(run.conversation, &(), &run.tokens);
         }
         self.cache.record_tip(run.conversation, &(), &consumed);
-        let phases = serde_json::json!({"prefill_ms":run.prefill_ms,"decode_ms":generation.wall_ms,"reused_tokens":run.matched,"prefill_tokens":run.tokens.len()-run.matched,"restore_ms":run.restore_ms,"reuse_source":run.reuse_source,"batch":batch,"decode_impl":"ordinary_members"});
+        let phases = serde_json::json!({"prefill_ms":run.prefill_ms,"decode_ms":generation.wall_ms,"reused_tokens":run.matched,"prefill_tokens":run.tokens.len()-run.matched,"restore_ms":run.restore_ms,"reuse_source":run.reuse_source,"batch":batch,"decode_impl":if self.native.is_some(){"native_hc_dense_head"}else{"ordinary_members"}});
         tracing::info!(target:"qwen_diag", "serve phases: family=qwen4exp tokenize_ms={:.1} restore_ms={:.1} reuse_source={} departing_capture_ms={:.1} endpoint_checkpoint={} prefill_calls={} matched_tokens={} prefill_ms={:.1} prefill_tokens={} snapshot_capture_ms={:.1} decode_ms={:.1} required_forwards={} forward_limit={} transitions={} batch={}",run.tokenize_ms,run.restore_ms,run.reuse_source,run.departing_ms,run.endpoint,run.prefill_calls,run.matched,run.prefill_ms,run.tokens.len()-run.matched,run.capture_ms,generation.wall_ms,run.required,self.forward_limit,generation.transitions,phases["batch"]);
         let mut out = super::super::outcome::finish_generation(
             run.tokens.len(),
@@ -672,6 +727,40 @@ impl<'a> Owner<'a> {
             return Err("malformed Flash-Next logits".into());
         }
         Ok(v)
+    }
+    fn decode_group(
+        &mut self,
+        states: &mut [&mut State<'a>],
+        tokens: &[u32],
+    ) -> Result<Vec<Vec<f32>>, String> {
+        let Some(native) = self.native.as_mut() else {
+            return self.ordinary_group(states, tokens);
+        };
+        crate::shutdown::checkpoint().map_err(|e| e.to_string())?;
+        if states.is_empty()
+            || states.len() > self.config.active
+            || states.len() != tokens.len()
+            || states.iter().zip(tokens).any(|(s, &t)| {
+                s.failed
+                    || s.runner.is_poisoned()
+                    || s.runner.next_position() >= self.forward_limit
+                    || t >= self.vocab
+            })
+        {
+            return Err("invalid native Flash-Next group".into());
+        }
+        for s in states.iter_mut() {
+            s.failed = true;
+        }
+        let mut runners: Vec<_> = states.iter_mut().map(|s| &mut s.runner).collect();
+        let result = native.step(&mut runners, tokens).map_err(|e| e.to_string());
+        drop(runners);
+        if result.is_ok() {
+            for s in states {
+                s.failed = false;
+            }
+        }
+        result
     }
     /// Replaceable native decode seam. An error after the first member advances
     /// marks the entire group failed, preventing the driver's safe-refusal replay.
@@ -797,7 +886,7 @@ impl<'a> Runtime for Owner<'a> {
         s: &mut [&mut Self::State],
         tokens: &[u32],
     ) -> Result<Vec<Vec<f32>>, String> {
-        self.ordinary_group(s, tokens)
+        self.decode_group(s, tokens)
     }
     fn finish(
         &mut self,

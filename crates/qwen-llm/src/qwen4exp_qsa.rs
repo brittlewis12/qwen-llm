@@ -17,6 +17,8 @@ use crate::metal::{
     encode_qk_rms_norm_rope_f32_packed_consecutive, encode_scatter_offset_f32_to_f16_kv,
     encode_sigmoid_mul_gate_strided_f32, mat_vec_q8_0_lcpp_enabled,
 };
+pub(crate) mod decode_batch;
+
 use crate::metal_forward::{
     MfError, encode_mat_mat_dispatch_without_fewrow, encode_mat_vec_dispatch,
     encode_qwen4exp_prefill_mat_mat,
@@ -4320,27 +4322,51 @@ fn encode_step(
     position: usize,
     sequence_length: usize,
 ) -> Result<(), Qwen4ExpQsaError> {
+    encode_step_inner(
+        ctx,
+        enc,
+        input,
+        weights,
+        workspace,
+        position,
+        sequence_length,
+        false,
+    )
+}
+
+fn encode_step_inner(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    weights: QwenSparseAttentionMetalWeights<'_>,
+    workspace: &QwenSparseAttentionMetalWorkspace,
+    position: usize,
+    sequence_length: usize,
+    projected: bool,
+) -> Result<(), Qwen4ExpQsaError> {
     let g = workspace.geometry;
     #[cfg(test)]
     let child_index = crate::qwen4exp_child_profile::span(enc, "index_projection_norm_pending");
-    encode_mat_vec_dispatch(
-        ctx,
-        enc,
-        weights.index_query,
-        input,
-        &workspace.index_query_raw,
-        g.hidden_size,
-        g.index_query_width(),
-    )?;
-    encode_mat_vec_dispatch(
-        ctx,
-        enc,
-        weights.index_key,
-        input,
-        &workspace.index_key_raw,
-        g.hidden_size,
-        g.index_head_dim,
-    )?;
+    if !projected {
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.index_query,
+            input,
+            &workspace.index_query_raw,
+            g.hidden_size,
+            g.index_query_width(),
+        )?;
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.index_key,
+            input,
+            &workspace.index_key_raw,
+            g.hidden_size,
+            g.index_head_dim,
+        )?;
+    }
     encode_norm_rope(
         ctx,
         enc,
@@ -4403,33 +4429,35 @@ fn encode_step(
 
     #[cfg(test)]
     let child_qkv = crate::qwen4exp_child_profile::span(enc, "qkv_norm_publish");
-    encode_mat_vec_dispatch(
-        ctx,
-        enc,
-        weights.query,
-        input,
-        &workspace.query_gate_projection,
-        g.hidden_size,
-        g.query_projection_width(),
-    )?;
-    encode_mat_vec_dispatch(
-        ctx,
-        enc,
-        weights.key,
-        input,
-        &workspace.key_raw,
-        g.hidden_size,
-        g.kv_width(),
-    )?;
-    encode_mat_vec_dispatch(
-        ctx,
-        enc,
-        weights.value,
-        input,
-        &workspace.value,
-        g.hidden_size,
-        g.kv_width(),
-    )?;
+    if !projected {
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.query,
+            input,
+            &workspace.query_gate_projection,
+            g.hidden_size,
+            g.query_projection_width(),
+        )?;
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.key,
+            input,
+            &workspace.key_raw,
+            g.hidden_size,
+            g.kv_width(),
+        )?;
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.value,
+            input,
+            &workspace.value,
+            g.hidden_size,
+            g.kv_width(),
+        )?;
+    }
     encode_qgate_norm_rope(ctx, enc, workspace, weights.query_norm, position)?;
     encode_norm_rope(
         ctx,
@@ -4472,15 +4500,17 @@ fn encode_step(
     drop(child_attention);
     #[cfg(test)]
     let _child_output = crate::qwen4exp_child_profile::span(enc, "qsa_output_projection");
-    encode_mat_vec_dispatch(
-        ctx,
-        enc,
-        weights.output,
-        &workspace.attention,
-        &workspace.output,
-        g.query_width(),
-        g.hidden_size,
-    )?;
+    if !projected {
+        encode_mat_vec_dispatch(
+            ctx,
+            enc,
+            weights.output,
+            &workspace.attention,
+            &workspace.output,
+            g.query_width(),
+            g.hidden_size,
+        )?;
+    }
     Ok(())
 }
 

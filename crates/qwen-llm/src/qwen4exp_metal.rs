@@ -12,6 +12,8 @@ use objc2_metal::{
     MTLResource, MTLSize,
 };
 
+pub(crate) mod decode_batch;
+pub(crate) mod decode_projection;
 mod hc_device;
 #[path = "qwen4exp_hc_read.rs"]
 mod hc_read;
@@ -571,6 +573,10 @@ pub struct GatedResidualMetalRead<'scratch, 'resources, 'pass> {
 }
 
 impl GatedResidualMetalRead<'_, '_, '_> {
+    pub(crate) fn block_output(&self) -> &MetalTensor {
+        self.block_output
+    }
+
     pub fn mixed(&self) -> &MetalTensor {
         &self.scratch.mixed
     }

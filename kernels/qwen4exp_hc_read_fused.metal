@@ -41,17 +41,11 @@ kernel void kernel_qwen4exp_hc_down_silu_bf16(
     threadgroup float partial[4];
     fn_hc_down_silu(weights, normalized, low, partial, row, tid, sg, lane);
 }
-kernel void kernel_qwen4exp_hc_down_silu_inject_bf16(
-        device const uint4 * weights [[buffer(0)]],
-        device const float4 * normalized [[buffer(1)]],
-        device float * low [[buffer(2)]],
-        device const float * inject [[buffer(3)]],
-        device float * injection [[buffer(4)]],
-        uint row [[threadgroup_position_in_grid]],
-        ushort tid [[thread_index_in_threadgroup]],
-        ushort sg [[simdgroup_index_in_threadgroup]],
-        ushort lane [[thread_index_in_simdgroup]]) {
-    threadgroup float partial[32];
+inline void fn_hc_down_inject(device const uint4 * weights,
+        device const float4 * normalized, device float * low,
+        device const float * inject, device float * injection,
+        threadgroup float * partial,
+        uint row, ushort tid, ushort sg, ushort lane) {
     if (row < 320) {
         fn_hc_down_silu(weights, normalized, low, partial, row, tid, sg, lane);
         return;
@@ -77,4 +71,41 @@ kernel void kernel_qwen4exp_hc_down_silu_inject_bf16(
         const float sum = simd_sum(partial[lane]);
         if (lane == 0) injection[row - 320] = sum;
     }
+}
+kernel void kernel_qwen4exp_hc_down_silu_inject_bf16(
+        device const uint4 * weights [[buffer(0)]],
+        device const float4 * normalized [[buffer(1)]],
+        device float * low [[buffer(2)]],
+        device const float * inject [[buffer(3)]],
+        device float * injection [[buffer(4)]],
+        uint row [[threadgroup_position_in_grid]],
+        ushort tid [[thread_index_in_threadgroup]],
+        ushort sg [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    threadgroup float partial[32];
+    fn_hc_down_inject(weights, normalized, low, inject, injection, partial, row, tid, sg, lane);
+}
+
+kernel void kernel_qwen4exp_hc_down_inject_bf16_batch(
+        device const uint4 * weights [[buffer(0)]],
+        device const float4 * normalized0 [[buffer(1)]],
+        device const float4 * normalized1 [[buffer(2)]],
+        device const float4 * normalized2 [[buffer(3)]],
+        device const float4 * normalized3 [[buffer(4)]],
+        device float * low0 [[buffer(5)]],
+        device float * low1 [[buffer(6)]],
+        device float * low2 [[buffer(7)]],
+        device float * low3 [[buffer(8)]],
+        device const float * inject [[buffer(9)]],
+        device float * injection0 [[buffer(10)]],
+        device float * injection1 [[buffer(11)]],
+        device float * injection2 [[buffer(12)]],
+        device float * injection3 [[buffer(13)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort tid [[thread_index_in_threadgroup]],
+        ushort sg [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]]) {
+    threadgroup float partial[32];
+    const uint seq = group.y;
+    fn_hc_down_inject(weights, seq == 0 ? normalized0 : seq == 1 ? normalized1 : seq == 2 ? normalized2 : normalized3, seq == 0 ? low0 : seq == 1 ? low1 : seq == 2 ? low2 : low3, inject, seq == 0 ? injection0 : seq == 1 ? injection1 : seq == 2 ? injection2 : injection3, partial, group.x, tid, sg, lane);
 }

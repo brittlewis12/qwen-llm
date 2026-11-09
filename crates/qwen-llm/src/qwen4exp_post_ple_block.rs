@@ -1,4 +1,5 @@
 //! Reusable post-PLE Qwen3.8-Flash-Next block composition.
+pub(crate) mod decode_batch;
 
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTensorProvenance,

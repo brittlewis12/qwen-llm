@@ -557,7 +557,7 @@ impl SpecBuffers {
             } else {
                 return invalid(format!("{owner}.{}: fill requires F32", spec.name));
             };
-            workspace::commit_new_tensor(&tensor);
+            workspace::commit_new_tensor(&tensor, spec.fill);
             if buffers.insert(spec.name, tensor).is_some() {
                 return invalid(format!("{owner}.{}: duplicate buffer spec", spec.name));
             }
@@ -1147,7 +1147,7 @@ impl<'w> Glm5NextSession<'w> {
             });
         }
         // Every buffer below comes from the spec lists the ledger priced.
-        let _commit = workspace::CommitScope::new(ctx, &ledger)?;
+        let commit = workspace::CommitScope::new(ctx, &ledger)?;
         let before = ctx.current_allocated_size();
         let layers = c
             .blocks
@@ -1170,6 +1170,7 @@ impl<'w> Glm5NextSession<'w> {
                 )
             })
             .transpose()?;
+        commit.finish(ctx)?;
         // Diagnostic only: the device counter also moves with unrelated
         // allocations and frees elsewhere in the process.
         let observed_allocation_delta = ctx.current_allocated_size().saturating_sub(before);

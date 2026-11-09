@@ -2,52 +2,87 @@
 //! Every re-acquisition admits the original width before any state advances.
 
 use super::*;
+use objc2_foundation::NSRange;
+use objc2_metal::MTLBlitCommandEncoder;
 use objc2_metal::MTLResource;
-use std::cell::Cell;
+use std::cell::RefCell;
 
 crate::env_flag!(
-    /// Commit admitted GLM prompt-phase pages before warming weights on memory-tight non-Apple10 devices. Preserves width and arithmetic; zero restores lazy allocation and startup prefetch order. Experimental until the residency gate passes.
+    /// GPU-fill newly admitted GLM prompt/session scratch before warming weights on memory-tight non-Apple10 devices. Ordinary scratch-only commands; no model residency or pinning. Zero restores lazy allocation and startup prefetch order. Experimental until the residency gate passes.
     default_off peak_requested,
     "QWEN_GLM53_PREFILL_PEAK_FIRST"
 );
 
-thread_local! { static COMMIT_PAGE: Cell<usize> = const { Cell::new(0) }; }
+thread_local! { static COMMIT_BUFFERS: RefCell<Option<Vec<crate::metal::Buffer>>> = const { RefCell::new(None) }; }
 
-pub(super) struct CommitScope(usize);
+pub(super) struct CommitScope {
+    previous: Option<Vec<crate::metal::Buffer>>,
+    maximum_bytes: u64,
+}
 
 impl CommitScope {
     pub(super) fn new(ctx: &MetalContext, ledger: &Glm5NextMemoryLedger) -> Result<Self> {
-        let page = if Glm5NextSession::prefill_peak_first(ctx, ledger) {
-            crate::metal::host_page_size_bytes()?
-        } else {
-            0
-        };
-        Ok(Self(COMMIT_PAGE.with(|value| value.replace(page))))
+        let buffers = Glm5NextSession::prefill_peak_first(ctx, ledger).then(Vec::new);
+        Ok(Self {
+            previous: COMMIT_BUFFERS.with(|value| value.replace(buffers)),
+            maximum_bytes: ledger.session_buffer_bytes(),
+        })
+    }
+
+    pub(super) fn finish(self, ctx: &MetalContext) -> Result<()> {
+        let buffers = COMMIT_BUFFERS
+            .with(|value| value.borrow_mut().take())
+            .unwrap_or_default();
+        if buffers.is_empty() {
+            return Ok(());
+        }
+        let bytes: u64 = buffers.iter().map(|buffer| buffer.length() as u64).sum();
+        if bytes > self.maximum_bytes {
+            return invalid("scratch commitment exceeds admitted session bytes");
+        }
+        let started = std::time::Instant::now();
+        // Only fresh owned zero-initialized scratch is referenced. Weight
+        // buffers never enter this list. Drain the ordinary completed command
+        // so it cannot retain scratch past the subsequent decode release.
+        objc2::rc::autoreleasepool(|_| -> Result<()> {
+            let command = ctx
+                .queue
+                .commandBuffer()
+                .ok_or_else(|| Glm5NextMetalError::Invalid("no scratch command buffer".into()))?;
+            let encoder = crate::metal::BlitEncoder::try_begin(&command)?;
+            for buffer in &buffers {
+                unsafe {
+                    encoder
+                        .raw
+                        .fillBuffer_range_value(buffer, NSRange::new(0, buffer.length()), 0);
+                }
+            }
+            encoder.end();
+            command.commit();
+            wait_completed(&command)?;
+            Ok(())
+        })?;
+        tracing::info!(target: "qwen_diag", "glm peak: gpu_fill_bytes={bytes} buffers={} fill_ms={:.3}", buffers.len(), started.elapsed().as_secs_f64()*1e3);
+        Ok(())
     }
 }
 
 impl Drop for CommitScope {
     fn drop(&mut self) {
-        COMMIT_PAGE.with(|value| value.set(self.0));
+        COMMIT_BUFFERS.with(|value| {
+            value.replace(self.previous.take());
+        });
     }
 }
 
-/// Called only on fresh, initialized, owned shared buffers before publication.
-pub(super) fn commit_new_tensor(tensor: &MetalTensor) {
-    COMMIT_PAGE.with(|page| {
-        let page = page.get();
-        if page == 0 {
-            return;
-        }
-        let pointer = tensor.buffer.contents().as_ptr().cast::<u8>();
-        let bytes = tensor.buffer.length();
-        // Writing the existing byte faults in a private physical page without
-        // changing zero or nonzero initialization. No GPU can own this tensor.
-        for offset in (0..bytes).step_by(page) {
-            unsafe {
-                let address = pointer.add(offset);
-                address.write_volatile(address.read_volatile());
-            }
+/// Register only fresh byte-zeroed buffers; nonzero fills are already physical.
+pub(super) fn commit_new_tensor(tensor: &MetalTensor, fill: f32) {
+    if fill != 0.0 {
+        return;
+    }
+    COMMIT_BUFFERS.with(|buffers| {
+        if let Some(buffers) = buffers.borrow_mut().as_mut() {
+            buffers.push(tensor.buffer.clone());
         }
     });
 }
@@ -192,7 +227,7 @@ impl Glm5NextSession<'_> {
                 advice: CapacityAdvice::NotEvaluated,
             });
         }
-        let _commit = CommitScope::new(ctx, &ledger)?;
+        let commit = CommitScope::new(ctx, &ledger)?;
         let mut packed = packed::PackedScratch::new_with_options(
             ctx,
             &self.weights.config,
@@ -200,6 +235,7 @@ impl Glm5NextSession<'_> {
             self.capacity,
             ledger.scratch_options(),
         )?;
+        commit.finish(ctx)?;
         packed.lineage = config.arith.lineage;
         packed.precision = config.arith.precision;
         self.packed = Some(packed);

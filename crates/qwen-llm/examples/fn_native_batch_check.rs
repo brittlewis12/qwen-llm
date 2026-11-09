@@ -1,7 +1,8 @@
 //! Real independent states, full-vocabulary distribution witness and step costs.
-//! MODEL CODE PROSE DEPTH [STEPS=128] [WIDTHS=1,2,3,4] [FLAGS=profile,both].
+//! MODEL CODE PROSE DEPTH [STEPS=128] [WIDTHS=1,2,3,4] [FLAGS=profile,both,census].
 //! `both` runs the listed widths ascending then descending; `profile` reports one
-//! dispatch census after the width measurements. Keep all heads/checkpoints in RAM.
+//! dispatch census after the width measurements; `census` profiles one B=1 and
+//! one B=4 round and exits. Keep all heads/checkpoints in RAM.
 use qwen_llm::{
     gguf::GgufFile,
     metal::MetalContext,
@@ -31,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let flags = a.get(7).map(String::as_str).unwrap_or("");
     let both = flags.split(',').any(|f| f == "both");
     let profile = flags.split(',').any(|f| f == "profile");
+    let census = flags.split(',').any(|f| f == "census");
     let mut sequence = widths.clone();
     if both {
         sequence.extend(widths.iter().rev().copied());
@@ -79,6 +81,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         checkpoints.push(r.capture_snapshot()?);
     }
     let mut native = Qwen4ExpDecodeBatch::new(&runners[0], 4)?;
+    if census {
+        for width in [1, 4] {
+            for (r, s) in runners.iter_mut().zip(&checkpoints) {
+                r.reset()?;
+                r.restore_snapshot(s)?;
+            }
+            for step in 0..8 {
+                let tokens: Vec<_> = (0..width).map(|i| docs[i][depth + i * 17 + step]).collect();
+                let mut members: Vec<_> = runners[..width].iter_mut().collect();
+                native.step(&mut members, &tokens)?;
+            }
+            let tokens: Vec<_> = (0..width).map(|i| docs[i][depth + i * 17 + 8]).collect();
+            qwen_llm::metal::dispatch_census_begin();
+            let guard = qwen_llm::metal::dispatch_profile_begin(&ctx, 20_000)?;
+            let mut members: Vec<_> = runners[..width].iter_mut().collect();
+            native.step(&mut members, &tokens)?;
+            let report = qwen_llm::metal::dispatch_profile_finish(&ctx, guard)?;
+            let rows = qwen_llm::metal::dispatch_census_take();
+            assert_eq!(report.overflow, 0, "census profile overflow");
+            assert_eq!(
+                report.rows.len(),
+                rows.len(),
+                "census/profile dispatch count mismatch"
+            );
+            for (ordinal, (profile, row)) in report.rows.iter().zip(&rows).enumerate() {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "kind":"fn_census_dispatch",
+                        "width":width,
+                        "ordinal":ordinal,
+                        "kernel":profile.kernel,
+                        "tag":row.tag,
+                        "family":row.family,
+                        "grid":profile.grid,
+                        "threads":profile.threads,
+                        "encoder_ordinal":row.encoder_ordinal,
+                        "encoder_concurrent":row.encoder_concurrent,
+                        "dispatch_concurrent":profile.concurrent,
+                        "gpu_ns":profile.gpu_ns,
+                    })
+                );
+            }
+        }
+        return Ok(());
+    }
     for (index, width) in sequence.iter().copied().enumerate() {
         let order = if !both {
             "single"

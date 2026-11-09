@@ -264,25 +264,53 @@ mod tests {
             vec![-0., 0., 0.],
             vec![1., f32::INFINITY, f32::INFINITY],
             vec![0., f32::NAN, 2.],
+            vec![f32::NEG_INFINITY; 3],
         ] {
-            let gpu = GpuTokenSampler::new(&ctx, values.len(), SamplingConfig::default()).unwrap();
-            let x = MetalTensor::from_bytes(
-                &ctx,
-                bytemuck::cast_slice(&values),
-                vec![values.len() as u64],
-                GgmlType::F32,
-            )
-            .unwrap();
-            let y = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
-            let command = ctx.queue.commandBuffer().unwrap();
-            let enc = KernelEncoder::begin(&command);
-            gpu.encode(&ctx, &enc, &x, &y, 0.).unwrap();
-            enc.end();
-            let readback = AsyncTokenReadback::attach(&command, &y);
-            command.commit();
-            let actual = readback.receive().unwrap();
-            wait_completed(&command).unwrap();
-            assert_eq!(actual, if values[1].is_nan() { -2 } else { 1 });
+            for config in [
+                SamplingConfig::default(),
+                SamplingConfig {
+                    temperature: 0.8,
+                    top_k: 20,
+                    top_p: 0.95,
+                    min_p: 0.02,
+                    ..Default::default()
+                },
+                SamplingConfig {
+                    temperature: 0.8,
+                    top_k: 0,
+                    top_p: 0.95,
+                    min_p: 0.02,
+                    ..Default::default()
+                },
+            ] {
+                let gpu = GpuTokenSampler::new(&ctx, values.len(), config).unwrap();
+                let x = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&values),
+                    vec![values.len() as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                let y = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+                let command = ctx.queue.commandBuffer().unwrap();
+                let enc = KernelEncoder::begin(&command);
+                gpu.encode(&ctx, &enc, &x, &y, 0.).unwrap();
+                enc.end();
+                let readback = AsyncTokenReadback::attach(&command, &y);
+                command.commit();
+                let actual = readback.receive().unwrap();
+                wait_completed(&command).unwrap();
+                assert_eq!(
+                    actual,
+                    if values[1].is_nan() {
+                        -2
+                    } else if values[0] == f32::NEG_INFINITY {
+                        i32::MIN
+                    } else {
+                        1
+                    }
+                );
+            }
         }
     }
 }

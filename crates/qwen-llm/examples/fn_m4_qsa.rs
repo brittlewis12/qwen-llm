@@ -24,9 +24,37 @@ fn ids(n: usize, v: u32, mut s: u64) -> Vec<u32> {
         })
         .collect()
 }
+fn compare(a: &[f32], b: &[f32], target: usize) -> (f64, f64, f64) {
+    assert!(a.iter().chain(b).all(|x| x.is_finite()));
+    let z = |v: &[f32]| {
+        let m = v.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+        m + v
+            .iter()
+            .map(|&x| (f64::from(x) - m).exp())
+            .sum::<f64>()
+            .ln()
+    };
+    let (za, zb) = (z(a), z(b));
+    let kl = a
+        .iter()
+        .zip(b)
+        .map(|(&x, &y)| (f64::from(x) - za).exp() * (f64::from(x) - za - f64::from(y) + zb))
+        .sum();
+    let max = a
+        .iter()
+        .zip(b)
+        .map(|(&x, &y)| f64::from((x - y).abs()))
+        .fold(0., f64::max);
+    (
+        zb - f64::from(b[target]) - za + f64::from(a[target]),
+        kl,
+        max,
+    )
+}
 fn main() -> anyhow::Result<()> {
     let a: Vec<_> = std::env::args().collect();
     let depth: usize = a[2].parse()?;
+    let ab_only = a.iter().any(|s| s == "--ab-only");
     let count: usize = a.get(3).map(|s| s.parse()).transpose()?.unwrap_or(64);
     let ctx = MetalContext::new()?;
     let g = GgufFile::open(&a[1])?;
@@ -49,7 +77,7 @@ fn main() -> anyhow::Result<()> {
         let _guard = diagnostic_decode_price(4);
         r.forward_token(token)?.to_vec()
     };
-    for rep in 0..3 {
+    for rep in 0..if ab_only { 0 } else { 3 } {
         let modes = if rep % 2 == 0 {
             [4, 1, 3, 2]
         } else {
@@ -84,7 +112,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
     // Real autoregression: the candidate performs every selection, no cached substitution.
-    for rep in 0..4 {
+    for rep in 0..if ab_only { 12 } else { 4 } {
         for mode in if rep % 2 == 0 { [4, 2] } else { [2, 4] } {
             r.restore_snapshot_with_logits(&entry, &entry_logits)?;
             let _guard = diagnostic_decode_price(mode);
@@ -103,6 +131,45 @@ fn main() -> anyhow::Result<()> {
             )?;
             emit(
                 json!({"kind":"selector_ab","depth":depth,"rep":rep,"mode":mode,"wall_ms":t.wall_ms,"first_ms":t.first_token_ready_ms,"transitions":count-1,"gpu_ms":t.gpu_ms,"tps":(count-1)as f64*1e3/(t.wall_ms-t.first_token_ready_ms.unwrap())}),
+            );
+        }
+    }
+    // Signed teacher-forced distributions, with an incumbent GPU/native repeat floor.
+    if ab_only {
+        r.restore_snapshot_with_logits(&entry, &entry_logits)?;
+        let mut targets = Vec::new();
+        let mut reference = Vec::new();
+        {
+            let _guard = diagnostic_decode_price(4);
+            r.generate_gpu_tokens_observed(
+                &mut Sampler::new(SamplingConfig::default())?,
+                64,
+                &[],
+                |t, row| {
+                    targets.push(t);
+                    reference.push(row.to_vec());
+                    true
+                },
+            )?;
+        }
+        for mode in [4, 2] {
+            r.restore_snapshot_with_logits(&entry, &entry_logits)?;
+            let _guard = diagnostic_decode_price(mode);
+            let mut rows = vec![r.logits()?.to_vec()];
+            for &t in &targets[..63] {
+                rows.push(r.forward_token(t as u32)?.to_vec());
+            }
+            let mut dnll = 0.;
+            let mut kl = 0.;
+            let mut max = 0f64;
+            for ((a, b), &target) in reference.iter().zip(&rows).zip(&targets) {
+                let (d, k, m) = compare(a, b, target as usize);
+                dnll += d;
+                kl += k;
+                max = max.max(m);
+            }
+            emit(
+                json!({"kind":"distribution","depth":depth,"mode":mode,"targets":64,"signed_dNLL":dnll/64.,"mean_KL":kl/64.,"max_logit_error_diagnostic":max,"comparison":if mode==4{"incumbent_repeat"}else{"selector"}}),
             );
         }
     }

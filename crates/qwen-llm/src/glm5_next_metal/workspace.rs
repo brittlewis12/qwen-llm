@@ -198,8 +198,9 @@ mod tests {
             .map(|t| t as u32)
             .collect();
         assert!(tokens.len() >= 8256);
-        // Future CPU snapshot plus two complete 64-row logit streams. No
-        // admission or working-set override is used by either timing arm.
+        // One upfront allowance for the future CPU snapshot, two complete
+        // logit streams and the tiny reference workspace. Both GPU shapes
+        // are normally admitted before prefill; no timing arm allocates.
         let cpu_reserve = 512 << 20;
         let logits_reserve = 2 * 64 * u64::from(weights.config.vocab_size) * 4;
         let mut session = Glm5NextSession::with_prefill_rows_and_cpu_reserve(
@@ -216,9 +217,41 @@ mod tests {
         );
         session.set_packed_lineage(PackedLineage::Fast).unwrap();
         session.set_fast_precision(FastPrecision::Half).unwrap();
+        let decode_ledger = session.workspace_ledger(&ctx, 0).unwrap();
+        let reference_ledger = session.workspace_ledger(&ctx, 1).unwrap();
+        let reference_bytes =
+            reference_ledger.session_buffer_bytes() - decode_ledger.session_buffer_bytes();
+        let mut parked_reference = {
+            let _allocation = ctx.begin_allocation_transaction();
+            // Carve the already planned GPU bytes out of the remaining
+            // future allowance; the total charge and dynamic reserve do
+            // not decrease. CPU snapshot/logits still fit the remainder.
+            let admission = evaluate_metal_memory_admission_with_cpu_bytes(
+                reference_bytes,
+                cpu_reserve.checked_sub(reference_bytes).unwrap(),
+                memory::DYNAMIC_RESERVE_BYTES,
+                ctx.memory_signals(),
+                true,
+            );
+            assert!(
+                admission.refusal().is_none(),
+                "reference admission: {admission:?}"
+            );
+            let mut reference = packed::PackedScratch::new_with_options(
+                &ctx,
+                &weights.config,
+                1,
+                10000,
+                reference_ledger.scratch_options(),
+            )
+            .unwrap();
+            reference.lineage = PackedLineage::Fast;
+            reference.precision = FastPrecision::Half;
+            Some(reference)
+        };
         session.prefill_packed(&ctx, &tokens[..8192]).unwrap();
         let prefix = session.capture_snapshot().unwrap();
-        assert!(prefix.bytes() as u64 + logits_reserve < cpu_reserve);
+        assert!(prefix.bytes() as u64 + logits_reserve + reference_bytes < cpu_reserve);
         session.prepare_decode(&ctx).unwrap();
 
         let thermal = || {
@@ -239,11 +272,20 @@ mod tests {
             ("resident2", true),
             ("stock2", false),
         ] {
-            session.release_workspace(&ctx).unwrap();
-            session.prefill_config.as_mut().unwrap().rows = if resident { 1 } else { 2048 };
-            if resident {
-                session.prepare_prefill(&ctx, logits_reserve).unwrap();
+            // Keep the same pre-admitted device allocation in both arms.
+            // Stock's session owns no prompt workspace; the tiny comparator
+            // is parked outside it until the reference arm borrows it.
+            if resident && session.packed.is_none() {
+                session.packed = parked_reference.take();
+            } else if !resident && session.packed.is_some() {
+                parked_reference = session.packed.take();
             }
+            session.prefill_config.as_mut().unwrap().rows = if resident { 1 } else { 2048 };
+            session.ledger = if resident {
+                reference_ledger
+            } else {
+                decode_ledger
+            };
             session.release_prefill_for_decode = !resident;
             std::thread::sleep(std::time::Duration::from_secs(30));
             thermal();
@@ -306,6 +348,7 @@ mod tests {
             "matched native summary: {}",
             serde_json::json!({
             "context":8192, "tokens":64, "capacity":10000,
+            "reference_workspace_bytes":reference_bytes, "reference_preadmitted":true,
             "snapshot_bytes":prefix.bytes(), "arms":records,
             "stock_tps":64000.0/stock_ms, "resident_tps":64000.0/resident_ms,
             "delta_ms_per_token":delta_ms_per_token,

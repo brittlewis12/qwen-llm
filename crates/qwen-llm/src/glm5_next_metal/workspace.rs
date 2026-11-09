@@ -279,7 +279,7 @@ mod tests {
         let released_again = session.prepare_decode(&ctx).unwrap();
         let device_released = allocated.saturating_sub(ctx.current_allocated_size());
         assert!(
-            weak.upgrade().is_none(),
+            weak.load().is_none(),
             "completed prompt command retained its route buffer"
         );
         assert!(

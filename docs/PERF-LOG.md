@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - GLM M4 Decode Decision: Quant Work And Workspace Lifetime
+
+- **Diagnosis/design only**, base **`09a3a521`**, 128-GiB M4 Max,
+  unchanged **Maya-M IQ2_S**. Pristine ordinary release CLI tg64@8192:
+  **24.286 / 27.983 tok/s**; retain that dispersion.
+- Resident diagnostic: restore one normal 2048-row Fast/Half prefix into an
+  admitted **one-row session**, releasing prompt scratch. Four retained
+  fixed-input tg64 arms, full readbacks, untimed restores and excluded tg64
+  priming **after cooling**: **30.333–30.693 tok/s**, pooled **30.477**.
+  Wall **32.812**, ordinary command GPU **32.045**, CPU encode **0.470**,
+  other wall-minus-GPU **0.297 ms/token**. Thermal **0 throughout**;
+  sampled timing-window page-in/disk-read deltas zero. This is resident
+  compute, **not a default-policy speedup**.
+- Nov 6's **10.372487 GB/token / 505.79 GB/s** gives a **20.507-ms floor**,
+  **48.763-tok/s ceiling** and today's **316.122 logical GB/s / 62.50%**.
+  Census: **1306 dispatches, one encoder/command**; full unsampled graph
+  replay **31.597 ms**, all six vectors equal native. Isolated real-binding
+  cohorts: Q6 projections/head **16.079 ms**, IQ2_S gate/up **6.384**,
+  IQ3 down **3.587**. Representative shared scratch and changed cache/clock
+  interactions make these **nonadditive diagnostics**, not causal gap shares.
+- Residency screen: 2048-row scratch plus a **250,697,728-byte** snapshot
+  yielded **4.13–4.55 tok/s**, about **176 GB** process disk reads versus
+  **112.402 GB** retained weights. Compact transfer preserves complete
+  64-vector stream hashes. Sequential load/priming differences prohibit a
+  policy-gain claim. Unprimed compact runs and a normal host-admission refusal
+  remain in the evidence; no admission or memory-limit override.
+- Proposed redesign: phase-owned prompt workspace with independent session
+  lineage/precision, then cooperative control/projection packets and a
+  pipelined native-IQ block-decode/F32-dot program; no expanded weight cache.
+  **35–37 tok/s (72–76% of roof)** needs **4.24–5.78 ms/token** saved:
+  **unmeasured engineering target**. First kill: new IQ2_S dataflow saves
+  **>=1 ms whole decode**, beyond noise in both ABBA pairs, before expansion.
+  M5 B=1 already delegates to ordinary forward; preserve the Nov 8 B>1
+  batch/scheduler and F32-weight contract, coordinating workspace loans.
+- Rollout requires frozen code/prose signed teacher-forced dNLL/KL against a
+  preregistered noise floor, no-worse F64 error, full lib/CLI/contracts and a
+  default-on path with rollback. Timing used Metal leases, nice 10, cooling,
+  **no build lock**; builds alone took it. Instrumentation/examples removed;
+  native/shader sources match base. Path/env/identity/format checks pass;
+  full lib/CLI/contracts were not rerun for this report.
+  Exact binaries, patches, all attempts, thermal/I/O traces and **`summary.json`**:
+  **`~/qwen-runs/2026-11-08-glm-m4-roofline/`**. No merge or owned worker remains.
+
 ## 2026-11-08 - Flash-Next Concurrency: Current Few-Row Vehicle Killed
 
 - Base **`09a3a521`**, GSQ-RCO **IQ3_S**, M5 Ultra; M4 Max fallback uses the

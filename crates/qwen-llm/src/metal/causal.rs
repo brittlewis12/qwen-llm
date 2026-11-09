@@ -195,7 +195,7 @@ impl KernelEncoder {
     /// It changes no normal-build policy and is scoped to the calling thread.
     #[cfg(any(test, feature = "perf-ablations"))]
     pub fn diagnostic_causal_replay(mode: u8) -> impl Drop {
-        assert!(mode < 4);
+        assert!(mode < 8);
         struct Guard(u8, bool);
         impl Drop for Guard {
             fn drop(&mut self) {
@@ -224,8 +224,8 @@ impl KernelEncoder {
         fuse_ffn: bool,
     ) -> Result<(), MetalError> {
         let mut recording = self.recording.borrow_mut().take().expect("causal scope");
-        if fuse_ffn && replay_mode() & 2 != 0 {
-            fuse_flash_next(ctx, &mut recording.nodes)?;
+        if fuse_ffn && (replay_mode() & 2 != 0 || replay_mode() >= 4) {
+            fuse_flash_next(ctx, &mut recording.nodes, replay_mode())?;
         }
         let mut spans = Vec::with_capacity(recording.nodes.len());
         for n in &recording.nodes {
@@ -256,7 +256,7 @@ impl KernelEncoder {
             (0..spans.len()).map(|i| vec![i]).collect()
         };
         #[cfg(any(test, feature = "perf-ablations"))]
-        if recording.nodes.len() < 10 && TAIL_ENABLED.with(Cell::get) {
+        if TAIL_ENABLED.with(Cell::get) && (recording.nodes.len() < 10 || TAIL_TRACE.with(|t| t.borrow().len() < 3)) {
             let rows:Vec<_>=recording.nodes.iter().zip(&spans).map(|(n,s)|serde_json::json!({"kernel":n.name(),"args":n.state.words(0),"spans":s.iter().map(|a|serde_json::json!({"buffer":a.buffer,"lo":a.lo,"hi":a.hi,"write":a.write})).collect::<Vec<_>>()})).collect();
             TAIL_TRACE.with(|t| {
                 t.borrow_mut()
@@ -341,7 +341,7 @@ fn same_buffer(a: Option<&Binding>, b: Option<&Binding>) -> bool {
 
 /// Fuse only the proven scalar epilogue pattern, with all producer/consumer
 /// identities checked. Other model geometries and packed kernels stay intact.
-fn fuse_flash_next(ctx: &MetalContext, nodes: &mut Vec<Node>) -> Result<(), MetalError> {
+fn fuse_flash_next(ctx: &MetalContext, nodes: &mut Vec<Node>, mode: u8) -> Result<(), MetalError> {
     let sum = nodes
         .iter()
         .position(|n| n.name() == "kernel_moe_weighted_sum_f32");
@@ -351,7 +351,7 @@ fn fuse_flash_next(ctx: &MetalContext, nodes: &mut Vec<Node>) -> Result<(), Meta
     let inject = nodes
         .iter()
         .rposition(|n| n.name() == "kernel_qwen4exp_hc_inject_f32");
-    if let (Some(sum), Some(axpy), Some(inject)) = (sum, axpy, inject) {
+    if let (true, Some(sum), Some(axpy), Some(inject)) = (mode < 4 || mode >= 6, sum, axpy, inject) {
         if sum < axpy && axpy + 2 == inject && nodes[axpy + 1].name() == "kernel_copy_offset_f32" {
             let s = &nodes[sum];
             let a = &nodes[axpy];
@@ -408,6 +408,7 @@ fn fuse_flash_next(ctx: &MetalContext, nodes: &mut Vec<Node>) -> Result<(), Meta
         }
     }
     // A scalar mixer copy followed immediately by injection has no other reader.
+    if mode >= 6 { return Ok(()); }
     let mut i = 0;
     while i + 1 < nodes.len() {
         if nodes[i].name() == "kernel_copy_offset_f32"

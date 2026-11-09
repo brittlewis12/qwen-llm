@@ -62,8 +62,17 @@ mod probe {
             );
             baseline_logits = r.logits()?.to_vec();
         }
-        for mode in 0..4 {
+        r.restore_snapshot(&entry)?;
+        r.configure_causal_executor(false);
+        let normal_logits = r.forward_token(token)?.to_vec();
+        for mode in 0..8 {
             let _mode = KernelEncoder::diagnostic_causal_replay(mode);
+            r.restore_snapshot(&entry)?;
+            r.configure_causal_executor(true);
+            qwen_llm::metal::dispatch_census_begin();
+            let got = r.forward_token(token)?.to_vec();
+            let census = qwen_llm::metal::dispatch_census_take();
+            println!("{}", json!({"kind":"normal_discriminator","mode":mode,"logit_max_abs":error(&normal_logits,&got),"dispatches":census.len(),"fused":census.iter().filter(|r|r.kernel=="kernel_qwen4exp_ffn_epilogue_f32").count(),"tail":KernelEncoder::take_diagnostic_causal_tail()}));
             for (i, layer) in layers.into_iter().enumerate() {
                 r.restore_snapshot(&entry)?;
                 r.configure_causal_executor(true);

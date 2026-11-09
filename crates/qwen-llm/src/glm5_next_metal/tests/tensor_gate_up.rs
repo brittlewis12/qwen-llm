@@ -9,6 +9,7 @@ const HALF: Arith = Arith {
 
 #[test]
 fn cpu_short_gate_preserves_exact_f32_and_geometry_contracts() {
+    let _small = crate::glm5_next_metal::row_policy::SmallScope::new(false);
     let _scope = memory::TensorGateUpScope::new(true);
     let shape = (4096, 2048, 288, 8);
     for dtype in [GgmlType::IQ2_S, GgmlType::IQ3_S] {

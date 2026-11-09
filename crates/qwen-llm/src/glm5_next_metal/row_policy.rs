@@ -6,10 +6,13 @@ crate::env_flag!(
 );
 
 pub(crate) fn small_expanded(rows: usize) -> bool {
-    small_requested()
-        && (128..512).contains(&rows)
-        && expanded(rows)
-        && super::short_prefill::enabled()
+    #[cfg(test)]
+    let requested = SMALL_OVERRIDE
+        .with(std::cell::Cell::get)
+        .unwrap_or_else(small_requested);
+    #[cfg(not(test))]
+    let requested = small_requested();
+    requested && (128..512).contains(&rows) && expanded(rows) && super::short_prefill::enabled()
 }
 
 crate::env_flag!(
@@ -26,8 +29,27 @@ crate::env_flag!(
 
 #[cfg(test)]
 thread_local! {
+    static SMALL_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static IQ_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct SmallScope(Option<bool>, std::marker::PhantomData<std::rc::Rc<()>>);
+#[cfg(test)]
+impl SmallScope {
+    pub(crate) fn new(value: bool) -> Self {
+        Self(
+            SMALL_OVERRIDE.with(|v| v.replace(Some(value))),
+            std::marker::PhantomData,
+        )
+    }
+}
+#[cfg(test)]
+impl Drop for SmallScope {
+    fn drop(&mut self) {
+        SMALL_OVERRIDE.with(|v| v.set(self.0));
+    }
 }
 
 pub(crate) fn expanded(rows: usize) -> bool {
@@ -91,6 +113,80 @@ mod tests {
         short_prefill, tensor_prefill,
     };
     use crate::tensor::GgmlType;
+    #[test]
+    fn small_matrices_preserve_modes_bounds_and_independent_rollback() {
+        use crate::glm5_next_metal::{memory, tensor_down, tensor_gate_up};
+        let _rows = Scope::new(true);
+        let _small = SmallScope::new(true);
+        let _dense = tensor_prefill::Scope::new(true);
+        let _up = memory::TensorGateUpScope::new(true);
+        let _down = tensor_down::Scope::new(true);
+        let half = Arith {
+            lineage: PackedLineage::Fast,
+            precision: FastPrecision::Half,
+        };
+        let active = super::super::short_prefill::enabled();
+        let up_active = tensor_gate_up::short_selected(
+            half,
+            StageMode::Fast,
+            GgmlType::IQ2_S,
+            GgmlType::IQ2_S,
+            (4096, 2048, 288, 8),
+            512,
+        );
+        for rows in 0..=8192 {
+            assert_eq!(small_expanded(rows), active && (128..512).contains(&rows));
+        }
+        for rows in [128, 129, 399, 400, 511] {
+            for lineage in [PackedLineage::Fast, PackedLineage::Exact] {
+                for precision in FastPrecision::ALL {
+                    let arith = Arith { lineage, precision };
+                    for mode in [StageMode::Fast, StageMode::Exact, StageMode::FastF32] {
+                        let expected = active && arith == half && mode == StageMode::Fast;
+                        for dtype in [GgmlType::Q6_K, GgmlType::Q8_0] {
+                            assert_eq!(
+                                tensor_prefill::eligible(arith, mode, dtype, 4096, 8192, rows)
+                                    .unwrap(),
+                                expected
+                            );
+                        }
+                        assert_eq!(
+                            tensor_down::selected(arith, mode, GgmlType::IQ3_S, rows),
+                            expected
+                        );
+                        for dtype in [GgmlType::IQ2_S, GgmlType::IQ3_S] {
+                            assert_eq!(
+                                tensor_gate_up::short_selected(
+                                    arith,
+                                    mode,
+                                    dtype,
+                                    dtype,
+                                    (4096, 2048, 288, 8),
+                                    rows
+                                ),
+                                expected && up_active
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        {
+            let _off = SmallScope::new(false);
+            assert!(!small_expanded(400));
+            assert!(expanded(400));
+            assert!(
+                !tensor_prefill::eligible(half, StageMode::Fast, GgmlType::Q6_K, 4096, 8192, 400)
+                    .unwrap()
+            );
+        }
+        {
+            let _off = Scope::new(false);
+            assert!(!small_expanded(400));
+        }
+        assert_eq!(small_expanded(400), active);
+    }
+
     #[test]
     fn arbitrary_rows_are_bounded_and_rollback_is_nested() {
         let _on = Scope::new(true);
@@ -193,6 +289,7 @@ mod tests {
 
     #[test]
     fn irregular_rows_keep_precision_stage_and_short_prefill_contracts() {
+        let _small = SmallScope::new(false);
         let _rows = Scope::new(true);
         let _dense = tensor_prefill::Scope::new(true);
         let half = Arith {

@@ -52,6 +52,7 @@ fn cpu_short_q6_wide_is_explicit_and_keeps_shared_q8_capability() {
 
 #[test]
 fn cpu_arbitrary_large_rows_respect_q6_rollback() {
+    let _small = crate::glm5_next_metal::row_policy::SmallScope::new(false);
     let _rows = crate::glm5_next_metal::row_policy::Scope::new(true);
     for wide in [false, true] {
         let _wide = Q6WideScope::new(wide);
@@ -153,6 +154,7 @@ fn cpu_policy_requires_ordinary_half_fast_resolved_mode_and_native_types() {
 
 #[test]
 fn cpu_policy_row_boundary_matches_production_not_q6_test_n64_threshold() {
+    let _small = crate::glm5_next_metal::row_policy::SmallScope::new(false);
     let _scope = Scope::new(true);
     let _wide = Q8WideScope::new(true);
     for dtype in [GgmlType::Q6_K, GgmlType::Q8_0] {

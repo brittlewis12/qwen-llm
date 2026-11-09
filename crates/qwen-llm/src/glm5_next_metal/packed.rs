@@ -2810,7 +2810,9 @@ mod down_policy_tests {
             let _rows = row_policy::Scope::new(any_rows);
             let _iq = row_policy::IqScope::new(iq_rows);
             for rows in 0..=4096 {
-                let expected = if rows == 512 && super::super::short_prefill::enabled() {
+                let expected = if (rows == 512 && super::super::short_prefill::enabled())
+                    || row_policy::small_expanded(rows)
+                {
                     GroupedDownPolicy::Iq3STensorOrSmallCounts
                 } else if matches!(rows, 1024 | 2048)
                     || (any_rows && iq_rows && (1024..=4096).contains(&rows))

@@ -6,6 +6,45 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-09 - GLM Append F32 Tensor Attention: First Screen Killed
+
+- **Kill; no runtime change.** M5 Ultra selected-attention operator screen,
+  F32 queries/probabilities and exact promotion of native F16 cache values;
+  the failed Half widening stays excluded. Six tensor layouts tested 2051
+  selected slots over a 65536-row cache, with original F32 query operands,
+  visibility/invalid-id masks, sinks and guarded output offsets. Eight retained
+  alternating samples per layout after warmup; Metal validation enabled,
+  lease held, thermal pressure **0**. Component GPU times, **not append TTFT**:
+
+  | Queries | Split ms | Fastest F32 tensor ms | Speedup | F64 RMS error ratio |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 16 | 0.4906 | 0.3645 | 1.346x | **3.291x** |
+  | 32 | 1.0245 | 0.6389 | 1.604x | **3.179x** |
+  | 64 | 2.0973 | 1.1163 | 1.879x | **3.189x** |
+
+- Independent F64 QK/softmax/PV checks use 6144 scalar outputs per shape,
+  the original F32 queries and native F16 cache. All six layouts fail the
+  no-worse error gate. At 64 queries RMS is **2.967e-9 versus 9.305e-10**;
+  smaller absolute error does not waive the ratio gate. Stop before native
+  ABBA, steady-harness TTFT and signed teacher-forced dNLL/KL qualification;
+  **no claim against the 400/2000-row targets**. Unqualified runtime code and
+  knob removed. Compensated/late-normalization attention and count-adaptive
+  IQ3_S down probes compiled, but their queued GPU screen was canceled
+  before acquisition at this decision point. No new default or rollout.
+- The existing 2K census still identifies IQ3_S down (**270.8 ms**) and
+  Q6_K dense (**334.2 ms**, both activation types) as matrix priorities;
+  those figures are instrumented spans, not independently recoverable native
+  time. Fresh whole-append measurements remain required.
+- Tested shader **`07f867f2`**; retained overlay and corrected standalone
+  fixture under **`~/qwen-runs/2026-11-09-glm-append-attn/`**. On an isolated
+  **`d510f3e4d`** checkout: `python3 "$RAW/reproduce_operator.py" --repo .`,
+  build `cargo build --release -p qwen-llm --example glm_append_attn` under
+  the build lock, then lease-wrap `python3 "$RAW/campaign.py" "$OUT"
+  target/release/examples/glm_append_attn operator` with `MTL_DEBUG_LAYER=1`.
+  `analyze_operator.py` regenerates the table from **`operator-3`**. Retain
+  invalid preflight/checker attempts as rejected evidence; prototype full-test
+  build was interrupted, not a passing qualification. Regenerable bulk deleted.
+
 ## 2026-11-09 - GLM M4 Prompt Workspace Lifetime: Default On
 
 - Branch **`perf/m4-glm-decode`**, base **`2b9fe91c`**, code **`a5ff2a0e`**;

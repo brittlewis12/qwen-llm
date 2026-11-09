@@ -6,6 +6,50 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-09 - Steady Agent Concurrency: V4.1 1.308x, GLM 1.730x; 128K Rooflines
+
+- Clean engine **`9b193b38`**, M5 Ultra 256 GiB, current tier-1 artifacts;
+  includes GLM batched expert activation reuse. Harness now defaults to three
+  **continuous closed loops**, distinct untimed **48K roots**, 15 s ramp,
+  fixed **180 s common window**, seeded real per-family append/reply/tool-gap
+  draws. No turn quota, finite solo drain, exact-work gate or fixed-output
+  control. Natural EOS/unequal work are accepted; compare **rates**. Boundary
+  replies contribute their delivered tokens; cutoff cancels without timing
+  drain. [Protocol, latency and next levers](bench/2026-11-09-steady-concurrency.md),
+  [turns](bench/2026-11-09-steady-concurrency-calls.csv),
+  [20 s trace](bench/2026-11-09-steady-concurrency-trace.csv).
+
+  | Family | MAX_ACTIVE=1 tok/s | Default tok/s | Default / serial |
+  | --- | ---: | ---: | ---: |
+  | V4.1 | 69.62 | 91.04 | **1.308x** |
+  | GLM-5.3 | 41.63 | 72.03 | **1.730x** |
+  | Flash-Next, serial baseline | 67.20 | — | — |
+
+- V4.1 default agents receive **29.4–31.0 tok/s**, GLM **23.7–24.2**.
+  Median observed TTFT for default V4.1 short agents **0.80/0.96 s**, GLM
+  **0.57–1.05 s**; serial GLM **14–19 s**, FN **69–71 s**. Pending TTFTs
+  at cutoff: **two** each V4.1/GLM serial, **three FN**; censored waits stay
+  in the turn packet. Default V4.1 has **zero solo-stream seconds**; three
+  streams overlap for **147/180 s** (GLM **151/180**). Stream overlap is not
+  exclusive GPU batch service. GLM's control retains one live state versus
+  default four, so its gain includes residency. Default p95/max content gaps:
+  **28.5/2196.5 ms V4.1**, **36.0/2289.9 ms GLM**.
+- Cheap native **128K** screen, one retained sample/cell: GLM/FN single-stream
+  tg256 **54.30/68.51 tok/s**, **49.2/33.2% measured BW roof**. Fresh pp512
+  **0.761/0.373 s**, **672.5/1373.4 tok/s**, **19.5/13.6% tensor peak**.
+  [Accounting and commands](bench/2026-11-09-128k-roofline.md) use audited
+  logical bytes/useful matmul FLOPs, measured **1175.47 GB/s / 131.676 TFLOP/s**
+  calibrations; these are optimistic useful-work roofs, not DRAM counters or
+  occupancy. No other-engine ratio. Immediate concurrency lever remains FN
+  batching/idle states; V4.1/GLM should target B=2/3 decode before solo-only wins.
+- Evidence is **commit plus command**; measured driver **`e6d33da4`** V4.1/GLM,
+  **`761a13c4`** FN, cutoff robustness **`4120be7e`**. Seven CPU harness tests
+  and contracts pass. Timing uses only canonical Metal lease/wait + nice 10;
+  builds alone hold the build lock. Cooling and one-second monitoring, all
+  thermal samples **0**. Compact JSON under
+  `$HOME/qwen-runs/2026-11-08-realistic-steady/` on both hosts; regenerable
+  M5 worktree/target/bundle removed, no owned processes remain. No merge/push.
+
 ## 2026-11-08 - Warm Agent Concurrency: Observed Capacity, EOS Fails Exact-Work Gate
 
 - Clean engine **`09a3a521`**, M5 Ultra **256 GiB**, unchanged tier-1 artifacts

@@ -6067,5 +6067,12 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Independent HC batch axes, incumbent reductions and guarded offsets require Metal."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::batched_hc_pre_preserves_mixed_depths_and_dirty_restores",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Leased synthetic full-forward batches at mixed depths, B=1..5, split submission and dirty restores; verifies exact heads and real HC dispatch grids, no production model."
   }
 ]

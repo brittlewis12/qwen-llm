@@ -302,6 +302,65 @@ kernel void kernel_deepseek_v41_hc_pre(
 // controls are first read after the block, so they move into
 // kernel_deepseek_v41_hc_post_controls. Reduction order differs from
 // projection + kernel_deepseek_v41_hc_pre; nothing else.
+#define V41_HC_PRE_WIDE_BODY \
+    threadgroup float partial[V41_HC_PRE_THREADS / 32]; \
+    threadgroup float2 partial2[V41_HC_PRE_THREADS / 32]; \
+    const uint h4 = a.hidden / 4; \
+    const uint n4 = V41_HC_CONNECTIONS * h4; \
+    if (row < 24) { \
+        device const float4 *w = weight + ulong(row) * n4; \
+        float4 dot = 0.0f, ss = 0.0f; \
+        uint i = tid; \
+        for (; i + 3 * V41_HC_PRE_THREADS < n4; i += 4 * V41_HC_PRE_THREADS) { \
+            const float4 v0 = x[i], v1 = x[i + V41_HC_PRE_THREADS]; \
+            const float4 v2 = x[i + 2 * V41_HC_PRE_THREADS], v3 = x[i + 3 * V41_HC_PRE_THREADS]; \
+            const float4 w0 = w[i], w1 = w[i + V41_HC_PRE_THREADS]; \
+            const float4 w2 = w[i + 2 * V41_HC_PRE_THREADS], w3 = w[i + 3 * V41_HC_PRE_THREADS]; \
+            dot += w0 * v0 + w1 * v1 + w2 * v2 + w3 * v3; \
+            ss += v0 * v0 + v1 * v1 + v2 * v2 + v3 * v3; \
+        } \
+        for (; i < n4; i += V41_HC_PRE_THREADS) { \
+            const float4 v = x[i]; \
+            dot += w[i] * v; \
+            ss += v * v; \
+        } \
+        const float d = simd_sum((dot.x + dot.y) + (dot.z + dot.w)); \
+        const float s = simd_sum((ss.x + ss.y) + (ss.z + ss.w)); \
+        if (lane == 0) partial2[sg] = float2(d, s); \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+        if (tid == 0) { \
+            float2 total = 0.0f; \
+            for (uint k = 0; k < V41_HC_PRE_THREADS / 32; ++k) total += partial2[k]; \
+            mix[row] = total.x * rsqrt(total.y / float(4 * n4) + a.norm_eps); \
+        } \
+        return; \
+    } \
+    /* Collapse with the lagged incoming pre, then the weighted RMS norm. */ \
+    const float p0 = incoming_pre[0], p1 = incoming_pre[1], p2 = incoming_pre[2], p3 = incoming_pre[3]; \
+    float4 col[V41_HC_PRE_MAX_D4]; \
+    float4 ss2v = 0.0f; \
+    for (uint j = 0; j < V41_HC_PRE_MAX_D4; ++j) { \
+        const uint d4 = tid + j * V41_HC_PRE_THREADS; \
+        if (d4 < h4) { \
+            float4 v = 0.0f; \
+            v += x[d4] * p0; \
+            v += x[h4 + d4] * p1; \
+            v += x[2 * h4 + d4] * p2; \
+            v += x[3 * h4 + d4] * p3; \
+            col[j] = v; \
+            ss2v += v * v; \
+        } \
+    } \
+    const float inv2 = rsqrt(v41_hc_tg_sum((ss2v.x + ss2v.y) + (ss2v.z + ss2v.w), partial, lane, sg) \
+        / float(a.hidden) + a.norm_eps); \
+    for (uint j = 0; j < V41_HC_PRE_MAX_D4; ++j) { \
+        const uint d4 = tid + j * V41_HC_PRE_THREADS; \
+        if (d4 < h4) { \
+            collapsed[d4] = col[j]; \
+            normalized[d4] = (col[j] * inv2) * norm_weight[d4]; \
+        } \
+    }
+
 kernel void kernel_deepseek_v41_hc_pre_wide(
     constant HcPreArgs &a [[buffer(0)]],
     device const float4 *x [[buffer(1)]],           // residual [4*hidden]
@@ -313,64 +372,48 @@ kernel void kernel_deepseek_v41_hc_pre_wide(
     device float4 *normalized [[buffer(7)]],        // [hidden]
     uint row [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-    threadgroup float partial[V41_HC_PRE_THREADS / 32];
-    threadgroup float2 partial2[V41_HC_PRE_THREADS / 32];
-    const uint h4 = a.hidden / 4;
-    const uint n4 = V41_HC_CONNECTIONS * h4;
-    if (row < 24) {
-        device const float4 *w = weight + ulong(row) * n4;
-        float4 dot = 0.0f, ss = 0.0f;
-        uint i = tid;
-        for (; i + 3 * V41_HC_PRE_THREADS < n4; i += 4 * V41_HC_PRE_THREADS) {
-            const float4 v0 = x[i], v1 = x[i + V41_HC_PRE_THREADS];
-            const float4 v2 = x[i + 2 * V41_HC_PRE_THREADS], v3 = x[i + 3 * V41_HC_PRE_THREADS];
-            const float4 w0 = w[i], w1 = w[i + V41_HC_PRE_THREADS];
-            const float4 w2 = w[i + 2 * V41_HC_PRE_THREADS], w3 = w[i + 3 * V41_HC_PRE_THREADS];
-            dot += w0 * v0 + w1 * v1 + w2 * v2 + w3 * v3;
-            ss += v0 * v0 + v1 * v1 + v2 * v2 + v3 * v3;
-        }
-        for (; i < n4; i += V41_HC_PRE_THREADS) {
-            const float4 v = x[i];
-            dot += w[i] * v;
-            ss += v * v;
-        }
-        const float d = simd_sum((dot.x + dot.y) + (dot.z + dot.w));
-        const float s = simd_sum((ss.x + ss.y) + (ss.z + ss.w));
-        if (lane == 0) partial2[sg] = float2(d, s);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (tid == 0) {
-            float2 total = 0.0f;
-            for (uint k = 0; k < V41_HC_PRE_THREADS / 32; ++k) total += partial2[k];
-            mix[row] = total.x * rsqrt(total.y / float(4 * n4) + a.norm_eps);
-        }
-        return;
-    }
-    // Collapse with the lagged incoming pre, then the weighted RMS norm.
-    const float p0 = incoming_pre[0], p1 = incoming_pre[1], p2 = incoming_pre[2], p3 = incoming_pre[3];
-    float4 col[V41_HC_PRE_MAX_D4];
-    float4 ss2v = 0.0f;
-    for (uint j = 0; j < V41_HC_PRE_MAX_D4; ++j) {
-        const uint d4 = tid + j * V41_HC_PRE_THREADS;
-        if (d4 < h4) {
-            float4 v = 0.0f;
-            v += x[d4] * p0;
-            v += x[h4 + d4] * p1;
-            v += x[2 * h4 + d4] * p2;
-            v += x[3 * h4 + d4] * p3;
-            col[j] = v;
-            ss2v += v * v;
-        }
-    }
-    const float inv2 = rsqrt(v41_hc_tg_sum((ss2v.x + ss2v.y) + (ss2v.z + ss2v.w), partial, lane, sg)
-        / float(a.hidden) + a.norm_eps);
-    for (uint j = 0; j < V41_HC_PRE_MAX_D4; ++j) {
-        const uint d4 = tid + j * V41_HC_PRE_THREADS;
-        if (d4 < h4) {
-            collapsed[d4] = col[j];
-            normalized[d4] = (col[j] * inv2) * norm_weight[d4];
-        }
-    }
+    V41_HC_PRE_WIDE_BODY
 }
+
+// Same threadgroup arithmetic; one independent sequence per grid row.
+kernel void kernel_deepseek_v41_hc_pre_batch(
+    constant HcPreArgs &a [[buffer(0)]],
+    device const float4 *weight [[buffer(1)]],
+    device const float4 *norm_weight [[buffer(2)]],
+    device const float4 *x0 [[buffer(3)]],
+    device const float4 *x1 [[buffer(4)]],
+    device const float4 *x2 [[buffer(5)]],
+    device const float4 *x3 [[buffer(6)]],
+    device float *mix0 [[buffer(7)]],
+    device float *mix1 [[buffer(8)]],
+    device float *mix2 [[buffer(9)]],
+    device float *mix3 [[buffer(10)]],
+    device const float *incoming0 [[buffer(11)]],
+    device const float *incoming1 [[buffer(12)]],
+    device const float *incoming2 [[buffer(13)]],
+    device const float *incoming3 [[buffer(14)]],
+    device float4 *collapsed0 [[buffer(15)]],
+    device float4 *collapsed1 [[buffer(16)]],
+    device float4 *collapsed2 [[buffer(17)]],
+    device float4 *collapsed3 [[buffer(18)]],
+    device float4 *normalized0 [[buffer(19)]],
+    device float4 *normalized1 [[buffer(20)]],
+    device float4 *normalized2 [[buffer(21)]],
+    device float4 *normalized3 [[buffer(22)]],
+    uint2 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    device const float4 *x = (group.y==0 ? x0 : group.y==1 ? x1 : group.y==2 ? x2 : x3);
+    device float *mix = (group.y==0 ? mix0 : group.y==1 ? mix1 : group.y==2 ? mix2 : mix3);
+    device const float *incoming_pre = (group.y==0 ? incoming0 : group.y==1 ? incoming1 : group.y==2 ? incoming2 : incoming3);
+    device float4 *collapsed = (group.y==0 ? collapsed0 : group.y==1 ? collapsed1 : group.y==2 ? collapsed2 : collapsed3);
+    device float4 *normalized = (group.y==0 ? normalized0 : group.y==1 ? normalized1 : group.y==2 ? normalized2 : normalized3);
+    const uint row=group.x;
+    V41_HC_PRE_WIDE_BODY
+}
+
+#undef V41_HC_PRE_WIDE_BODY
 
 // Controls for a site whose pre-block ran kernel_deepseek_v41_hc_pre_wide,
 // computed in the prologue of its post. Simdgroup 0 of every threadgroup

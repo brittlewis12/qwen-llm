@@ -421,6 +421,98 @@ impl Workspace {
     }
 }
 
+fn encode_attention_hc_batch(
+    model: &Forward<'_>,
+    stages: &mut StageEncoder<'_>,
+    workspaces: &[&mut Workspace],
+    id: usize,
+) -> Result<bool> {
+    if !hc_gpu::batch_candidate(workspaces.len()) {
+        return Ok(false);
+    }
+    let hc = &model.layers[id].attn_hc;
+    let constants = &workspaces[0].constants[id];
+    let sites: [_; 4] = std::array::from_fn(|seq| {
+        let ws = &*workspaces[seq.min(workspaces.len() - 1)];
+        let incoming = if id == 0 {
+            &ws.initial_pre
+        } else {
+            ws.ffn.next_pre()
+        };
+        (
+            &ws.x,
+            hc_gpu::HcPreSite {
+                mix: &ws.raw,
+                pre: &ws.pre,
+                post: &ws.post,
+                combination: &ws.comb,
+                incoming_pre: incoming,
+                collapsed: &ws.collapsed,
+                normalized: &ws.normalized,
+            },
+        )
+    });
+    let sites = &sites[..workspaces.len()];
+    if !hc_gpu::pre_batch_supported(&model.config, hc, constants, &sites)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(false);
+    }
+    if model.layers[id].engram.is_some() {
+        for ws in workspaces {
+            sequence_boundary(stages);
+            ws.encode_engram_gate(model, stages, id)?;
+        }
+    }
+    sequence_boundary(stages);
+    metal::dispatch_profile_label("hc_pre", Some(id));
+    hc_gpu::encode_pre_batch(
+        model.ctx,
+        stages.enc(),
+        &model.config,
+        hc,
+        constants,
+        &sites,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+fn encode_ffn_hc_batch(
+    model: &Forward<'_>,
+    stages: &mut StageEncoder<'_>,
+    workspaces: &[&mut Workspace],
+    id: usize,
+) -> Result<bool> {
+    if !hc_gpu::batch_candidate(workspaces.len()) {
+        return Ok(false);
+    }
+    let hc = &model.layers[id].ffn_hc;
+    let constants = workspaces[0].ffn.hc_pre_constants(id);
+    let sites: [_; 4] = std::array::from_fn(|seq| {
+        let ws = &*workspaces[seq.min(workspaces.len() - 1)];
+        (&ws.half, ws.ffn.hc_pre_site(&ws.pre))
+    });
+    let sites = &sites[..workspaces.len()];
+    if !hc_gpu::pre_batch_supported(&model.config, hc, constants, &sites)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(false);
+    }
+    sequence_boundary(stages);
+    metal::dispatch_profile_label("ffn_hc_pre", Some(id));
+    hc_gpu::encode_pre_batch(
+        model.ctx,
+        stages.enc(),
+        &model.config,
+        hc,
+        constants,
+        &sites,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 /// Layer `id` of every sequence's attention, with its dense projections run
 /// once for all of them: per sequence the Engram gate, HC pre and the
 /// attention checks; the rank pair over the gathered inputs (or, without
@@ -443,10 +535,15 @@ fn encode_attention_columns(
     let w = &model.layers[id].attention;
     let cols = workspaces.len();
     let err = |e: metal::MetalError| e.to_string();
+    let hc_batch = encode_attention_hc_batch(model, stages, workspaces, id)?;
     for (ws, input) in workspaces.iter_mut().zip(inputs) {
-        sequence_boundary(stages);
-        ws.encode_engram_gate(model, stages, id)?;
-        ws.attention_input(model, stages, id)?;
+        if !hc_batch {
+            sequence_boundary(stages);
+            ws.encode_engram_gate(model, stages, id)?;
+            ws.attention_input(model, stages, id)?;
+        } else if !scratch.qkv {
+            sequence_boundary(stages);
+        }
         let ws = &mut **ws;
         if scratch.qkv {
             ws.attention
@@ -613,9 +710,11 @@ fn encode_ffn_columns(
         }
         return Ok(());
     }
-    for ws in workspaces.iter_mut() {
-        sequence_boundary(stages);
-        ws.ffn_hc_pre(model, stages, id)?;
+    if !encode_ffn_hc_batch(model, stages, workspaces, id)? {
+        for ws in workspaces.iter_mut() {
+            sequence_boundary(stages);
+            ws.ffn_hc_pre(model, stages, id)?;
+        }
     }
     let split = ffn_split_encoders();
     if split {

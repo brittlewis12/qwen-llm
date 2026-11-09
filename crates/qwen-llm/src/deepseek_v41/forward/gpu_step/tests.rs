@@ -1084,3 +1084,125 @@ fn folded_finite_check_matches_separate_dispatch_bitwise() {
     }
     assert_eq!(errors[0], errors[1]);
 }
+
+/// Independent HC grids retain each member's lagged controls through mixed
+/// depths, split submission, width changes and dirty checkpoint restores.
+#[test]
+fn batched_hc_pre_preserves_mixed_depths_and_dirty_restores() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            BatchLevers::apply(None);
+            SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(None));
+            hc_gpu::BATCH_HC_OVERRIDE.with(|o| o.set(None));
+            hc_gpu::HC_WIDE_OVERRIDE.with(|o| o.set(None));
+        }
+    }
+    let _reset = Reset;
+    let ctx = MetalContext::new().unwrap();
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    BatchLevers::apply(Some(BatchLevers {
+        shared: true,
+        attention: true,
+        qkv: true,
+        output_a: true,
+        head: true,
+        engram: true,
+        routed: true,
+        sequence_encoders: true,
+        ffn_split: true,
+        per_column_copy: false,
+        fused_rank_norms: true,
+    }));
+    hc_gpu::HC_WIDE_OVERRIDE.with(|o| o.set(Some(true)));
+    for split in [false, true] {
+        SPLIT_SUBMIT_OVERRIDE.with(|o| o.set(Some(split)));
+        for batch in [1usize, 2, 3, 4, 5] {
+            let mut old = Vec::new();
+            let mut new = Vec::new();
+            for seq in 0..batch {
+                let mut state = model.new_state_with_gpu_step(12).unwrap();
+                for j in 0..seq + 1 {
+                    model
+                        .step(&mut state, ((j + seq) % model.config.vocab) as u32, None)
+                        .unwrap();
+                }
+                let snap = model.capture_snapshot(&state).unwrap();
+                let mut copy = model.new_state_with_gpu_step(12).unwrap();
+                model.restore_snapshot(&mut copy, &snap).unwrap();
+                old.push(state);
+                new.push(copy);
+            }
+            for round in 0..3 {
+                let tokens: Vec<_> = (0..batch)
+                    .map(|seq| ((round + seq) % model.config.vocab) as u32)
+                    .collect();
+                hc_gpu::BATCH_HC_OVERRIDE.with(|o| o.set(Some(false)));
+                metal::dispatch_census_begin();
+                let expected = model
+                    .step_batch(&mut old.iter_mut().collect::<Vec<_>>(), &tokens, None)
+                    .unwrap();
+                assert!(
+                    metal::dispatch_census_take()
+                        .iter()
+                        .all(|d| d.kernel != "kernel_deepseek_v41_hc_pre_batch")
+                );
+                hc_gpu::BATCH_HC_OVERRIDE.with(|o| o.set(Some(true)));
+                metal::dispatch_census_begin();
+                let actual = model
+                    .step_batch(&mut new.iter_mut().collect::<Vec<_>>(), &tokens, None)
+                    .unwrap();
+                let dispatches: Vec<_> = metal::dispatch_census_take()
+                    .into_iter()
+                    .filter(|d| d.kernel == "kernel_deepseek_v41_hc_pre_batch")
+                    .collect();
+                assert_eq!(
+                    dispatches.len(),
+                    if (2..=4).contains(&batch) {
+                        2 * model.layers.len()
+                    } else {
+                        0
+                    }
+                );
+                for dispatch in dispatches {
+                    assert_eq!(
+                        (
+                            dispatch.grid_width,
+                            dispatch.grid_height,
+                            dispatch.grid_depth
+                        ),
+                        (25, batch as u64, 1)
+                    );
+                }
+                assert!(actual.iter().flatten().all(|v| v.is_finite()));
+                let bits = |heads: &Vec<Vec<f32>>| {
+                    heads
+                        .iter()
+                        .flatten()
+                        .map(|v| v.to_bits())
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    bits(&actual),
+                    bits(&expected),
+                    "split={split} B={batch} round={round}"
+                );
+                for (a, b) in old.iter().zip(&new) {
+                    assert_eq!(a.position(), b.position());
+                    assert!(a.is_ready() && b.is_ready());
+                }
+                if round == 1 {
+                    for states in [&mut old, &mut new] {
+                        for state in states {
+                            let snap = model.capture_snapshot(state).unwrap();
+                            model.step(state, 0, None).unwrap();
+                            model.step(state, 1, None).unwrap();
+                            model.restore_snapshot(state, &snap).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

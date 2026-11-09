@@ -682,6 +682,26 @@ impl Workspace {
             )
     }
 
+    pub(super) fn hc_pre_constants(&self, id: usize) -> &[MetalTensor] {
+        &self.constants[id]
+    }
+
+    pub(super) fn hc_pre_site<'t>(
+        &'t self,
+        incoming_pre: &'t MetalTensor,
+    ) -> hc_gpu::HcPreSite<'t> {
+        let b = &self.buffers;
+        hc_gpu::HcPreSite {
+            mix: &b[2],
+            pre: &b[3],
+            post: &b[4],
+            combination: &b[5],
+            incoming_pre,
+            collapsed: &b[6],
+            normalized: &b[7],
+        }
+    }
+
     /// `encode` in four parts. The shared expert and the router plus routed
     /// experts only read the HC pre output and write disjoint buffers, so on
     /// separate encoders Metal's resource tracking may overlap them; the
@@ -708,15 +728,7 @@ impl Workspace {
                 &layer.ffn_hc,
                 constants,
                 x,
-                hc_gpu::HcPreSite {
-                    mix: &b[2],
-                    pre: &b[3],
-                    post: &b[4],
-                    combination: &b[5],
-                    incoming_pre: pre,
-                    collapsed: &b[6],
-                    normalized: &b[7],
-                },
+                self.hc_pre_site(pre),
             )?;
         } else {
             layer.ffn_hc.projection.encode(enc, x, &b[2])?;

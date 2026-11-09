@@ -75,6 +75,7 @@ struct HcPreArgs {
 /// Buffers of one mHC pre-block site. `incoming_pre` is the lagged pre the
 /// collapse consumes (previous FFN's, or the initial unit pre); `pre`,
 /// `post` and `combination` receive this site's controls.
+#[derive(Clone, Copy)]
 pub(super) struct HcPreSite<'t> {
     pub mix: &'t MetalTensor,
     pub pre: &'t MetalTensor,
@@ -92,15 +93,12 @@ pub(super) fn fused_supported(hc: &Hc<'_>) -> bool {
         && hc.projection.input.is_multiple_of(4)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn encode_pre(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
+fn validate_pre(
     c: &Config,
     hc: &Hc<'_>,
     constants: &[MetalTensor],
     x: &MetalTensor,
-    site: HcPreSite<'_>,
+    site: &HcPreSite<'_>,
 ) -> std::result::Result<(), metal::MetalError> {
     const K: &str = "v41_hc_pre";
     let hidden = c.hidden as u64;
@@ -125,6 +123,9 @@ pub(super) fn encode_pre(
     };
     f32_elems(x, HC_CONNECTIONS * hidden, "residual")?;
     f32_elems(site.mix, HC_MIXES, "mix")?;
+    if constants.len() < 3 {
+        return Err(bad("mHC pre constants"));
+    }
     f32_elems(&constants[0], 3, "scale")?;
     f32_elems(&constants[1], HC_MIXES, "base")?;
     f32_elems(&constants[2], hidden, "norm weight")?;
@@ -146,6 +147,115 @@ pub(super) fn encode_pre(
             return Err(bad(&format!("{name} must be writable")));
         }
     }
+
+    Ok(())
+}
+
+crate::env_flag!(
+    /// V4.1 independent decode batches of 2-4 sequences share one mHC-pre grid per site. Each grid row uses its original residual, lagged pre, mixing logits, collapse and normalization buffers; arithmetic is unchanged. Set to 0 for per-sequence pre dispatches. The two-dispatch HC rollback and unsupported shapes retain their existing route.
+    default_on batch_hc_enabled,
+    "QWEN_V41_BATCH_HC"
+);
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static BATCH_HC_OVERRIDE:std::cell::Cell<Option<bool>>=const {std::cell::Cell::new(None)};
+}
+
+pub(super) fn batch_candidate(sequences: usize) -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = BATCH_HC_OVERRIDE.with(|o| o.get()) {
+        return enabled && (2..=4).contains(&sequences);
+    }
+    batch_hc_enabled() && (2..=4).contains(&sequences)
+}
+
+/// Metadata preflight before any of the batch's Engram gates is encoded.
+pub(super) fn pre_batch_supported(
+    c: &Config,
+    hc: &Hc<'_>,
+    constants: &[MetalTensor],
+    sites: &[(&MetalTensor, HcPreSite<'_>)],
+) -> std::result::Result<bool, metal::MetalError> {
+    if !batch_candidate(sites.len())
+        || constants.len() < 3
+        || !sites
+            .iter()
+            .all(|(x, s)| wide(hc, c.hidden, x, s.collapsed, s.normalized, &constants[2]))
+    {
+        return Ok(false);
+    }
+    for (x, site) in sites {
+        validate_pre(c, hc, constants, x, site)?;
+    }
+    Ok(true)
+}
+
+/// One 25-by-B grid. Bounded ordinary buffer bindings preserve Metal resource
+/// tracking and keep every sequence's state in its original allocation.
+pub(super) fn encode_pre_batch(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    c: &Config,
+    hc: &Hc<'_>,
+    constants: &[MetalTensor],
+    sites: &[(&MetalTensor, HcPreSite<'_>)],
+) -> std::result::Result<(), metal::MetalError> {
+    if !pre_batch_supported(c, hc, constants, sites)? {
+        return Err(metal::MetalError::BadShape {
+            kernel: "v41_hc_pre_batch",
+            detail: "batch needs 2-4 wide HC sites".into(),
+        });
+    }
+    let pso = ctx.pipeline("kernel_deepseek_v41_hc_pre_batch")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &HcPreArgs {
+            hidden: c.hidden as u32,
+            norm_eps: c.norm_eps,
+            hc_eps: c.hc_eps,
+        },
+    );
+    enc.set_tensor(1, &hc.projection.tensor);
+    enc.set_tensor(2, &constants[2]);
+    for seq in 0..4 {
+        let (x, s) = &sites[seq.min(sites.len() - 1)];
+        for (field, t) in [*x, s.mix, s.incoming_pre, s.collapsed, s.normalized]
+            .into_iter()
+            .enumerate()
+        {
+            enc.set_tensor(3 + field * 4 + seq, t);
+        }
+    }
+    enc.dispatch(
+        MTLSize {
+            width: 25,
+            height: sites.len(),
+            depth: 1,
+        },
+        MTLSize {
+            width: PRE_THREADS,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn encode_pre(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    c: &Config,
+    hc: &Hc<'_>,
+    constants: &[MetalTensor],
+    x: &MetalTensor,
+    site: HcPreSite<'_>,
+) -> std::result::Result<(), metal::MetalError> {
+    validate_pre(c, hc, constants, x, &site)?;
+    let hidden = c.hidden as u64;
+    let n_in = hc.projection.input;
 
     if wide(
         hc,

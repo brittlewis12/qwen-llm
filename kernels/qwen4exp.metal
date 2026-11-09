@@ -1761,3 +1761,23 @@ kernel void kernel_fn_batch_qsa_expand(
 
 
 // The same prepared-coefficient injection, with a separate member axis.
+
+// The same prepared-coefficient injection, with a separate member axis.
+kernel void
+kernel_fn_batch_hc_inject(constant hc_branch_args &args [[buffer(0)]], device const float *out0 [[buffer(1)]],
+                          device const float *out1 [[buffer(2)]], device const float *out2 [[buffer(3)]],
+                          device const float *out3 [[buffer(4)]], device const float *inj0 [[buffer(5)]],
+                          device const float *inj1 [[buffer(6)]], device const float *inj2 [[buffer(7)]],
+                          device const float *inj3 [[buffer(8)]], device float *res0 [[buffer(9)]],
+                          device float *res1 [[buffer(10)]], device float *res2 [[buffer(11)]],
+                          device float *res3 [[buffer(12)]], uint3 p [[thread_position_in_grid]]) {
+    if (p.x >= args.hidden_size || p.y >= args.branch_count)
+        return;
+    const uint r = p.z;
+    device const float *output = r == 0 ? out0 : r == 1 ? out1 : r == 2 ? out2 : out3;
+    device const float *raw = r == 0 ? inj0 : r == 1 ? inj1 : r == 2 ? inj2 : inj3;
+    device float *residual = r == 0 ? res0 : r == 1 ? res1 : r == 2 ? res2 : res3;
+    const float value = raw[p.y] / float(args.branch_count);
+    const float injection = 2.0f / (1.0f + exp(-value));
+    residual[ulong(p.y) * args.hidden_size + p.x] += output[p.x] * injection;
+}

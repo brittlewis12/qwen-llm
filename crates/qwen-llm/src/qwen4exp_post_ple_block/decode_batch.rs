@@ -79,9 +79,7 @@ pub(crate) fn encode(
         }
     }
     drop(mixed);
-    for read in reads {
-        read.encode_combine()?;
-    }
+    hc::combine(reads)?;
     let mut hc_members = Vec::with_capacity(members.len());
     let mut rest = Vec::with_capacity(members.len());
     for (w, &x) in members.iter_mut().zip(inputs) {
@@ -121,9 +119,7 @@ pub(crate) fn encode(
             .encode_copy_to(ctx, enc, read.block_output())?;
     }
     drop(mixed);
-    for read in reads {
-        read.encode_combine()?;
-    }
+    hc::combine(reads)?;
     for w in members {
         w.encode_failed = false;
     }

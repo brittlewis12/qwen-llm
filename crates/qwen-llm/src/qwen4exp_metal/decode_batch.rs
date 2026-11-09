@@ -13,6 +13,57 @@ pub(crate) struct Member<'s, 'r> {
 const NORM: &str = "kernel_qwen4exp_hc_rms_norm_batch";
 const DOWN: &str = "kernel_qwen4exp_hc_down_inject_bf16_batch";
 const UP: &str = "kernel_qwen4exp_hc_up_mix_bf16_batch";
+crate::env_flag!(
+    /// Span native independent members in the existing HC residual injection operation. 0 restores one injection launch per member. The prepared coefficients and F32 expression are unchanged.
+    default_on combine_enabled, "QWEN_FN_BATCH_HC_INJECTION"
+);
+
+pub(crate) fn combine(
+    reads: Vec<GatedResidualMetalRead<'_, '_, '_>>,
+) -> Result<(), Qwen4ExpMetalError> {
+    #[cfg(feature = "perf-ablations")]
+    let selected = crate::metal::fn_batch_probe::axis("hc", combine_enabled());
+    #[cfg(not(feature = "perf-ablations"))]
+    let selected = combine_enabled();
+    let eligible = enabled()
+        && selected
+        && (2..=4).contains(&reads.len())
+        && reads.iter().all(|r| {
+            r.injection_prepared
+                && (r.scratch.branch_count, r.scratch.hidden_size) == (4, 2560)
+                && std::ptr::eq(r.ctx, reads[0].ctx)
+                && std::ptr::eq(r.encoder, reads[0].encoder)
+        });
+    if !eligible {
+        for read in reads {
+            read.encode_combine()?;
+        }
+        return Ok(());
+    }
+    let ctx = reads[0].ctx;
+    let enc = reads[0].encoder;
+    enc.set_pipeline(&ctx.pipeline("kernel_fn_batch_hc_inject")?);
+    enc.set_bytes_slice(0, &[4u32, 2560]);
+    for i in 0..4 {
+        let r = &reads[i.min(reads.len() - 1)];
+        enc.set_tensor(1 + i, r.block_output);
+        enc.set_tensor(5 + i, &r.scratch.injection);
+        enc.set_tensor(9 + i, r.hyper_input);
+    }
+    enc.dispatch(
+        MTLSize {
+            width: 10,
+            height: 4,
+            depth: reads.len(),
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
 pub(crate) fn encode<'s, 'r, 'p>(
     ctx: &'p MetalContext,
     enc: &'p KernelEncoder,

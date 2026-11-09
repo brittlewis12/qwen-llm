@@ -54,6 +54,36 @@ const DENSE_PACKED_QUERY_TILE: usize = 32;
 mod decode_reuse;
 mod index_reuse;
 mod prefill_reuse;
+
+#[cfg(feature = "perf-ablations")]
+thread_local! { static DECODE_PRICE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+
+/// Example-only whole-token pricing: 1 cached selection, 2 scan selector,
+/// 3 cached attention, 4 original radix selector. Cached modes require an
+/// identical excluded native step followed by architectural snapshot restore.
+#[cfg(feature = "perf-ablations")]
+pub fn diagnostic_decode_price(mode: u8) -> impl Drop {
+    assert!(mode <= 4);
+    struct Guard(u8);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            DECODE_PRICE.with(|v| v.set(self.0));
+        }
+    }
+    Guard(DECODE_PRICE.with(|v| v.replace(mode)))
+}
+
+#[inline]
+fn decode_price_mode() -> u8 {
+    #[cfg(feature = "perf-ablations")]
+    {
+        DECODE_PRICE.with(std::cell::Cell::get)
+    }
+    #[cfg(not(feature = "perf-ablations"))]
+    {
+        0
+    }
+}
 mod selected_value;
 pub(crate) mod split_decode;
 #[cfg(test)]
@@ -2257,7 +2287,14 @@ pub(crate) fn prepare_control_scalars(
     let visible_blocks = sequence_length / workspace.geometry.ratio;
     write_i32_scalar(&workspace.visible_blocks, visible_blocks as i32)?;
     write_i32_scalar(&workspace.selector_status, 0)?;
-    write_i32_scalar(&workspace.selected_count, 0)?;
+    write_i32_scalar(
+        &workspace.selected_count,
+        if decode_price_mode() == 1 && visible_blocks > workspace.geometry.block_budget() {
+            workspace.geometry.block_budget() as i32
+        } else {
+            0
+        },
+    )?;
     Ok((position, sequence_length))
 }
 
@@ -4580,6 +4617,9 @@ fn encode_attention_step(
     position: usize,
     sequence_length: usize,
 ) -> Result<(), Qwen4ExpQsaError> {
+    if decode_price_mode() == 3 {
+        return Ok(());
+    }
     #[cfg(test)]
     let child_attention = crate::qwen4exp_child_profile::span(enc, "attention_logits_value");
     let g = workspace.geometry;
@@ -5380,6 +5420,9 @@ fn encode_select_blocks(
     workspace: &QwenSparseAttentionMetalWorkspace,
     _visible: usize,
 ) -> Result<(), MetalError> {
+    if decode_price_mode() == 1 {
+        return Ok(());
+    }
     let g = workspace.geometry;
     encode_select_blocks_tensors(
         ctx,

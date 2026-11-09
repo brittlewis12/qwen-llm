@@ -78,7 +78,8 @@ pub(super) fn selector_pipeline(
     singleton: bool,
 ) -> Result<Option<Pipeline>, MetalError> {
     let decode = decode_selector_shape(singleton, capacity, budget, count)
-        && ctx.tensor_ops_status().is_available()
+        && decode_price_mode() != 4
+        && (ctx.tensor_ops_status().is_available() || decode_price_mode() == 2)
         && decode_selector_enabled();
     let packed = !singleton
         && compact_selector_enabled()

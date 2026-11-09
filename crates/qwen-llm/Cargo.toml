@@ -64,6 +64,10 @@ tracing-subscriber.workspace = true
 [build-dependencies]
 anyhow.workspace = true
 
+[[example]]
+name = "fn_m4_qsa"
+required-features = ["perf-ablations"]
+
 [[bench]]
 name = "kernels"
 harness = false

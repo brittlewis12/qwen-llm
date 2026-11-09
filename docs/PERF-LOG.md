@@ -6,6 +6,58 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-08 - Warm Agent Concurrency: Observed Capacity, EOS Fails Exact-Work Gate
+
+- Clean engine **`09a3a521`**, M5 Ultra **256 GiB**, unchanged tier-1 artifacts
+  and production Rust/shaders. Three distinct **48K warm contexts**, untimed
+  priming; seed **20261108**, paired append/reply/tool-gap draws from the real
+  OpenCode calls. Own-history clients, greedy, direct loopback Responses API;
+  serial controls set the family's MAX_ACTIVE=1. GLM's serial control also has
+  one live session; default retains four. The [packet](bench/2026-11-08-realistic-concurrency.md),
+  [calls](bench/2026-11-08-realistic-concurrency-calls.csv) and
+  [20-second traces](bench/2026-11-08-realistic-concurrency-trace.csv) record
+  every turn and the protocol limitations. Reusable stdlib harness:
+  `scripts/bench/serve_realistic.py`.
+
+  | Family | Serial / default wall s | Serial / default outputs | Actual-output aggregate tok/s | Observed TPS ratio |
+  | --- | ---: | ---: | ---: | ---: |
+  | V4.1 | 240.730 / 211.717 | 14622 / 14610 | 60.74 / 69.01 | 1.136x |
+  | GLM-5.3 | 319.129 / 220.578 | 12410 / 12020 | 38.89 / 54.49 | 1.401x |
+  | Flash-Next, serial baseline | 203.601 / — | 12041 / — | 59.14 / — | — |
+
+- **These are not qualified identical-work speedups.** EOS shortens one
+  V4.1 reply **218 -> 206** and one GLM reply **3822 -> 3432**; the strict
+  comparator rejects both own-history A/B ratios. Flash-Next has two early
+  EOS replies (**276 -> 81**, **2247 -> 35**), versus 14448 planned outputs.
+  Fresh input bytes, limits and tool-gap plans match. The API output limit is
+  a ceiling, so strict future fixed-length qualification needs a bench-only
+  minimum-output/EOS control. Preserve the observed work and failure receipts.
+- V4.1's short agent p95 TTFT **144.5 -> 2.19 s**; GLM's first two agents
+  **82.3/81.2 -> 6.60/8.45 s**. Default reuse: V4.1 **25/25 live**, GLM
+  **31/33 live**; GLM processes **68391 -> 27192** rows, a residency benefit
+  included in the requested control. Native member transitions at B=1/2/3:
+  V4.1 **8149/1390/5046**, GLM **3765/698/7524**. Stream-width wall is reported
+  separately from native counts; it is not exclusive GPU service time.
+  Default content-gap p95/max: **28.2/3025.5 ms V4.1**, **38.5/2396.1 ms GLM**.
+  Solo medians remain stable over the sustained traces; all thermal samples **0**.
+- Initial exact-body frozen-history diagnostics caused artificial reply edits
+  and extra restores. They are retained/excluded from the primary standing;
+  their matched canonical ratios **1.112x/1.184x** do not represent own-history
+  agent turns. Only default arms were repeated to correct the protocol.
+- Next planning levers: **Flash-Next batching + idle states**, ~30–45 s/cohort
+  target, 3–5 days; **V4.1 B=1 decode/routed-tile lane**, ~10–12 s for a 10%
+  solo service reduction, stage census plus 2–4 days; **GLM B=2/3 native decode**,
+  ~10–20 s planning ceiling for a 10% service reduction, census plus 2–4 days.
+  These are conditional estimates, not measured kernel wins. Warm state reuse
+  already works across the three V4.1/GLM default live conversations.
+- Build lock, canonical lease/wait, nice 10, fresh loopback-only server/arm,
+  cooling and one-second monitoring. Seven harness CPU tests, docs/CSV/path
+  checks and contracts have receipts. About **46 minutes owned lease time**
+  includes warm-up and the two diagnostics; shared-slot waits are separate.
+  Raw evidence: `$HOME/qwen-runs/2026-11-08-realistic-concurrency/` on both
+  hosts. All owned processes stopped; M5 build worktree/bundle removed.
+  No OpenCode access, merge or push.
+
 ## 2026-11-08 - GLM Batched Decode: Reuse IQ Expert Activations Across Channels
 
 - Base **`09a3a521`** census, implementation rebased onto **`2b9fe91c`**

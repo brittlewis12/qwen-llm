@@ -785,6 +785,34 @@ last-expert regressions and shared state hashing. No GPU timing or inference.
   **`~/qwen-runs/2026-11-09-gpu-loop-families/`**, especially
   `corrected-summary.json`, `census/` and `census-stock/`. Coordination is
   recorded on **GLM-PYH3 / V41-ZPX6**. Flash-Next QSA stays banked.
+## 2026-11-09 - Flash-Next M4: GPU Loop And Executor Carry Over
+
+- Current-main base **`fdd087b74`**, probe **`6a70ed3c4`** on
+  **`perf/m4-fn-decode`**; same GSQ-RCO IQ3_S. Standing delivered in 11 minutes.
+  Reused the landed integration example's same-snapshot library controls for
+  `QWEN4EXP_GPU_TOKEN_LOOP` / `QWEN4EXP_CAUSAL_EXECUTOR`: greedy tg64, two
+  reverse-order arms per cell, ordinary process priority; builds nice 10.
+
+  | GPU loop / executor | 8K tok/s (% BW roof) | 32K tok/s (% BW roof) |
+  | --- | ---: | ---: |
+  | off / off | 42.177 (46.61%) | 40.549 (44.96%) |
+  | on / off | 45.537 (50.33%) | 44.622 (49.48%) |
+  | off / on | 43.836 (48.45%) | 41.190 (45.68%) |
+  | on / on | **49.751 (54.98%)** | **47.169 (52.31%)** |
+
+- GPU-loop gain **7.97% / 10.05%**; executor on top **9.26% / 5.71%**.
+  Executor alone is small, with inconsistent 32K pair directions. **Every arm
+  overlapped compilation**; thermal pressure **0–2, mostly 2**. These describe
+  observed background-load conditions, not a thermal-zero hardware maximum.
+  Logical **5.603241 / 5.622110 GB/token** divided by **507 GB/s** gives the
+  **90.483 / 90.180 tok/s** ceilings; these are useful-byte, not DRAM counters.
+- Reproduce: release-build example `fn_gpu_decode_integration`, then canonical
+  lease-wrap `target/release/examples/fn_gpu_decode_integration "$MODEL"
+  8192 64 --standing` (also 32768); `$MODEL` resolves through
+  `QWEN_MODEL_SEARCH_PATH`. No timing/build exclusion or compiler quiet gate.
+  Compact commit, commands, all paired arms and conditions:
+  **`~/qwen-runs/2026-11-09-m4-fn-decode/standing.json`**.
+  No production code changed for this standing; QSA pricing follows separately.
 
 ## 2026-11-09 - GLM M4 Peak-Before-Warm: KILL Under Build Load
 

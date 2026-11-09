@@ -139,6 +139,100 @@ fn native_spec_pipeline(
     Some((name, if fused { 2 * rows } else { 4 * rows }))
 }
 
+/// Qualified batched GLM geometries. No global primitive dispatch widening.
+fn batch_tile_pipeline(
+    dtype: GgmlType,
+    k: usize,
+    m: usize,
+    offset: u64,
+    fused: bool,
+) -> Option<(&'static str, usize)> {
+    if !offset.is_multiple_of(16) {
+        return None;
+    }
+    match (dtype, k, m, fused) {
+        (GgmlType::IQ2_S, 4096, 2048, true) => {
+            Some(("kernel_expert_native_gate_up_iq2_s_f32_k4096_r4", 8))
+        }
+        (GgmlType::IQ3_S, 2048, 4096, false) => {
+            Some(("kernel_expert_native_iq3_s_f32_k2048_r4", 16))
+        }
+        _ => None,
+    }
+}
+
+/// Explicit multi-output F32 token-grid policy for independent M5 decode.
+/// Existing bank, device, route, alias and bounds validation is unchanged.
+/// Unsupported geometries retain the ordinary token grid.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_glm_batch_gate_up(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate: &MetalTensor,
+    up: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    dims: (usize, usize, usize, usize),
+    rows: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    let (k, m, e, top) = dims;
+    encode_gate_up_with_batch_tile(
+        ctx,
+        enc,
+        gate,
+        up,
+        input,
+        ids,
+        status,
+        output,
+        k,
+        m,
+        e,
+        top,
+        clamp,
+        Some(rows),
+        NativeOperands::F32,
+        true,
+        iq2_spec(),
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_glm_batch_down(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    dims: (usize, usize, usize, usize),
+    rows: usize,
+) -> Result<(), MetalError> {
+    let (k, m, e, top) = dims;
+    encode_down_with_batch_tile(
+        ctx,
+        enc,
+        bank,
+        input,
+        ids,
+        status,
+        output,
+        k,
+        m,
+        e,
+        top,
+        Some(rows),
+        NativeOperands::F32,
+        iq2_spec(),
+        true,
+    )
+}
+
 /// Q5_K uses `kernel_expert_native_q5_K_f32_split` (llama.cpp's work split)
 /// unless `QWEN_EXPERT_NATIVE_Q5K=one_row` keeps the one-row kernel (A/B).
 fn q5_k_split() -> bool {
@@ -764,6 +858,33 @@ fn encode_gate_up_with(
     fuse: bool,
     spec: bool,
 ) -> Result<(), MetalError> {
+    encode_gate_up_with_batch_tile(
+        ctx, enc, gate_bank, up_bank, input, ids, status, output, n_in, n_out, experts, top_k,
+        clamp, rows, operands, fuse, spec, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_gate_up_with_batch_tile(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_bank: &MetalTensor,
+    up_bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    experts: usize,
+    top_k: usize,
+    clamp: f32,
+    rows: Option<usize>,
+    operands: NativeOperands,
+    fuse: bool,
+    spec: bool,
+    batch_tile: bool,
+) -> Result<(), MetalError> {
     const K: &str = "all_slots_gate_up_swiglu_native";
     require_serial(K, enc)?;
     if !clamp.is_finite() || clamp <= 0.0 {
@@ -793,6 +914,17 @@ fn encode_gate_up_with(
             native_spec_pipeline(gate_bank.dtype, n_in, n_out, input, true)
         {
             fused = Some((ctx.pipeline(&name)?, channels));
+        }
+    }
+    if batch_tile
+        && matches!(operands, NativeOperands::F32)
+        && fused.is_some()
+        && (2..=4).contains(&rows.unwrap_or(1))
+    {
+        if let Some((name, channels)) =
+            batch_tile_pipeline(gate_bank.dtype, n_in, n_out, input.offset, true)
+        {
+            fused = Some((ctx.pipeline(name)?, channels));
         }
     }
     if let Some((fused, channels)) = fused {
@@ -1027,6 +1159,30 @@ fn encode_down_with(
     operands: NativeOperands,
     spec: bool,
 ) -> Result<(), MetalError> {
+    encode_down_with_batch_tile(
+        ctx, enc, bank, input, ids, status, output, n_in, n_out, experts, top_k, rows, operands,
+        spec, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_down_with_batch_tile(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    experts: usize,
+    top_k: usize,
+    rows: Option<usize>,
+    operands: NativeOperands,
+    spec: bool,
+    batch_tile: bool,
+) -> Result<(), MetalError> {
     const K: &str = "all_slots_down_native";
     require_serial(K, enc)?;
     let mut args = dimensions(K, n_in, n_out, experts, top_k)?;
@@ -1038,6 +1194,17 @@ fn encode_down_with(
     let pso = match native_spec_pipeline(bank.dtype, n_in, n_out, input, false).filter(|_| spec) {
         Some((name, channels)) => (ctx.pipeline(&name)?, channels),
         None => (pso, native_channels_per_threadgroup(bank.dtype)),
+    };
+    let pso = if batch_tile
+        && matches!(operands, NativeOperands::F32)
+        && (2..=4).contains(&rows.unwrap_or(1))
+    {
+        match batch_tile_pipeline(bank.dtype, n_in, n_out, input.offset, false) {
+            Some((name, channels)) => (ctx.pipeline(name)?, channels),
+            None => pso,
+        }
+    } else {
+        pso
     };
     args.mode = operands.mode(2);
     args.row_bytes = row_bytes;

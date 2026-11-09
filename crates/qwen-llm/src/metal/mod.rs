@@ -297,6 +297,7 @@ mod elementwise;
 mod encoder;
 mod expert;
 mod expert_native;
+pub(crate) use expert_native::{encode_glm_batch_down, encode_glm_batch_gate_up};
 pub(crate) mod expert_tensor_down;
 pub(crate) mod expert_tensor_gate_up;
 mod gdn;

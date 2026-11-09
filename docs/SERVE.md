@@ -808,7 +808,12 @@ plain throwaway decode before accepting requests.
   bounds active plus waiting connections.
 - **Arithmetic and state.** Batched dense Q6/Q8 projections use few-row MMA
   with F32 dequantized weights and activations; summation differs from plain
-  decode. Routed experts retain the native F32 token-grid arithmetic. Every
+  decode. Routed experts retain the native F32 token-grid arithmetic.
+  `QWEN_GLM53_BATCH_EXPERT_ROWS` defaults on for the qualified batched
+  IQ2_S gate/up and IQ3_S down geometries. Four output channels share each
+  activation-fragment load, retaining the per-channel F32 FMA chain and
+  route rejection. `=0` restores the original token-grid kernels. Ordinary
+  one-member decode and Exact/F32 mode routing remain unchanged. Every
   sequence owns its KDA/conv state, MLA cache, pending indexer ring and sparse
   selection. One-member rounds are ordinary `forward`. Exact and F32 members
   take individual steps. Greedy text may differ at near ties; determinism

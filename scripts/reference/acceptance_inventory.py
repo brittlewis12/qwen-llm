@@ -33,6 +33,7 @@ SCOPES = {
     "lib": [
         "deepseek_v41::",
         "glm5_next_metal::packed::batch::tests::",
+        "metal::expert_native::tests::batch_tiles::",
         "metal::mat_mat::tests::fewrow_f32_weights_match_f64_and_reduce_rounding_error",
         "glm5_next_metal::tests::snapshot_gates::live_trajectory_observer_restore_is_exact",
         "qwen4exp_runtime::tests::snapshot::live_checkpoint_observer_restores_exact_state",

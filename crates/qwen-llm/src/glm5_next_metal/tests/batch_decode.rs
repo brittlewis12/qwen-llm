@@ -41,3 +41,6 @@ fn independent_batch_projection_checks_format_and_inner_tile_width() {
 
 #[path = "batch_model.rs"]
 mod model;
+
+#[path = "batch_packet.rs"]
+mod packet;

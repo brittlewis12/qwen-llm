@@ -10,6 +10,12 @@ use super::*;
 use crate::metal::encode_copy_offset_f32;
 use objc2_metal::MTLResource;
 
+crate::env_flag!(
+    /// Default-on four-output-channel IQ2_S gate/up and IQ3_S down grids for qualified M5 Fast/Half independent decode batches of two to four members. Zero restores the original F32 token grids; single-token, Exact/F32 and other primitive policies are unchanged.
+    default_on batch_expert_rows_enabled,
+    "QWEN_GLM53_BATCH_EXPERT_ROWS"
+);
+
 /// Largest qualified independent decode batch.
 pub const GLM5_NEXT_MAX_BATCH_SIZE: usize = 4;
 
@@ -24,6 +30,7 @@ pub struct Glm5NextBatch {
     logits: MetalTensor,
     weights_instance: u64,
     max_members: usize,
+    expert_rows: bool,
 }
 
 fn projection_geometry(dtype: GgmlType, shape: &[u64]) -> bool {
@@ -131,6 +138,7 @@ impl Glm5NextBatch {
             )?,
             weights_instance: weights.instance,
             max_members,
+            expert_rows: batch_expert_rows_enabled(),
         })
     }
 
@@ -194,7 +202,7 @@ impl Glm5NextBatch {
             }
         }
         let refs: Vec<_> = sessions.iter().map(|s| &**s).collect();
-        refs[0].encode_independent_batch(ctx, &refs, tokens, &self.logits)?;
+        refs[0].encode_independent_batch(ctx, &refs, tokens, &self.logits, self.expert_rows)?;
         let p = refs[0].packed.as_ref().expect("preflighted");
         for (block, r) in p.routes.iter().enumerate() {
             if let Some(r) = r {
@@ -285,6 +293,7 @@ impl Glm5NextSession<'_> {
         seqs: &[&Self],
         tokens: &[u32],
         logits: &MetalTensor,
+        expert_rows: bool,
     ) -> Result<()> {
         let w = self.weights;
         let c = &w.config;
@@ -466,7 +475,17 @@ impl Glm5NextSession<'_> {
                             .view_subrange(0, vec![h as u64, (k * rows) as u64]),
                         output: &v(&p.routed),
                     };
-                    crate::metal::encode_all_slots_gate_up_swiglu_native_fused_tokens(
+                    let gate_up = if expert_rows {
+                        crate::metal::encode_glm_batch_gate_up
+                    } else {
+                        crate::metal::encode_all_slots_gate_up_swiglu_native_fused_tokens
+                    };
+                    let down = if expert_rows {
+                        crate::metal::encode_glm_batch_down
+                    } else {
+                        crate::metal::encode_all_slots_down_native_tokens
+                    };
+                    gate_up(
                         ctx,
                         &enc,
                         grouped.gate_bank,
@@ -479,7 +498,7 @@ impl Glm5NextSession<'_> {
                         rows,
                         c.swiglu_clamp,
                     )?;
-                    crate::metal::encode_all_slots_down_native_tokens(
+                    down(
                         ctx,
                         &enc,
                         grouped.down_bank,

@@ -915,6 +915,11 @@ EXPERT_IQ2_XXS_SPEC("2304", 72)
 EXPERT_NATIVE_SPEC_ROWS("iq2_xs", 74, 16, expert_dequantize_iq2_xs, "4", 4)
 EXPERT_NATIVE_SPEC_ROWS("iq2_s", QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_iq2_s, "4", 4)
 
+// Multi-output GLM batch decode: unchanged per-channel F32 FMA chains,
+// reusing activation fragments for independent output channels.
+EXPERT_NATIVE_SPEC("iq2_s", "4096", "4", QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_iq2_s, 4096, 4)
+EXPERT_NATIVE_SPEC("iq3_s", "2048", "4", QT_IQ3_S_BYTES, QT_IQ3_S_NL, latent_dequantize_iq3_s, 2048, 4)
+
 // Two dense Q8_0 projections of one F32 activation in one dispatch (the V4.1
 // decode query-rank and KV-latent projections both read the layer input).
 // One threadgroup per output row with K split across its four simdgroups

@@ -5997,5 +5997,26 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Scripted runtime, synthetic service clock and in-memory sinks; no Metal context, model or real timing."
+  },
+  {
+    "target": "lib",
+    "name": "metal::expert_native::tests::batch_tiles::batch_expert_tile_scope_preserves_other_shapes_and_unaligned_inputs",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure caller-local expert tile geometry/alignment predicate; no Metal context or model."
+  },
+  {
+    "target": "lib",
+    "name": "metal::expert_native::tests::batch_tiles::batch_expert_tiles_match_generic_bits_routes_offsets_and_guards",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Self-leased model-free Metal witness: output bits, duplicate/invalid IDs, mixed READY status, shifted bindings, immutable inputs and output canaries."
+  },
+  {
+    "target": "lib",
+    "name": "glm5_next_metal::packed::batch::tests::packet::m5_batch_expert_abba_and_distribution",
+    "class": "model",
+    "ignored": true,
+    "reason": "Actual M5 UD-IQ3_XXS teacher-forced bits and same-binary ABBA; GLM53_GGUF and GLM53_BATCH_DEPTH, internal lease."
   }
 ]

@@ -1683,18 +1683,67 @@ impl<'w> Glm5NextSession<'w> {
                 .add(s.token.offset as usize)
                 .cast::<i32>() = token as i32;
         }
-        let observed = !probes.is_empty();
         let mut command = ctx
             .queue
             .commandBuffer()
             .ok_or_else(|| Glm5NextMetalError::Invalid("no command buffer".into()))?;
         let mut enc = KernelEncoder::begin(&command);
-        self.stage(&mut enc, Glm5NextStage::Embed, None)?;
-        encode_get_rows_f32(ctx, &enc, &w.embedding, &s.token, &s.embedding, 1, h)?;
-        self.apply_site_hooks(
+        self.encode_token_body(
             ctx,
             &mut command,
             &mut enc,
+            &s.token,
+            self.position,
+            logits,
+            probes,
+            observer,
+            hooks,
+            output,
+        )?;
+        enc.end();
+        let encode_ms = encode_started.map(|started| started.elapsed().as_secs_f64() * 1e3);
+        let wait_started = self.decode_timing.get().map(|_| std::time::Instant::now());
+        command.commit();
+        wait_completed(&command)?;
+        if let Some(started) = wait_started {
+            let mut timing = self.decode_timing.get().unwrap();
+            timing.encode_ms += encode_ms.unwrap();
+            timing.commit_wait_ms += started.elapsed().as_secs_f64() * 1e3;
+            timing.gpu_ms += (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+            self.decode_timing.set(Some(timing));
+        }
+        if let Some(recorder) = self.stage_recorder.borrow_mut().as_mut() {
+            recorder.command_gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+        }
+        Ok(())
+    }
+
+    /// Encode only: no host staging, submission or readback on the ordinary path.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_token_body(
+        &self,
+        ctx: &MetalContext,
+        command: &mut objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn MTLCommandBuffer>>,
+        enc: &mut KernelEncoder,
+        input_token: &MetalTensor,
+        position: usize,
+        logits: bool,
+        probes: &[Glm5NextProbe],
+        observer: &mut dyn FnMut(Glm5NextProbe, usize, &[f32]),
+        hooks: &mut interventions::Hooks<'_, '_>,
+        output: Option<&capture::RowOutput<'_>>,
+    ) -> Result<()> {
+        let w = self.weights;
+        let c = &w.config;
+        let s = &self.s;
+        let h = c.hidden_size as usize;
+        let observed = !probes.is_empty();
+        self.stage(enc, Glm5NextStage::Embed, None)?;
+        encode_get_rows_f32(ctx, &enc, &w.embedding, input_token, &s.embedding, 1, h)?;
+        self.apply_site_hooks(
+            ctx,
+            command,
+            enc,
             hooks,
             Glm5NextSite::Embedding,
             0,
@@ -1705,11 +1754,11 @@ impl<'w> Glm5NextSession<'w> {
         for (index, block) in w.blocks.iter().enumerate() {
             let (a, b) = (&s.residual[0], &s.residual[1]);
             // Attention sub-block: a -> b.
-            self.stage(&mut enc, Glm5NextStage::AttentionPre, Some(index))?;
+            self.stage(enc, Glm5NextStage::AttentionPre, Some(index))?;
             self.encode_hc_pre(ctx, &enc, a, &block.attention_hc, &block.attention_norm)?;
             match (&block.mixer, &self.layers[index]) {
                 (MixerTensors::Kda(kda), LayerState::Kda { conv, state }) => {
-                    self.stage(&mut enc, Glm5NextStage::Kda, Some(index))?;
+                    self.stage(enc, Glm5NextStage::Kda, Some(index))?;
                     self.encode_kda(ctx, &enc, kda, conv, state)?
                 }
                 (
@@ -1721,7 +1770,7 @@ impl<'w> Glm5NextSession<'w> {
                     },
                 ) => {
                     self.encode_mla(
-                        ctx, &mut enc, mla, latent, pending, pooled, mla_index, index,
+                        ctx, enc, mla, latent, pending, pooled, mla_index, index, position,
                     )?;
                     mla_index += 1;
                 }
@@ -1729,32 +1778,32 @@ impl<'w> Glm5NextSession<'w> {
             }
             self.apply_site_hooks(
                 ctx,
-                &mut command,
-                &mut enc,
+                command,
+                enc,
                 hooks,
                 Glm5NextSite::MixerOutput,
                 index,
                 &s.block_out,
             )?;
-            self.stage(&mut enc, Glm5NextStage::AttentionPost, Some(index))?;
+            self.stage(enc, Glm5NextStage::AttentionPost, Some(index))?;
             encode_mhc4_post(ctx, &enc, h, &s.block_out, a, &s.post, &s.comb, b)?;
             if observed && probes.contains(&Glm5NextProbe::AttentionResidual) {
-                enc.end();
+                enc.finish();
                 command.commit();
                 wait_completed(&command)?;
                 observer(Glm5NextProbe::AttentionResidual, index, &read_f32(b)?);
-                command = ctx
+                *command = ctx
                     .queue
                     .commandBuffer()
                     .ok_or_else(|| Glm5NextMetalError::Invalid("no command buffer".into()))?;
-                enc = KernelEncoder::begin(&command);
+                *enc = KernelEncoder::begin(command);
             }
             // FFN sub-block: b -> a.
-            self.stage(&mut enc, Glm5NextStage::FfnPre, Some(index))?;
+            self.stage(enc, Glm5NextStage::FfnPre, Some(index))?;
             self.encode_hc_pre(ctx, &enc, b, &block.ffn_hc, &block.ffn_norm)?;
             match &block.ffn {
                 FfnTensors::Dense(dense) => {
-                    self.stage(&mut enc, Glm5NextStage::DenseFfn, Some(index))?;
+                    self.stage(enc, Glm5NextStage::DenseFfn, Some(index))?;
                     let f = c.dense_ffn_size as usize;
                     matvec(ctx, &enc, &dense.gate, &s.normed, &s.dense_gate, h, f)?;
                     matvec(ctx, &enc, &dense.up, &s.normed, &s.dense_up, h, f)?;
@@ -1777,7 +1826,7 @@ impl<'w> Glm5NextSession<'w> {
                         c.expert_ffn_size as usize,
                         c.expert_used_count as usize,
                     );
-                    self.stage(&mut enc, Glm5NextStage::Router, Some(index))?;
+                    self.stage(enc, Glm5NextStage::Router, Some(index))?;
                     matvec(ctx, &enc, &moe.router, &s.normed, &s.router, h, e)?;
                     let spec = LearnedRoute {
                         experts: e,
@@ -1795,7 +1844,7 @@ impl<'w> Glm5NextSession<'w> {
                         &route.weights,
                         &route.status,
                     )?;
-                    self.stage(&mut enc, Glm5NextStage::RoutedExperts, Some(index))?;
+                    self.stage(enc, Glm5NextStage::RoutedExperts, Some(index))?;
                     encode_all_slots_gate_up_swiglu(
                         ctx,
                         &enc,
@@ -1835,14 +1884,14 @@ impl<'w> Glm5NextSession<'w> {
                     )?;
                     self.apply_site_hooks(
                         ctx,
-                        &mut command,
-                        &mut enc,
+                        command,
+                        enc,
                         hooks,
                         Glm5NextSite::RoutedExpertsOutput,
                         index,
                         &s.routed,
                     )?;
-                    self.stage(&mut enc, Glm5NextStage::SharedExpert, Some(index))?;
+                    self.stage(enc, Glm5NextStage::SharedExpert, Some(index))?;
                     let sf = c.shared_expert_ffn_size as usize;
                     shared_gate_up_swiglu(
                         ctx,
@@ -1865,8 +1914,8 @@ impl<'w> Glm5NextSession<'w> {
                     )?;
                     self.apply_site_hooks(
                         ctx,
-                        &mut command,
-                        &mut enc,
+                        command,
+                        enc,
                         hooks,
                         Glm5NextSite::SharedExpertOutput,
                         index,
@@ -1877,52 +1926,37 @@ impl<'w> Glm5NextSession<'w> {
             }
             self.apply_site_hooks(
                 ctx,
-                &mut command,
-                &mut enc,
+                command,
+                enc,
                 hooks,
                 Glm5NextSite::FfnOutput,
                 index,
                 &s.block_out,
             )?;
-            self.stage(&mut enc, Glm5NextStage::FfnPost, Some(index))?;
+            self.stage(enc, Glm5NextStage::FfnPost, Some(index))?;
             encode_mhc4_post(ctx, &enc, h, &s.block_out, b, &s.post, &s.comb, a)?;
             if let Some(output) = output {
-                output.encode_capture(ctx, &enc, &s.quarter, index, self.position, 1, a)?;
+                output.encode_capture(ctx, &enc, &s.quarter, index, position, 1, a)?;
             }
             if observed && probes.contains(&Glm5NextProbe::BlockResidual) {
-                enc.end();
+                enc.finish();
                 command.commit();
                 wait_completed(&command)?;
                 observer(Glm5NextProbe::BlockResidual, index, &read_f32(a)?);
-                command = ctx
+                *command = ctx
                     .queue
                     .commandBuffer()
                     .ok_or_else(|| Glm5NextMetalError::Invalid("no command buffer".into()))?;
-                enc = KernelEncoder::begin(&command);
+                *enc = KernelEncoder::begin(command);
             }
         }
         if logits {
-            self.stage(&mut enc, Glm5NextStage::Head, None)?;
+            self.stage(enc, Glm5NextStage::Head, None)?;
             self.encode_output_tail(ctx, &enc, &s.residual[0], &s.logits)?;
         }
-        if let Some(dst) = output.and_then(|output| output.logits_at(self.position)) {
-            self.stage(&mut enc, Glm5NextStage::Head, None)?;
+        if let Some(dst) = output.and_then(|output| output.logits_at(position)) {
+            self.stage(enc, Glm5NextStage::Head, None)?;
             self.encode_output_tail(ctx, &enc, &s.residual[0], &dst)?;
-        }
-        enc.end();
-        let encode_ms = encode_started.map(|started| started.elapsed().as_secs_f64() * 1e3);
-        let wait_started = self.decode_timing.get().map(|_| std::time::Instant::now());
-        command.commit();
-        wait_completed(&command)?;
-        if let Some(started) = wait_started {
-            let mut timing = self.decode_timing.get().unwrap();
-            timing.encode_ms += encode_ms.unwrap();
-            timing.commit_wait_ms += started.elapsed().as_secs_f64() * 1e3;
-            timing.gpu_ms += (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
-            self.decode_timing.set(Some(timing));
-        }
-        if let Some(recorder) = self.stage_recorder.borrow_mut().as_mut() {
-            recorder.command_gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
         }
         Ok(())
     }
@@ -2155,6 +2189,7 @@ impl<'w> Glm5NextSession<'w> {
         pooled: &MetalTensor,
         mla_index: usize,
         block: usize,
+        position: usize,
     ) -> Result<()> {
         self.stage(enc, Glm5NextStage::MlaProjection, Some(block))?;
         let c = &self.weights.config;
@@ -2190,7 +2225,7 @@ impl<'w> Glm5NextSession<'w> {
             &s.latent,
             c.rms_epsilon,
         )?;
-        encode_scatter_offset_f32_to_f16(ctx, enc, &s.latent, latent, self.position * kv, kv)?;
+        encode_scatter_offset_f32_to_f16(ctx, enc, &s.latent, latent, position * kv, kv)?;
         grouped_matvec(
             ctx,
             enc,
@@ -2234,11 +2269,11 @@ impl<'w> Glm5NextSession<'w> {
             &mla.indexer.pool_position,
             pending,
             pooled,
-            self.position,
+            position,
             c.layer_norm_epsilon,
         )?;
         let scale = 1.0 / (head_dim as f32).sqrt();
-        let visible = self.position + 1;
+        let visible = position + 1;
         if visible >= c.sparse_frontier() as usize {
             self.encode_sparse_attention(
                 ctx, enc, mla, latent, pooled, mla_index, visible, scale, block,
@@ -2252,7 +2287,7 @@ impl<'w> Glm5NextSession<'w> {
                 latent,
                 &s.no_sink,
                 &s.output_latent,
-                self.position,
+                position,
                 1,
                 scale,
             )?;
@@ -2597,6 +2632,7 @@ fn matvec(
 mod capture;
 mod checkpoint;
 mod dflash;
+mod gpu_decode;
 mod interventions;
 mod kda_half_inputs;
 mod kda_value4;

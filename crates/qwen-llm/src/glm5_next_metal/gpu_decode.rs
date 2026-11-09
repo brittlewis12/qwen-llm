@@ -160,7 +160,7 @@ unsafe impl GpuTokenLoopDriver for Driver<'_, '_> {
         ordinal: usize,
         u: f32,
     ) -> Result<PreparedTokenStep<Self::Metadata>> {
-        self.prepare(u, Some((t, self.start + ordinal - 1)))
+        self.prepare(u, Some((t, self.start + ordinal)))
     }
     fn started(&mut self) {
         self.session.poisoned = true;

@@ -254,7 +254,7 @@ fn exercise(ctx: &MetalContext, dtype: GgmlType, k: usize, m: usize, n: usize) {
 
 #[test]
 fn native_f32_gate_up_cpu_f64_slots_buckets_and_partition() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -272,7 +272,7 @@ fn native_f32_gate_up_cpu_f64_slots_buckets_and_partition() {
 
 #[test]
 fn native_f32_gate_up_v41_widths_reduced_banks() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -288,7 +288,7 @@ fn native_f32_gate_up_v41_widths_reduced_banks() {
 
 #[test]
 fn native_f32_gate_up_preflight_before_write() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -355,7 +355,7 @@ fn native_f32_gate_up_preflight_before_write() {
 
 #[test]
 fn native_f32_fused_controlled_clamp_boundaries_and_cancellation() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };

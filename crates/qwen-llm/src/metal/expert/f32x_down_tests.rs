@@ -268,7 +268,7 @@ fn exercise_down(ctx: &MetalContext, dtype: GgmlType, k: usize, m: usize, n: usi
 
 #[test]
 fn down_f32x_all_native_decoders_match_cpu_and_preserve_slot_independence() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -301,7 +301,7 @@ fn down_f32x_all_native_decoders_match_cpu_and_preserve_slot_independence() {
 
 #[test]
 fn down_f32x_iq3_xxs_glm_dimensions_match_cpu() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -310,7 +310,7 @@ fn down_f32x_iq3_xxs_glm_dimensions_match_cpu() {
 
 #[test]
 fn down_f32x_iq2_xxs_and_xs_match_cpu_and_preserve_slot_independence() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -330,7 +330,7 @@ fn down_f32x_iq2_xxs_and_xs_match_cpu_and_preserve_slot_independence() {
 /// Dense F32/BF16 weights also retain values outside half's finite range.
 #[test]
 fn down_f32x_dense_weights_preserve_large_and_small_f32_range() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -389,7 +389,7 @@ fn down_f32x_dense_weights_preserve_large_and_small_f32_range() {
 
 #[test]
 fn down_f32x_mxfp4_subnormal_weights_produce_normal_results() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -502,7 +502,7 @@ fn down_f32x_mxfp4_subnormal_weights_produce_normal_results() {
 
 #[test]
 fn down_f32x_mxfp4_normal_blocks_keep_matrix_arithmetic_bitwise() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -564,7 +564,7 @@ fn down_f32x_mxfp4_normal_blocks_keep_matrix_arithmetic_bitwise() {
 
 #[test]
 fn down_f32x_mxfp4_mixed_exponents_real_k_tails_and_partition() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -684,7 +684,7 @@ fn down_f32x_mxfp4_mixed_exponents_real_k_tails_and_partition() {
 
 #[test]
 fn down_f32x_native_preflight_rejects_bad_shapes_types_and_alignment() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };

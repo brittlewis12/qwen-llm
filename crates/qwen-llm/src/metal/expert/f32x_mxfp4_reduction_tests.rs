@@ -53,7 +53,7 @@ fn check(ctx: &MetalContext, label: &str, bytes: &[u8], x: &[f32], expected: f64
 
 #[test]
 fn mxfp4_reduction_small_terms_ordinary_cancellation_and_bounded_inputs() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -102,7 +102,7 @@ fn mxfp4_reduction_small_terms_ordinary_cancellation_and_bounded_inputs() {
 
 #[test]
 fn mxfp4_reduction_ftz_products_and_cancellation_have_normal_final_values() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -137,7 +137,7 @@ fn mxfp4_reduction_ftz_products_and_cancellation_have_normal_final_values() {
 
 #[test]
 fn mxfp4_reduction_extreme_finite_and_normal_scale_boundaries() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };
@@ -179,7 +179,7 @@ fn mxfp4_reduction_extreme_finite_and_normal_scale_boundaries() {
 
 #[test]
 fn mxfp4_reduction_product_roundoff_and_large_ordinary_merge() {
-    let _lease = production_lease();
+    let _lease = test_lease();
     let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
         return;
     };

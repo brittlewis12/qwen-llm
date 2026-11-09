@@ -831,6 +831,74 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   thermal samples **0**. Compact JSON under
   `$HOME/qwen-runs/2026-11-08-realistic-steady/` on both hosts; regenerable
   M5 worktree/target/bundle removed, no owned processes remain. No merge/push.
+## 2026-11-08 - Flash-Next Cache Overlap: Tiny HC Benefit, Preserve Executor/Feedback Work
+
+- **Step 1 physics probe only.** Measured source **`335e5445`**, unchanged
+  `09a3a521` production, same M5 Ultra/8K/width-1 model. Real causal adjacent
+  layer pairs use the prior best DAG/FFN-epilogue/copy-elision executor. No
+  predicted experts, spin barriers, batching/API changes or integration.
+  Build lock/nice 10, canonical Metal lease, six alternating-order samples per
+  pair cell; **1,152** primary pair timings, **192** cold/hot matvec timings,
+  **72** sweep measurements, **768** attribution masks, **390** dispatch
+  marginals. All checksum/boundary checks pass. **80** thermal monitor and
+  **16** in-probe readings, all zero; no timing sample dropped.
+- Effective cache knee **96–128 MiB**: hot 32/64/96/128/192 MiB reads achieve
+  **1.919/1.898/1.782/1.307/1.200 TB/s**, versus **1.177 TB/s** large-set
+  median. Small 1–2 MiB sets peak at **4.7 TB/s**. This is an effective read
+  cache measurement, not an isolated physical SLC-capacity claim.
+- Read-touch next-layer HC, early projections, projection/shared weights or
+  all known nonrouted weights during selection/recurrence, publication,
+  routing, expert activation, tail or spread waves. Time **current+next**
+  including prefetch, contention and barriers; ordinary/publication weight 3:1.
+
+  | Handoff | Best fixed packet / wave | Ordinary saved us | Publication saved us | Weighted saved us |
+  | --- | --- | ---: | ---: | ---: |
+  | GDN -> QSA | 13.312 MB HC / router | -0.938 | 1.812 | **-0.250** |
+  | QSA -> GDN | 13.312 MB HC / selection | 1.812 | 2.958 | **2.099** |
+  | GDN -> GDN | 13.312 MB HC / router | -1.000 | 0.875 | **-0.531** |
+
+- Broader packets lose **16–44 us/pair even at their best placement** despite
+  isolated hot all-known projection sets saving **25–27 us**. Narrow QSA HC
+  touch is positive in both order directions/phases. Phase-aware publication
+  placement saves **5.167 us** on publishing tokens, or ~**2.65 us/QSA handoff**
+  with selection on ordinary tokens. Only **0.023–0.029 ms/token** projected:
+  prior executor **81.79 -> ~81.95 tok/s**, ideal GPU feedback
+  **91.83 -> ~92.02**. These are post-sweep representative-pair extrapolations,
+  not whole-model wins; cache interactions remain. **No broad prefetch design
+  change.** Keep narrow HC for a cheap later whole-model A/B.
+- QSA output-preserving substitutions retain all DAG waves. Two exhaustive
+  six-cohort Shapley allocations charge copy costs back. Measured layer
+  **272.458 us**, useful floor at 1.17 TB/s **76.938 us**, excess **195.520 us**:
+
+  | Excess allocation | us |
+  | --- | ---: |
+  | Attention/cache | **61.223** |
+  | Command/control | **46.688** |
+  | Selection/index | **35.443** |
+  | FFN shared/router + routed/epilogue | **30.464** |
+  | HC/glue | **13.855** |
+  | Attention projections | **8.284** |
+  | Reconciliation | **-0.438** |
+
+  Non-additive per-dispatch marginals: merge **19.59 us**, selector **18.95**,
+  split PV **16.04**, QK **13.21**; pool publication **40.08 us/publication**
+  (~10.02 amortized). These are copy/cache-sensitive model allocations, not
+  exclusive hardware timestamps. Weight warming addresses little of this gap.
+- **Preserve the executor and reusable GPU token loop for integration**, even
+  though the 120 target failed. Future qualification is whole-model timing and
+  signed teacher-forced dNLL/KL with noise floor/F64; default on plus rollback
+  for measured wins, compatible with `perf/fn-serve-batch`. This packet changes
+  no batch seam. Stop here, unmerged, no owned worker/waiter remains.
+- Reproduce with committed commands in
+  **`scripts/research/fn-decode-roofline/cache/README.md`**. Compact raw data,
+  summary, command and build/thermal logs:
+  **`~/qwen-runs/2026-11-09-fn-cache-prefetch/`**, mirrored locally; successful
+  run `second/`, first run failed shader compilation before timing. Release
+  build, Metal syntax, replay checks and Python/whitespace checks pass.
+  This lane's earlier frozen binaries, sealed sources and capture bulk were
+  deleted; compact metrics/commits remain. This supersedes older retention
+  descriptions. No frozen executable/source packet is required for evidence.
+
 ## 2026-11-08 - Flash-Next Causal Layer Prototype: Staged Fusion Misses Roofline Gates
 
 - **Kill this design for the 120+ target; research only.** Base **`8f2dedac`**,

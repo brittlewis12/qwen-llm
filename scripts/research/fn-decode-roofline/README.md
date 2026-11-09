@@ -5,6 +5,14 @@ committed tree. `capture.patch` instruments the existing encoder for this probe;
 it is not a runtime optimization. The capture code extends the archived Nov 6
 exact replay experiment. No batching-lane files or APIs are changed.
 
+Evidence retention update: compact metrics, numerical checks, commands and
+summaries remain under `~/qwen-runs/2026-11-09-fn-decode-roofline/`. Frozen
+binaries, sealed sources, patches and regenerable capture bulk were removed;
+`RETENTION.json` identifies source commit `8f2dedac`. This supersedes historical
+evidence descriptions. Subsequent layer/cache results are in `layer/` and
+`cache/`; the best causal executor and reusable GPU feedback remain integration
+candidates despite missing the 120 tok/s design gate.
+
 Apply the patch in an isolated worktree, copy `probe.rs` to
 `crates/qwen-llm/examples/fn_decode_roofline.rs`, then build with the usual build
 lock (outside the GPU lease):

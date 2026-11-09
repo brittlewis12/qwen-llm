@@ -145,7 +145,7 @@ on-chip fusion or native-quant layout redesign is unprofitable.
 Every best-executor/native boundary check is exact, including full state/cache
 regions, with the same F64 error. MoE READY=1 and QSA selector status=0 are
 checked. The initial setup run incorrectly expected zero for MoE READY and
-stopped before retained layer rows; its packet and binary are preserved. It did
+stopped before retained layer rows; its compact failure log is preserved. It did
 not produce a performance acceptance sample. No distribution qualification is
 claimed for these performance-killed prototypes.
 
@@ -163,6 +163,10 @@ Release build and all retained timing/finite/status checks pass; best-executor
 state boundaries and F64 checks pass. QSA Flash's numerical screen fails as
 reported. No full library/distribution campaign is warranted after the kill.
 All **480** retained layer samples (96 screen + 384 confirmation), F64 metrics,
-thermal logs (25 monitor readings, all zero), manifests, exact sources, failed
-setup packet and binaries live under
-`~/qwen-runs/2026-11-09-fn-layer-prototype/`, mirrored locally.
+thermal logs (25 monitor readings, all zero), manifests and compact failed-setup
+logs live under `~/qwen-runs/2026-11-09-fn-layer-prototype/`, mirrored locally.
+Source is reproduced from `056b7986` and the commands above. Under the updated
+evidence policy, frozen binaries, sealed sources and regenerable capture bulk
+were deleted; `RETENTION.json` records the source commit. The subsequent cache
+probe keeps the best executor and GPU feedback candidates for integration:
+missing 120 tok/s does not reject their projected 81.8/~92 tok/s gains.

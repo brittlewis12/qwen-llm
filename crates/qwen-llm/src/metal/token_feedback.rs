@@ -346,8 +346,10 @@ mod tests {
                     actual,
                     if values[1].is_nan() {
                         -2
-                    } else if values[0] == f32::NEG_INFINITY {
+                    } else if values[0] == f32::NEG_INFINITY && config.temperature > 0. {
                         i32::MIN
+                    } else if values[0] == f32::NEG_INFINITY {
+                        0
                     } else {
                         1
                     }

@@ -132,7 +132,8 @@ Full vocabulary rows remain in RAM for signed dNLL/KL against repeated incumbent
 replay. Dense QSA, natural input with PLE EOS history, native continuation and
 stop contracts run after timing. See the newest PERF-LOG entry for the verdict.
 
-Build with the normal production features under the shared build lock. Run
+Build with the normal production features under the shared build lock and nice
+10. Time at normal process priority outside that lock. Run
 `integrate.py --model "$MODEL" --binary target/release/examples/fn_gpu_decode_integration
 --out "$RUNS" --depths 8192 32768 --steps 64` outside that lock; the controller
 uses the canonical GPU lease and records thermal pressure. Retain the source

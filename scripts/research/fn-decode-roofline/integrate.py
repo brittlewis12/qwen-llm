@@ -45,7 +45,10 @@ def main():
             command = [str(a.binary.resolve()), str(a.model.resolve()), str(depth), str(a.steps)]
             manifest = {'commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(), 'command': command, 'thermal_before': thermal(), 'thermal_file': thermal_file}
             with (a.out / f'{depth}.jsonl').open('w') as stdout, (a.out / f'{depth}.log').open('w') as stderr:
-                result = subprocess.run([str(root/'scripts/bench/with-metal-lease'), '--task', 'FN-5M7T-integration', '--for', '8m', '--', 'nice', '-n', '10', 'python3', str(Path(__file__).with_name('cool_exec.py')), *command], stdout=stdout, stderr=stderr, env={**os.environ, 'QWEN_METAL_LEASE_WAIT': '1'}, timeout=7200)
+                # Time at the production process priority. Background builds
+                # use nice 10; applying that to timing makes host-loop arms
+                # vulnerable to unrelated build activity on this shared host.
+                result = subprocess.run([str(root/'scripts/bench/with-metal-lease'), '--task', 'FN-5M7T-integration', '--for', '8m', '--', 'python3', str(Path(__file__).with_name('cool_exec.py')), *command], stdout=stdout, stderr=stderr, env={**os.environ, 'QWEN_METAL_LEASE_WAIT': '1'}, timeout=7200)
             manifest.update(returncode=result.returncode, thermal_after=thermal())
             (a.out / f'{depth}-command.json').write_text(json.dumps(manifest, indent=2)+'\n')
             result.check_returncode()

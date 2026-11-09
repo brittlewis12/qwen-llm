@@ -281,6 +281,89 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `$HOME/qwen-runs/2026-11-09-append-roofline/` on both hosts. M5 worktree,
   target, bundle and regenerable dispatch bulk removed; no owned worker,
   merge or client/server changes. V4.1 deferred for its separate Engram roof.
+## 2026-11-09 - GLM Batched Projections: 2.16–2.43 ms Saved, Steady Agents +4.94%
+
+- Engine **`0160f910`**, base **`9b193b38`**, M5 Ultra, unchanged
+  **GLM-5.3-Flash UD-IQ3_XXS**. First increment passes the declared
+  **>=2 ms saved per B=4 round** in both ABBA orders at every depth.
+  The **28 ms** target remains open; continue from the remaining GPU cost.
+- Header ledger: **7.169986 GB** always-on weights (**6.083912 GB Q6_K**),
+  **3.051880 GB routed/member**, plus useful KDA read/write, selected F16
+  latents and index keys. At 8K, B=4 has a **20.633702-GB** no-overlap
+  budget; actual selected expert unions reduce it to **18.659888 GB** in
+  the sampled step (1127 distinct layer/expert pairs versus 1344 references).
+  These are useful-byte estimates, not measured DRAM traffic; repeated reads,
+  cache reuse, lookup/instruction costs and protocol overhead remain separate.
+  Main's measured **1175.47 GB/s loads-only** anchor gives optimistic floors
+  **17.554 / 15.874 ms** (no overlap / observed union). At the old 38.504-ms
+  round that is **45.6% / 41.2%** of roof, versus **48.3% / 43.7%** now.
+  Q6's shared bytes alone floor at **5.176 ms**; the rounded 1.0-TB/s practical
+  anchor instead gives **6.084 ms** and an **18.660-ms** union floor.
+- Q6 kill screens: nine existing MMA tiles plus direct F32-fragment and
+  block-scaled vector variants, B=2/3/4, real artifact matrices, balanced
+  rotating weights, two warm and ten retained repeats. The vector variants
+  lose; best retiling alone estimates only **0.75–0.79 ms B=4**, below the
+  whole-round gate. Head already reaches about **1.0 TB/s**. Keep only
+  conservative output tiling with the incumbent K split: KDA q/k/v 4->2
+  tiles, shared/KDA/MLA outputs 4->1. No Half coefficient rounding.
+- Combine that with cooperative F32 router members (incumbent r2 arithmetic)
+  and direct packed MLA views. Remove seven copies/member/MLA block and two
+  index projections whose results the per-member projections overwrite.
+  B=4 dispatches **2341 -> 1885**. No new model/scratch storage or persistent
+  format. Default on; **`QWEN_GLM53_BATCH_PROJECTIONS=0`** restores the old
+  projection/copy policies. Existing global F32 cooperative rollback is
+  respected; single-token, Exact/F32 and prefill contracts remain.
+- Whole round: normal admission, restored independent code/prose prefixes,
+  eight excluded warm rounds/route, **ABBA + BAAB**, four retained arms/route,
+  eight transitions/arm; full heads and status checks in the wall timer.
+
+  | Depth | B=2 rollback / on ms | B=3 rollback / on ms | B=4 rollback / on ms | B=4 saved ms in the two orders |
+  | --- | ---: | ---: | ---: | ---: |
+  | 8K | 26.176 / 24.862 | 32.367 / 30.542 | 38.504 / 36.345 | 2.140 / 2.179 |
+  | 32K | 26.737 / 25.419 | 33.162 / 31.412 | 39.655 / 37.490 | 2.181 / 2.150 |
+  | 64K | 27.531 / 26.243 | 34.338 / 32.569 | 41.845 / 39.411 | 2.443 / 2.425 |
+
+  8K B=4 GPU **36.918 -> 34.860 ms**, encode **0.934 -> 0.832 ms**.
+  Short single-feature ablations: Q6 **0.573 ms**, router **0.867 ms**,
+  MLA views **0.833 ms**; diagnostic, not additive gap shares.
+- Accuracy: **1536 teacher-forced complete-vocabulary vectors** over four
+  documents and three depths match bitwise, **dNLL = KL = 0**. Another
+  **32 mixed-membership rounds/depth** change first workspace, order,
+  B=1/2/3/4 and singleton fallback; full logits and final KDA/conv/MLA/pool
+  snapshots match bitwise. 8K rerun with Metal validation on also passes.
+  New model-free GPU witnesses cover shifted bindings, odd router outputs,
+  source immutability, canaries, alias/rejection checks and Q6 tile bits.
+- Serve: main's steady harness **`4120be7e`**, engine **`0160f910`**,
+  three continuous own-history agents, distinct untimed **48K roots**,
+  **15 s ramp + 180 s common window**, seed **20261109**, real append/reply/
+  tool-gap draws, greedy. Fresh server per arm, only the new rollback changes;
+  default scheduler/active states stay on. **off/on/on/off** delivers
+  **73.2167 / 76.7444 / 76.9333 / 73.2222 tok/s**: means
+  **73.2194 -> 76.8389**, **1.04943x** (pairs **1.04818 / 1.05068x**).
+  Natural EOS, unequal completed work and cutoff replies are part of the rate
+  protocol. Content-gap p95 **36.01–36.03 -> 34.22–34.28 ms**;
+  max **2.285–2.290 -> 2.297–2.318 s**. Warm-up **140.6–140.9 s**, untimed.
+- Validation: full M5 library **2475 passed / 749 ignored** (required Metal,
+  validation on); all 11 prebuilt release CLI targets **1689 passed / 72
+  ignored**, doctests **0 passed / 2 ignored**; contracts pass on **`faa99bfe`**.
+  Initial CLI invocation hit the shared laptop's busy Metal lease and memory
+  admission; all targets were rerun under one validation lease, with no memory
+  override. Builds alone use the build lock; all timing uses only canonical
+  Metal lease/wait, nice 10. Model packets and serve monitor thermal once per
+  second, **0 throughout**. Compact summaries/commands only:
+  **`$HOME/qwen-runs/2026-11-09-glm-batch-q6/`**; no frozen binaries, exported
+  snapshots or raw event/profile traces retained.
+- Reproduction: build `qwen`, `qwen-tok`, the `glm_batch_q6` example and the
+  release library tests under the build lock. Operator commands at **`ecf11e48`**
+  and **`2c7ab0d0`**: `glm_batch_q6 MODEL ledger|sweep|routers`, under the lease
+  for GPU modes. Model command at **`0160f910`**: set `GLM53_GGUF=MODEL`,
+  `GLM53_BATCH_DEPTH=8192` (also 32768/65536), `MTL_DEBUG_LAYER=0`,
+  `QWEN_METAL_LEASE_WAIT=1`; run the Cargo-reported release library executable
+  with `glm5_next_metal::packed::batch::tests::projection_model::m5_projection_abba_and_distribution
+  --exact --ignored --nocapture --test-threads=1`. Committed helpers under
+  `scripts/research/glm-batch-q6/` summarize packets and run the steady ABBA;
+  corpus is the first >=3 MB of sorted tracked Rust source at **`9b193b38`**.
+
 
 ## 2026-11-09 - Flash-Next Native Independent Decode And Concurrent Serve
 

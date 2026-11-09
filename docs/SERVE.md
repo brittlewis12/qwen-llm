@@ -842,6 +842,10 @@ plain throwaway decode before accepting requests.
 - **Arithmetic and state.** Batched dense Q6/Q8 projections use few-row MMA
   with F32 dequantized weights and activations; summation differs from plain
   decode. Routed experts retain the native F32 token-grid arithmetic.
+  `QWEN_GLM53_BATCH_PROJECTIONS` defaults on for qualified Q6 output tiles,
+  cooperative F32 router members and packed MLA views. It preserves the
+  per-output arithmetic and removes redundant projections/copies;
+  `=0` restores the previous projection/copy policies.
   `QWEN_GLM53_BATCH_EXPERT_ROWS` defaults on for the qualified batched
   IQ2_S gate/up and IQ3_S down geometries. Four output channels share each
   activation-fragment load, retaining the per-channel F32 FMA chain and

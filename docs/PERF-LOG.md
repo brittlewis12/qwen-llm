@@ -6,6 +6,73 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-09 - Share V4.1 HC Pre Grids Across Concurrent Decode Sequences
+
+- **Default ON**, rollback **`QWEN_V41_BATCH_HC=0`**. Independent batches of
+  **2–4** sequences use one **25-by-B** HC-pre grid at each attention/FFN site.
+  Each member keeps its original residual, lagged pre, mixes, collapse and norm
+  buffers; ordinary Metal bindings track dependencies. The original wide scalar
+  body is shared literally, preserving reductions and rounding. B=1/5+, unsupported
+  shapes and the two-dispatch HC rollback keep their previous routes. At B=3,
+  **240 HC-pre dispatches become 80**; total dispatches fall **2346→2186** at 32K
+  and **2361→2201** at 64K. Avoid empty per-sequence encoder boundaries when the
+  attention front only checks metadata.
+- M5 Ultra **256 GiB**, production four-shard **DeepSeek-V4.1-Flash-1017-GSQ-RCO-
+  IQ2_XS**, native mixed expert storage, all 384 experts/top-6, disk Engram and
+  **4 GiB P4** soft mapping. Same frozen native helper/binary for off/on arms;
+  the simultaneous IQ-width prototype is forced off in both HC controls. Two
+  rollback arms bracket two HC-only repeats. Exact-CED common prefixes, distinct
+  **4096+17×sequence** Full suffixes, 16 excluded warm steps; first sequence at
+  **32784 / 65552**. Restore identical entries per width, exclude eight additional
+  warm steps, retain **128 teacher-forced rounds/cell**, including full-vocabulary
+  readback. Rates below divide equal work by the mean of both arm times:
+
+  | Depth | Batch | Rollback / HC aggregate tok/s | Throughput gain |
+  | --- | ---: | ---: | ---: |
+  | 32K | 2 | 86.77 / **88.54** | **2.04%** |
+  | 32K | 3 | 104.29 / **108.02** | **3.58%** |
+  | 32K | 4 | 116.57 / **120.49** | **3.36%** |
+  | 64K | 2 | 86.38 / **87.91** | **1.76%** |
+  | 64K | 3 | 102.97 / **106.66** | **3.59%** |
+  | 64K | 4 | 114.78 / **118.62** | **3.34%** |
+
+- Both orders win in every cell. All **2304 full-vocabulary vectors/arm** are
+  finite and bitwise identical across rollback and HC-only repeats: therefore
+  **KL=0 and Δteacher-forced NLL=0** relative to the existing batched path. The
+  synthetic full-forward test additionally covers B=1…5, mixed depths, split/one
+  submission and dirty checkpoint restores, checking exact heads,
+  positions, readiness and real dispatch grids. The unchanged scalar wide body
+  also has an identical preprocessed arithmetic-token fingerprint.
+- **Killed widened native IQ2_XXS tiles**: sharing activations over four output
+  channels gives **6–10% isolated-bank gains**, bitwise, but **−0.8%…+0.5%** whole
+  decode across these six cells. The micro gain does not transfer to the mixed
+  expert/attention chain. No IQ-width knob, alternate kernel or prototype/revert
+  pair remains in the shipping series.
+- Final **HC-only** binary through serve, current continuous-loop harness
+  **`4120be7e`**, seed **20261109**, the standing's reproducible code corpus,
+  three **48K roots**, default batching, 15 s ramp and **180 s common window**:
+  rollback **16256 tokens / 90.31 tok/s**, default **16913 / 93.96**, **1.0404x**
+  delivered capacity. Every agent gains: **30.79/30.33/29.19 →
+  32.09/31.62/30.25 tok/s**. Median content gap **28.14→27.16 ms**; short-agent
+  median TTFT **0.817/0.935→0.789/0.945 s**. One TTFT is pending at cutoff in
+  each arm. All stalls remain included (max content gap **5.36/2.94 s**);
+  one paired window is a serving confirmation, not a universal tail-latency claim.
+  Startup **14.72/1.86 s** and root warm-up **76.66/77.26 s** are excluded.
+  Identical fixtures are prepared unleased, cooling stays outside the lease,
+  and the descriptor closes after server drain, before offline token counting;
+  sampling, own histories and the rate metric are unchanged. An earlier finite
+  cohort rollback (**212.27 s**) is retained only as a diagnostic, superseded by
+  this continuous-loop pair; its queued candidate was cancelled before launch.
+- Release M5 suites, required Metal tests and API validation: **2473 lib passed /
+  748 ignored; 1689 CLI passed / 74 ignored**. The seven current steady-harness
+  CPU tests and **`scripts/check-contracts.sh`** pass. Builds and contracts are
+  unleased; timing holds the build
+  lock and canonical Metal lease, nice 10. Short arms, cooling outside leases,
+  one-second watchdog, **thermal 0 throughout**, no timed samples dropped.
+  Source hashes prove the tested HC code unchanged across the main rebase.
+  Helpers, source/binary identities, every retained arm and receipts:
+  **`~/qwen-runs/2026-11-08-v41-batch-depth/`** on both hosts.
+
 ## 2026-11-09 - Agent Append Decomposition: Real Rows Expose Matrix/Attention Cliffs
 
 - Main **`2bad80c4`**, M5 Ultra, unchanged FN GSQ-RCO IQ3_S / GLM UD-IQ3_XXS.

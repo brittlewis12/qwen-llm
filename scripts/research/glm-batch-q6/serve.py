@@ -11,7 +11,9 @@ from pathlib import Path
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for key in ['build-log','model','plan','corpus','harness','out']:p.add_argument('--'+key,type=Path,required=True)
-    p.add_argument('--harness-commit',required=True);p.add_argument('--rollback',action='append');a=p.parse_args()
+    p.add_argument('--harness-commit',required=True);p.add_argument('--rollback',action='append')
+    p.add_argument('--arms',nargs='+',choices=['off1','on1','on2','off2'],default=['off1','on1','on2','off2']);p.add_argument('--cooldown',type=int,default=40);a=p.parse_args()
+    assert a.cooldown>=15 and len(set(a.arms))==len(a.arms)
     knobs=a.rollback or ['QWEN_GLM53_BATCH_PROJECTIONS','QWEN_GLM53_BATCH_SELECTION','QWEN_GLM53_BATCH_KDA']
     assert 'QWEN_METAL_LEASE_FD' not in os.environ
     a.out.mkdir(parents=True,exist_ok=True)
@@ -21,10 +23,13 @@ def main():
         if 'Finished `release` profile'in s:break
         time.sleep(2)
     binary=Path('target/release/qwen').resolve();tokenizer=Path('target/release/qwen-tok').resolve()
-    for arm in ['off1','on1','on2','off2']:
-        time.sleep(25)
-        for _ in range(3):
-            assert subprocess.check_output(['notifyutil','-g','com.apple.system.thermalpressurelevel'],text=True).split()[-1]=='0'
+    for arm in a.arms:
+        # Cooling never owns the Metal lease. Require sustained level zero;
+        # other lanes may have heated the machine since the preceding arm.
+        stable=0
+        while stable<a.cooldown:
+            pressure=int(subprocess.check_output(['notifyutil','-g','com.apple.system.thermalpressurelevel'],text=True).split()[-1])
+            stable=stable+5 if pressure==0 else 0
             time.sleep(5)
         env=dict(os.environ,QWEN_METAL_LEASE_WAIT='1',MTL_DEBUG_LAYER='0')
         for knob in knobs:

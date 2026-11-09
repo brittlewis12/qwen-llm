@@ -37,7 +37,7 @@ pub(super) fn decode_selector_shape(
 }
 
 crate::env_flag!(
-    /// Default-on M5 singleton QSA decode selector holding each thread's contiguous 16- or 32-score chunk in registers across radix passes, with the fewest SIMD groups covering the row (up to 1024 threads, 32768 visible blocks; longer rows keep the existing selector). Same radix-4 threshold, index-order compaction, IDs, ties, counts and statuses as QWEN_FN_QSA_DECODE_SELECT; one barrier per radix pass and one packed compaction scan. No added device buffers or dispatches. Set 0 for the existing decode selector; QWEN_FN_QSA_DECODE_SELECT=0 still restores radix4.
+    /// Default-on M5 singleton QSA decode selector for 4096-32768 visible blocks (16K-128K context): each thread holds a contiguous 16- or 32-score chunk in registers across radix passes, using the fewest SIMD groups covering the row. Same radix-4 threshold, index-order compaction, IDs, ties, counts and statuses as QWEN_FN_QSA_DECODE_SELECT; one barrier per radix pass and one packed compaction scan. Shallower rows, where whole tokens measured no gain, and longer rows keep the existing selector. No added device buffers or dispatches. Set 0 for the existing decode selector; QWEN_FN_QSA_DECODE_SELECT=0 still restores radix4.
     default_on wide_decode_selector_enabled,
     "QWEN_FN_QSA_DECODE_SELECT_WIDE"
 );

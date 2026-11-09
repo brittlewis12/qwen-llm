@@ -75,15 +75,29 @@ impl GpuTokenSampler {
         output: &MetalTensor,
         uniform: f32,
     ) -> Result<(), MetalError> {
-        output.assert_writable("gpu_sampler");
-        if logits.dtype != GgmlType::F32
-            || logits.n_elements() != self.vocab as u64
-            || output.dtype != GgmlType::I32
-            || output.n_elements() != 1
+        checks::require_serial("gpu_sampler", enc)?;
+        checks::check_tensor(
+            "gpu_sampler",
+            logits,
+            GgmlType::F32,
+            &[self.vocab as u64],
+            false,
+            "logits",
+        )?;
+        checks::check_tensor("gpu_sampler", output, GgmlType::I32, &[1], true, "token")?;
+        checks::check_disjoint("gpu_sampler", output, &[(logits, "logits")])?;
+        let device = ctx.device.registryID();
+        if enc.ended
+            || enc.parent_command_buffer().device().registryID() != device
+            || [logits, output, &self.scratch[0]]
+                .iter()
+                .any(|t| t.buffer.device().registryID() != device)
         {
             return Err(MetalError::BadShape {
                 kernel: "gpu_sampler",
-                detail: "logit/output shape mismatch".into(),
+                detail:
+                    "encoder or sampler bindings belong to another device, or encoder has ended"
+                        .into(),
             });
         }
         if self.config.temperature == 0. {
@@ -209,6 +223,34 @@ impl GpuTokenSampler {
 mod tests {
     use super::*;
     use crate::sampling::{Sampler, SamplingUniform};
+
+    #[test]
+    fn gpu_sampler_rejects_unordered_and_aliasing_bindings() {
+        let Some(ctx) = test_support::metal_test_context() else {
+            return;
+        };
+        let gpu = GpuTokenSampler::new(
+            &ctx,
+            513,
+            SamplingConfig {
+                temperature: 0.8,
+                top_k: 20,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let x = MetalTensor::zeros_f32(&ctx, vec![513]).unwrap();
+        let y = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin_concurrent(&command);
+        assert!(gpu.encode(&ctx, &enc, &x, &y, 0.5).is_err());
+        enc.end();
+        let enc = KernelEncoder::begin(&command);
+        let mut alias = x.view_subrange(0, vec![1]);
+        alias.dtype = GgmlType::I32;
+        assert!(gpu.encode(&ctx, &enc, &x, &alias, 0.5).is_err());
+        enc.end();
+    }
 
     #[test]
     fn gpu_sampler_orders_candidates_filters_and_async_reads() {

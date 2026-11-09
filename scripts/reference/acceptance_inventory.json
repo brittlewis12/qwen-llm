@@ -6179,5 +6179,12 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Strict default-on decode rollback parsing, including invalid and non-UTF-8 values; no environment mutation or Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "metal::token_feedback::tests::gpu_sampler_rejects_unordered_and_aliasing_bindings",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "GPU sampler rejects concurrent dependent dispatches and aliased output before encoding; requires a Metal context."
   }
 ]

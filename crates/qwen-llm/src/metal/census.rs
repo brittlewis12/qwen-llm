@@ -342,6 +342,7 @@ pub(crate) type Library = Retained<ProtocolObject<dyn MTLLibrary>>;
 pub struct Pipeline {
     pub(crate) raw: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     pub(crate) name: Arc<str>,
+    pub(crate) accesses: Arc<OnceLock<Arc<Vec<(usize, bool)>>>>,
 }
 
 impl std::ops::Deref for Pipeline {

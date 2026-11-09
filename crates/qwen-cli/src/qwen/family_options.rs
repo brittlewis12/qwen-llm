@@ -205,6 +205,10 @@ pub(crate) const DEEPSEEK_V4_PREFILL_CHUNK_ENV: &str = "QWEN_DSV4_PREFILL_CHUNK_
 /// run and serve lanes.
 pub(crate) fn qwen4exp_decode_options_from_env() -> Result<Qwen4ExpDecodeOptions> {
     Ok(Qwen4ExpDecodeOptions {
+        causal_executor: parse_qwen4exp_decode_flag(
+            std::env::var_os("QWEN4EXP_CAUSAL_EXECUTOR").as_deref(),
+            "QWEN4EXP_CAUSAL_EXECUTOR",
+        )?,
         guarded_topk: parse_qwen4exp_decode_flag(
             std::env::var_os(QWEN4EXP_GUARDED_TOPK_ENV).as_deref(),
             QWEN4EXP_GUARDED_TOPK_ENV,

@@ -1007,6 +1007,7 @@ impl Qwen4ExpTextPackedScratch {
 use crate::qwen4exp_metal::encode_final_gated_residual_mix;
 
 pub struct Qwen4ExpTextSessionMetalWorkspace {
+    pub(crate) causal_executor: bool,
     checkpoint_lineage: CheckpointLineage,
     geometry: Qwen4ExpTextSessionMetalGeometry,
     zero_one: Qwen4ExpLayersZeroOneMetalWorkspace,
@@ -1105,6 +1106,7 @@ impl Qwen4ExpTextSessionMetalWorkspace {
             None
         };
         let workspace = Self {
+            causal_executor: true,
             checkpoint_lineage: CheckpointLineage::fresh()?,
             zero_one: Qwen4ExpLayersZeroOneMetalWorkspace::new(ctx, geometry.zero_one)?,
             packed,
@@ -2858,6 +2860,10 @@ fn encode_step(
         weights,
         workspace,
     )?;
+    if enc.causal_mode {
+        enc.finish_causal_scope(ctx, false)?;
+        enc.begin_causal_scope();
+    }
     encode_post_layer_hyper_probe(ctx, enc, 1, &workspace.hyper_residual, probe)?;
     if let Some(capture) = capture {
         capture.encode(ctx, enc, 1, &workspace.hyper_residual, position, 1)?;
@@ -2880,6 +2886,10 @@ fn encode_step(
                 position,
                 1,
             )?;
+        }
+        if enc.causal_mode {
+            enc.finish_causal_scope(ctx, true)?;
+            enc.begin_causal_scope();
         }
     }
     let hyper_residual = workspace.hyper_residual.clone();

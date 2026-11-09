@@ -376,6 +376,7 @@ fn product_split_decode_shared_prefix() {
         capacity,
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
+            causal_executor: true,
             guarded_topk: false,
             hc_up_mix: false,
         },

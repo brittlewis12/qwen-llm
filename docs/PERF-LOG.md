@@ -831,6 +831,23 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   thermal samples **0**. Compact JSON under
   `$HOME/qwen-runs/2026-11-08-realistic-steady/` on both hosts; regenerable
   M5 worktree/target/bundle removed, no owned processes remain. No merge/push.
+## 2026-11-08 - Flash-Next Decode Integration: Executor And Device Feedback In Progress
+
+- Rebased this lane onto **`9b193b38`**. Integrating the causal-wave executor
+  and scalar FFN epilogue/copy fusion first, then reusable GPU token feedback.
+  Prior **81.8/~92 tok/s** figures remain projections until whole-model A/B at
+  8K/32K; distribution/noise-floor/F64, library/CLI and contracts qualify rollout.
+- **Drop all prefetch, including narrow HC.** No prefetch knob or product
+  integration. Remember only the effective **96–128 MiB / ~1.9 TB/s** cache
+  knee for future designs; this supersedes the prior optional HC A/B proposal.
+- Coordination: read `perf/fn-serve-batch` through **`ccd1ae11`**. Its factory
+  and owner driver compose independent sessions. Causal scopes retain each
+  member's tensors and parent-command ownership; no global sequence state or
+  assumption that one member is the entire batch. No serve/factory seam edit.
+- Banked next single-stream target, **not started**: QSA attention/cache plus
+  selection/index ~**97 us/layer**, ~**1.2 ms/token** excess. This integration
+  changes scheduling/feedback, not those attention/selection algorithms.
+
 ## 2026-11-08 - Flash-Next Cache Overlap: Tiny HC Benefit, Preserve Executor/Feedback Work
 
 - **Step 1 physics probe only.** Measured source **`335e5445`**, unchanged

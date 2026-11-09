@@ -1292,6 +1292,7 @@ impl MetalContext {
         let pso = Pipeline {
             raw: pso,
             name: Arc::from(name),
+            accesses: Arc::new(OnceLock::new()),
         };
         self.pso_cache
             .lock()
@@ -1351,6 +1352,7 @@ impl MetalContext {
         let pso = Pipeline {
             raw: pso,
             name: Arc::from(name),
+            accesses: Arc::new(OnceLock::new()),
         };
         self.pso_cache
             .lock()

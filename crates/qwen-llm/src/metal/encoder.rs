@@ -12,6 +12,8 @@ use super::*;
 /// to client code. The forward-pass driver owns the command buffer; every
 /// kernel just appends dispatches.
 pub struct KernelEncoder {
+    pub(crate) recording: std::cell::RefCell<Option<causal::Recording>>,
+    pub(crate) causal_mode: bool,
     // Swapped only by the opt-in per-dispatch profiler (`dispatch_profile`).
     pub(crate) raw: std::cell::RefCell<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>>,
     pub(crate) parent: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -48,6 +50,8 @@ impl KernelEncoder {
         concurrent: bool,
     ) -> Self {
         Self {
+            recording: std::cell::RefCell::new(None),
+            causal_mode: false,
             raw: std::cell::RefCell::new(raw),
             parent: parent.clone(),
             ended: false,
@@ -84,7 +88,14 @@ impl KernelEncoder {
     }
 
     pub(crate) fn is_concurrent(&self) -> bool {
-        self.concurrent
+        self.concurrent && !self.causal_mode
+    }
+
+    pub(crate) fn begin_causal(cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Self {
+        let mut enc = Self::begin_concurrent(cmd);
+        enc.causal_mode = true;
+        enc.begin_causal_scope();
+        enc
     }
 
     pub(crate) fn parent_command_buffer(&self) -> Retained<ProtocolObject<dyn MTLCommandBuffer>> {
@@ -149,7 +160,7 @@ impl KernelEncoder {
         tensor.assert_writable("KernelEncoder::note_write");
         #[cfg(debug_assertions)]
         {
-            if !self.concurrent {
+            if !self.is_concurrent() {
                 return;
             }
             let buf = Retained::as_ptr(&tensor.buffer) as *const () as usize;
@@ -187,7 +198,7 @@ impl KernelEncoder {
     pub fn note_read(&self, tensor: &MetalTensor) {
         #[cfg(debug_assertions)]
         {
-            if !self.concurrent {
+            if !self.is_concurrent() {
                 return;
             }
             let buf = Retained::as_ptr(&tensor.buffer) as *const () as usize;
@@ -250,6 +261,10 @@ impl KernelEncoder {
     /// Mark `buf` used for reading by this pass without binding it, so the
     /// command keeps it resident (`MTLComputeCommandEncoder.useResource`).
     pub fn use_resource_read(&self, buf: &Buffer) {
+        if let Some(r) = self.recording.borrow_mut().as_mut() {
+            r.resource(buf);
+            return;
+        }
         if let Some(replay) = self.replay.borrow_mut().as_mut() {
             replay.resource(buf);
         }
@@ -262,6 +277,10 @@ impl KernelEncoder {
 
     /// Bind a buffer at slot `index`.
     pub fn set_buffer(&self, index: usize, buf: &Buffer, offset: u64) {
+        if let Some(r) = self.recording.borrow_mut().as_mut() {
+            r.buffer(index, buf, offset);
+            return;
+        }
         if let Some(replay) = self.replay.borrow_mut().as_mut() {
             replay.buffer(index, buf, offset);
         }
@@ -275,6 +294,10 @@ impl KernelEncoder {
     /// Bind a `MetalTensor` at slot `index`. Convenience wrapper over
     /// `set_buffer` that respects the tensor's `offset`.
     pub fn set_tensor(&self, index: usize, tensor: &MetalTensor) {
+        if let Some(r) = self.recording.borrow_mut().as_mut() {
+            r.tensor(index, tensor);
+            return;
+        }
         self.set_buffer(index, &tensor.buffer, tensor.offset);
     }
 
@@ -283,6 +306,10 @@ impl KernelEncoder {
     /// for tiny per-dispatch scalars.
     pub fn set_bytes<T: bytemuck::Pod>(&self, index: usize, value: &T) {
         let bytes = bytemuck::bytes_of(value);
+        if let Some(r) = self.recording.borrow_mut().as_mut() {
+            r.bytes(index, bytes);
+            return;
+        }
         if let Some(replay) = self.replay.borrow_mut().as_mut() {
             replay.bytes(index, bytes);
         }
@@ -303,6 +330,10 @@ impl KernelEncoder {
             bytes.len() <= 4_096,
             "inline Metal slice exceeds the 4 KiB API limit"
         );
+        if let Some(r) = self.recording.borrow_mut().as_mut() {
+            r.bytes(index, bytes);
+            return;
+        }
         if let Some(replay) = self.replay.borrow_mut().as_mut() {
             replay.bytes(index, bytes);
         }
@@ -320,6 +351,10 @@ impl KernelEncoder {
         let n_bytes = n_bytes
             .checked_next_multiple_of(16)
             .expect("threadgroup memory size overflow");
+        if let Some(r) = self.recording.borrow_mut().as_mut() {
+            r.threadgroup(index, n_bytes);
+            return;
+        }
         if let Some(replay) = self.replay.borrow_mut().as_mut() {
             replay.threadgroup(index, n_bytes);
         }
@@ -331,6 +366,10 @@ impl KernelEncoder {
     }
 
     pub fn set_pipeline(&self, pso: &Pipeline) {
+        if let Some(r) = self.recording.borrow_mut().as_mut() {
+            r.pipeline(pso);
+            return;
+        }
         if let Some(replay) = self.replay.borrow_mut().as_mut() {
             replay.pipeline(pso);
         }
@@ -339,6 +378,10 @@ impl KernelEncoder {
     }
 
     pub fn dispatch(&self, grid: MTLSize, threads: MTLSize) {
+        if let Some(r) = self.recording.borrow_mut().as_mut() {
+            r.dispatch(grid, threads);
+            return;
+        }
         kernel_trace_record_dispatch();
         census_record_dispatch(self, grid, threads);
         if self.replay.borrow().is_some() {

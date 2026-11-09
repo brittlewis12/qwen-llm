@@ -691,6 +691,7 @@ impl Drop for PleCacheWarm {
 /// incumbent execution. Defaults enable qualified wins; false is a hard rollback.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Qwen4ExpDecodeOptions {
+    pub causal_executor: bool,
     pub guarded_topk: bool,
     pub hc_up_mix: bool,
 }
@@ -698,6 +699,7 @@ pub struct Qwen4ExpDecodeOptions {
 impl Default for Qwen4ExpDecodeOptions {
     fn default() -> Self {
         Self {
+            causal_executor: true,
             guarded_topk: true,
             hc_up_mix: true,
         }
@@ -708,6 +710,7 @@ impl Qwen4ExpDecodeOptions {
     /// Keep each requested fast path whose pipeline capability check passed.
     fn qualified(self, capabilities: [bool; 2]) -> Self {
         Self {
+            causal_executor: self.causal_executor,
             guarded_topk: self.guarded_topk && capabilities[0],
             hc_up_mix: self.hc_up_mix && capabilities[1],
         }
@@ -995,6 +998,7 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
         if decode.hc_up_mix {
             workspace.configure_hc_up_mix(ctx, true)?;
         }
+        workspace.causal_executor = decode.causal_executor;
         let session_admission = workspace.admission();
         let aggregate = session_plan
             .memory_plan()
@@ -1161,6 +1165,14 @@ impl Qwen4ExpCapturedRows<'_> {
 }
 
 impl Qwen4ExpTextRunner<'_, '_, '_> {
+    /// Select causal dependency waves and scalar FFN epilogues for subsequent
+    /// single-row forwards. Packed prefill and independent session owners keep
+    /// their existing scheduling. The exclusive runner borrow excludes in-flight
+    /// token-loop work while changing this rollback policy.
+    pub fn configure_causal_executor(&mut self, enabled: bool) {
+        self.workspace.causal_executor = enabled;
+    }
+
     /// Separately admit one fixed-size device bank for this workspace. Includes
     /// no historical KV or compressed-index rows and no logits.
     pub fn allocate_device_checkpoint_bank(
@@ -2079,7 +2091,11 @@ fn execute_qwen4exp_text_packed_with_row_outputs_sync(
     let command = ctx.queue.commandBuffer().ok_or_else(|| {
         Qwen4ExpRuntimeError::Invalid("Metal command queue returned no command buffer".into())
     })?;
-    let encoder = KernelEncoder::begin(&command);
+    let encoder = if workspace.causal_executor {
+        KernelEncoder::begin_causal(&command)
+    } else {
+        KernelEncoder::begin(&command)
+    };
     let encoded = if row_logits.is_some() {
         encode_qwen4exp_text_packed_with_row_outputs(
             ctx,
@@ -2119,6 +2135,16 @@ fn execute_qwen4exp_text_packed_with_row_outputs_sync(
         }
     };
     drop(pending);
+    if encoder.causal_mode {
+        if let Err(error) = encoder.finish_causal_scope(ctx, false) {
+            encoder.cancel_causal_scope();
+            encoder.end();
+            unsafe {
+                workspace.abandon_uncommitted()?;
+            }
+            return Err(Qwen4ExpTextSessionError::from(error).into());
+        }
+    }
     encoder.end();
     let encode_cpu_ms = wall_started.elapsed().as_secs_f64() * 1e3;
     let wait_started = Instant::now();

@@ -22,6 +22,7 @@ fn saved_moe_parallel_topk_screen() {
         capacity,
         None,
         Qwen4ExpDecodeOptions {
+            causal_executor: true,
             guarded_topk: false,
             hc_up_mix: false,
         },
@@ -55,6 +56,7 @@ fn saved_moe_interval_budget_v2() {
         capacity,
         None,
         Qwen4ExpDecodeOptions {
+            causal_executor: true,
             guarded_topk: false,
             hc_up_mix: false,
         },
@@ -90,6 +92,7 @@ fn saved_moe_stage_interval_diagnostic() {
         capacity,
         None,
         Qwen4ExpDecodeOptions {
+            causal_executor: true,
             guarded_topk: false,
             hc_up_mix: false,
         },
@@ -147,6 +150,7 @@ fn native_moe_observation(guarded: bool) {
         capacity,
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
+            causal_executor: true,
             guarded_topk: guarded,
             hc_up_mix: false,
         },

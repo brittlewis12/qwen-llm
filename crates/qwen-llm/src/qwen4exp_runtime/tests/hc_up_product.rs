@@ -114,6 +114,7 @@ fn qualify_hc_product(guarded: bool, split_baseline: bool) {
         capacity,
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
+            causal_executor: true,
             guarded_topk: guarded,
             hc_up_mix: true,
         },

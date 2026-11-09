@@ -98,6 +98,7 @@ fn product_guarded_topk_shared_prefix() {
         capacity,
         Some(PREFIX),
         Qwen4ExpDecodeOptions {
+            causal_executor: true,
             guarded_topk: true,
             hc_up_mix: false,
         },

@@ -107,8 +107,8 @@ pub fn run_preencoded_tokens<D: GpuTokenLoopDriver>(
     let mut input_token = None;
     driver.started();
     running.0 = Some(current.command.clone());
-    current.command.commit();
     let mut submitted = Instant::now();
+    current.command.commit();
     loop {
         let encode_started = Instant::now();
         let next = if stats.sampled_tokens + 1 < max_tokens {
@@ -177,8 +177,8 @@ pub fn run_preencoded_tokens<D: GpuTokenLoopDriver>(
         let Some(next) = next else { break };
         input_token = Some(token);
         running.0 = Some(next.command.clone());
-        next.command.commit();
         submitted = Instant::now();
+        next.command.commit();
         current = next;
     }
     stats.wall_ms = started.elapsed().as_secs_f64() * 1e3;

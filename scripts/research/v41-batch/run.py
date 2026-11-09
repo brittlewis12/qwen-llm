@@ -9,10 +9,11 @@ def pressure():
 
 
 def leased(a):
-    fd=int(os.environ['QWEN_METAL_LEASE_FD']);assert pressure()==0
+    fd=int(os.environ['QWEN_METAL_LEASE_FD']);assert pressure()<2
     cmd=[str(a.binary.resolve()),str(a.model.resolve()),str(a.depth),str(a.batch),str(a.steps)]
     if a.bounds:cmd.append('bounds')
     if a.waves:cmd.append('waves')
+    if a.causal:cmd.append('causal')
     start=time.monotonic();reason=None;samples=[];child=None
     def stop(sig,frame):
         if child is not None and child.poll() is None:os.killpg(child.pid,signal.SIGINT)
@@ -24,9 +25,12 @@ def leased(a):
         with stem.with_suffix('.stdout').open('w') as out,stem.with_suffix('.stderr').open('w') as err:
             child=subprocess.Popen(cmd,stdout=out,stderr=err,pass_fds=(fd,),start_new_session=True)
             while child.poll() is None:
-                time.sleep(1);p=pressure();samples.append(p)
-                if p or time.monotonic()-start>210:
-                    reason='thermal' if p else 'deadline';child.send_signal(signal.SIGINT);break
+                time.sleep(1);p=pressure()
+                proc=subprocess.run(['pgrep','-x','rustc|clang|clang[+][+]|metal'],capture_output=True,text=True)
+                assert proc.returncode in (0,1),proc.stderr
+                samples.append(dict(unix=time.time(),pressure=p,compiler_pids=proc.stdout.split()))
+                if p>=2 or time.monotonic()-start>210:
+                    reason='thermal' if p>=2 else 'deadline';child.send_signal(signal.SIGINT);break
             try:code=child.wait(timeout=35)
             except subprocess.TimeoutExpired:os.killpg(child.pid,signal.SIGKILL);code=child.wait();reason='drain timeout'
     finally:
@@ -41,8 +45,14 @@ def leased(a):
     stem.with_suffix('.conditions.json').write_text(json.dumps(record,indent=2)+'\n')
     if code or reason:raise RuntimeError(record)
     rows=[json.loads(s) for s in stem.with_suffix('.stdout').read_text().splitlines() if s.startswith('{')]
-    result=rows if (a.bounds or a.waves) else next(x for x in rows if x['kind']=='kill')
+    result=rows if (a.bounds or a.waves or a.causal) else next(x for x in rows if x['kind']=='kill')
     for row in rows:
+        if row.get('kind')=='causal_screen':
+            observed=[s for s in samples if row['started_unix']<=s['unix']<=row['finished_unix']]
+            row['thermal_max']=max([row['thermal_before'],row['thermal_after']]+[s['pressure'] for s in observed])
+            row['thermal_level_1']=row['thermal_max']==1
+            row['compile_overlapped']=any(s['compiler_pids'] for s in observed)
+            row['monitor_samples']=observed
         if row.get('kind')=='wave_capture':
             meta=row['metadata'];meta['dispatches']=len(meta.pop('steps'))
     print(json.dumps(dict(event='complete',label=a.leased,commit=record['commit'],result=result)),flush=True)
@@ -57,6 +67,7 @@ def main():
     mode=p.add_mutually_exclusive_group(required=True)
     mode.add_argument('--bounds',action='store_true')
     mode.add_argument('--waves',action='store_true')
+    mode.add_argument('--causal',action='store_true')
     a=p.parse_args()
     if a.leased:leased(a);return
     assert 'QWEN_METAL_LEASE_FD' not in os.environ
@@ -68,10 +79,10 @@ def main():
             os.killpg(active_child.pid,signal.SIGINT)
         raise KeyboardInterrupt
     for sig in [signal.SIGINT,signal.SIGTERM]:signal.signal(sig,cancel)
-    for i,arm in enumerate(['bounds'] if a.bounds else ['waves']):
-        assert arm in ['bounds','waves'];time.sleep(a.cool)
+    for i,arm in enumerate(['bounds'] if a.bounds else ['waves'] if a.waves else ['causal']):
+        assert arm in ['bounds','waves','causal'];time.sleep(a.cool)
         for _ in range(3):
-            assert pressure()==0;time.sleep(3)
+            assert pressure()<2;time.sleep(3)
         label=f'{arm}-{i}-d{a.depth}-b{a.batch}'
         cmd=[str(root/'scripts/bench/with-metal-lease'),'--task','v41-round-'+label,'--for','2m','--',
              'python3',str(Path(__file__).resolve()),'--leased',label,'--binary',str(a.binary.resolve()),
@@ -79,6 +90,7 @@ def main():
              '--batch',str(a.batch),'--steps',str(a.steps)]
         if a.bounds:cmd.append('--bounds')
         if a.waves:cmd.append('--waves')
+        if a.causal:cmd.append('--causal')
         env=dict(os.environ,QWEN_METAL_LEASE_WAIT='1');env.pop('MTL_DEBUG_LAYER',None);env.pop('QWEN_REQUIRE_METAL_TESTS',None)
         print(json.dumps(dict(event='queued',label=label,command=cmd,requested_unix=time.time())),flush=True)
         active_child=subprocess.Popen(cmd,env=env,start_new_session=True)

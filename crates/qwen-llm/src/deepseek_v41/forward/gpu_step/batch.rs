@@ -214,6 +214,32 @@ fn batch_head_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var(BATCH_HEAD_ENV).as_deref() != Ok("0"))
 }
 
+/// Layer-sized causal waves for M5 V4.1 B=3. `0` keeps native encoder cuts.
+const BATCH_CAUSAL_ENV: &str = "QWEN_V41_BATCH_CAUSAL_EXECUTOR";
+#[cfg(test)]
+thread_local! { pub(super) static BATCH_CAUSAL_OVERRIDE: std::cell::Cell<Option<bool>> = const {std::cell::Cell::new(None)}; }
+fn batch_causal_enabled() -> bool {
+    // Recording consumes tensor metadata and delays dispatches: diagnostics
+    // need native binding/phase lineage rather than replayed bindings.
+    if metal::dispatch_census_is_active() || metal::dispatch_profile_records() {
+        return false;
+    }
+    #[cfg(feature = "perf-ablations")]
+    if metal::decode_bounds::is_active() {
+        return false;
+    }
+    #[cfg(test)]
+    if let Some(enabled) = BATCH_CAUSAL_OVERRIDE.with(std::cell::Cell::get) {
+        return enabled;
+    }
+    #[cfg(feature = "perf-ablations")]
+    if let Some(enabled) = metal::decode_bounds::batch_causal_override() {
+        return enabled;
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| crate::env_flag::read_default_on(BATCH_CAUSAL_ENV))
+}
+
 /// Column scratch of the batched attention projections, `[n, B]` each:
 /// attention input, query rank and KV latent (the rank pair), query (q_b),
 /// attended heads (output_a), output rank (output_a's output, output_b's
@@ -903,7 +929,14 @@ pub(in super::super) fn run_batch(
                 .queue
                 .commandBuffer()
                 .ok_or("Metal command buffer allocation")?;
-            let mut stages = StageEncoder::begin(&command, None);
+            let causal = workspaces.len() == 3
+                && ctx.device_facts().gpu_families.apple10
+                && batch_causal_enabled();
+            let mut stages = if causal {
+                StageEncoder::begin_causal(&command)
+            } else {
+                StageEncoder::begin(&command, None)
+            };
             let segment = (|| -> Result<()> {
                 if engram_projection {
                     match &scratch.engram {
@@ -922,6 +955,7 @@ pub(in super::super) fn run_batch(
                         for (ws, input) in workspaces.iter_mut().zip(inputs) {
                             ws.encode_layer(model, &mut stages, id, input.position)?;
                         }
+                        stages.causal_boundary(ctx).map_err(|e| e.to_string())?;
                         continue;
                     }
                     match scratch.attention.as_ref().filter(|_| attention) {
@@ -948,6 +982,7 @@ pub(in super::super) fn run_batch(
                         }
                     }
                     encode_ffn_columns(model, &mut stages, workspaces, id, scratch)?;
+                    stages.causal_boundary(ctx).map_err(|e| e.to_string())?;
                 }
                 if head {
                     match &scratch.head {
@@ -963,6 +998,11 @@ pub(in super::super) fn run_batch(
                 }
                 Ok(())
             })();
+            let segment =
+                segment.and_then(|_| stages.finish_causal(ctx).map_err(|e| e.to_string()));
+            if segment.is_err() {
+                stages.cancel_causal();
+            }
             stages.end();
             segment?;
             command.commit();

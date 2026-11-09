@@ -1206,3 +1206,135 @@ fn batched_hc_pre_preserves_mixed_depths_and_dirty_restores() {
         }
     }
 }
+
+#[test]
+fn batched_causal_waves_preserve_snapshots_forks_and_rollback() {
+    let ctx = MetalContext::new().unwrap();
+    if !ctx.device_facts().gpu_families.apple10 {
+        return;
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            batch::BATCH_CAUSAL_OVERRIDE.with(|v| v.set(None));
+        }
+    }
+    let _reset = Reset;
+    let weights = toy::Weights::new(&ctx);
+    let model = weights.model(&ctx);
+    let mut reference = None;
+    for enabled in [false, true] {
+        batch::BATCH_CAUSAL_OVERRIDE.with(|v| v.set(Some(enabled)));
+        let mut states = (0..3)
+            .map(|_| model.new_state_with_gpu_step(16).unwrap())
+            .collect::<Vec<_>>();
+        let cancel = AtomicBool::new(true);
+        assert!(
+            model
+                .step_batch(
+                    &mut states.iter_mut().collect::<Vec<_>>(),
+                    &[0, 1, 2],
+                    Some(&cancel)
+                )
+                .unwrap_err()
+                .contains("cancelled")
+        );
+        assert!(states.iter().all(|s| s.is_ready() && s.position() == 0));
+        metal::dispatch_census_begin();
+        let observed = model
+            .step_batch(&mut states.iter_mut().collect::<Vec<_>>(), &[0, 1, 2], None)
+            .unwrap();
+        let census = metal::dispatch_census_take();
+        assert!(!census.is_empty());
+        assert!(
+            census.iter().all(|row| !row.encoder_concurrent),
+            "diagnostics must keep native serial encoders"
+        );
+        for i in 0..3 {
+            for _ in 0..i {
+                model.step(&mut states[i], 3, None).unwrap();
+            }
+        }
+        let mut heads = vec![observed];
+        for tokens in [[0, 3, 1], [3, 2, 4], [4, 1, 0], [2, 0, 3]] {
+            heads.push(
+                model
+                    .step_batch(&mut states.iter_mut().collect::<Vec<_>>(), &tokens, None)
+                    .unwrap(),
+            );
+        }
+        let snapshots = states
+            .iter()
+            .map(|s| model.capture_snapshot(s).unwrap())
+            .collect::<Vec<_>>();
+        let payload = snapshots
+            .iter()
+            .map(|s| s.diagnostic_digest())
+            .collect::<Vec<_>>();
+        let mut forked = (0..3)
+            .map(|_| model.new_state_with_gpu_step(16).unwrap())
+            .collect::<Vec<_>>();
+        for (fork, snap) in forked.iter_mut().zip(&snapshots) {
+            model.restore_snapshot(fork, snap).unwrap();
+        }
+        for tokens in [[1, 4, 2], [3, 0, 1]] {
+            let batch = model
+                .step_batch(&mut states.iter_mut().collect::<Vec<_>>(), &tokens, None)
+                .unwrap();
+            for ((fork, state), (&token, head)) in forked
+                .iter_mut()
+                .zip(&states)
+                .zip(tokens.iter().zip(&batch))
+            {
+                assert_eq!(model.step(fork, token, None).unwrap(), *head);
+                assert_eq!(fork.addresses, state.addresses);
+                assert_eq!(
+                    model.capture_snapshot(fork).unwrap().diagnostic_digest(),
+                    model.capture_snapshot(state).unwrap().diagnostic_digest()
+                );
+            }
+            heads.push(batch);
+        }
+        let actual = (heads, payload);
+        if let Some(ref r) = reference {
+            assert_eq!(*r, actual);
+        } else {
+            reference = Some(actual);
+        }
+    }
+}
+
+#[test]
+fn batched_causal_encode_failure_drains_commits_and_poisons_members() {
+    let ctx = MetalContext::new().unwrap();
+    if !ctx.device_facts().gpu_families.apple10 {
+        return;
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            batch::BATCH_CAUSAL_OVERRIDE.with(|v| v.set(None));
+            SPLIT_SUBMIT_OVERRIDE.with(|v| v.set(None));
+        }
+    }
+    let _reset = Reset;
+    batch::BATCH_CAUSAL_OVERRIDE.with(|v| v.set(Some(true)));
+    let weights = toy::Weights::new(&ctx);
+    for split in [false, true] {
+        SPLIT_SUBMIT_OVERRIDE.with(|v| v.set(Some(split)));
+        let mut model = weights.model(&ctx);
+        let mut states = (0..3)
+            .map(|_| model.new_state_with_gpu_step(8).unwrap())
+            .collect::<Vec<_>>();
+        model.layers[3].attention.head_dim += 1;
+        let error = model
+            .step_batch(&mut states.iter_mut().collect::<Vec<_>>(), &[0, 1, 2], None)
+            .unwrap_err();
+        assert!(error.contains("GPU attention weights"), "{error}");
+        for state in states {
+            assert!(state.is_poisoned());
+            assert_eq!(state.position(), 0);
+            assert_eq!(state.gpu_step.unwrap().commands, usize::from(split));
+        }
+    }
+}

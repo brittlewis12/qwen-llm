@@ -9,6 +9,14 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Research-only exact causal payload digest; excludes transient activations.
+    #[cfg(any(test, feature = "perf-ablations"))]
+    pub fn diagnostic_digest(&self) -> String {
+        blake3::hash(bytemuck::cast_slice(&self.payload))
+            .to_hex()
+            .to_string()
+    }
+
     pub fn position(&self) -> usize {
         self.addresses.position() as usize
     }

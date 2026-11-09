@@ -102,6 +102,10 @@ impl Drop for Guard {
     }
 }
 
+pub(crate) fn is_active() -> bool {
+    ACTIVE.with(|v| v.borrow().is_some())
+}
+
 pub(crate) fn label(label: &'static str) {
     ACTIVE.with(|a| {
         if let Some(a) = a.borrow_mut().as_mut() {
@@ -354,4 +358,21 @@ mod tests {
         assert!(skip("kernel_deepseek_v41_hc_pre_batch"));
         g.finish();
     }
+}
+
+thread_local! { static BATCH_CAUSAL: std::cell::Cell<Option<bool>> = const {std::cell::Cell::new(None)}; }
+pub fn batch_causal_override() -> Option<bool> {
+    BATCH_CAUSAL.with(std::cell::Cell::get)
+}
+pub fn batch_causal_scope(enabled: bool) -> impl Drop {
+    struct Scope(Option<bool>, std::marker::PhantomData<Rc<()>>);
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            BATCH_CAUSAL.with(|v| v.set(self.0));
+        }
+    }
+    Scope(
+        BATCH_CAUSAL.with(|v| v.replace(Some(enabled))),
+        std::marker::PhantomData,
+    )
 }

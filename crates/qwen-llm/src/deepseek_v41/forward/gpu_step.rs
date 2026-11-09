@@ -95,6 +95,40 @@ impl<'a> StageEncoder<'a> {
         }
     }
 
+    fn begin_causal(
+        command: &'a objc2::rc::Retained<
+            objc2::runtime::ProtocolObject<dyn objc2_metal::MTLCommandBuffer>,
+        >,
+    ) -> Self {
+        Self {
+            command: Some(command),
+            samples: None,
+            enc: StageInner::Owned(KernelEncoder::begin_causal(command)),
+            stage: 0,
+        }
+    }
+
+    fn causal_boundary(&self, ctx: &MetalContext) -> std::result::Result<(), metal::MetalError> {
+        if self.enc().causal_mode {
+            self.enc().finish_causal_scope(ctx, false)?;
+            self.enc().begin_causal_scope();
+        }
+        Ok(())
+    }
+
+    fn finish_causal(&self, ctx: &MetalContext) -> std::result::Result<(), metal::MetalError> {
+        if self.enc().causal_mode {
+            self.enc().finish_causal_scope(ctx, false)?;
+        }
+        Ok(())
+    }
+
+    fn cancel_causal(&self) {
+        if self.enc().causal_mode {
+            self.enc().cancel_causal_scope();
+        }
+    }
+
     fn borrowed(enc: &'a KernelEncoder) -> Self {
         Self {
             command: None,
@@ -131,8 +165,12 @@ impl<'a> StageEncoder<'a> {
 
     /// End the current plain encoder and begin another on the same command,
     /// so Metal's resource tracking may overlap independent work across the
-    /// boundary. No-op for borrowed or sampled encoders.
+    /// boundary. Causal scopes collect these chains until the layer boundary.
+    /// No-op for borrowed or sampled encoders.
     fn split(&mut self) {
+        if self.enc().causal_mode {
+            return;
+        }
         let (None, Some(command)) = (self.samples, self.command) else {
             return;
         };

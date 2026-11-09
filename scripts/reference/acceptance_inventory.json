@@ -6221,5 +6221,19 @@
     "class": "timing",
     "ignored": true,
     "reason": "Ignored GPU timing witness; canonical production lease and wired-memory gate; excluded from CPU acceptance."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::batched_causal_encode_failure_drains_commits_and_poisons_members",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "M5 Metal context with synthetic V4.1 toy weights; exercises causal batch state/fork equality or cancellation/error draining, without a real model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::gpu_step::tests::batched_causal_waves_preserve_snapshots_forks_and_rollback",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "M5 Metal context with synthetic V4.1 toy weights; exercises causal batch state/fork equality or cancellation/error draining, without a real model import."
   }
 ]

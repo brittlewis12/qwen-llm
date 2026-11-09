@@ -23,16 +23,22 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 extern "C" fn cancel(_: libc::c_int) {
     CANCEL.store(true, Ordering::Relaxed);
 }
-fn thermal() -> Result<()> {
+fn thermal_level() -> Result<u32> {
     let o = std::process::Command::new("notifyutil")
         .args(["-g", "com.apple.system.thermalpressurelevel"])
         .output()?;
-    ensure!(
-        String::from_utf8(o.stdout)?.split_whitespace().last() == Some("0"),
-        "thermal pressure: stop"
-    );
-    Ok(())
+    let level = String::from_utf8(o.stdout)?
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .parse()?;
+    ensure!(level < 2, "thermal pressure >=2: redo");
+    Ok(level)
 }
+fn thermal() -> Result<()> {
+    thermal_level().map(|_| ())
+}
+
 fn hashes(v: &[Vec<f32>]) -> Result<Vec<String>> {
     v.iter()
         .map(|x| {
@@ -141,7 +147,12 @@ fn main() -> Result<()> {
         let snap = f.capture_snapshot(&base)?;
         let is_bounds = args.get(5).is_some_and(|s| s == "bounds");
         let is_waves = args.get(5).is_some_and(|s| s == "waves");
-        let members = if is_bounds || is_waves { 3 } else { 4 };
+        let is_causal = args.get(5).is_some_and(|s| s == "causal");
+        let members = if is_bounds || is_waves || is_causal {
+            3
+        } else {
+            4
+        };
         let mut states = Vec::new();
         for i in 0..members {
             let mut state = f.new_state(98304)?;
@@ -159,6 +170,18 @@ fn main() -> Result<()> {
             .iter()
             .map(|s| f.capture_snapshot(s))
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        if is_causal {
+            #[cfg(feature = "perf-ablations")]
+            return causal_screen(
+                &f,
+                &mut states,
+                &entries,
+                &streams,
+                args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(128),
+            );
+            #[cfg(not(feature = "perf-ablations"))]
+            anyhow::bail!("causal requires perf-ablations");
+        }
         if is_waves {
             #[cfg(feature = "perf-ablations")]
             return waves(&ctx, &f, &mut states, &streams);
@@ -717,6 +740,78 @@ fn native_wave_calibration(
         println!(
             "{}",
             serde_json::json!({"kind":"wave_native","label":label,"rep":rep,"wall_ms":wall_ms,"gpu_ms":op.gpu_ms,"hashes":h,"pageins":report.process_pageins,"disk_read_bytes":report.process_disk_read_bytes})
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "perf-ablations")]
+fn causal_screen(
+    f: &Forward<'_>,
+    states: &mut [State],
+    entries: &[qwen_llm::deepseek_v41::forward::Snapshot],
+    streams: &[Vec<u32>],
+    n: usize,
+) -> Result<()> {
+    ensure!((32..=256).contains(&n), "bounded causal screen");
+    let mut reference = None;
+    for (arm, enabled) in [false, true, true, false].into_iter().enumerate() {
+        let thermal_before = thermal_level()?;
+        for (s, snap) in states.iter_mut().zip(entries) {
+            f.restore_snapshot(s, snap)?;
+        }
+        let guard = metal::decode_bounds::batch_causal_scope(enabled);
+        for j in 0..8 {
+            let tokens: Vec<_> = (0..3).map(|i| streams[i][4300 + j]).collect();
+            step(f, states, &tokens, true)?;
+        }
+        let unix = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64()
+        };
+        let started_unix = unix();
+        let begin = Instant::now();
+        let mut heads = Vec::with_capacity(n);
+        for j in 0..n {
+            let tokens: Vec<_> = (0..3).map(|i| streams[i][4310 + j]).collect();
+            heads.push(step(f, states, &tokens, true)?);
+        }
+        let ms_round = begin.elapsed().as_secs_f64() * 1000. / n as f64;
+        let finished_unix = unix();
+        let thermal_after = thermal_level()?;
+        drop(guard);
+        let mut digest = blake3::Hasher::new();
+        for h in &heads {
+            for v in h {
+                ensure!(v.iter().all(|x| x.is_finite()), "finite causal logits");
+                digest.update(bytemuck::cast_slice(v));
+            }
+        }
+        let logits = digest.finalize().to_hex().to_string();
+        let payload = states
+            .iter()
+            .map(|s| f.capture_snapshot(s).map(|x| x.diagnostic_digest()))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut follow = Vec::new();
+        for j in 0..8 {
+            let tokens: Vec<_> = (0..3).map(|i| streams[i][4310 + n + j]).collect();
+            follow.push(step(f, states, &tokens, false)?);
+        }
+        let follow: Vec<_> = follow.iter().map(|h| hashes(h)).collect::<Result<_>>()?;
+        let bits = (logits.clone(), payload.clone(), follow.clone());
+        if let Some(ref expected) = reference {
+            ensure!(
+                *expected == bits,
+                "causal arithmetic or persistent state changed"
+            );
+        } else {
+            reference = Some(bits);
+        }
+        println!(
+            "{}",
+            serde_json::json!({"kind":"causal_screen","started_unix":started_unix,"finished_unix":finished_unix,"thermal_before":thermal_before,"thermal_after":thermal_after,"arm":arm,"enabled":enabled,"rounds":n,"ms_round":ms_round,"logits":logits,"state":payload,"follow":follow,"bitwise":true})
         );
     }
     Ok(())

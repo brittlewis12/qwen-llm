@@ -21,6 +21,7 @@ mod probe {
             .collect()
     }
     fn error(a: &[f32], b: &[f32]) -> f64 {
+        assert!(a.iter().chain(b).all(|x| x.is_finite()), "nonfinite diagnostic boundary");
         a.iter()
             .zip(b)
             .map(|(&x, &y)| (f64::from(x) - f64::from(y)).abs())

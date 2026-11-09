@@ -500,12 +500,14 @@ fn packed_router_e8p32_strict_matches_generic_route_bits() {
         return;
     }
 
-    check_packed_router_e8p32_bits(
-        ctx,
-        &[
-            128, 129, 399, 400, 401, 511, 512, 513, 1009, 2000, 2045, 2047, 2048,
-        ],
-    );
+    // The append widths are admitted only where the tensor tier exists; other
+    // hosts keep the incumbent router for them, so cover the always-qualified
+    // widths there instead.
+    let mut token_counts = PACKED_ROUTER_E8P32_STRICT_TOKEN_COUNTS.to_vec();
+    if ctx.tensor_ops_status().is_available() {
+        token_counts.extend_from_slice(&[128, 129, 399, 400, 401, 511, 513, 1009, 2000, 2047]);
+    }
+    check_packed_router_e8p32_bits(ctx, &token_counts);
 }
 
 #[test]

@@ -28,6 +28,51 @@ use std::sync::{Mutex, OnceLock};
 use crate::env_flag::env_value_truthy;
 use crate::metal::{MetalContext, MetalError};
 
+/// Owned scratch directory for one test or fixture. Creation reserves the name
+/// atomically; neither clock resolution nor another test's cleanup can alias it.
+pub struct TestDir(Option<PathBuf>);
+
+impl TestDir {
+    pub fn new(label: &str) -> Self {
+        use std::os::unix::fs::DirBuilderExt;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        loop {
+            let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "qwen-test-{label}-{}-{nonce}-{sequence}",
+                std::process::id()
+            ));
+            match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => return Self(Some(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create test directory {}: {error}", path.display()),
+            }
+        }
+    }
+
+    /// Transfer cleanup to an existing fixture owner (or explicit remove_dir_all).
+    pub fn keep(mut self) -> PathBuf {
+        self.0.take().unwrap()
+    }
+
+    pub fn path(&self) -> &Path {
+        self.0.as_deref().unwrap()
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
 /// One local model fixture: a stable id, the environment aliases that may
 /// override its location, and its published filename.
 #[derive(Clone, Copy, Debug)]
@@ -661,13 +706,48 @@ pub fn metal_tests_required() -> bool {
         .unwrap_or(false)
 }
 
-/// A Metal context for a test, or `None` when the GPU is not available to
-/// this process (no device, or another qwen process holds the lease —
-/// dependent crates' test binaries take the real lease, not the
-/// per-process test lease) and the test may skip. Any other initialization
-/// error, or an unavailable GPU when Metal tests are required, is a failure.
+/// A Metal context for model witnesses. Dependent crates acquire the production
+/// lease; their bounded unit fixtures use `unit_metal_context_or_skip` instead.
+/// A missing GPU or metallib may skip unless Metal tests are required. Other
+/// initialization errors, including lease refusal, are failures.
 pub fn metal_context_or_skip() -> Option<MetalContext> {
-    match MetalContext::new() {
+    metal_context_result_or_skip(MetalContext::new())
+}
+
+/// Context for bounded, model-free unit fixtures in dependent crates, where
+/// qwen-llm itself is not compiled with cfg(test). Model witnesses must keep
+/// using `metal_context_or_skip` and the canonical production lease.
+pub fn unit_metal_context_or_skip() -> Option<MetalContext> {
+    use crate::metal::{MetalProcessLease, open_metal_process_lease};
+    use std::sync::Arc;
+
+    // An explicit campaign retains authority over its children.
+    if std::env::var_os("QWEN_METAL_LEASE_FD")
+        .is_some_and(|fd| fd.to_str().is_none_or(|fd| !fd.trim().is_empty()))
+    {
+        return metal_context_or_skip();
+    }
+    static LEASE: Mutex<Option<(TestDir, Arc<MetalProcessLease>)>> = Mutex::new(None);
+    let lease = {
+        let mut cached = LEASE.lock().unwrap_or_else(|error| error.into_inner());
+        let (_, lease) = cached.get_or_insert_with(|| {
+            let directory = TestDir::new("unit-metal");
+            let lease = open_metal_process_lease(&directory.path().join("metal.lock"), false)
+                .expect("isolated unit-fixture lease");
+            (directory, Arc::new(lease))
+        });
+        assert_eq!(
+            lease.owner_pid,
+            std::process::id(),
+            "unit Metal context inherited across fork"
+        );
+        Arc::clone(lease)
+    };
+    metal_context_result_or_skip(MetalContext::new_with_process_lease(lease))
+}
+
+fn metal_context_result_or_skip(result: Result<MetalContext, MetalError>) -> Option<MetalContext> {
+    match result {
         Ok(ctx) => Some(ctx),
         Err(error @ (MetalError::EmptyLibrary | MetalError::NoDevice)) => {
             assert!(
@@ -728,7 +808,8 @@ mod tests {
 
     #[test]
     fn first_alias_wins_and_agreeing_aliases_are_fine() {
-        let file = std::env::temp_dir().join("qwen-test-fixture-probe.gguf");
+        let directory = TestDir::new("fixture-probe");
+        let file = directory.path().join("probe.gguf");
         std::fs::write(&file, b"x").unwrap();
         let path = file.to_str().unwrap();
         with_env(
@@ -843,7 +924,8 @@ mod tests {
 
     #[test]
     fn searches_filename_to_bounded_depth_in_directory_order() {
-        let root = std::env::temp_dir().join(format!("qwen-fixture-search-{}", std::process::id()));
+        let directory = TestDir::new("fixture-search");
+        let root = directory.path();
         let file = root.join("one/two/three/probe.gguf");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, b"fixture").unwrap();
@@ -859,5 +941,44 @@ mod tests {
             },
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::TestDir;
+
+    #[test]
+    fn scratch_directories_are_unique_owned_and_cleaned_on_drop() {
+        let paths = std::thread::scope(|scope| {
+            let workers = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let directories = (0..16)
+                            .map(|_| TestDir::new("same-label"))
+                            .collect::<Vec<_>>();
+                        let paths = directories
+                            .iter()
+                            .map(|directory| {
+                                let path = directory.path().to_owned();
+                                std::fs::write(path.join("owned"), b"fixture").unwrap();
+                                path
+                            })
+                            .collect::<Vec<_>>();
+                        drop(directories);
+                        paths
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .flat_map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            paths.iter().collect::<std::collections::HashSet<_>>().len(),
+            64
+        );
+        assert!(paths.iter().all(|path| !path.exists()));
     }
 }

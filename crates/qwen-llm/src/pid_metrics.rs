@@ -123,14 +123,8 @@ mod tests {
         // we can't assert either strictly, but the API must succeed
         // and produce a coherent delta.
         let bytes = 64 * 1024 * 1024;
-        let path = std::env::temp_dir().join(format!(
-            "qwen-pid-metrics-{}-{}.bin",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
+        let directory = crate::test_fixtures::TestDir::new("pid-metrics");
+        let path = directory.path().join("data.bin");
         {
             let mut f = std::fs::File::create(&path).expect("create");
             let chunk = vec![0xABu8; 1 << 20];
@@ -148,9 +142,56 @@ mod tests {
             assert_eq!(buf.len(), bytes);
         }
         let after = PidSnapshot::now().expect("after");
-        let d = PidDelta::between(before, after);
-        // Byteswritten shouldn't have grown from a read.
-        assert_eq!(d.diskio_byteswritten, 0);
+        let _delta = PidDelta::between(before, after);
+        // These are process-wide physical I/O counters: delayed writeback and
+        // other threads may contribute writes during a read-only interval.
+        assert!(after.diskio_byteswritten >= before.diskio_byteswritten);
+        assert!(after.diskio_bytesread >= before.diskio_bytesread);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod delta_tests {
+    use super::*;
+
+    #[test]
+    fn deltas_use_owned_snapshots_and_saturate_counters() {
+        let before = PidSnapshot {
+            pageins: 8,
+            diskio_bytesread: 1024,
+            diskio_byteswritten: 4096,
+            resident_size: 100,
+            phys_footprint: 200,
+        };
+        let after = PidSnapshot {
+            pageins: 10,
+            diskio_bytesread: 1536,
+            diskio_byteswritten: 8192,
+            resident_size: 80,
+            phys_footprint: 230,
+        };
+        let delta = PidDelta::between(before, after);
+        assert_eq!(
+            (
+                delta.pageins,
+                delta.diskio_bytesread,
+                delta.diskio_byteswritten
+            ),
+            (2, 512, 4096)
+        );
+        assert_eq!(
+            (delta.resident_size_delta, delta.phys_footprint_delta),
+            (-20, 30)
+        );
+        let reversed = PidDelta::between(after, before);
+        assert_eq!(
+            (
+                reversed.pageins,
+                reversed.diskio_bytesread,
+                reversed.diskio_byteswritten
+            ),
+            (0, 0, 0)
+        );
     }
 }

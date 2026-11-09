@@ -669,15 +669,7 @@ mod retained_tokenizer_tests {
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "retained-tokenizer-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir(&path).unwrap();
+            let path = crate::test_fixtures::TestDir::new("retained-tokenizer-").keep();
             Self(path)
         }
     }

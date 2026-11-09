@@ -24,11 +24,19 @@ struct Record {
     value: Value,
 }
 
-type SharedSender = Arc<Mutex<Option<SyncSender<Record>>>>;
+struct TraceChannel {
+    queue: SyncSender<Record>,
+    #[cfg(test)]
+    lossless: bool,
+}
+
+type SharedSender = Arc<Mutex<Option<TraceChannel>>>;
 
 pub(crate) struct TraceLog {
     sender: SharedSender,
     worker: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    drain_on_drop: bool,
 }
 
 pub(crate) struct TraceSubscriber {
@@ -75,9 +83,23 @@ impl TraceLog {
         Self::with_writer(BufWriter::new(file))
     }
 
+    /// Complete fixture capture, independent of worker scheduling. Production
+    /// tracing stays bounded and nonblocking; overflow tests use `open`/`with_writer`.
+    #[cfg(test)]
+    pub(crate) fn open_for_test(path: &Path) -> io::Result<Self> {
+        let mut log = Self::open(path)?;
+        log.sender.lock().unwrap().as_mut().unwrap().lossless = true;
+        log.drain_on_drop = true;
+        Ok(log)
+    }
+
     fn with_writer(writer: impl Write + Send + 'static) -> io::Result<Self> {
         let (sender, receiver) = sync_channel::<Record>(TRACE_QUEUE_CAPACITY);
-        let sender = Arc::new(Mutex::new(Some(sender)));
+        let sender = Arc::new(Mutex::new(Some(TraceChannel {
+            queue: sender,
+            #[cfg(test)]
+            lossless: false,
+        })));
         let worker_sender = Arc::clone(&sender);
         let worker = std::thread::Builder::new()
             .name("qwen-sse-trace".into())
@@ -100,6 +122,8 @@ impl TraceLog {
         Ok(Self {
             sender,
             worker: Some(worker),
+            #[cfg(test)]
+            drain_on_drop: false,
         })
     }
 
@@ -150,7 +174,18 @@ impl TraceSubscriber {
         let Some(channel) = sender.as_ref() else {
             return;
         };
-        let result = channel.try_send(record);
+        #[cfg(test)]
+        if channel.lossless {
+            // Never hold the shared mutex while applying test-only backpressure:
+            // the worker needs it to disable the sink after an I/O failure.
+            let queue = channel.queue.clone();
+            drop(sender);
+            if queue.send(record).is_err() {
+                self.sender.lock().unwrap().take();
+            }
+            return;
+        }
+        let result = channel.queue.try_send(record);
         if result.is_err() {
             sender.take();
         }
@@ -191,6 +226,11 @@ impl Drop for TraceLog {
         let Some(worker) = self.worker.take() else {
             return;
         };
+        #[cfg(test)]
+        if self.drain_on_drop {
+            worker.join().expect("test trace writer");
+            return;
+        }
         match join_trace_worker_with_grace(worker, TRACE_SHUTDOWN_GRACE) {
             Some(Ok(())) => {}
             Some(Err(_)) => {

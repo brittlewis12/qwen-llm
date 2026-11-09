@@ -3,15 +3,15 @@ use crate::metal::test_support::*;
 
 #[test]
 fn diagnostics_observers_return_to_inactive_state() {
-    assert_eq!(diagnostics_observer_active_counts(), [0, 0, 0]);
+    assert_eq!(diagnostics_observer_thread_active_counts(), [0, 0, 0]);
     {
         let _trace = kernel_trace_begin();
-        assert_eq!(diagnostics_observer_active_counts(), [1, 0, 0]);
+        assert_eq!(diagnostics_observer_thread_active_counts(), [1, 0, 0]);
     }
     dispatch_census_begin();
-    assert_eq!(diagnostics_observer_active_counts(), [0, 1, 0]);
+    assert_eq!(diagnostics_observer_thread_active_counts(), [0, 1, 0]);
     assert!(dispatch_census_take().is_empty());
-    assert_eq!(diagnostics_observer_active_counts(), [0, 0, 0]);
+    assert_eq!(diagnostics_observer_thread_active_counts(), [0, 0, 0]);
 }
 
 #[test]
@@ -138,6 +138,22 @@ fn tensor_ops_matmul2d_witness_selects_and_matches_portable() {
 /// (serial and concurrent), blit encoders do not.
 #[test]
 fn compute_encoder_counter_counts_every_compute_encoder_and_no_blit() {
+    const CHILD: &str = "QWEN_ENCODER_COUNTER_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let qualified = concat!(
+            module_path!(),
+            "::compute_encoder_counter_counts_every_compute_encoder_and_no_blit"
+        );
+        let name = qualified.split_once("::").unwrap().1;
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--test-threads=1"])
+            .env(CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated encoder counter test");
+        return;
+    }
+
     let ctx = match metal_test_context() {
         Some(ctx) => ctx,
         None => return,
@@ -152,11 +168,7 @@ fn compute_encoder_counter_counts_every_compute_encoder_and_no_blit() {
     let blit_cmd = ctx.queue.commandBuffer().expect("cmd buf");
     let before_blit = compute_encoders_begun();
     BlitEncoder::begin(&blit_cmd).end();
-    // Tests may run in parallel; only this thread's blit is between the
-    // reads when single-threaded, so check the equality there.
-    if std::env::var("RUST_TEST_THREADS").as_deref() == Ok("1") {
-        assert_eq!(compute_encoders_begun(), before_blit, "a blit counted");
-    }
+    assert_eq!(compute_encoders_begun(), before_blit, "a blit counted");
     cmd.commit();
     blit_cmd.commit();
     wait_completed(&cmd).expect("compute command buffer");

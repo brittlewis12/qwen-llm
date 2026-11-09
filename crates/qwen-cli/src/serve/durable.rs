@@ -612,15 +612,15 @@ mod tests {
 
     #[test]
     fn auto_budget_is_a_tenth_of_free_space_capped_at_64_gib() {
+        let directory = qwen_llm::test_fixtures::TestDir::new("durable-missing");
         assert_eq!(auto_budget_bytes(Some(100 * GIB)), 10 * GIB);
         assert_eq!(auto_budget_bytes(Some(640 * GIB)), 64 * GIB);
         assert_eq!(auto_budget_bytes(Some(4 * 1024 * GIB)), 64 * GIB);
         assert_eq!(auto_budget_bytes(Some(0)), 0);
         assert_eq!(auto_budget_bytes(None), AUTO_FALLBACK_BYTES);
         // Reads a real volume through a not-yet-created leaf.
-        let free = qwen_llm::checkpoint_store::volume_free_bytes(
-            &std::env::temp_dir().join("qwen-durable-missing/a/b"),
-        );
+        let free =
+            qwen_llm::checkpoint_store::volume_free_bytes(&directory.path().join("missing/a/b"));
         assert!(free.is_some());
     }
 

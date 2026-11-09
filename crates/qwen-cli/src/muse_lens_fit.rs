@@ -392,15 +392,7 @@ mod tests {
 
     #[test]
     fn artifact_directory_is_published_by_one_final_rename() {
-        let root = std::env::temp_dir().join(format!(
-            "qwen-muse-publish-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&root).unwrap();
+        let root = qwen_llm::test_fixtures::TestDir::new("qwen-muse-publish-").keep();
         let output = root.join("artifact");
         publish_artifact_directory(&output, b"payload", b"manifest").unwrap();
         assert_eq!(

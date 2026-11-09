@@ -1220,6 +1220,12 @@ impl MetalContext {
     /// Initialize a Metal context backed by the embedded `kernels.metallib`.
     pub fn new() -> Result<Self, MetalError> {
         let process_lease = acquire_metal_process_lease()?;
+        Self::new_with_process_lease(process_lease)
+    }
+
+    pub(crate) fn new_with_process_lease(
+        process_lease: Arc<MetalProcessLease>,
+    ) -> Result<Self, MetalError> {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;
         let device_facts = Arc::new(super::DeviceFacts::from_device(&device));
         if device_facts.os_supports_metallib() == Some(false) {

@@ -769,7 +769,6 @@ mod tests {
     use super::*;
     use qwen_llm::muse_glimmer::{MuseGlimmerArtifactProfile, MuseGlimmerConfig};
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn args() -> FitRowsArgs {
         FitRowsArgs {
@@ -822,15 +821,7 @@ mod tests {
     }
 
     fn temporary_root() -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "qwen-muse-row-fit-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&root).unwrap();
+        let root = qwen_llm::test_fixtures::TestDir::new("qwen-muse-row-fit-").keep();
         root
     }
 

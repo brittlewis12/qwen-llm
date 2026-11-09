@@ -22,9 +22,50 @@ pub struct DispatchCensusRow {
 pub(crate) static DISPATCH_CENSUS_ACTIVE_THREADS: AtomicUsize = AtomicUsize::new(0);
 static CENSUS_NEXT_SESSION: AtomicUsize = AtomicUsize::new(1);
 
+// A capture belongs to its thread. Libtest and application workers may exit
+// without calling `take`; their TLS destructor must release the fast-path count.
+struct ThreadCensus<T> {
+    rows: Option<Vec<T>>,
+    active_threads: &'static AtomicUsize,
+}
+
+impl<T> ThreadCensus<T> {
+    const fn new(active_threads: &'static AtomicUsize) -> Self {
+        Self {
+            rows: None,
+            active_threads,
+        }
+    }
+
+    fn begin(&mut self) {
+        if self.rows.is_none() {
+            self.active_threads.fetch_add(1, Ordering::Relaxed);
+        }
+        self.rows = Some(Vec::with_capacity(512));
+    }
+
+    fn take(&mut self) -> Vec<T> {
+        match self.rows.take() {
+            Some(rows) => {
+                self.active_threads.fetch_sub(1, Ordering::Relaxed);
+                rows
+            }
+            None => Vec::new(),
+        }
+    }
+}
+
+impl<T> Drop for ThreadCensus<T> {
+    fn drop(&mut self) {
+        if self.rows.is_some() {
+            self.active_threads.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 thread_local! {
-    static DISPATCH_CENSUS: std::cell::RefCell<Option<Vec<DispatchCensusRow>>> =
-        const { std::cell::RefCell::new(None) };
+    static DISPATCH_CENSUS: std::cell::RefCell<ThreadCensus<DispatchCensusRow>> =
+        const { std::cell::RefCell::new(ThreadCensus::new(&DISPATCH_CENSUS_ACTIVE_THREADS)) };
     #[cfg(test)]
     static CENSUS_PSO_ANNOTATION: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
@@ -49,14 +90,7 @@ impl Drop for DispatchCensusTagGuard {
 
 /// Begin recording dispatch shapes on this thread. Bench-only.
 pub fn dispatch_census_begin() {
-    let activated = DISPATCH_CENSUS.with(|c| {
-        let activated = c.borrow().is_none();
-        *c.borrow_mut() = Some(Vec::with_capacity(512));
-        activated
-    });
-    if activated {
-        DISPATCH_CENSUS_ACTIVE_THREADS.fetch_add(1, Ordering::Relaxed);
-    }
+    DISPATCH_CENSUS.with(|c| c.borrow_mut().begin());
     CENSUS_TAG.with(|tag| *tag.borrow_mut() = None);
     CENSUS_NEXT_ENCODER.with(|next| next.set(0));
     CENSUS_SESSION.with(|session| {
@@ -69,12 +103,7 @@ pub fn dispatch_census_begin() {
 
 /// Stop recording and take the census rows.
 pub fn dispatch_census_take() -> Vec<DispatchCensusRow> {
-    let rows = DISPATCH_CENSUS.with(|c| c.borrow_mut().take());
-    if rows.is_some() {
-        let previous = DISPATCH_CENSUS_ACTIVE_THREADS.fetch_sub(1, Ordering::Relaxed);
-        debug_assert!(previous > 0);
-    }
-    rows.unwrap_or_default()
+    DISPATCH_CENSUS.with(|c| c.borrow_mut().take())
 }
 
 /// Set the current stage family label (called by decode stage boundaries).
@@ -87,7 +116,7 @@ pub fn dispatch_census_set_family(family: &'static str) {
 
 pub fn dispatch_census_is_active() -> bool {
     DISPATCH_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed) != 0
-        && DISPATCH_CENSUS.with(|census| census.borrow().is_some())
+        && DISPATCH_CENSUS.with(|census| census.borrow().rows.is_some())
 }
 
 #[doc(hidden)]
@@ -96,6 +125,16 @@ pub fn diagnostics_observer_active_counts() -> [usize; 3] {
         KERNEL_TRACE_ACTIVE_THREADS.load(Ordering::Relaxed),
         DISPATCH_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed),
         ALLOCATION_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed),
+    ]
+}
+
+/// Current-thread observer state; unrelated workers may have active captures.
+#[cfg(test)]
+pub(crate) fn diagnostics_observer_thread_active_counts() -> [usize; 3] {
+    [
+        usize::from(KERNEL_TRACE_ACTIVE.with(|active| active.get())),
+        usize::from(DISPATCH_CENSUS.with(|c| c.borrow().rows.is_some())),
+        usize::from(ALLOCATION_CENSUS.with(|c| c.borrow().rows.is_some())),
     ]
 }
 
@@ -115,30 +154,18 @@ pub(crate) struct MetalAllocationTransactionGuard {
 }
 
 thread_local! {
-    static ALLOCATION_CENSUS: std::cell::RefCell<Option<Vec<MetalAllocationCensusRow>>> =
-        const { std::cell::RefCell::new(None) };
+    static ALLOCATION_CENSUS: std::cell::RefCell<ThreadCensus<MetalAllocationCensusRow>> =
+        const { std::cell::RefCell::new(ThreadCensus::new(&ALLOCATION_CENSUS_ACTIVE_THREADS)) };
 }
 
 #[doc(hidden)]
 pub fn allocation_census_begin() {
-    let activated = ALLOCATION_CENSUS.with(|census| {
-        let activated = census.borrow().is_none();
-        *census.borrow_mut() = Some(Vec::with_capacity(512));
-        activated
-    });
-    if activated {
-        ALLOCATION_CENSUS_ACTIVE_THREADS.fetch_add(1, Ordering::Relaxed);
-    }
+    ALLOCATION_CENSUS.with(|census| census.borrow_mut().begin());
 }
 
 #[doc(hidden)]
 pub fn allocation_census_take() -> Vec<MetalAllocationCensusRow> {
-    let rows = ALLOCATION_CENSUS.with(|census| census.borrow_mut().take());
-    if rows.is_some() {
-        let previous = ALLOCATION_CENSUS_ACTIVE_THREADS.fetch_sub(1, Ordering::Relaxed);
-        debug_assert!(previous > 0);
-    }
-    rows.unwrap_or_default()
+    ALLOCATION_CENSUS.with(|census| census.borrow_mut().take())
 }
 
 pub(crate) fn record_buffer_allocation(requested_bytes: usize, buffer: &Buffer) {
@@ -146,7 +173,7 @@ pub(crate) fn record_buffer_allocation(requested_bytes: usize, buffer: &Buffer) 
         return;
     }
     ALLOCATION_CENSUS.with(|census| {
-        if let Some(rows) = census.borrow_mut().as_mut() {
+        if let Some(rows) = census.borrow_mut().rows.as_mut() {
             let storage_mode = match buffer.storageMode() {
                 MTLStorageMode::Shared => "shared",
                 MTLStorageMode::Managed => "managed",
@@ -218,7 +245,7 @@ pub(crate) fn census_record_dispatch(enc: &KernelEncoder, grid: MTLSize, threads
         return;
     }
     DISPATCH_CENSUS.with(|c| {
-        if let Some(rows) = c.borrow_mut().as_mut() {
+        if let Some(rows) = c.borrow_mut().rows.as_mut() {
             let session = CENSUS_SESSION.with(|session| session.get());
             let (encoder_session, mut ordinal) = enc.census_identity.get();
             if encoder_session != session {
@@ -542,5 +569,34 @@ mod tests {
         assert!(dispatch_census_take().is_empty());
         done_tx.send(()).unwrap();
         assert!(other.join().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod thread_capture_tests {
+    use super::*;
+
+    #[test]
+    fn captures_release_their_counter_on_thread_exit_and_unwind() {
+        static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+        std::thread::spawn(|| {
+            let mut census = ThreadCensus::<u8>::new(&ACTIVE);
+            census.begin();
+            census.begin();
+            assert_eq!(ACTIVE.load(Ordering::Relaxed), 1);
+            // Deliberately omit take(), as callers ending a thread can do.
+        })
+        .join()
+        .unwrap();
+        assert_eq!(ACTIVE.load(Ordering::Relaxed), 0);
+        assert!(
+            std::panic::catch_unwind(|| {
+                let mut census = ThreadCensus::<u8>::new(&ACTIVE);
+                census.begin();
+                panic!("capture owner unwinds");
+            })
+            .is_err()
+        );
+        assert_eq!(ACTIVE.load(Ordering::Relaxed), 0);
     }
 }

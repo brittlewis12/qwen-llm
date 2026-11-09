@@ -8,8 +8,12 @@ fn queued_log(capacity: usize) -> (TraceLog, Receiver<Record>) {
     let (sender, receiver) = sync_channel(capacity);
     (
         TraceLog {
-            sender: Arc::new(Mutex::new(Some(sender))),
+            sender: Arc::new(Mutex::new(Some(TraceChannel {
+                queue: sender,
+                lossless: false,
+            }))),
             worker: None,
+            drain_on_drop: false,
         },
         receiver,
     )
@@ -208,4 +212,28 @@ fn stalled_trace_worker_is_detached_instead_of_blocking_shutdown() {
     done_receiver
         .recv_timeout(WAIT)
         .expect("detached worker remains able to finish");
+}
+
+#[test]
+fn complete_test_capture_drains_more_than_the_production_queue_capacity() {
+    let directory = qwen_llm::test_fixtures::TestDir::new("trace-capture");
+    let path = directory.path().join("trace.jsonl");
+    {
+        let log = TraceLog::open_for_test(&path).unwrap();
+        let trace = log.subscriber();
+        for sequence in 0..128 {
+            trace.line(|| json!({"kind":"event", "sequence":sequence}));
+        }
+        trace.line(|| json!({"kind":"done"}));
+    }
+    let rows = std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 129);
+    for (sequence, row) in rows[..128].iter().enumerate() {
+        assert_eq!(row["sequence"], sequence);
+    }
+    assert_eq!(rows[128]["kind"], "done");
 }

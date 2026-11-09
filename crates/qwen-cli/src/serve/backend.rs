@@ -3669,7 +3669,7 @@ mod tests {
     /// through the rebased view afterwards.
     #[test]
     fn early_capture_window_serves_boundary_tail_then_rebases() {
-        let Some(ctx) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        let Some(ctx) = qwen_llm::test_fixtures::unit_metal_context_or_skip() else {
             return;
         };
         let (features, window, prompt_len, boundary) = (3usize, 8usize, 20usize, 17usize);

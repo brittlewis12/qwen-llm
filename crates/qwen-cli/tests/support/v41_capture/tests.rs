@@ -1,24 +1,14 @@
 use super::*;
 use qwen_llm::deepseek_v41::forward::capture::Checkpoint;
 
-struct Temp(PathBuf);
+struct Temp(
+    PathBuf,
+    #[allow(dead_code)] qwen_llm::test_fixtures::TestDir,
+);
 impl Temp {
     fn new() -> Self {
-        let p = std::env::temp_dir().join(format!(
-            "qwen-v41-capture-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&p).unwrap();
-        Self(p)
-    }
-}
-impl Drop for Temp {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        let directory = qwen_llm::test_fixtures::TestDir::new("v41-capture");
+        Self(directory.path().to_owned(), directory)
     }
 }
 fn manifest(p: &Path) -> Value {

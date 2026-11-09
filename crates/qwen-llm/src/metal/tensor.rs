@@ -1364,7 +1364,7 @@ mod tests {
         assert_eq!(rows[1].requested_bytes, 8);
         assert_eq!(rows[1].buffer_length, second.length() as u64);
         assert_eq!(rows[1].storage_mode, "shared");
-        assert_eq!(diagnostics_observer_active_counts(), [0, 0, 0]);
+        assert_eq!(diagnostics_observer_thread_active_counts(), [0, 0, 0]);
     }
 
     #[test]

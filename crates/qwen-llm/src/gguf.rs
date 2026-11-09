@@ -1928,9 +1928,11 @@ mod tests {
 
     fn write_temp(bytes: &[u8]) -> std::path::PathBuf {
         use std::io::Write;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut tmp = std::env::temp_dir();
         tmp.push(format!(
-            "qwen-gguf-test-{}-{}.gguf",
+            "qwen-gguf-test-{}-{sequence}-{}.gguf",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1949,17 +1951,7 @@ mod tests {
     }
 
     fn temp_split_dir() -> std::path::PathBuf {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!(
-            "qwen-gguf-split-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&dir).unwrap();
-        dir
+        crate::test_fixtures::TestDir::new("temp_split_dir").keep()
     }
 
     macro_rules! assert_rejects {
@@ -2962,17 +2954,7 @@ mod tests {
     }
 
     fn temp_cache_dir() -> std::path::PathBuf {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!(
-            "qwen-half-range-cache-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&dir).unwrap();
-        dir
+        crate::test_fixtures::TestDir::new("temp_cache_dir").keep()
     }
 
     #[test]

@@ -1571,14 +1571,11 @@ mod tests {
 
     #[test]
     fn trace_log_writes_one_json_object_per_line() {
-        let path = std::env::temp_dir().join(format!(
-            "serve_trace_{}_{}.jsonl",
-            std::process::id(),
-            line!()
-        ));
+        let directory = qwen_llm::test_fixtures::TestDir::new("http-trace");
+        let path = directory.path().join("trace.jsonl");
         let _ = std::fs::remove_file(&path);
         {
-            let log = TraceLog::open(&path).expect("open trace");
+            let log = TraceLog::open_for_test(&path).expect("open trace");
             let trace = log.subscriber();
             trace.line(|| json!({"kind": "request", "body": {"model": "m"}}));
             trace.line(|| json!({"kind": "event", "event": "response.created"}));
@@ -1596,7 +1593,7 @@ mod tests {
         );
         // Appends rather than truncating, so a restart keeps history.
         {
-            let log = TraceLog::open(&path).expect("reopen trace");
+            let log = TraceLog::open_for_test(&path).expect("reopen trace");
             let trace = log.subscriber();
             trace.line(|| json!({"kind": "heartbeat"}));
         }
@@ -1620,8 +1617,8 @@ mod tests {
             MockBackend::new(&["<think>\np\n</think>\n\nanswer"], StopReason::Eos),
             &request,
         );
-        let path =
-            std::env::temp_dir().join(format!("serve_trace_wire_{}.jsonl", std::process::id()));
+        let directory = qwen_llm::test_fixtures::TestDir::new("http-trace");
+        let path = directory.path().join("trace.jsonl");
         let _ = std::fs::remove_file(&path);
         let traced = roundtrip_traced(
             MockBackend::new(&["<think>\np\n</think>\n\nanswer"], StopReason::Eos),
@@ -1683,7 +1680,7 @@ mod tests {
         let trace_path = trace_path.to_path_buf();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            let trace = TraceLog::open(&trace_path).expect("open trace");
+            let trace = TraceLog::open_for_test(&trace_path).expect("open trace");
             handle_connection(&stream, &mut backend, Some(trace.subscriber())).unwrap();
         });
         let mut client = TcpStream::connect(addr).unwrap();
@@ -1775,14 +1772,15 @@ mod tests {
 
     #[test]
     fn stream_trace_records_request_events_and_done() {
-        let path = std::env::temp_dir().join(format!("qwen-trace-{}.jsonl", next_response_id()));
+        let directory = qwen_llm::test_fixtures::TestDir::new("http-trace");
+        let path = directory.path().join("trace.jsonl");
         let trace_path = path.clone();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut backend = MockBackend::new(&["answer"], StopReason::Eos);
-            let trace = TraceLog::open(&trace_path).unwrap();
+            let trace = TraceLog::open_for_test(&trace_path).unwrap();
             handle_connection(&stream, &mut backend, Some(trace.subscriber())).unwrap();
         });
         let mut client = TcpStream::connect(addr).unwrap();
@@ -1829,13 +1827,13 @@ mod tests {
 
     #[test]
     fn trace_correlates_each_request_even_when_json_decoding_fails() {
-        let path =
-            std::env::temp_dir().join(format!("qwen-trace-invalid-{}.jsonl", next_response_id()));
+        let directory = qwen_llm::test_fixtures::TestDir::new("http-trace");
+        let path = directory.path().join("trace.jsonl");
         let trace_path = path.clone();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
-            let trace = TraceLog::open(&trace_path).unwrap();
+            let trace = TraceLog::open_for_test(&trace_path).unwrap();
             let mut backend = MockBackend::new(&["answer"], StopReason::Eos);
             for _ in 0..2 {
                 let (stream, _) = listener.accept().unwrap();
@@ -2345,7 +2343,8 @@ mod tests {
     fn trace_files_are_private_and_symlinks_are_rejected() {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
-        let path = std::env::temp_dir().join(format!("qwen-trace-private-{}", next_response_id()));
+        let directory = qwen_llm::test_fixtures::TestDir::new("http-trace");
+        let path = directory.path().join("trace.jsonl");
         let link = path.with_extension("link");
         drop(TraceLog::open(&path).unwrap());
         assert_eq!(
@@ -2368,7 +2367,8 @@ mod tests {
     fn trace_fifo_is_rejected_without_waiting_for_a_reader() {
         use std::os::unix::ffi::OsStrExt;
 
-        let path = std::env::temp_dir().join(format!("qwen-trace-fifo-{}", next_response_id()));
+        let directory = qwen_llm::test_fixtures::TestDir::new("http-trace");
+        let path = directory.path().join("trace.jsonl");
         let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
         let started = std::time::Instant::now();

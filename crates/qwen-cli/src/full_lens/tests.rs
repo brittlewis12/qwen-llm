@@ -586,15 +586,7 @@ fn trace_batch_args_replace_single_input_without_changing_shared_bounds() {
 
 #[test]
 fn trace_batch_jsonl_is_bounded_strict_and_resolves_structured_inputs() {
-    let root = std::env::temp_dir().join(format!(
-        "qwen-trace-batch-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir(&root).unwrap();
+    let root = qwen_llm::test_fixtures::TestDir::new("qwen-trace-batch-").keep();
     std::fs::write(root.join("messages.json"), "[]").unwrap();
     let requests_path = root.join("requests.jsonl");
     let mut cohort = String::from(concat!(
@@ -628,15 +620,7 @@ fn trace_batch_jsonl_is_bounded_strict_and_resolves_structured_inputs() {
 
 #[test]
 fn trace_batch_publication_exposes_only_one_complete_fresh_generation() {
-    let root = std::env::temp_dir().join(format!(
-        "qwen-trace-publish-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir(&root).unwrap();
+    let root = qwen_llm::test_fixtures::TestDir::new("qwen-trace-publish-").keep();
     let output = root.join("cohort");
     let documents = vec![
         ("trace-0000.json", serde_json::json!({"value": "first"})),

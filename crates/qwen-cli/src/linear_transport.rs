@@ -479,16 +479,7 @@ pub(crate) mod tests {
         }
     }
     pub(crate) fn fixture(method: &str, h: usize, seed: u16) -> Fixture {
-        let dir = std::env::temp_dir().join(format!(
-            "linear-contract-{}-{}-{}",
-            std::process::id(),
-            h,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&dir).unwrap();
+        let dir = qwen_llm::test_fixtures::TestDir::new("linear-contract-").keep();
         let matrix: Vec<u8> = (0..h * h)
             .flat_map(|i| (seed + i as u16).to_le_bytes())
             .collect();

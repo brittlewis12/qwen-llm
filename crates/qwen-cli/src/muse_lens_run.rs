@@ -1360,7 +1360,7 @@ mod tests {
             "readouts": []
         }))
         .unwrap();
-        let Some(context) = qwen_llm::test_fixtures::metal_context_or_skip() else {
+        let Some(context) = qwen_llm::test_fixtures::unit_metal_context_or_skip() else {
             return;
         };
         let execution = prepare_execution_plan(plan, lenses, &config, &context).unwrap();

@@ -204,14 +204,8 @@ fn gguf_with_contract(
         offset = (offset + shape.iter().product::<u64>() / block * bytes).next_multiple_of(32);
     }
     out.resize(out.len().next_multiple_of(32), 0);
-    let path = std::env::temp_dir().join(format!(
-        "v41-cli-{}-{}.gguf",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let directory = qwen_llm::test_fixtures::TestDir::new("v41-cli");
+    let path = directory.path().join("model.gguf");
     let mut file = std::fs::OpenOptions::new()
         .create_new(true)
         .read(true)

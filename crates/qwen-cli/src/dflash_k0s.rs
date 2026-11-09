@@ -7686,15 +7686,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir() -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "qwen-k0s-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&path).unwrap();
+        let path = qwen_llm::test_fixtures::TestDir::new("qwen-k0s-").keep();
         path.canonicalize().unwrap()
     }
 

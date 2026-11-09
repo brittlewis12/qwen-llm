@@ -2440,7 +2440,6 @@ mod tests {
         );
     }
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn trace_capture_pricing_scales_with_requested_work() {
@@ -2491,15 +2490,7 @@ mod tests {
 
     #[test]
     fn artifact_probe_recognizes_local_and_published_muse_schemas() {
-        let root = std::env::temp_dir().join(format!(
-            "qwen-muse-full-probe-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&root).unwrap();
+        let root = qwen_llm::test_fixtures::TestDir::new("qwen-muse-full-probe-").keep();
         for (schema, expected) in [
             (artifact::SCHEMA, true),
             (published::SCHEMA, true),
@@ -2537,15 +2528,7 @@ mod tests {
 
     #[test]
     fn completed_payload_verification_checks_matrix_and_whole_digests() {
-        let root = std::env::temp_dir().join(format!(
-            "qwen-muse-full-verify-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&root).unwrap();
+        let root = qwen_llm::test_fixtures::TestDir::new("qwen-muse-full-verify-").keep();
         let bytes = b"abcdefgh";
         std::fs::write(root.join(artifact::PAYLOAD_NAME), bytes).unwrap();
         let payload = artifact::Payload {

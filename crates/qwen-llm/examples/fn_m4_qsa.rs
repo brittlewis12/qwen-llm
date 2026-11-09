@@ -40,11 +40,8 @@ fn compare(a: &[f32], b: &[f32], target: usize) -> (f64, f64, f64) {
         .zip(b)
         .map(|(&x, &y)| (f64::from(x) - za).exp() * (f64::from(x) - za - f64::from(y) + zb))
         .sum();
-    let max = a
-        .iter()
-        .zip(b)
-        .map(|(&x, &y)| f64::from((x - y).abs()))
-        .fold(0., f64::max);
+    let max = qwen_llm::compare::report_max_abs_diff_f64(a, b);
+    assert!(max.is_finite(), "invalid diagnostic comparison");
     (
         zb - f64::from(b[target]) - za + f64::from(a[target]),
         kl,

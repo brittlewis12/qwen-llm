@@ -628,6 +628,38 @@ mod tests {
             b,
             "recorded epilogue rewrite differs from direct leaf"
         );
+        // A native shared-projection fallback reuses routed output scratch
+        // after its reduction. Extending that input's lifetime is illegal.
+        let guarded = make(&residual);
+        let cmd = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin_causal(&cmd);
+        encode_moe_weighted_sum_f32(&ctx, &enc, &e, &w, &sum, hidden, topk).unwrap();
+        let reused = e.view_subrange(0, vec![hidden as u64]);
+        encode_copy_offset_f32(&ctx, &enc, &s, 0, &reused, hidden).unwrap();
+        encode_axpy_scalar_f32(&ctx, &enc, &s, &gate, &sum).unwrap();
+        encode_copy_offset_f32(&ctx, &enc, &sum, 0, &copied, hidden).unwrap();
+        enc.set_pipeline(&ctx.pipeline("kernel_qwen4exp_hc_inject_f32").unwrap());
+        enc.set_bytes(0, &[branches as u32, hidden as u32]);
+        enc.set_tensor(1, &copied);
+        enc.set_tensor(2, &r);
+        enc.set_tensor(3, &guarded);
+        enc.dispatch(
+            MTLSize {
+                width: hidden.div_ceil(256),
+                height: branches,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        enc.finish_causal_scope(&ctx, true).unwrap();
+        enc.end();
+        cmd.commit();
+        wait_completed(&cmd).unwrap();
+        assert_eq!(read(&guarded), a, "fusion crossed a scratch overwrite");
         let mut error = [(0f64, 0f64); 2];
         for branch in 0..branches {
             for j in 0..hidden {

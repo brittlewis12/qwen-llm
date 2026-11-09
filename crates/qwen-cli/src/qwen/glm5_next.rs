@@ -24,6 +24,8 @@ use serde_json::{Value, json};
 
 #[path = "glm5_next/dflash.rs"]
 mod dflash;
+#[path = "glm5_next/residency.rs"]
+mod residency;
 
 const FAMILY: &str = "GLM-5.3-Flash";
 
@@ -623,6 +625,7 @@ pub(crate) fn run(
     // Warm cold retained windows with parallel reads before the zero-copy
     // weights are first touched; demand paging would otherwise land in the
     // first prefill at a fraction of the storage bandwidth.
+    residency::sample(&ctx, gguf, "before_prefetch");
     let prefetch = timing.measure(Phase::Prefetch, || {
         prefetch_retained_with_cancel(&ctx, gguf, 0.98, &|| shutdown::checkpoint().is_err())
             .context("prefetch GLM-5.3 retained windows")
@@ -634,9 +637,11 @@ pub(crate) fn run(
         prefetch.bytes_read,
         prefetch.wall.as_secs_f64() * 1e3
     );
+    residency::sample(&ctx, gguf, "after_prefetch");
     let weights = timing.measure(Phase::ModelLoad, || {
         Glm5NextWeights::load(&ctx, gguf).context("load GLM-5.3 weights")
     })?;
+    residency::sample(&ctx, gguf, "after_weights");
     let (prefill_rows, mut session) = timing.measure(Phase::SessionSetup, || {
         with_prefill_policy(prefill_rows, head.is_some(), |rows| {
             Glm5NextSession::with_prefill_rows(&ctx, &weights, capacity, rows)
@@ -644,6 +649,7 @@ pub(crate) fn run(
         .context("create GLM-5.3 session")
     })?;
 
+    residency::sample(&ctx, gguf, "after_session");
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
     // Chat prints the decoded bytes (text) or one Responses object; raw
@@ -707,10 +713,12 @@ pub(crate) fn run(
         let resident_t0 = Instant::now();
         let result = (|| {
             let logits = session.prefill_packed_with_checkpoint(&ctx, &tokens, &mut || {
+                residency::sample(&ctx, gguf, "prefill_chunk_begin");
                 shutdown::checkpoint().map_err(|e| e.to_string())
             })?;
             session.prepare_decode(&ctx)?;
             let prefill_ms = resident_t0.elapsed().as_secs_f64() * 1e3;
+            residency::sample(&ctx, gguf, "after_prefill");
             let generation = generate_serial(
                 logits,
                 args.tokens,
@@ -723,6 +731,7 @@ pub(crate) fn run(
                     session.forward(&ctx, token).map_err(anyhow::Error::from)
                 },
             )?;
+            residency::sample(&ctx, gguf, "after_decode");
             Ok((generation, prefill_ms))
         })();
         timing.record(Phase::ResidentExecution, resident_t0.elapsed());

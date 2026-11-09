@@ -33,6 +33,10 @@ def main():
     parser.add_argument("--label", required=True)
     parser.add_argument("--engine-commit", required=True,
                         help="commit used to build the existing executable; driver identity is separate")
+    parser.add_argument("--residency", action="store_true")
+    parser.add_argument("--memory-map", action="store_true", help="one intrusive vmmap observation; attribution only")
+    parser.add_argument("--background-gib", type=int, choices=range(9), default=0,
+                        help="bounded incompressible anonymous background, not a compiler simulation")
     args = parser.parse_args()
     fd = int(os.environ["QWEN_METAL_LEASE_FD"])
     os.fstat(fd)
@@ -47,6 +51,15 @@ def main():
     binary = ROOT / "target/release/qwen"
     tok = ROOT / "target/release/qwen-tok"
     env = dict(os.environ, MTL_DEBUG_LAYER="0")
+    observer = None
+    background = []
+    if args.residency:
+        from glm_residency import Observer
+        observer = Observer(args.memory_map)
+        env["QWEN_GLM53_RESIDENCY_TRACE"] = "1"
+        background = [os.urandom(64 * 1024 * 1024) for _ in range(args.background_gib * 16)]
+    elif args.background_gib or args.memory_map:
+        raise ValueError("background and mapping observations require --residency")
     env.pop("QWEN_GLM53_RELEASE_PREFILL", None)
     if args.release == "off":
         env["QWEN_GLM53_RELEASE_PREFILL"] = "0"
@@ -84,10 +97,12 @@ def main():
     def sample():
         with sample_lock:
             thermal()
-            rows = subprocess.check_output(["ps", "-axo", "rss=,comm="], text=True)
-            rss = sum(int(parts[0]) * 1024 for line in rows.splitlines()
-                      if len(parts := line.split(maxsplit=1)) == 2
-                      and Path(parts[1]).name.strip("()") == "rustc")
+            rows = subprocess.check_output(["ps", "-axo", "pid=,ppid=,rss=,comm="], text=True)
+            rss = sum(int(parts[2]) * 1024 for line in rows.splitlines()
+                      if len(parts := line.split(maxsplit=3)) == 4
+                      and Path(parts[3]).name.strip("()") == "rustc")
+            if observer is not None:
+                observer.sample(rows, log)
             now = time.time()
             compiler_samples.append((now, rss))
             if log is not None and log.exists():
@@ -177,6 +192,9 @@ def main():
             watcher.join()
             sample()
             text = re.sub(r"\x1b\[[0-9;]*m", "", log.read_text())
+            if observer is not None:
+                result["residency"] = observer.finish(text)
+                result["background_anonymous_bytes"] = len(background) * 64 * 1024 * 1024
             result["diagnostics"] = [line for line in text.splitlines()
                 if any(key in line for key in ["glm workspace:", "glm5_next stats:",
                                                 "glm native:", "serve native:",

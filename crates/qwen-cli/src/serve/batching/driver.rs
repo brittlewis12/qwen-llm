@@ -44,6 +44,17 @@ pub(crate) trait Runtime {
         sink: &mut dyn GenerationSink,
         reserve: u64,
     ) -> Result<Advance, BackendFailure>;
+    /// Optional bounded feedback burst, only with one active request and no
+    /// queued peer. Returning None retains ordinary token-at-a-time advance.
+    fn advance_single(
+        &mut self,
+        _run: &mut Self::Run,
+        _cursor: &mut DecodeCursor,
+        _sink: &mut dyn GenerationSink,
+        _reserve: u64,
+    ) -> Option<Result<Advance, BackendFailure>> {
+        None
+    }
     fn state(run: &mut Self::Run) -> &mut Self::State;
     fn can_step(&self, state: &Self::State) -> bool;
     fn poisoned(state: &Self::State) -> bool;
@@ -79,6 +90,10 @@ impl GenerationSink for Publish<'_> {
     }
     fn tick(&mut self) -> io::Result<()> {
         self.sink.check()
+    }
+    fn flush_ready(&mut self) -> io::Result<bool> {
+        self.sink.check()?;
+        self.sink.flush()
     }
 }
 struct Pending {
@@ -203,17 +218,27 @@ impl<R> Driver<R> {
                 crate::serve::output_memory::size_overflow("batch transport").into(),
             );
         };
+        let lone = self.active.len() == 1 && self.pending.is_empty();
         let a = &mut self.active[index];
         let run = a.run.as_mut().expect("decoding run");
-        let outcome = runtime.advance(
-            run,
-            a.cursor.as_mut().expect("cursor"),
-            &mut Publish {
-                sink: a.sink.as_mut(),
-                reserve,
-            },
+        let cursor = a.cursor.as_mut().expect("cursor");
+        let before = cursor.completed_transitions();
+        let mut sink = Publish {
+            sink: a.sink.as_mut(),
             reserve,
-        );
+        };
+        let outcome = if lone {
+            runtime.advance_single(run, cursor, &mut sink, reserve)
+        } else {
+            None
+        }
+        .unwrap_or_else(|| runtime.advance(run, cursor, &mut sink, reserve));
+        let extra = cursor.completed_transitions().saturating_sub(before);
+        a.steps += extra;
+        a.width_sum += extra;
+        if extra > 0 {
+            a.width_max = a.width_max.max(1);
+        }
         match outcome {
             Err(e) => self.fail(index, e),
             Ok(Advance::Forward(token)) => {

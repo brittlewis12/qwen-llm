@@ -402,7 +402,11 @@ impl<'a> Owner<'a> {
                 hit,
                 runner,
                 |r, c: &Checkpoint| {
-                    r.restore_snapshot(&c.snapshot)?;
+                    if c.logits.is_empty() {
+                        r.restore_snapshot(&c.snapshot)?;
+                    } else {
+                        r.restore_snapshot_with_logits(&c.snapshot, &c.logits)?;
+                    }
                     restored_logits = (!c.logits.is_empty()).then(|| c.logits.clone());
                     Ok(r.next_position())
                 },
@@ -883,6 +887,78 @@ impl<'a> Runtime for Owner<'a> {
             sink,
             crate::shutdown::checkpoint,
         )
+    }
+    fn advance_single(
+        &mut self,
+        run: &mut Self::Run,
+        cursor: &mut DecodeCursor,
+        sink: &mut dyn GenerationSink,
+        reserve: u64,
+    ) -> Option<Result<Advance, BackendFailure>> {
+        if !run.state.runner.gpu_token_loop_enabled() {
+            return None;
+        }
+        run.reserve = reserve;
+        // A newly arriving peer waits at most one bounded burst. Existing
+        // peers/prefills use native rounds, and backpressure yields at a token.
+        let count = cursor.remaining_tokens().min(16);
+        let offset = cursor.elapsed_ms();
+        let draws = run.sampler.draws();
+        let mut tokens = Vec::with_capacity(count);
+        let mut callback_error = None;
+        let result =
+            run.state
+                .runner
+                .generate_gpu_tokens(&mut run.sampler, count, self.stops, |token| {
+                    tokens.push(token);
+                    let result =
+                        (|| -> Result<bool, BackendFailure> {
+                            crate::shutdown::checkpoint()
+                                .map_err(|e| ServeError::server_error(e.to_string()))?;
+                            let bytes =
+                                self.tokenizer.try_decode_piece_bytes_exact(token).map_err(
+                                    |e| ServeError::server_error(format!("decode {FAMILY}: {e}")),
+                                )?;
+                            sink.piece(bytes)
+                                .and_then(|()| sink.tick())
+                                .map_err(BackendFailure::Aborted)?;
+                            let ready = sink.flush_ready().map_err(BackendFailure::Aborted)?;
+                            crate::shutdown::checkpoint()
+                                .map_err(|e| ServeError::server_error(e.to_string()))?;
+                            Ok(ready)
+                        })();
+                    match result {
+                        Ok(ready) => ready,
+                        Err(e) => {
+                            callback_error = Some(e);
+                            false
+                        }
+                    }
+                });
+        if let Some(e) = callback_error {
+            return Some(Err(e));
+        }
+        match result {
+            Err(_)
+                if !run.state.runner.is_poisoned()
+                    && tokens.is_empty()
+                    && run.sampler.draws() == draws =>
+            {
+                None
+            }
+            Err(e) => {
+                run.state.failed = true;
+                Some(self.track_failure(Err(
+                    ServeError::server_error(format!("{FAMILY} GPU feedback: {e}")).into(),
+                )))
+            }
+            Ok(stats) => {
+                if stats.stopped_on_eos {
+                    tokens.push(stats.terminal_token.expect("GPU EOS token"));
+                }
+                Some(Ok(cursor.append_gpu_burst(&tokens, stats, offset)))
+            }
+        }
     }
     fn state(run: &mut Self::Run) -> &mut Self::State {
         &mut run.state

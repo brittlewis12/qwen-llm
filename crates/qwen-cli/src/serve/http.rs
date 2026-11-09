@@ -51,6 +51,11 @@ pub(crate) trait GenerationSink {
         self.piece(bytes)
     }
     fn tick(&mut self) -> io::Result<()>;
+    /// Flush owner-side queued pieces without waiting; false yields a burst
+    /// to the scheduler so it can park this client and admit other work.
+    fn flush_ready(&mut self) -> io::Result<bool> {
+        Ok(true)
+    }
     /// Additional future CPU buffer allowance, beyond resident request storage.
     fn transport_reserve_bytes(&self) -> u64 {
         0

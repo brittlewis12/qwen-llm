@@ -36,6 +36,8 @@ impl<'gguf> Qwen4ExpLoadedModel<'gguf> {
             Qwen4ExpRuntimeError::Invalid("loaded model session was consumed".into())
         })?;
         let decode = Qwen4ExpDecodeOptions {
+            causal_executor: workspace.causal_executor,
+            gpu_token_loop: workspace.gpu_token_loop,
             guarded_topk: workspace.guarded_topk_enabled(),
             hc_up_mix: workspace.hc_up_mix_enabled(),
         };
@@ -95,6 +97,8 @@ impl<'model, 'gguf> Qwen4ExpSessionFactory<'model, 'gguf> {
             .clone()
             .admit_after_residency(self.resident, ctx.memory_signals())?;
         let mut workspace = Qwen4ExpTextSessionMetalWorkspace::from_admitted(ctx, admitted)?;
+        workspace.causal_executor = self.decode.causal_executor;
+        workspace.gpu_token_loop = self.decode.gpu_token_loop;
         workspace.configure_guarded_topk(ctx, self.decode.guarded_topk)?;
         workspace.configure_hc_up_mix(ctx, self.decode.hc_up_mix)?;
         Ok(Qwen4ExpTextRunner {

@@ -43,6 +43,52 @@ pub(crate) struct DecodeCursor {
 }
 
 impl DecodeCursor {
+    pub(crate) fn remaining_tokens(&self) -> usize {
+        self.max_tokens - self.tokens.len()
+    }
+    pub(crate) fn elapsed_ms(&self) -> f64 {
+        self.wall_t0.elapsed().as_secs_f64() * 1e3
+    }
+    pub(crate) fn completed_transitions(&self) -> usize {
+        self.transitions
+    }
+
+    /// A completed GPU burst has streamed these tokens already. Its last
+    /// selection stays unconsumed when yielding back to native batch decode.
+    pub(crate) fn append_gpu_burst(
+        &mut self,
+        tokens: &[i32],
+        stats: qwen_llm::metal::GpuTokenLoopStats,
+        offset_ms: f64,
+    ) -> Advance {
+        assert!(!self.awaiting_logits && !tokens.is_empty());
+        assert_eq!(tokens.len(), stats.sampled_tokens);
+        assert_eq!(stats.forwarded_tokens, tokens.len() - 1);
+        assert!(tokens.len() <= self.remaining_tokens());
+        self.first_token_selection_ms
+            .get_or_insert(stats.first_token_selection_ms);
+        if self.first_token_ready_ms.is_none() {
+            self.first_token_ready_ms = stats.first_token_ready_ms.map(|t| t + offset_ms);
+        }
+        if self.first_token_callback_ms.is_none() {
+            self.first_token_callback_ms = stats.first_token_callback_ms.map(|t| t + offset_ms);
+        }
+        if self.first_transition_ms.is_none() {
+            self.first_transition_ms = stats.first_transition_ms;
+        }
+        self.transition_ms += stats.transition_ms;
+        self.transitions += stats.forwarded_tokens;
+        self.tokens.extend_from_slice(tokens);
+        self.logits.clear();
+        if stats.stopped_on_eos {
+            return Advance::Done(self.finish(crate::StopReason::Eos));
+        }
+        if self.tokens.len() == self.max_tokens {
+            return Advance::Done(self.finish(crate::StopReason::TokenLimit));
+        }
+        self.awaiting_logits = true;
+        Advance::Forward(*tokens.last().unwrap() as u32)
+    }
     /// Starts the decode wall clock, as `decode_serial` does on entry.
     pub(crate) fn new(request: DecodeRequest<'_>) -> Result<Self, BackendFailure> {
         if request.max_tokens == 0 {

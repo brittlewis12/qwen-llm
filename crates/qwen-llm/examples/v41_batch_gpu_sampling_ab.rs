@@ -225,48 +225,58 @@ fn main() -> anyhow::Result<()> {
             *sampler = Sampler::new(config)?;
         }
 
-        // Fast GPU arm: a valid draw, not token-identical with the host.
-        let mut fast_ms = Vec::new();
-        let mut fast_tokens: Vec<Vec<u32>> = vec![Vec::new(); width];
-        let fast_modes: Vec<_> = (0..width)
-            .map(|_| BatchSampleMode::Fast {
-                temperature: config.temperature,
-            })
-            .collect();
-        for tokens in &inputs {
-            let t = Instant::now();
-            let mut members: Vec<_> = gpu_states.iter_mut().collect();
-            let mut refs: Vec<&mut Sampler> = gpu_samplers.iter_mut().collect();
-            let out = f
-                .step_batch_sampled(&mut members, tokens, &mut refs, &fast_modes, None)
-                .map_err(anyhow_msg)?;
-            fast_ms.push(t.elapsed().as_secs_f64() * 1e3);
-            for (i, out) in out.into_iter().enumerate() {
-                match out {
-                    BatchMemberOutput::Token(t) => fast_tokens[i].push(t),
-                    BatchMemberOutput::Logits(_) => unreachable!("fast members sample in-command"),
-                }
-            }
-        }
+        // Fast GPU arm: a valid draw, not token-identical with the host. It
+        // only exists for a positive temperature, so greedy skips it.
         let count_mismatches = |a: &[Vec<u32>], b: &[Vec<u32>]| -> usize {
             (0..width)
                 .map(|i| a[i].iter().zip(&b[i]).filter(|(x, y)| x != y).count())
                 .sum()
         };
+        let (fast_round, fast_mismatches) = if fast_enabled {
+            let mut fast_ms = Vec::new();
+            let mut fast_tokens: Vec<Vec<u32>> = vec![Vec::new(); width];
+            let fast_modes: Vec<_> = (0..width)
+                .map(|_| BatchSampleMode::Fast {
+                    temperature: config.temperature,
+                })
+                .collect();
+            for tokens in &inputs {
+                let t = Instant::now();
+                let mut members: Vec<_> = gpu_states.iter_mut().collect();
+                let mut refs: Vec<&mut Sampler> = gpu_samplers.iter_mut().collect();
+                let out = f
+                    .step_batch_sampled(&mut members, tokens, &mut refs, &fast_modes, None)
+                    .map_err(anyhow_msg)?;
+                fast_ms.push(t.elapsed().as_secs_f64() * 1e3);
+                for (i, out) in out.into_iter().enumerate() {
+                    match out {
+                        BatchMemberOutput::Token(t) => fast_tokens[i].push(t),
+                        BatchMemberOutput::Logits(_) => {
+                            unreachable!("fast members sample in-command")
+                        }
+                    }
+                }
+            }
+            (
+                Some(mean(&fast_ms)),
+                Some(count_mismatches(&host_tokens, &fast_tokens)),
+            )
+        } else {
+            (None, None)
+        };
         let exact_mismatches = count_mismatches(&host_tokens, &exact_tokens);
-        let fast_mismatches = count_mismatches(&host_tokens, &fast_tokens);
         phases.push(serde_json::json!({
             "preset": name,
             "width": width,
             "host_round_ms": host_round,
             "exact_round_ms": mean(&exact_ms),
             "exact_gain": host_round / mean(&exact_ms) - 1.,
-            "fast_round_ms": fast_enabled.then(|| mean(&fast_ms)),
-            "fast_gain": fast_enabled.then(|| host_round / mean(&fast_ms) - 1.),
+            "fast_round_ms": fast_round,
+            "fast_gain": fast_round.map(|fast| host_round / fast - 1.),
             "step_ms": mean(&host_ms),
             "sample_ms": mean(&sample_ms),
             "exact_mismatches": exact_mismatches,
-            "fast_mismatches": fast_enabled.then_some(fast_mismatches),
+            "fast_mismatches": fast_mismatches,
             "token_vectors": width * steps,
         }));
     }

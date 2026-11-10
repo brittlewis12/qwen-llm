@@ -645,6 +645,93 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   and remove the serial retained-prefix replay before any drafter, and price
   against B=3.
 - [Protocol, measured tables, availability matrix and limits](bench/2026-11-09-spec-econ/README.md).
+## 2026-11-10 - Serve Owner Host: Pooled Sampling, Worker Tokenization, B2 Waves
+
+- **Default on**, all with rollbacks: GLM members of a batched step sample on
+  persistent threads (`QWEN_SERVE_GLM_SAMPLE_WORKERS=0` restores owner-serial
+  sampling); GLM and V4.1 tokenize the rendered full prompt on the HTTP worker
+  (`QWEN_SERVE_WORKER_TOKENIZE=0` restores owner encoding); V4.1 causal waves
+  cover B=2 as well as B=3 (`QWEN_V41_BATCH_CAUSAL_MIN_WIDTH=3` restores the
+  width-3-only gate; `QWEN_V41_BATCH_CAUSAL_EXECUTOR=0` disables the executor).
+  Width 4 stays on the native path. Base **`405054553`**; branch
+  `perf/serve-owner-host`; no merge.
+- Measured runtime **`471069f21`**, harness **`896e16432`**; the B2 default is
+  a one-constant change at **`9b749481c`** on the same code path. The harness
+  now retains `serve native:`/`serve phases:` lines, reports
+  `round_budget.host_ms_per_round`, defaults sampling to what agents send
+  (omit fields; GLM 1.0/0.95, V4.1 1.0/1.0), accepts `--env KEY=VALUE`
+  rollbacks and `--warm-cool` between deep warm roots.
+- GLM-5.3 Flash, stock UD-IQ3_XXS, three agents, three **48K roots**, seed
+  **20261109**, real agent sampling, same binary. `host` is the median content
+  gap minus the native round wall. Accepted arms thermal **0/1**; both had a
+  compiler overlap sample.
+
+  | GLM arm | Window | Delivered tok/s | Host ms/round | Gap p50 | Prefill s | Coverage |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | rollback | 45 s | 74.09 | **2.722** | 31.66 | 5.60 | 0.632 |
+  | default | 45 s | 64.89 | **0.780** | 30.07 | 7.61 | 0.684 |
+  | default repeat | 45 s | 40.56 | **1.193** | 29.47 | 20.88 | 0.610 |
+  | rollback | 90 s | 33.26 | **2.306** | 31.94 | 39.49 | 0.894 |
+  | default | 90 s | 82.31 | **0.932** | 29.82 | 8.04 | 0.273 |
+
+  The raw delivered rates are **not attributable**: the arms completed
+  different turn mixes, so one window spent 39.5 s of 90 s in prefill and
+  another 8.0 s, and ambient load ranged 38-104. The stable result is owner
+  host per round, **2.72 -> 0.78 ms (-71%)** on the matched 45 s pair (and
+  **2.31 -> 0.93 ms** at 90 s), plus the inter-token gap p50 falling
+  **1.6-2.2 ms (5-7%)**. That is the mechanism; raw window throughput needs a
+  quieter lab and a longer window.
+- DeepSeek V4.1 Flash, same protocol, 48K, tokenization pair:
+
+  | V4.1 arm | Window | Delivered tok/s | Gap p50 ms | Round ms | Host ms/round | TTFT p50 a1/a2 s |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | tokenize off | 45 s | 96.64 | 27.04 | 26.02 | 1.013 | 0.834 / 0.745 |
+  | default | 45 s | 98.47 | 26.79 | 25.62 | 1.171 | 0.776 / 0.719 |
+  | default | 90 s | 91.87 | 28.24 | 27.58 | 0.663 | 0.836 / 0.928 |
+
+  Delivered **+1.89%** and TTFT p50 **-0.06/-0.03 s**, but the arms differed
+  in load and compiler overlap and per-round host is noise-level: this change
+  is per-turn admission work, not a round cut. The 90 s control aborted at
+  thermal level 2, so the V4.1 pair is the 45 s one.
+- V4.1 B=2 causal wave screen at 48K, 128 rounds, ABBA, same binary:
+
+  | B=2 native | ms/round |
+  | --- | ---: |
+  | native cuts | 23.198 |
+  | causal waves | **21.614** |
+  | saved | **1.584 (6.83%)** |
+
+  Every arm thermal **1**, and logits, snapshot digests and eight following
+  serial steps are **bitwise** equal across arms. A same-binary serve screen
+  (48K, 45 s) moved delivered **89.18 -> 89.82 tok/s (+0.72%)** and round wall
+  **28.303 -> 28.188 ms (-0.115 ms)**. Both screens win, so B=2 is default;
+  width 4 remains native because it has no screen.
+- **Accuracy:** no model arithmetic changed. Pooled sampling is tested
+  bitwise for tokens, RNG draws and next state at greedy and at GLM's
+  temperature-1/nucleus-0.95 shape; B=2 is bitwise at full vocabulary and
+  state. Signed teacher-forced dNLL/KL are therefore zero by construction;
+  the B=2 byte screen is the stronger check.
+- **Validation:** `cargo fmt --all --check`; `cargo test --bin qwen
+  pooled_sampling` (4 pass, including temperature 1); `cargo test -p qwen-llm
+  --lib gpu_step` (38 pass, 18 ignored); eight steady-harness CPU tests;
+  `scripts/check-contracts.sh` passed at **`896e1643`** before the B=2 default
+  constant. Full suites are the landing lane's.
+- **Thermal and lab:** another lane's emulator/AOT jobs held CPU load
+  **15-105** and repeatedly pushed 48K arms to level **2**; every level-2 arm
+  was discarded and redone, never accepted. `--warm-cool 90` and 120 s arm
+  cools were needed to complete 48K runs at level 0/1. The 45 s window is the
+  largest that completed consistently; a 90 s GLM pair also completed. No
+  greedy pair was run: it was not cheap under this contention.
+- Evidence: `~/qwen-runs/2026-11-09-serve-owner-host/` (arms above,
+  `b2-native.jsonl`, `b2-native-verdict.json`, thermals, launch records).
+- **Deleted:** the hard `workspaces.len() == 3` causal gate (replaced by the
+  min-width default 2; width 4 remains native), and the default-path
+  owner-serial GLM sampling and owner full-prompt encode (retained only behind
+  the rollback knobs). Nothing else was removed.
+- **Next:** one combined V4.1 full-rollback-vs-shipped-default pair in a single
+  binary (B=2 plus worker tokenization); a B=4 causal screen; asynchronous GLM
+  tip capture; and a quiet-lab 180 s raw delivered measurement once the shared
+  M5 is not carrying another lane's load.
 
 ## 2026-11-09 - V4.1 B3 Causal Waves Default On
 

@@ -143,6 +143,14 @@ QWEN_METAL_LEASE_WAIT=1 nice -n 10 scripts/bench/with-metal-lease \
 python3 scripts/bench/serve_realistic.py compare serial default
 ```
 
+Sampling defaults to what live agents send: the harness omits
+`temperature`/`top_p`, so each family's release defaults apply (GLM 1.0 /
+0.95; V4.1 1.0 / 1.0). `--sampling greedy` restores the earlier greedy arm,
+and `--sampling custom --temperature ... --top-p ...` makes values explicit;
+`compare` rejects arms with different sampling. On a shared M5, 48K roots can
+cross thermal level 2 during warm-up; `--warm-cool` idles between roots so
+the measured window still runs at depth. Rollback knobs for an arm go through
+repeatable `--env KEY=VALUE`.
 Use `glm` for its pair; `fn` has serial baseline only on this engine commit.
 The code corpus is exactly reproducible from **dabb97021e65f192a15057b3f226281cbe1ad81f**:
 concatenate the following Git blobs in order, prefixing each with

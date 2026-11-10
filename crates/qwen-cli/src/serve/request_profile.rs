@@ -536,6 +536,52 @@ mod tests {
         }
     }
 
+    /// The pre-normalization flag alone decides fast vs exact: normalization
+    /// draws a fresh seed for every request, so `seed.is_some()` is not intent.
+    #[test]
+    fn v41_seed_intent_survives_normalization() {
+        let profile = RequestProfile::DeepSeekV41 {
+            limits: OutputLimits::TEST,
+            sampling: Some(crate::release_sampling::release_sampling_defaults(
+                crate::release_identity::ReleaseIdentity::DeepSeekV41,
+            )),
+        };
+        let config = |request: &ServeRequest| qwen_llm::sampling::SamplingConfig {
+            temperature: request.temperature.unwrap(),
+            top_k: request.top_k.unwrap(),
+            top_p: request.top_p.unwrap(),
+            min_p: request.min_p.unwrap(),
+            seed: request.seed.unwrap(),
+        };
+
+        let mut implicit = profile
+            .parse(&serde_json::json!({"model":"m", "input":"hi"}))
+            .unwrap();
+        assert!(!implicit.seed_explicit);
+        profile.normalize(&mut implicit).unwrap();
+        assert!(implicit.seed.is_some(), "normalization draws a fresh seed");
+        assert!(
+            !implicit.seed_explicit,
+            "a fresh draw is not explicit intent"
+        );
+        assert!(
+            qwen_llm::metal::fast_sampler_allowed(&config(&implicit), implicit.seed_explicit),
+            "an unseeded V4.1 request takes the fast path"
+        );
+
+        let mut explicit = profile
+            .parse(&serde_json::json!({"model":"m", "input":"hi", "x_qwen":{"seed":7}}))
+            .unwrap();
+        assert!(explicit.seed_explicit);
+        profile.normalize(&mut explicit).unwrap();
+        assert_eq!(explicit.seed, Some(7));
+        assert!(explicit.seed_explicit);
+        assert!(
+            !qwen_llm::metal::fast_sampler_allowed(&config(&explicit), explicit.seed_explicit),
+            "a seeded V4.1 request stays exact"
+        );
+    }
+
     /// Qwen-family tool ceilings: the resolved token limit (explicit or the
     /// backend default) times the longest piece times 3; an uncomputable
     /// ceiling is refused at normalization (400) when tools are declared.

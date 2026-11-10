@@ -67,6 +67,8 @@ struct Log {
     steps: Vec<usize>,
     /// Whether every batched step received only the shutdown flag.
     batch_flags_are_shutdown: Vec<bool>,
+    /// Per sampled step, each member's explicit-seed intent, in batch order.
+    sampled_explicit: Vec<Vec<bool>>,
     reserves: Vec<u64>,
     events: Vec<String>,
 }
@@ -236,14 +238,15 @@ impl BatchEngine<Seq> for StubEngine {
         &mut self,
         states: &mut [&mut Seq],
         tokens: &[u32],
-        _: &mut [&mut qwen_llm::sampling::Sampler],
-        _: &[bool],
+        samplers: &mut [&mut qwen_llm::sampling::Sampler],
+        explicit_seeds: &[bool],
         cancel: &AtomicBool,
     ) -> std::result::Result<Vec<u32>, String> {
         {
             let mut log = self.log.borrow_mut();
             log.steps.push(states.len());
             log.events.push(format!("sampled {}", states.len()));
+            log.sampled_explicit.push(explicit_seeds.to_vec());
             log.batch_flags_are_shutdown
                 .push(std::ptr::eq(cancel, crate::shutdown::cancellation_flag()));
         }
@@ -251,21 +254,31 @@ impl BatchEngine<Seq> for StubEngine {
         if states.iter().any(|state| state.unready || state.poisoned) {
             return Err("sequence is provisional or poisoned by partial execution".into());
         }
-        Ok(states
+        // Mirror `ForwardEngine`: explicit members stay exact host sampling,
+        // implicit members would be device-sampled (argmax stands in here).
+        states
             .iter_mut()
             .zip(tokens)
-            .map(|(state, &token)| {
+            .enumerate()
+            .map(|(i, (state, &token))| {
                 state.tokens.push(token);
                 let logits = self.logits(state);
-                logits
-                    .iter()
-                    .enumerate()
-                    .fold((0usize, f32::NEG_INFINITY), |best, (i, &v)| {
-                        if v > best.1 { (i, v) } else { best }
-                    })
-                    .0 as u32
+                if explicit_seeds[i] {
+                    samplers[i]
+                        .sample(&logits)
+                        .map(|sampled| sampled.token as u32)
+                        .map_err(|error| error.to_string())
+                } else {
+                    Ok(logits
+                        .iter()
+                        .enumerate()
+                        .fold((0usize, f32::NEG_INFINITY), |best, (i, &v)| {
+                            if v > best.1 { (i, v) } else { best }
+                        })
+                        .0 as u32)
+                }
             })
-            .collect())
+            .collect()
     }
     fn poisoned(&self, state: &Seq) -> bool {
         state.poisoned
@@ -614,6 +627,79 @@ fn sampled_batch_steps_match_serial_greedy_outputs() {
         assert_eq!((batched_end, batched_tokens), (end, tokens), "{input}");
         assert!(phases["batch"]["batched_transitions"].as_u64().unwrap() > 0);
     }
+}
+
+#[test]
+fn sampled_steps_carry_seed_intent_after_normalization() {
+    let mut settings = settings();
+    settings.gpu_sample = true;
+    let mut scheduler = Scheduler::new(2);
+    let mut engine = StubEngine {
+        sampled_step: true,
+        ..Default::default()
+    };
+    let mut reuse = Recording::default();
+    // `prepared` and `seeded` both pass through parse -> normalize, which fills
+    // an absent seed with a fresh draw. Only the captured intent differs.
+    let _implicit = submit(&mut scheduler, prepared(&settings, "first prompt", false));
+    let _explicit = submit(&mut scheduler, seeded(&settings, "second prompt", 7));
+    drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+    let log = engine.log.borrow();
+    let seen = log.sampled_explicit.last().expect("a sampled batch");
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(
+        seen.iter().filter(|&&explicit| !explicit).count(),
+        1,
+        "the unseeded request must reach the engine as implicit: {seen:?}"
+    );
+    assert_eq!(
+        seen.iter().filter(|&&explicit| explicit).count(),
+        1,
+        "the seeded request must reach the engine as explicit: {seen:?}"
+    );
+}
+
+#[test]
+fn seeded_requests_keep_host_tokens_with_gpu_sampling_on_or_off() {
+    // The fixture tokenizer maps one token per byte, so delivered text plus the
+    // token count is the generated token stream.
+    fn two_seeded(gpu_sample: bool) -> Vec<(String, usize)> {
+        let mut settings = settings();
+        settings.sampling = qwen_llm::sampling::SamplingConfig {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 42,
+        };
+        settings.gpu_sample = gpu_sample;
+        let mut scheduler = Scheduler::new(2);
+        let mut engine = StubEngine {
+            sampled_step: true,
+            ..Default::default()
+        };
+        let mut reuse = Recording::default();
+        let clients: Vec<_> = ["first prompt", "a second, longer prompt"]
+            .iter()
+            .map(|input| submit(&mut scheduler, seeded(&settings, input, 7)))
+            .collect();
+        drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+        clients
+            .iter()
+            .map(|client| {
+                let text = client.text();
+                match client.terminal() {
+                    Some(Ok((_, count, _))) => (text, count),
+                    other => panic!("{other:?}"),
+                }
+            })
+            .collect()
+    }
+    assert_eq!(
+        two_seeded(true),
+        two_seeded(false),
+        "explicitly seeded requests must take the unchanged host-sampling path"
+    );
 }
 
 #[test]

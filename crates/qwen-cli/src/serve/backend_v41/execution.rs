@@ -316,7 +316,7 @@ impl Settings {
             vocab,
             ceiling: ceiling.get(),
             sampler,
-            explicit_seed: request.seed.is_some(),
+            explicit_seed: request.seed_explicit,
             flag,
             state,
             logits,

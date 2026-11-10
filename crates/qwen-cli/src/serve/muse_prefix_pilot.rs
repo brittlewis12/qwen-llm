@@ -210,6 +210,7 @@ fn muse_live_prefix_sampled_retries_match_reset() {
     for (temperature, seed) in [(1.0, 42), (0.7, 99)] {
         request.temperature = Some(temperature);
         request.seed = Some(seed);
+        request.seed_explicit = true;
         backend.prefix_reuse = false;
         let (reference, expected, _) = run(&mut backend, &request, &prompt);
         let history = backend.consumed_tokens.clone();

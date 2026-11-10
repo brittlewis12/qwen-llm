@@ -211,6 +211,10 @@ pub struct ServeRequest {
     pub top_p: Option<f32>,
     pub top_p_echo: Option<f64>,
     pub seed: Option<u64>,
+    /// Whether the request itself named `seed`, captured at parse time before
+    /// normalization fills an absent seed with a fresh draw. Sampling policy
+    /// (fast vs exact) must read this, never `seed.is_some()`.
+    pub seed_explicit: bool,
     pub top_k: Option<usize>,
     pub min_p: Option<f32>,
     /// Spec `reasoning.effort`, passed through verbatim (the AI SDK
@@ -269,6 +273,7 @@ impl Default for ServeRequest {
             top_p: None,
             top_p_echo: None,
             seed: None,
+            seed_explicit: false,
             top_k: None,
             min_p: None,
             reasoning_effort: None,
@@ -577,7 +582,8 @@ fn parse_request_with(
                             Some("x_qwen.seed"),
                             "x_qwen.seed must be a non-negative integer",
                         )
-                    })?)
+                    })?);
+                    request.seed_explicit = true;
                 }
                 "top_k" => {
                     let raw = value.as_u64().ok_or_else(|| {
@@ -1720,10 +1726,21 @@ mod tests {
         assert!(request.stream);
         assert_eq!(request.max_output_tokens, Some(512));
         assert_eq!(request.seed, Some(7));
+        assert!(
+            request.seed_explicit,
+            "x_qwen.seed records parse-time intent"
+        );
         assert_eq!(request.top_k, Some(200));
         assert!(request.strip_history_thinking);
         assert!(request.echo_stats);
         assert_eq!(request.reasoning, Some(json!({"effort": "high"})));
+    }
+
+    #[test]
+    fn absent_seed_is_not_explicit_intent() {
+        let request = parse(json!({"model": "m", "input": "q"})).unwrap();
+        assert_eq!(request.seed, None);
+        assert!(!request.seed_explicit);
     }
 
     #[test]

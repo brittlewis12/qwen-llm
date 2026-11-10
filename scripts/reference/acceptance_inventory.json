@@ -5118,6 +5118,20 @@
   },
   {
     "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::sampled_steps_carry_seed_intent_after_normalization",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::seeded_requests_keep_host_tokens_with_gpu_sampling_on_or_off",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
     "name": "serve::backend_v41::scheduler_tests::sampled_batch_steps_match_serial_greedy_outputs",
     "class": "cpu",
     "ignored": false,

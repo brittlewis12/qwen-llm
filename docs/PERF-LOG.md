@@ -36,6 +36,87 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   K=1 first, success bar **>=1.15x delivered inter-token**. Do not build M4
   first. Details: `bench/2026-11-09-fn-mtp/README.md`; raw headers
   `header-audit.json` and `mtp-head-inventory.json`.
+## 2026-11-10 - Flash-Next Member FFN Projections: +3.98% B4; QSA Cache Killed
+
+- Ship default-on **`QWEN_FN_MOE_BATCH_PROJECTIONS`**; set 0 to restore the
+  per-member fused shared/router projections. The member-axis kernel uses one
+  flat grid over all independent members, private input/output buffers, and the
+  same per-row gate/up/router/shared-scale arithmetic. Paired 32K B4, 128
+  steps: **29.616 -> 28.481 ms (+3.98%)**, streams bitwise, dNLL/KL **0**.
+- Same-binary **`iter`** control vs FFN sweep. Control is the current
+  GDN+top-k default; FFN adds the member projection path. 48 samples at 32K,
+  24 at 48K, both orders:
+
+  | Depth | Config | B=1 | B=2 | B=3 | B=4 |
+  | ---: | --- | ---: | ---: | ---: | ---: |
+  | 32K | control | 14.064 | 20.843 | 24.990 | 29.447 |
+  | 32K | FFN | 14.244 | 20.980 | 24.885 | **28.725** |
+  | 48K | control | 14.206 | 21.045 | 25.198 | 29.808 |
+  | 48K | FFN | 14.678 | 21.330 | 25.502 | 29.632 |
+
+  B2..4 fits:
+
+  | Depth | Config | F ms | m ms/row |
+  | ---: | --- | ---: | ---: |
+  | 32K | control | 12.187 | 4.302 |
+  | 32K | FFN | 13.246 | **3.873** |
+  | 48K | control | 12.205 | 4.382 |
+  | 48K | FFN | 13.035 | **4.151** |
+
+  The sweep B4 saves **2.45%** at 32K and **0.59%** at 48K; B1 control/FFN
+  differ by 1.3-3.3% even though no member path exists there, so the sequential
+  sweep is noisier than the alternating per-step A/B. The paired **+3.98%** A/B
+  is the primary win. All per-width stream hashes match control vs FFN.
+- **QSA write/publish candidate killed.** Member-axis pending-key and block
+  publication gave paired 32K B4 **29.464 -> 29.375 ms (+0.30%)**, bitwise but
+  below the 0.5% ship gate. Code and **`QWEN_FN_QSA_BATCH_CACHE`** are removed.
+- Next: the ~88 HC fallback dispatches and the remaining per-member chains.
+- **Hygiene.** Packet2 all arms thermal max **1**, mostly compile-overlapped.
+  `scripts/check-contracts.sh` passes after this change. No owned GPU process
+  remains.
+
+## 2026-11-10 - Flash-Next Combined Widths; r8 Down Retile Killed
+
+- Combined same-binary **`iter`** sweep at 32K/48K, 48 samples at 32K and 24 at
+  48K, ascending/descending orders. Baseline sets
+  **`QWEN_FN_GDN_BATCH_MEMBERS=0 QWEN_FN_MOE_BATCH_TOPK=0`**; default enables
+  both. All per-width stream hashes match baseline vs default (B1..4, both
+  depths). Native `step()` ms/round:
+
+  | Depth | Config | B=1 | B=2 | B=3 | B=4 |
+  | ---: | --- | ---: | ---: | ---: | ---: |
+  | 32K | baseline | 13.977 | 21.141 | 25.701 | 31.124 |
+  | 32K | default | 13.751 | 20.415 | 24.821 | 28.778 |
+  | 48K | baseline | 13.717 | 21.212 | 26.433 | 31.407 |
+  | 48K | default | 13.824 | 20.829 | 25.102 | 29.305 |
+
+  Gains: 32K **B2 -3.43%, B3 -3.42%, B4 -7.54%**; 48K **B2 -1.81%, B3
+  -5.03%, B4 -6.69%**. B1 is unchanged within noise. Fits (B2..4,
+  `round = F + m*B`):
+
+  | Depth | Config | F ms | m ms/row |
+  | ---: | --- | ---: | ---: |
+  | 32K | baseline | 11.015 | 4.991 |
+  | 32K | default | 12.128 | **4.181** |
+  | 48K | baseline | 11.059 | 5.097 |
+  | 48K | default | 12.366 | **4.238** |
+
+  The intercept rises because the gain grows with width (B1 ~0, B4 -7%); the
+  per-width table is the direct evidence. **m falls by 0.81-0.86 ms/row.**
+  These are iter-profile timings, not release; the individual GDN/top-k wins
+  remain the release-qualified A/Bs above.
+- **r8 down retile is a small loss, deleted.** The r8 IQ4_NL/Q2_0 down kernels
+  (eight channels per simdgroup, 32 per threadgroup) were paired at 32K B4
+  with the combined defaults on both arms: **29.722 -> 29.825 ms (-0.34%)**,
+  bitwise streams and dNLL/KL 0. The halved activation re-reads did not
+  overcome the register/occupancy cost. Commit **`9dc52d653`** is reverted;
+  `QWEN_FN_EXPERT_DOWN_R8` is removed.
+- **Prepared, not measured:** the member-axis fused FFN shared/router
+  projection candidate (commit **`972150286`**, default off,
+  `QWEN_FN_MOE_BATCH_PROJECTIONS=1`). Next short packet should run
+  `fn_batch_counterfactual ... pair-moe_batch_projections`; QSA write/publish
+  and the HC fallback dispatches follow.
+
 ## 2026-11-09 - Flash-Next GDN And MoE Top-K Row-Axis Batches
 
 - Base **`bcb1b46b8`** plus the retained probes; M5 Ultra, GSQ-RCO IQ3_S.

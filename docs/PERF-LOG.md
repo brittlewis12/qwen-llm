@@ -36,6 +36,69 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   K=1 first, success bar **>=1.15x delivered inter-token**. Do not build M4
   first. Details: `bench/2026-11-09-fn-mtp/README.md`; raw headers
   `header-audit.json` and `mtp-head-inventory.json`.
+## 2026-11-09 - Flash-Next GDN And MoE Top-K Row-Axis Batches
+
+- Base **`bcb1b46b8`** plus the retained probes; M5 Ultra, GSQ-RCO IQ3_S.
+  Defaults on: **`QWEN_FN_GDN_BATCH_MEMBERS=0`** and
+  **`QWEN_FN_MOE_BATCH_TOPK=0`** restore the per-member routes. No arithmetic,
+  causal-state or allocation changes. Commits **`40b64b57b`**, **`3eb56c72c`**,
+  **`693ffb85b`**.
+- **GDN controls+prep.** New `qwen4exp_gdn_batch.metal` kernels put the
+  beta/alpha/decay controls and the causal-conv/L2 prep in row-axis grids. One
+  dispatch each replaces four per-member controls+prep dispatches; the
+  31-buffer stage limit forced the controls/prep split. Paired 32K B4, 128
+  steps, same binary:
+
+  | Run | Off ms | On ms | Gain |
+  | --- | ---: | ---: | ---: |
+  | 1 | 31.330 | 30.507 | **+2.70%** |
+  | 2 | 31.903 | 31.264 | **+2.04%** |
+
+  Streams bitwise equal, dNLL/KL **0**; GPU **24.46 -> 23.83** and **24.67 ->
+  24.07 ms**. GDN was 1.72 ms of the census B4-B1 delta (~0.57 ms/row); the
+  batch recovers 0.6-0.7 ms/round.
+- **MoE guarded top-k.** New member-axis SIMD top-k kernel, one threadgroup per
+  member, used when the fused shared/router projections are active. Paired
+  32K B4: **31.356 -> 30.494 ms (+2.83%)**, bitwise streams, dNLL/KL **0**;
+  GPU **24.49 -> 23.58 ms**. The per-member top-k was 1.73 ms at B4; this route
+  saves **0.86 ms/round**. A second pass was queued but could not acquire the
+  shared GPU.
+- **Combined sweep blocked.** The planned B1..4 32K/48K before/after arms did
+  not get a lease window: other lanes held it continuously (serve-overhead and
+  V4.1 cycle A/Bs). The B4-only paired deltas are 0.73 ms (GDN) and 0.86 ms
+  (top-k). A combined B4 round is estimated around **29.8 ms** and **m around
+  4.5 ms/row**, but those combined values are **inferred, not measured**.
+  Next session: run the same-binary B1..4 32K/48K baseline
+  (`QWEN_FN_GDN_BATCH_MEMBERS=0 QWEN_FN_MOE_BATCH_TOPK=0`) against default and
+  fit F/m.
+- **HC coordination.** Flash-Next HC is a separate implementation from V4.1
+  (`qwen4exp_metal/decode_batch.rs` + `qwen4exp*.metal` vs
+  `deepseek_v41/forward/hc_gpu.rs` + `deepseek_v41_ffn.metal`); the V4.1
+  `hc_post`/`ffn_post` work is not reusable code. The V4.1 lane's latest record
+  is neutral, and Flash-Next HC is already member-axis batched for most sites
+  (92 batch kernels at B4; ~88 fallback dispatches). No second HC version was
+  built.
+- **Routed-expert efficiency.** B4 kernels/dtypes and effective bandwidth:
+  gate/up IQ2_S k2560_r4 **731 GB/s**, IQ3_XXS **785**, IQ3_S **803**, IQ4_XS
+  **765**; down IQ4_NL k640_r4 **547**, Q2_0 **477**. Aggregate **3.78 GB /
+  6.96 ms = 545 GB/s** against the **1,175 GB/s** anchor. The down kernels
+  (18-byte IQ4_NL 32-weight and Q2_0 64-weight blocks) are the weak half;
+  gate/up are already 62-68% of the anchor. Headroom is roughly
+  **0.7-0.9 ms/row**, but it needs a retile/alignment change (the GLM
+  `moe_iq3_s_down_retile` pattern), not a grid tweak. Reported, not built.
+- **Batched sampling pipeline.** Flash-Next B>=2 `decode_group` calls
+  `Qwen4ExpDecodeBatch::step` (commit, wait, copy full logits per member) and
+  samples on the host; only B=1's `advance_single` uses `generate_gpu_tokens`
+  (one command ahead, GPU sampling, token-only readback). V4.1 B>=2
+  `scheduler.rs` `step_batch` returns logits and `SamplePool` samples on host
+  worker threads after the forward; no next-command pipelining. GLM B>=2
+  `batch.step` also returns logits and samples on the host; only its single
+  path uses the GPU token loop. The batched fixed cost therefore includes a
+  host readback/sampling bubble that B=1 avoids.
+- **Hygiene.** GDN A/B thermal **1/1/1** both passes; MoE top-k **1/1/1**; all
+  runs compile-overlapped (144-162 samples). The combined campaign was stopped
+  while queued; exact waiter PIDs were terminated. No owned GPU process remains.
+
 ## 2026-11-09 - Flash-Next Width Census: Per-Member Chains, Transport A/B Negative
 
 - Base **`bcb1b46b8`** plus the retained probe commits; M5 Ultra,

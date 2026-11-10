@@ -14,8 +14,8 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    /// Batch the independent member GDN controls and prep in row-axis grids, replacing per-member controls+prep dispatches. Keeps the same F32 control reductions and causal conv/L2 arithmetic. Unsupported geometry, alignment, PSOs or a disabled fused route fall back to the per-member path.
-    default_off batch_members_enabled,
+    /// Batch the independent member GDN controls and prep in row-axis grids, replacing per-member controls+prep dispatches. Keeps the same F32 control reductions and causal conv/L2 arithmetic. 0 restores per-member controls+prep; unsupported geometry, alignment, PSOs or a disabled fused route also fall back.
+    default_on batch_members_enabled,
     "QWEN_FN_GDN_BATCH_MEMBERS"
 );
 

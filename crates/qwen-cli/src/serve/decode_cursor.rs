@@ -266,6 +266,23 @@ impl DecodeCursor {
         Ok(())
     }
 
+    /// Complete a transition whose token a family already sampled on the GPU.
+    /// No logits are retained; `advance` must receive the presampled token.
+    pub(crate) fn on_token(
+        &mut self,
+        elapsed_ms: f64,
+        mut checkpoint: impl FnMut() -> anyhow::Result<()>,
+    ) -> Result<(), BackendFailure> {
+        assert!(self.awaiting_logits, "no transition is pending");
+        self.awaiting_logits = false;
+        self.logits.clear();
+        checkpoint().map_err(|error| self.server(error))?;
+        self.transition_ms += elapsed_ms;
+        self.first_transition_ms.get_or_insert(elapsed_ms);
+        self.transitions += 1;
+        Ok(())
+    }
+
     fn finish(&mut self, stop_reason: crate::StopReason) -> crate::GenerationResult {
         crate::GenerationResult {
             tokens: std::mem::take(&mut self.tokens),

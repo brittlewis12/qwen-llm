@@ -6,7 +6,7 @@ use crate::serve::{
     decode_cursor::{Advance, DecodeCursor},
     http::{BackendFailure, GenerationOutcome, GenerationSink, PreparedResponse},
 };
-use qwen_llm::sampling::Sampler;
+use qwen_llm::sampling::{SampledToken, Sampler};
 use std::{
     collections::VecDeque,
     io,
@@ -16,6 +16,13 @@ use std::{
 pub(crate) enum Begun<R> {
     Run(Box<R>),
     Complete(GenerationOutcome),
+}
+
+/// One member's completed batch step: full logits for host sampling, or the
+/// token a family already sampled on the GPU.
+pub(crate) enum StepOutput {
+    Logits(Vec<f32>),
+    Token(u32),
 }
 
 pub(crate) trait Runtime {
@@ -71,6 +78,15 @@ pub(crate) trait Runtime {
         states: &mut [&mut Self::State],
         tokens: &[u32],
     ) -> Result<Vec<Vec<f32>>, String>;
+    /// Optional batch step that samples every member on the GPU and returns
+    /// only tokens. Returning None keeps `step_batch` and host sampling.
+    fn step_batch_sampled(
+        &mut self,
+        _runs: &mut [&mut Self::Run],
+        _tokens: &[u32],
+    ) -> Option<Result<Vec<u32>, String>> {
+        None
+    }
     fn finish(
         &mut self,
         run: Self::Run,
@@ -294,14 +310,14 @@ impl<R> Driver<R> {
     /// and next RNG state exactly as owner sampling would.
     fn presample<E: Runtime<Run = R>>(
         &mut self,
-        results: &mut [(usize, Result<Vec<f32>, String>, f64, usize)],
+        results: &mut [(usize, Result<StepOutput, String>, f64, usize)],
     ) -> Vec<Option<Sampled>> {
         let mut presampled: Vec<Option<Sampled>> = results.iter().map(|_| None).collect();
         let Some(pool) = self.sample_pool.as_mut() else {
             return presampled;
         };
         let members: Vec<usize> = (0..results.len())
-            .filter(|&k| results[k].1.is_ok())
+            .filter(|&k| matches!(results[k].1, Ok(StepOutput::Logits(_))))
             .collect();
         if members.len() < 2 {
             return presampled;
@@ -314,9 +330,13 @@ impl<R> Driver<R> {
                 E::sampler_mut(run).expect("a pooled runtime exposes every member's sampler");
             let placeholder = Sampler::new(qwen_llm::sampling::SamplingConfig::default())
                 .expect("default sampler");
+            let logits = match &mut results[k].1 {
+                Ok(StepOutput::Logits(v)) => std::mem::take(v),
+                _ => unreachable!("filtered to logits"),
+            };
             jobs.push(SampleJob {
                 sampler: std::mem::replace(sampler, placeholder),
-                logits: std::mem::take(results[k].1.as_mut().expect("logits")),
+                logits,
                 sampled: None,
             });
         }
@@ -324,7 +344,9 @@ impl<R> Driver<R> {
             let index = results[k].0;
             let run = self.active[index].run.as_mut().expect("decoding run");
             *E::sampler_mut(run).expect("sampler") = job.sampler;
-            *results[k].1.as_mut().expect("logits") = job.logits;
+            if let Ok(StepOutput::Logits(v)) = &mut results[k].1 {
+                *v = job.logits;
+            }
             presampled[k] = job.sampled;
         }
         presampled
@@ -334,13 +356,15 @@ impl<R> Driver<R> {
         &mut self,
         index: usize,
         runtime: &mut E,
-    ) -> (usize, Result<Vec<f32>, String>, f64, usize) {
+    ) -> (usize, Result<StepOutput, String>, f64, usize) {
         let a = &mut self.active[index];
         let start = Instant::now();
-        let result = runtime.step(
-            E::state(a.run.as_mut().expect("run")),
-            a.next.expect("pending token"),
-        );
+        let result = runtime
+            .step(
+                E::state(a.run.as_mut().expect("run")),
+                a.next.expect("pending token"),
+            )
+            .map(StepOutput::Logits);
         if result.is_err() && E::poisoned(E::state(a.run.as_mut().expect("run"))) {
             self.native_failed = true;
         }
@@ -364,35 +388,69 @@ impl<R> Driver<R> {
                 .map(|&i| self.active[i].next.expect("pending token"))
                 .collect();
             let start = Instant::now();
-            let mut states: Vec<_> = self
+            let mut runs: Vec<&mut R> = self
                 .active
                 .iter_mut()
                 .enumerate()
                 .filter(|(i, _)| batch.contains(i))
-                .map(|(_, a)| E::state(a.run.as_mut().expect("run")))
+                .map(|(_, a)| &mut **a.run.as_mut().expect("run"))
                 .collect();
-            let result = runtime.step_batch(&mut states, &tokens);
-            let poisoned = states.iter().any(|s| E::poisoned(s));
+            let sampled = runtime.step_batch_sampled(&mut runs, &tokens);
+            drop(runs);
             let elapsed = start.elapsed().as_secs_f64() * 1e3;
-            match result {
-                Ok(logits) if logits.len() == batch.len() => {
-                    for (i, v) in batch.iter().copied().zip(logits) {
-                        results.push((i, Ok(v), elapsed, batch.len()));
+            match sampled {
+                Some(Ok(sampled)) if sampled.len() == batch.len() => {
+                    for (i, token) in batch.iter().copied().zip(sampled) {
+                        results.push((i, Ok(StepOutput::Token(token)), elapsed, batch.len()));
                     }
                 }
-                Err(_) if !poisoned => {
-                    for i in batch {
-                        results.push(self.step_one(i, runtime));
-                    }
-                }
-                result => {
+                Some(Ok(_)) => {
                     self.native_failed = true;
-                    let message = result
-                        .err()
-                        .unwrap_or_else(|| "batched forward returned wrong row count".into());
-                    let message = format!("batched decode step failed: {message}");
+                    let message = "batched GPU sampling returned wrong row count".to_string();
                     for i in batch.iter().copied() {
                         results.push((i, Err(message.clone()), elapsed, batch.len()));
+                    }
+                }
+                Some(Err(message)) => {
+                    self.native_failed = true;
+                    let message = format!("batched GPU sampling failed: {message}");
+                    for i in batch.iter().copied() {
+                        results.push((i, Err(message.clone()), elapsed, batch.len()));
+                    }
+                }
+                None => {
+                    let start = Instant::now();
+                    let mut states: Vec<_> = self
+                        .active
+                        .iter_mut()
+                        .enumerate()
+                        .filter(|(i, _)| batch.contains(i))
+                        .map(|(_, a)| E::state(a.run.as_mut().expect("run")))
+                        .collect();
+                    let result = runtime.step_batch(&mut states, &tokens);
+                    let poisoned = states.iter().any(|s| E::poisoned(s));
+                    let elapsed = start.elapsed().as_secs_f64() * 1e3;
+                    match result {
+                        Ok(logits) if logits.len() == batch.len() => {
+                            for (i, v) in batch.iter().copied().zip(logits) {
+                                results.push((i, Ok(StepOutput::Logits(v)), elapsed, batch.len()));
+                            }
+                        }
+                        Err(_) if !poisoned => {
+                            for i in batch {
+                                results.push(self.step_one(i, runtime));
+                            }
+                        }
+                        result => {
+                            self.native_failed = true;
+                            let message = result.err().unwrap_or_else(|| {
+                                "batched forward returned wrong row count".into()
+                            });
+                            let message = format!("batched decode step failed: {message}");
+                            for i in batch.iter().copied() {
+                                results.push((i, Err(message.clone()), elapsed, batch.len()));
+                            }
+                        }
                     }
                 }
             }
@@ -406,13 +464,36 @@ impl<R> Driver<R> {
         {
             let a = &mut self.active[index];
             a.next = None;
-            match a.cursor.as_mut().expect("cursor").on_logits(
-                result.map_err(anyhow::Error::msg),
-                elapsed,
-                crate::shutdown::checkpoint,
-            ) {
+            let outcome = match result {
+                Err(e) => {
+                    self.fail(
+                        index,
+                        crate::serve::items::ServeError::server_error(e).into(),
+                    );
+                    continue;
+                }
+                Ok(StepOutput::Logits(logits)) => a
+                    .cursor
+                    .as_mut()
+                    .expect("cursor")
+                    .on_logits(Ok(logits), elapsed, crate::shutdown::checkpoint)
+                    .map(|()| presampled),
+                Ok(StepOutput::Token(token)) => a
+                    .cursor
+                    .as_mut()
+                    .expect("cursor")
+                    .on_token(elapsed, crate::shutdown::checkpoint)
+                    .map(|()| {
+                        Some(Ok(SampledToken {
+                            token: token as i32,
+                            candidate_index: 0,
+                        }))
+                    }),
+            };
+            match outcome {
                 Err(e) => self.fail(index, e),
-                Ok(()) => {
+                Ok(presampled) => {
+                    let a = &mut self.active[index];
                     a.steps += 1;
                     a.width_sum += width;
                     a.width_max = a.width_max.max(width);
@@ -422,6 +503,7 @@ impl<R> Driver<R> {
             }
         }
     }
+
     pub(crate) fn pump<E: Runtime<Run = R>>(&mut self, runtime: &mut E) -> bool {
         let mut progress = false;
         for i in (0..self.active.len()).rev() {

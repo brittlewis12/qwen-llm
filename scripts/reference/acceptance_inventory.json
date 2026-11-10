@@ -6305,5 +6305,12 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Fresh exact-PID CPU subprocess simulation of cooperative INT/TERM ownership, checked-release ordering or unwind handler restoration; no Metal context, GPU/model work or GPU-drain qualification."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::scheduler_token_batch_skips_host_sampling_and_keeps_lifecycle",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted fake token-returning batch step: the Driver consumes GPU-sampled tokens without host sampling and keeps the token/transition lifecycle; no Metal context."
   }
 ]

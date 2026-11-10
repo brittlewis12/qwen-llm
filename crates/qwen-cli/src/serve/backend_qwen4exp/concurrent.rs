@@ -14,6 +14,10 @@ qwen_llm::env_flag!(
     /// Share independent Flash-Next M5 decode HC/dense/head work. 0 retains the fair owner with ordinary member forwards. MAX_ACTIVE=1 restores serial serving.
     default_on native_enabled, "QWEN_SERVE_FN_NATIVE_BATCH"
 );
+qwen_llm::env_flag!(
+    /// Sample every member on the GPU at the end of each batched round and read back only tokens. 0 keeps full logits and host sampling.
+    default_on batch_sampling_enabled, "QWEN_SERVE_FN_BATCH_GPU_SAMPLE"
+);
 use std::collections::VecDeque;
 
 type Runner<'a> = Qwen4ExpTextRunner<'a, 'a, 'static>;
@@ -982,6 +986,52 @@ impl<'a> Runtime for Owner<'a> {
         tokens: &[u32],
     ) -> Result<Vec<Vec<f32>>, String> {
         self.decode_group(s, tokens)
+    }
+    fn step_batch_sampled(
+        &mut self,
+        runs: &mut [&mut Self::Run],
+        tokens: &[u32],
+    ) -> Option<Result<Vec<u32>, String>> {
+        if !batch_sampling_enabled() {
+            return None;
+        }
+        let b = runs.len();
+        let Some(native) = self.native.as_mut() else {
+            return None;
+        };
+        if !(2..=self.config.active).contains(&b) || tokens.len() != b {
+            return None;
+        }
+        for (i, run) in runs.iter().enumerate() {
+            let r = &run.state.runner;
+            if run.state.failed
+                || r.is_poisoned()
+                || r.next_position() >= self.forward_limit
+                || tokens[i] as usize >= self.vocab as usize
+            {
+                return None;
+            }
+        }
+        let mut runners = Vec::with_capacity(b);
+        let mut samplers = Vec::with_capacity(b);
+        for run in runs.iter_mut() {
+            runners.push(&mut run.state.runner);
+            samplers.push(&mut run.sampler);
+        }
+        match native.step_tokens(&mut runners, &mut samplers, tokens) {
+            Ok(tokens) => {
+                for run in runs.iter_mut() {
+                    run.state.failed = false;
+                }
+                Some(Ok(tokens))
+            }
+            Err(error) => {
+                for run in runs.iter_mut() {
+                    run.state.failed = true;
+                }
+                Some(Err(error.to_string()))
+            }
+        }
     }
     fn finish(
         &mut self,

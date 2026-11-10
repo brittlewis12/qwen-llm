@@ -63,6 +63,8 @@ struct Run {
 #[derive(Default)]
 struct Fake {
     feedback_bursts: bool,
+    token_batch: bool,
+    token_batches: usize,
     bursts: usize,
     steps: Vec<usize>,
     prefills: Vec<usize>,
@@ -246,6 +248,23 @@ impl Runtime for Fake {
                 logits(s)
             })
             .collect())
+    }
+    fn step_batch_sampled(
+        &mut self,
+        runs: &mut [&mut Run],
+        tokens: &[u32],
+    ) -> Option<Result<Vec<u32>, String>> {
+        if !self.token_batch {
+            return None;
+        }
+        self.token_batches += 1;
+        let mut out = Vec::with_capacity(runs.len());
+        for (run, &token) in runs.iter_mut().zip(tokens) {
+            run.state.pos += 1;
+            run.state.consumed.push(token);
+            out.push(b'a' as u32 + run.state.consumed.len() as u32 % 26);
+        }
+        Some(Ok(out))
     }
     fn finish(
         &mut self,
@@ -682,6 +701,27 @@ fn feedback_bursts_yield_before_existing_peers_and_keep_width_accounting() {
     finish(&mut d, &mut e);
     terminal_ok(&a.0);
     terminal_ok(&b.0);
+}
+
+#[test]
+fn scheduler_token_batch_skips_host_sampling_and_keeps_lifecycle() {
+    let mut d = Driver::new(3);
+    let mut e = Fake {
+        token_batch: true,
+        ..Fake::default()
+    };
+    let cs: Vec<_> = (0..3).map(|_| submit(&mut d, 5, true, 100)).collect();
+    finish(&mut d, &mut e);
+    for (s, _) in cs {
+        terminal_ok(&s);
+    }
+    assert!(e.token_batches > 0);
+    assert!(
+        !e.steps.contains(&3),
+        "the token path must not also run step_batch"
+    );
+    assert_eq!(e.commits.len(), 3);
+    assert!(!d.take_native_failure());
 }
 
 #[test]

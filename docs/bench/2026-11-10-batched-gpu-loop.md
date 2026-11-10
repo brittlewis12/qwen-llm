@@ -20,10 +20,12 @@ SRV-R2D8, related to SRV-8F18. No merge; this note is the decision record.
   bitwise equal to the host-staged batch forward.
 - The **non-pipelined device-input step is shipped default on**: +7.4-8.7%
   per round at B=2..4, bitwise exact, rollback `QWEN_FN_BATCH_GPU_INPUTS=0`.
+- **Flash-Next GPU sampling is shipped default on**: +3.3-5.3% released,
+  +7.2-12.0% greedy, exact. V4.1/GLM are blocked by the unbounded GPU sampler
+  at their `top_k=0` agent default (~38 ms/round), not by integration.
 - The one-ahead device-feedback loop is bitwise exact but measured **slower**
   than the host path on the loaded M5, so it stays **off** behind
-  `QWEN_SERVE_FN_BATCH_GPU_LOOP`. V4.1 and GLM need their token-dependent host
-  staging moved to the device; see the plan.
+  `QWEN_SERVE_FN_BATCH_GPU_LOOP`.
 
 ## 1. Measured bubble
 
@@ -162,6 +164,23 @@ removes ~3.5-3.8 ms of host work. Thermal started at level 1 and ended at level
 2; the paired alternating design bounds the comparison, but the absolute ms is
 a hot-host number. Probe `fn_batch_gpu_inputs_ab` (`--profile iter`); raw
 `~/qwen-runs/2026-11-10-batch-loop/gpu-inputs-ab.jsonl`.
+
+## 3c. GPU sampling: FN shipped, V4.1/GLM blocked at top_k=0
+
+Flash-Next now samples each member on the GPU at the end of the round and reads
+back only tokens, default on (`QWEN_SERVE_FN_BATCH_GPU_SAMPLE=0` rolls back).
+Paired A/B (48 rounds, teacher-forced forward, two restored state sets):
+released preset **+3.3% to +5.3%** at B=2..4, 32K/48K; greedy **+7.2% to
++12.0%**; greedy bitwise and 0 released token mismatches in every cell. B=3
+32K after: encode 2.90, GPU 19.73, commit+readback 0.87, host sample 0.0.
+
+V4.1's native `step_batch_sampled` (forward without host logits, then a GPU
+sampler command) gives greedy **+5.9% / +4.2%** at 32K/48K with 0 mismatches,
+but the released preset is **-56%**: `top_k=0` takes the `GpuTokenSampler`
+unbounded full-vocabulary sort at **~38 ms/round** against ~2.2 ms on the host.
+GLM's agent default is also `top_k=0, top_p=0.95`, so it shares the blocker.
+**V4.1/GLM GPU sampling is not shipped.** The next lever is a fast GPU nucleus
+(top-p-only) selection or a cheaper/pooled host sampler.
 
 ## 4. Serve integration
 

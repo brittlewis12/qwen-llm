@@ -106,6 +106,30 @@ cooperative accumulator, weights dequantized to half in threadgroup memory),
 then the Flash-Next fewrow and GLM Q6 ports. The census says the remaining
 band is q_b/output_b/output_a near 620-690 GB/s and shared near 380, so the
 tensor tile must lift the medium-`n_out` shapes, not just the head.
+## 2026-11-10 - Flash-Next GPU Sampling Shipped; V4.1/GLM Blocked At top_k=0
+
+- **Flash-Next shipped default on.** At the end of each B>=2 round the per-member
+  `GpuTokenSampler` selects the next token in the same command and only tokens
+  are read back. Rollback `QWEN_SERVE_FN_BATCH_GPU_SAMPLE=0`; the Driver gains
+  an additive `step_batch_sampled` (tokens instead of logits) and a cursor
+  `on_token` path, with host sampling as the fallback.
+- **FN paired A/B** (48 rounds after 8 warm, teacher-forced forward, two
+  restored state sets): released preset **+3.3% to +5.3%** at B=2..4, 32K/48K
+  (e.g. B=3 24.45 -> 23.58 ms at 32K, 24.50 -> 23.67 at 48K); greedy
+  **+7.2% to +12.0%**. Greedy is bitwise and the released preset has **0 token
+  mismatches** in every cell. B=3 32K breakdown after: encode 2.90, GPU 19.73,
+  commit+readback 0.87, host sample 0.0. Raw
+  `~/qwen-runs/2026-11-10-batch-loop/fn-sampling-ab.json`.
+- **V4.1/GLM are blocked by the sampler, not the integration.** V4.1 native
+  `step_batch_sampled` (forward without host logits, then a GPU sampler command)
+  gives greedy **+5.9% / +4.2%** (32K/48K) with 0 mismatches, but the released
+  preset is **-56%**: `top_k=0` takes the `GpuTokenSampler` unbounded
+  full-vocabulary sort path at **~38 ms/round**, versus ~2.2 ms for the host
+  sampler. GLM's agent default is also `top_k=0, top_p=0.95`, so the same
+  blocker applies. **Do not ship V4.1/GLM GPU sampling with the current
+  sampler.** The next lever is a fast GPU nucleus (top-p-only) selection, or a
+  cheaper/pooled host sampler.
+- Raw: `~/qwen-runs/2026-11-10-batch-loop/v41-sampling-ab.json`.
 
 ## 2026-11-10 - V4.1/GLM Batched Host Bubble: CPU Input Terms Are Small
 

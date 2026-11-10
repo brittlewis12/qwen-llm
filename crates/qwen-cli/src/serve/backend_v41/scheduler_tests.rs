@@ -85,6 +85,8 @@ struct StubEngine {
     cold_encoded: usize,
     /// Synthetic service time for a decode quantum (default 1 ms).
     step_ms: u64,
+    /// Serve batched steps through `step_batch_sampled` (device-style tokens).
+    sampled_step: bool,
 }
 
 impl StubEngine {
@@ -226,6 +228,44 @@ impl BatchEngine<Seq> for StubEngine {
     }
     fn can_step(&self, state: &Seq) -> bool {
         !state.unready && !state.poisoned && state.tokens.len() < state.capacity
+    }
+    fn supports_sampled_step(&self) -> bool {
+        self.sampled_step
+    }
+    fn step_batch_sampled(
+        &mut self,
+        states: &mut [&mut Seq],
+        tokens: &[u32],
+        _: &mut [&mut qwen_llm::sampling::Sampler],
+        _: &[bool],
+        cancel: &AtomicBool,
+    ) -> std::result::Result<Vec<u32>, String> {
+        {
+            let mut log = self.log.borrow_mut();
+            log.steps.push(states.len());
+            log.events.push(format!("sampled {}", states.len()));
+            log.batch_flags_are_shutdown
+                .push(std::ptr::eq(cancel, crate::shutdown::cancellation_flag()));
+        }
+        self.clock += Duration::from_millis(self.step_ms.max(1));
+        if states.iter().any(|state| state.unready || state.poisoned) {
+            return Err("sequence is provisional or poisoned by partial execution".into());
+        }
+        Ok(states
+            .iter_mut()
+            .zip(tokens)
+            .map(|(state, &token)| {
+                state.tokens.push(token);
+                let logits = self.logits(state);
+                logits
+                    .iter()
+                    .enumerate()
+                    .fold((0usize, f32::NEG_INFINITY), |best, (i, &v)| {
+                        if v > best.1 { (i, v) } else { best }
+                    })
+                    .0 as u32
+            })
+            .collect())
     }
     fn poisoned(&self, state: &Seq) -> bool {
         state.poisoned
@@ -530,6 +570,49 @@ fn batched_requests_match_serial_outputs_and_report_batch_fields() {
         assert_eq!(batch["prefill_loaded_rows"], LOADED_PREFILL_ROWS);
         assert_eq!(phases["family"], "deepseek_v41");
         assert!(phases["process_token_io"].is_object());
+    }
+}
+
+#[test]
+fn sampled_batch_steps_match_serial_greedy_outputs() {
+    let mut settings = settings();
+    settings.gpu_sample = true;
+    let inputs = ["first prompt", "a second, longer prompt", "third"];
+    let mut scheduler = Scheduler::new(3);
+    let mut engine = StubEngine {
+        sampled_step: true,
+        ..Default::default()
+    };
+    let mut reuse = Recording::default();
+    let clients: Vec<_> = inputs
+        .iter()
+        .map(|input| submit(&mut scheduler, prepared(&settings, input, true)))
+        .collect();
+    drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+    {
+        let log = engine.log.borrow();
+        assert!(
+            log.events.iter().any(|event| event == "sampled 3"),
+            "{:?}",
+            log.events
+        );
+        assert!(
+            log.batch_flags_are_shutdown
+                .iter()
+                .all(|&shutdown| shutdown),
+            "{:?}",
+            log.batch_flags_are_shutdown
+        );
+    }
+    assert_eq!(reuse.commits.len(), 3);
+    for (client, input) in clients.iter().zip(inputs) {
+        let (text, end, tokens) = serial(&settings, &prepared(&settings, input, true));
+        let Some(Ok((batched_end, batched_tokens, phases))) = client.terminal() else {
+            panic!("{input}: {:?}", client.terminal());
+        };
+        assert_eq!(client.text(), text, "{input}");
+        assert_eq!((batched_end, batched_tokens), (end, tokens), "{input}");
+        assert!(phases["batch"]["batched_transitions"].as_u64().unwrap() > 0);
     }
 }
 

@@ -41,6 +41,7 @@ use super::execution::{
 };
 use super::sample_pool::{SampleJob, SamplePool, Sampled};
 use super::*;
+use qwen_llm::sampling::{SampledToken, Sampler};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -67,6 +68,26 @@ pub(super) trait BatchEngine<S>: Engine<S> {
         tokens: &[u32],
         cancel: &AtomicBool,
     ) -> std::result::Result<Vec<Vec<f32>>, String>;
+    /// Whether [`Self::step_batch_sampled`] is available.
+    fn supports_sampled_step(&self) -> bool {
+        false
+    }
+    /// One token per state, sampled on the device where the request's policy
+    /// allows it and on the host otherwise. Members whose sampler is fast
+    /// eligible skip the logit readback; exact members are host-sampled after
+    /// the step, so their tokens stay identical to [`Self::step_batch`] plus a
+    /// host sample at the same draw. `explicit_seeds` is per member.
+    fn step_batch_sampled(
+        &mut self,
+        states: &mut [&mut S],
+        tokens: &[u32],
+        samplers: &mut [&mut Sampler],
+        explicit_seeds: &[bool],
+        cancel: &AtomicBool,
+    ) -> std::result::Result<Vec<u32>, String> {
+        let _ = (states, tokens, samplers, explicit_seeds, cancel);
+        Err("sampled batch step is unsupported".into())
+    }
     /// Ready for another token: neither provisional nor poisoned, below capacity.
     fn can_step(&self, state: &S) -> bool;
     /// Poisoned by partial execution (a batch that failed after it started).
@@ -74,9 +95,16 @@ pub(super) trait BatchEngine<S>: Engine<S> {
     fn position(&self, state: &S) -> usize;
 }
 
+/// One member's forward result: logits still to sample, or a token a device
+/// sampler already selected.
+enum SteppedStep {
+    Logits(Vec<f32>),
+    Token(u32),
+}
+
 /// A request index, its forward result, the forward's milliseconds and the
 /// width of the step that produced it.
-type Stepped = (usize, std::result::Result<Vec<f32>, String>, f64, usize);
+type Stepped = (usize, std::result::Result<SteppedStep, String>, f64, usize);
 
 struct Pending {
     job: Job,
@@ -740,7 +768,11 @@ impl<S> Scheduler<S> {
             if batch.len() == 1 {
                 results.push(self.step_one(batch[0], engine));
             } else if batch.len() > 1 {
-                results.extend(self.step_batch(batch, engine));
+                if settings.gpu_sample && engine.supports_sampled_step() {
+                    results.extend(self.step_batch_sampled(batch, engine));
+                } else {
+                    results.extend(self.step_batch(batch, engine));
+                }
             }
         }
         results.sort_by_key(|(index, ..)| std::cmp::Reverse(*index));
@@ -765,7 +797,7 @@ impl<S> Scheduler<S> {
             return presampled;
         };
         let members: Vec<usize> = (0..results.len())
-            .filter(|&k| results[k].1.is_ok())
+            .filter(|&k| matches!(results[k].1, Ok(SteppedStep::Logits(_))))
             .collect();
         if members.len() < 2 {
             return presampled;
@@ -780,9 +812,13 @@ impl<S> Scheduler<S> {
                 let placeholder =
                     qwen_llm::sampling::Sampler::new(qwen_llm::sampling::SamplingConfig::default())
                         .expect("default sampler");
+                let logits = match &mut results[k].1 {
+                    Ok(SteppedStep::Logits(logits)) => std::mem::take(logits),
+                    _ => unreachable!("filtered to logit results"),
+                };
                 SampleJob {
                     sampler: std::mem::replace(&mut run.sampler, placeholder),
-                    logits: std::mem::take(results[k].1.as_mut().expect("logits")),
+                    logits,
                     sampled: None,
                 }
             })
@@ -793,7 +829,10 @@ impl<S> Scheduler<S> {
                 .as_mut()
                 .expect("decoding run");
             run.sampler = job.sampler;
-            *results[k].1.as_mut().expect("logits") = job.logits;
+            match &mut results[k].1 {
+                Ok(SteppedStep::Logits(logits)) => *logits = job.logits,
+                _ => unreachable!("filtered to logit results"),
+            }
             presampled[k] = job.sampled;
         }
         #[cfg(test)]
@@ -816,7 +855,12 @@ impl<S> Scheduler<S> {
             || qwen_llm::pid_metrics::PidSnapshot::now().ok(),
             || engine.step(&mut run.state, token, cancel_of(&flag)),
         );
-        (index, result, started.elapsed().as_secs_f64() * 1e3, 1)
+        (
+            index,
+            result.map(SteppedStep::Logits),
+            started.elapsed().as_secs_f64() * 1e3,
+            1,
+        )
     }
 
     fn step_batch(
@@ -862,7 +906,7 @@ impl<S> Scheduler<S> {
             Ok(logits) => members
                 .into_iter()
                 .zip(logits)
-                .map(|(index, logits)| (index, Ok(logits), elapsed_ms, width))
+                .map(|(index, logits)| (index, Ok(SteppedStep::Logits(logits)), elapsed_ms, width))
                 .collect(),
             Err(error) if refused => {
                 // Nothing was touched: each request steps alone, so only an
@@ -892,12 +936,97 @@ impl<S> Scheduler<S> {
         }
     }
 
+    /// One batched step whose members are sampled on the device where policy
+    /// allows it. Every result is a token: fast members skip the logit readback,
+    /// exact members are host-sampled by the engine after the step.
+    fn step_batch_sampled(
+        &mut self,
+        members: Vec<usize>,
+        engine: &mut impl BatchEngine<S>,
+    ) -> Vec<Stepped> {
+        let width = members.len();
+        let observe = self.active[members[0]].token_io.is_some();
+        let before = observe
+            .then(|| qwen_llm::pid_metrics::PidSnapshot::now().ok())
+            .flatten();
+        let started = Instant::now();
+        let mut tokens = Vec::with_capacity(width);
+        let mut positions = Vec::with_capacity(width);
+        let mut explicit = Vec::with_capacity(width);
+        let mut states: Vec<&mut S> = Vec::with_capacity(width);
+        let mut samplers: Vec<&mut Sampler> = Vec::with_capacity(width);
+        for (index, active) in self.active.iter_mut().enumerate() {
+            if members.contains(&index) {
+                tokens.push(active.next.expect("published token"));
+                let run = active.run.as_mut().expect("decoding run");
+                positions.push(engine.position(&run.state));
+                explicit.push(run.explicit_seed);
+                states.push(&mut run.state);
+                samplers.push(&mut run.sampler);
+            }
+        }
+        let result = engine.step_batch_sampled(
+            &mut states,
+            &tokens,
+            &mut samplers,
+            &explicit,
+            crate::shutdown::cancellation_flag(),
+        );
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
+        let after = observe
+            .then(|| qwen_llm::pid_metrics::PidSnapshot::now().ok())
+            .flatten();
+        let refused = result.is_err() && states.iter().all(|state| !engine.poisoned(state));
+        drop(states);
+        drop(samplers);
+        for (&index, &position) in members.iter().zip(&positions) {
+            let mut snapshots = [before, after].into_iter();
+            let ok = result.is_ok();
+            let _ = memory_io::observe(
+                self.active[index].token_io.as_mut(),
+                position,
+                || snapshots.next().flatten(),
+                || if ok { Ok(()) } else { Err(()) },
+            );
+        }
+        match result {
+            Ok(sampled) => members
+                .into_iter()
+                .zip(sampled)
+                .map(|(index, token)| (index, Ok(SteppedStep::Token(token)), elapsed_ms, width))
+                .collect(),
+            Err(error) if refused => {
+                tracing::info!(target: "qwen_diag",
+                    "serve: deepseek_v41 sampled step of {width} refused ({error}); stepping each request alone");
+                members
+                    .into_iter()
+                    .map(|index| self.step_one(index, engine))
+                    .collect()
+            }
+            Err(error) => {
+                tracing::warn!(target: "qwen_diag",
+                    "serve: deepseek_v41 sampled step of {width} failed after it started; failing every member: {error}");
+                members
+                    .into_iter()
+                    .map(|index| {
+                        (
+                            index,
+                            Err(format!("sampled step of {width} requests failed: {error}")),
+                            elapsed_ms,
+                            width,
+                        )
+                    })
+                    .collect()
+            }
+        }
+    }
+
     /// Complete one request's transition with its forward result.
     #[allow(clippy::too_many_arguments)]
     fn consume(
         &mut self,
         index: usize,
-        result: std::result::Result<Vec<f32>, String>,
+        result: std::result::Result<SteppedStep, String>,
         elapsed_ms: f64,
         width: usize,
         presampled: Option<Sampled>,
@@ -907,25 +1036,48 @@ impl<S> Scheduler<S> {
         let active = &mut self.active[index];
         let token = active.next.take().expect("published token");
         let run = active.run.as_mut().expect("decoding run");
-        let logits = match result {
-            Err(error) => Err(anyhow::Error::msg(error)),
-            Ok(next) if next.len() != run.vocab || !next.iter().all(|v| v.is_finite()) => {
-                Err(anyhow::anyhow!("V4.1 returned malformed logits"))
-            }
-            Ok(next) => {
-                run.consumed.push(token);
-                run.logits = next.clone();
-                active.stepped += 1;
-                active.width_sum += width;
-                active.width_max = active.width_max.max(width);
-                active.batched_transitions += usize::from(width > 1);
-                Ok(next)
-            }
-        };
+        let (logits, device_token): (std::result::Result<Vec<f32>, anyhow::Error>, Option<u32>) =
+            match result {
+                Err(error) => (Err(anyhow::Error::msg(error)), None),
+                Ok(SteppedStep::Logits(next))
+                    if next.len() != run.vocab || !next.iter().all(|v| v.is_finite()) =>
+                {
+                    (Err(anyhow::anyhow!("V4.1 returned malformed logits")), None)
+                }
+                Ok(SteppedStep::Logits(next)) => {
+                    run.consumed.push(token);
+                    run.logits = next.clone();
+                    (Ok(next), None)
+                }
+                Ok(SteppedStep::Token(sampled)) => {
+                    run.consumed.push(token);
+                    (Ok(Vec::new()), Some(sampled))
+                }
+            };
+        if logits.is_ok() {
+            active.stepped += 1;
+            active.width_sum += width;
+            active.width_max = active.width_max.max(width);
+            active.batched_transitions += usize::from(width > 1);
+        }
         let cursor = active.cursor.as_mut().expect("decoding cursor");
-        match cursor.on_logits(logits, elapsed_ms, crate::shutdown::checkpoint) {
-            Ok(()) => self.advance(index, presampled, settings, reuse),
-            Err(failure) => self.fail(index, failure),
+        match device_token {
+            Some(sampled) => match cursor.on_token(elapsed_ms, crate::shutdown::checkpoint) {
+                Ok(()) => self.advance(
+                    index,
+                    Some(Ok(SampledToken {
+                        token: sampled as i32,
+                        candidate_index: 0,
+                    })),
+                    settings,
+                    reuse,
+                ),
+                Err(failure) => self.fail(index, failure),
+            },
+            None => match cursor.on_logits(logits, elapsed_ms, crate::shutdown::checkpoint) {
+                Ok(()) => self.advance(index, presampled, settings, reuse),
+                Err(failure) => self.fail(index, failure),
+            },
         }
     }
 }

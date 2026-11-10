@@ -316,6 +316,7 @@ impl Settings {
             vocab,
             ceiling: ceiling.get(),
             sampler,
+            explicit_seed: request.seed.is_some(),
             flag,
             state,
             logits,
@@ -710,6 +711,8 @@ pub(super) struct Run<S> {
     pub(super) vocab: usize,
     pub(super) ceiling: usize,
     pub(super) sampler: Sampler,
+    /// The request named its seed, so the fast sampler must stay off.
+    pub(super) explicit_seed: bool,
     pub(super) flag: Option<Arc<AtomicBool>>,
     pub(super) state: S,
     pub(super) logits: Vec<f32>,

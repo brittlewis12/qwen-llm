@@ -77,6 +77,12 @@ const COLD_CED_ENV: &str = "QWEN_SERVE_V41_COLD_CED";
 /// Default on; 0 restores Full for live extensions independently of cold CED.
 /// Read once when preparing the server.
 const LIVE_CED_ENV: &str = "QWEN_SERVE_V41_LIVE_CED";
+/// Sample batched decode members on the device: fast Gumbel-max when the
+/// request leaves its seed implicit, host sampling otherwise. Skips the logit
+/// readback for fast members. Default on; 0 restores the host sampling path.
+/// `QWEN_FAST_SAMPLER=0` alone only forces the exact sampler. Read once when
+/// preparing the server.
+const GPU_SAMPLE_ENV: &str = "QWEN_SERVE_V41_GPU_SAMPLE";
 
 /// Keep up to four conversations in flight. Cohort throughput depends on
 /// the mixed prefill/decode policy, not just on decode batch width.
@@ -188,6 +194,9 @@ pub(super) fn start(
     tracing::info!("serve: V4.1 snapshot cache: {plan}");
     if prepared.max_active > 1 {
         warm_batched_decode(&forward, prepared.max_active, prepared.settings.eos)?;
+        // Compile the fast-sampler pipelines now, not on the first request.
+        let vocab = prepared.settings.tokenizer.n_vocab() as usize;
+        qwen_llm::metal::FastGpuSampler::new(&ctx, vocab, 1).map_err(anyhow::Error::msg)?;
     }
     let mut settings = prepared.settings;
     settings.model_id = listening.model_id.clone();
@@ -317,6 +326,7 @@ pub(crate) struct Settings {
     cold_ced: bool,
     live_ced: bool,
     prefill_fair: bool,
+    gpu_sample: bool,
     decode_percent: usize,
 }
 
@@ -361,6 +371,7 @@ impl Settings {
             cold_ced: qwen_llm::env_flag::read_default_on(COLD_CED_ENV),
             live_ced: qwen_llm::env_flag::read_default_on(LIVE_CED_ENV),
             prefill_fair: qwen_llm::env_flag::read_default_on(PREFILL_FAIR_ENV),
+            gpu_sample: qwen_llm::env_flag::read_default_on(GPU_SAMPLE_ENV),
             decode_percent,
         })
     }
@@ -595,6 +606,49 @@ impl scheduler::BatchEngine<qwen_llm::deepseek_v41::forward::State> for ForwardE
     }
     fn can_step(&self, state: &qwen_llm::deepseek_v41::forward::State) -> bool {
         state.is_ready() && state.position() < state.capacity()
+    }
+    fn supports_sampled_step(&self) -> bool {
+        self.ctx.pipeline("kernel_token_gumbel_block").is_ok()
+            && self.ctx.pipeline("kernel_token_gumbel_final").is_ok()
+    }
+    fn step_batch_sampled(
+        &mut self,
+        states: &mut [&mut qwen_llm::deepseek_v41::forward::State],
+        tokens: &[u32],
+        samplers: &mut [&mut qwen_llm::sampling::Sampler],
+        explicit_seeds: &[bool],
+        cancel: &AtomicBool,
+    ) -> std::result::Result<Vec<u32>, String> {
+        use qwen_llm::deepseek_v41::forward::{BatchMemberOutput, BatchSampleMode};
+        let modes: Vec<_> = samplers
+            .iter()
+            .zip(explicit_seeds)
+            .map(|(sampler, &explicit)| {
+                let config = sampler.config();
+                if qwen_llm::metal::fast_sampler_allowed(&config, explicit) {
+                    BatchSampleMode::Fast {
+                        temperature: config.temperature,
+                    }
+                } else {
+                    BatchSampleMode::Host
+                }
+            })
+            .collect();
+        let out = track_native_failure(
+            &self.native_failed,
+            self.forward
+                .step_batch_sampled(states, tokens, samplers, &modes, Some(cancel)),
+        )?;
+        out.into_iter()
+            .enumerate()
+            .map(|(i, member)| match member {
+                BatchMemberOutput::Token(token) => Ok(token),
+                BatchMemberOutput::Logits(logits) => samplers[i]
+                    .sample(&logits)
+                    .map(|sampled| sampled.token as u32)
+                    .map_err(|error| format!("host sampling after a deferred member: {error}")),
+            })
+            .collect()
     }
     fn poisoned(&self, state: &qwen_llm::deepseek_v41::forward::State) -> bool {
         state.is_poisoned()

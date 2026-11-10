@@ -552,26 +552,27 @@ impl Glm5NextBatch {
         sessions: &mut [&mut Glm5NextSession<'_>],
         samplers: &mut [&mut Sampler],
         pending: &[u32],
-        max_tokens: usize,
+        max_tokens: &[usize],
         eos: &[&[i32]],
         mut emit: impl FnMut(usize, u32) -> bool,
     ) -> Result<GlmBatchLoopStats> {
         let count = sessions.len();
         if count < 2
             || count > self.max_members
-            || max_tokens == 0
             || samplers.len() != count
             || pending.len() != count
+            || max_tokens.len() != count
             || eos.len() != count
+            || max_tokens.iter().any(|&n| n == 0)
         {
             return invalid("invalid GLM batch loop extents");
         }
-        for (s, &t) in sessions.iter().zip(pending) {
+        for ((s, &t), &n) in sessions.iter().zip(pending).zip(max_tokens) {
             if s.weights.instance != self.weights_instance
                 || s.poisoned
                 || t as usize >= s.weights.config.vocab_size as usize
                 || s.position >= s.capacity
-                || max_tokens > s.capacity - s.position
+                || n > s.capacity - s.position
             {
                 return invalid("GLM batch member is not ready for a token loop");
             }
@@ -621,7 +622,7 @@ impl Glm5NextBatch {
         let mut terminal = vec![-1i32; count];
         let mut stop = false;
         loop {
-            let next = if sampled + 1 < max_tokens {
+            let next = if (0..count).any(|i| sampled + 1 < max_tokens[i]) {
                 let positions: Vec<usize> = starts.iter().map(|s| s + sampled + 1).collect();
                 let uniforms: Vec<f32> = samplers.iter().map(|s| s.gpu_uniform(1)).collect();
                 let t = Instant::now();
@@ -678,7 +679,7 @@ impl Glm5NextBatch {
             for sampler in samplers.iter_mut() {
                 sampler.commit_gpu_draw();
             }
-            if stop || sampled >= max_tokens {
+            if stop || (0..count).any(|i| sampled >= max_tokens[i]) {
                 break;
             }
             let mut next = next.expect("a continuing burst prepared a frame");

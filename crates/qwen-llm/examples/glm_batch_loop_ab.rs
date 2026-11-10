@@ -212,7 +212,7 @@ fn main() -> anyhow::Result<()> {
                 &mut ss[..width].iter_mut().collect::<Vec<_>>(),
                 &mut gpu_sampler_refs,
                 &gpu_pending,
-                steps,
+                &vec![steps; width],
                 &vec![&[][..]; width],
                 |member, token| {
                     gpu_tokens[member].push(token);
@@ -279,7 +279,7 @@ fn main() -> anyhow::Result<()> {
             &mut ss[..width].iter_mut().collect::<Vec<_>>(),
             &mut gpu_sampler_refs,
             &gpu_pending,
-            steps,
+            &vec![steps; width],
             &vec![&[][..]; width],
             |member, token| {
                 loop_tokens[member].push(token);

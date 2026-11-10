@@ -21,6 +21,11 @@ const DECODE_PERCENT: &str = "QWEN_SERVE_GLM_DECODE_PERCENT";
 /// Persistent threads that sample a multi-member step beside the owner; 0
 /// samples serially on the owner (rollback). Default: max_active - 1.
 const SAMPLE_WORKERS: &str = "QWEN_SERVE_GLM_SAMPLE_WORKERS";
+qwen_llm::env_flag!(
+    /// Run the whole active GLM batch through the one-ahead device-feedback token loop: GPU sampling and pipelined forwarding. 0 keeps per-round host sampling.
+    default_on batch_loop_enabled,
+    "QWEN_SERVE_GLM_BATCH_GPU_LOOP"
+);
 #[derive(Clone, Copy)]
 pub(super) struct Config {
     pub active: usize,
@@ -312,6 +317,140 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
             sink,
             16,
         )
+    }
+    fn advance_group(
+        &mut self,
+        runs: &mut [&mut Self::Run],
+        cursors: &mut [&mut DecodeCursor],
+        sinks: &mut [&mut dyn GenerationSink],
+        tokens: &[u32],
+        reserves: &[u64],
+    ) -> Option<Result<Vec<Advance>, BackendFailure>> {
+        let b = runs.len();
+        if !batch_loop_enabled()
+            || b < 2
+            || self.0.batch.is_none()
+            || cursors.len() != b
+            || sinks.len() != b
+            || tokens.len() != b
+            || reserves.len() != b
+        {
+            return None;
+        }
+        let vocab = self.0.weights.config.vocab_size as usize;
+        for (i, run) in runs.iter().enumerate() {
+            let Some(session) = run.session.as_ref() else {
+                return None;
+            };
+            if session.is_poisoned()
+                || session.position() >= session.ledger().capacity() as usize
+                || tokens[i] as usize >= vocab
+            {
+                return None;
+            }
+        }
+        for (run, reserve) in runs.iter_mut().zip(reserves) {
+            run.reserve = *reserve;
+        }
+        // Whole burst forwards, samples and waits on this thread; nested with
+        // the driver guard.
+        let _qos = qwen_llm::metal::GpuThreadQos::enter();
+        let offset: Vec<f64> = cursors.iter().map(|c| c.elapsed_ms()).collect();
+        let counts: Vec<usize> = cursors
+            .iter()
+            .map(|c| c.remaining_tokens().min(8))
+            .collect();
+        let eos: Vec<&[i32]> = vec![&CHAT_STOPS[..]; b];
+        let tokenizer = self.0.prepared.artifact.tokenizer();
+        let mut burst: Vec<Vec<i32>> = vec![Vec::new(); b];
+        let mut callback_error: Option<BackendFailure> = None;
+        let result = {
+            let mut sessions: Vec<&mut Glm5NextSession<'_>> = Vec::with_capacity(b);
+            let mut samplers: Vec<&mut qwen_llm::sampling::Sampler> = Vec::with_capacity(b);
+            for run in runs.iter_mut() {
+                sessions.push(run.session.as_mut().expect("request owns session"));
+                samplers.push(&mut run.sampler);
+            }
+            self.0.batch.as_mut().unwrap().generate_gpu_tokens(
+                self.0.ctx,
+                &mut sessions,
+                &mut samplers,
+                tokens,
+                &counts,
+                &eos,
+                |member, token| {
+                    burst[member].push(token as i32);
+                    let result = (|| -> Result<bool, BackendFailure> {
+                        crate::shutdown::checkpoint()
+                            .map_err(|e| ServeError::server_error(e.to_string()))?;
+                        let bytes = tokenizer
+                            .try_decode_piece_bytes_exact(token as i32)
+                            .map_err(|e| {
+                                ServeError::server_error(format!("decode {FAMILY}: {e}"))
+                            })?;
+                        sinks[member]
+                            .piece(bytes)
+                            .and_then(|()| sinks[member].tick())
+                            .map_err(BackendFailure::Aborted)?;
+                        let ready = sinks[member]
+                            .flush_ready()
+                            .map_err(BackendFailure::Aborted)?;
+                        crate::shutdown::checkpoint()
+                            .map_err(|e| ServeError::server_error(e.to_string()))?;
+                        Ok(ready)
+                    })();
+                    match result {
+                        Ok(ready) => ready,
+                        Err(e) => {
+                            callback_error = Some(e);
+                            false
+                        }
+                    }
+                },
+            )
+        };
+        if let Some(error) = callback_error {
+            return Some(Err(error));
+        }
+        let stats = match result {
+            Ok(stats) => stats,
+            Err(error) => {
+                return Some(Err(ServeError::server_error(format!(
+                    "{FAMILY} GPU batch loop: {error}"
+                ))
+                .into()));
+            }
+        };
+        let sampled = stats.sampled_tokens / b;
+        let forwarded = stats.forwarded_tokens / b;
+        let per_round = stats.wall_ms / sampled.max(1) as f64;
+        let mut out = Vec::with_capacity(b);
+        for i in 0..b {
+            let terminal = stats.terminal_tokens.get(i).copied().unwrap_or(-1);
+            let stopped_on_eos = CHAT_STOPS.contains(&terminal);
+            if stopped_on_eos {
+                burst[i].push(terminal);
+            }
+            let member = qwen_llm::metal::GpuTokenLoopStats {
+                sampled_tokens: burst[i].len(),
+                forwarded_tokens: burst[i].len().saturating_sub(1),
+                emitted_tokens: burst[i].len() - usize::from(stopped_on_eos),
+                encode_cpu_ms: stats.encode_cpu_ms / b as f64,
+                completion_wait_ms: stats.completion_wait_ms / b as f64,
+                gpu_ms: stats.gpu_ms / b as f64,
+                wall_ms: stats.wall_ms,
+                terminal_token: Some(terminal),
+                stopped_on_eos,
+                first_token_ready_ms: None,
+                first_token_callback_ms: None,
+                first_token_selection_ms: 0.,
+                transition_ms: stats.wall_ms * forwarded as f64 / sampled.max(1) as f64,
+                first_transition_ms: (forwarded > 0).then_some(per_round),
+                ..Default::default()
+            };
+            out.push(cursors[i].append_gpu_burst(&burst[i], member, offset[i]));
+        }
+        Some(Ok(out))
     }
     fn state(run: &mut Self::Run) -> &mut Self::State {
         run.session.as_mut().expect("request owns session")

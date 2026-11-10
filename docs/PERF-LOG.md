@@ -743,6 +743,303 @@ tensor tile must lift the medium-`n_out` shapes, not just the head.
   `fn_native_batch_check MODEL CODE PROSE 32768 64 1,2,3,4` (also `4,3,2,1`)
   or `... 48000 32 1,2,3,4 both`, and `dispatch_deadtime` with no arguments.
   Compact evidence: `~/qwen-runs/2026-11-09-fn-widths-deadtime/` on M5.
+## 2026-11-10 - V4.1 Combine Restructure Fails; Encode Is Mostly Metal Encoding
+
+- **Report only; no runtime change.** Source **`00cfac16`** adds a `hostgap`
+  section breakdown (embedding, Engram rows, Metal encode, causal replay,
+  alloc/end/commit) and `FlashPartialHold` / `FlashCombineHold`; the K64
+  attention experiment was deleted. M5 Ultra, GSQ-RCO IQ2_XS, B=3.
+- **Cheaper combine via fewer splits failed.** `flash_h4_k64_d512` (KB=64,
+  10 splits, HG=4 keeps 160 threadgroups) should halve the combine's `used`
+  loop. Paired ABBA: **32K 26.470 -> 26.879 ms (+1.55%)**, **64K 25.997 ->
+  26.491 (+1.90%)**. The 64-key partial loses more than the halved combine
+  saves. Deleted. **Attention work stops**: the combine bound was 1.06 ms and
+  no tried restructuring beats it net.
+- **B=3 encode breakdown** (host timers, per round; sections sum to the
+  4.4 ms encode):
+
+  | section | 32K | 64K |
+  | --- | ---: | ---: |
+  | total encode | 4.42 ms | 4.44 ms |
+  | embedding decode/write | 0.002 | 0.004 |
+  | Engram row decode/write (CPU) | 0.90 | 0.76 |
+  | Metal command encoding (incl per-layer causal replay) | 3.53 | 3.47 |
+  | cmd alloc / encoder end / commit | 0.084 | 0.078 |
+
+  **~80% is Metal command encoding, ~20% CPU staging** (Engram rows dominate
+  staging; embedding is negligible). The encode-side fix is pipelining the next
+  round's encode under the current GPU work (or fewer dispatches / pre-encoded
+  replay), **not** a non-pipelined GPU-inputs step. Handed to the
+  `perf/batch-gpu-loop` lane; this lane did not edit the input/pipelining path.
+- All retained arms thermal **1** (flagged, no level 2). Holds <=15 min; queue
+  1-5 min. Evidence: `~/qwen-runs/2026-11-10-v41-k64/`,
+  `.../v41-encodebd2/`, `.../v41-encodebd3/`. No merge or running job.
+
+## 2026-11-10 - V4.1 Attention Sub-Items Priced: Combine Only Above The Bar
+
+- **Report plus counterfactual modes; no runtime change.** Source **`3f0fd34f`**
+  adds `FlashPartialHold` / `FlashCombineHold` to `decode_bounds` and a
+  `hostgap` mode. M5 Ultra, GSQ-RCO IQ2_XS, B=3, controls 28.327 (32K) /
+  28.627 (64K).
+- **Flash partial** (QK + inlined split softmax + PV + KV reads) saves
+  **2.38 ms (32K) / 2.33 ms (64K)**; **combine** (+ inverse RoPE) saves
+  **1.06 / 1.03 ms**; whole core 3.32 / 3.28 ms (partial and combine overlap
+  ~0.1 ms). The split softmax is inlined and cannot be isolated at dispatch
+  level.
+- **Half-KV cache bound ~0.15 ms.** Core KV is 640 keys x 512 x 4 B, read twice
+  (QK and PV), 40 layers x 3 seq = ~314 MB/round -> ~0.29 ms floor; a
+  persistent half ring/compressed cache halves the read (~0.15 ms) and removes
+  a staging step this F32 path does not have. Below the 0.5 ms bar.
+- **Host bubble (not in GPU bounds):** `hostgap` B=3 wall 27.43 / 26.61 ms,
+  commit/wait 20.84 / 21.31 ms, encode 4.53 / 4.74 ms; the probe's GPU-span
+  field is miscomputed, so wall - commit_wait gives a **~6.6 / 5.3 ms** upper
+  bound, consistent with the `perf/batch-gpu-loop` lane's ~7 ms. That lane owns
+  the `gpu_step/batch.rs` inputs.
+- **Decision:** build only the **combine (1.06 ms bound)** next; skip the half
+  KV cache (~0.15) and softmax (not isolatable). If the combine cannot beat
+  ~0.5 ms net, attention work stops. All retained arms thermal **1** (flagged,
+  no level 2). Evidence: `~/qwen-runs/2026-11-10-v41-attnprice/`. No merge or
+  running job.
+
+## 2026-11-10 - V4.1 Key-Split MMA Attention Partial: Mixed, Not Shipped
+
+- **Report only; code deleted.** Source back to **`6add3341f`** (plus the `iter`
+  profile). M5 Ultra, GSQ-RCO IQ2_XS, paired same-binary ABBA, 96-128 steps.
+- **Built and measured:** `kernel_deepseek_v41_attention_flash_mma` keeps the
+  flash split/softmax/combine but does QK (M=8 heads) and PV (value dim across
+  8 simdgroups) with `simdgroup_half8x8`, half rows staged from the F32
+  ring/compressed on load. KB=16 (40 splits) was +0.96% at B=3 32K because it
+  doubled the combine; KB=32 (20 splits, 128-dim chunked staging) gave:
+
+  | width | flash | MMA | delta |
+  | ---: | ---: | ---: | ---: |
+  | 1 (32K) | 14.065 ms | 14.358 ms | +2.08% |
+  | 2 (32K) | 21.731 ms | 21.724 ms | -0.03% |
+  | 3 (32K) | 26.659 ms | 26.392 ms | -1.00% |
+  | 4 (32K) | 30.278 ms | 30.476 ms | +0.66% |
+  | 3 (64K) | 26.163 ms | 26.454 ms | +1.11% |
+
+  Numerically **qualified** at B=3 32K: dNLL +0.0017, mean KL 3.4e-4, 192/192
+  argmax equal (half operands were already cleared).
+- **Limiter:** the decode core is not QK/PV-compute-bound enough for MMA to pay.
+  The combine is ~1.2 ms (unchanged, ~35% of the 3.45 ms core); the split
+  softmax and F32->half staging add work MMA cannot remove; QK uses 4 of 8
+  simdgroups; chunked staging adds barriers. The 4-TFLOP/s, ~2.4-3.1 ms ceiling
+  over-attributed the core to QK/PV. No F/m delta (not shipped). Preserved in
+  branch commits `71e2b8834` / `fd7faef3f` for a combine-focused retry.
+- All retained arms thermal **1** (flagged; no level 2). Holds <=15 min; queue
+  waits 20-45 min. Evidence: `~/qwen-runs/2026-11-10-v41-flashmma/` and
+  `.../v41-flashmma32/`. No merge or running job.
+
+## 2026-11-09 - V4.1 Attention MMA Reuse: Quality-Viable, Occupancy-Starved
+
+- **Report only; no runtime change.** Source back to **`bb7bea61`** plus the
+  `iter` build profile from main. M5 Ultra, GSQ-RCO IQ2_XS, paired same-binary
+  ABBA (iter binary; runtime-neutral).
+- **Built and measured, deleted:** run the decode attention core as
+  `score_mma` -> `softmax_rows` -> `pv_mma` -> `normalize_rows` -> inverse
+  RoPE, reusing the existing F32-KV half-MMA sink-tile kernels with decode's
+  ring (history-tile args, no KV conversion). Numerically **qualified**:
+  teacher-forced B=3 32K dNLL **+0.0026**, mean KL **3.6e-4**, 192/192 argmax
+  equal. But **much slower**: B=1 **14.098 -> 36.384 ms (+158%)**, B=2
+  **22.297 -> 43.916 ms (+97%)**.
+- **Mechanism:** `score_mma`/`pv_mma` are row-batched for prefill. A decode
+  step is one query per sequence, so they launch **heads/16 = 4 threadgroups**
+  and loop ~40 key blocks serially, while the flash kernel launches ~160
+  (20 key splits x 8 head groups). The existing tensor kernels cannot serve
+  single-query decode regardless of operand precision.
+- **Next:** a decode MMA core needs its own occupancy structure — key-split
+  MMA partials + combine (flash-style), optionally with sequences on the row
+  axis. Half operands are cleared for quality (dNLL/KL above). Ceiling remains
+  ~2.4-3.1 ms. Dense left to the separate design review per the lead.
+- Every retained arm thermal 0 except cells at **level 1 after** their window
+  (flagged). Evidence: `~/qwen-runs/2026-11-10-v41-mma/`. Holds kept under
+  15 min; the queue was heavily contended (one wait >45 min). No merge or
+  running job.
+
+## 2026-11-09 - V4.1 Multi-Column FMA Dense: Numerically Clean, Much Slower
+
+- **Report only; no runtime change.** Shipped source remains **`864477ca`**.
+  M5 Ultra, GSQ-RCO IQ2_XS, paired same-binary ABBA.
+- **Built and measured, deleted:** `kernel_dense_multicol_q5_K_f32` — one
+  simdgroup per output channel, one accumulator per column, each weight block
+  read and dequantized once, `cols` FMAs per element. Bitwise the per-column
+  split kernel (GPU witness passed); signed teacher-forced **dNLL -2.11e-7,
+  mean KL 7.35e-11, 192/192 argmax equal, qualified** vs the MMA path. Slower:
+
+  | width | MMA | multi-column FMA | delta |
+  | ---: | ---: | ---: | ---: |
+  | 2 | 22.071 ms | 23.187 ms | +5.06% |
+  | 3 | 26.382 ms | 30.450 ms | **+15.42%** |
+  | 4 | 30.542 ms | 37.446 ms | **+22.60%** |
+  | 3 @64K | 26.089 ms | 30.234 ms | +15.89% |
+
+  The 8x8 simdgroup MMA is much faster per weight byte than scalar FMA even
+  with 5/8 of the tile wasted at 3 columns. **The dense 618 GB/s is not an
+  FMA-vs-MMA problem;** the remaining dense levers are half-operand MMA
+  (`simdgroup_half8x8`, dNLL/KL gate) or a better MMA tiling/occupancy.
+- **Cross-family:** only `deepseek_v41` calls these skinny kernels. Flash-Next's
+  batched dense for Q5_K is `mat_mat_fewrow_gen.metal` (8x8 MMA, 2..16 rows;
+  Q4_K/Q5_K/Q6_K/Q8_0/IQ4_NL/IQ4_XS), so it shares the tile waste and the
+  half-MMA idea ports; GLM's is `encode_glm_batch_q6_tile` (Q6_K, 2..4 rows),
+  a separate tile. None can reuse the V4.1 kernel directly.
+- Next per the lead: attention-core half MMA using the existing Metal 4 tensor
+  QK/PV kernels. Every retained arm thermal 0 except cells at **level 1 after**
+  their window (flagged). Evidence: `~/qwen-runs/2026-11-10-v41-mc/`. No merge
+  or running job.
+
+## 2026-11-09 - V4.1 B=3 Ranked: Dense Is The Largest Lever, Then Attention MMA
+
+- **Report plus a counterfactual tool; no runtime change.** Shipped source
+  **`26f9f6ac`** adds `DenseHold` and `AttentionCoreHold` to `decode_bounds`
+  (`perf-ablations`). M5 Ultra, GSQ-RCO IQ2_XS; controls mean 28.465 ms (32K)
+  / 28.743 ms (64K). Model: `docs/bench/2026-11-09-v41-decode-reachable-limit.md`.
+- **Wall savings from removing work** (32K / 64K): AttentionIo 1.00 / 0.95;
+  PostControls 1.68 / 1.48; RoutedRead 2.60 / 2.49; RoutedHold 8.36 / 8.25;
+  **DenseHold 8.51 / 8.43**; **AttentionCoreHold 3.45 / 3.38**.
+- **Batched dense is the largest single lever.** It reads ~5.26 GB/round
+  (4.87 Q5_K + 0.39 Q8_0 pair) and costs 8.51 ms on the wall: **618 GB/s, 56%
+  of the 1.106 TB/s streaming reference**, i.e. ~3.75 ms of headroom, and its
+  hold saving equals its isolated service, so it is on the critical path. The
+  B=1 split kernel already reaches ~859 GB/s for one column, so this is a
+  batched-path artifact (8-wide MMA tile with 3 useful columns), not a floor.
+- **Attention core is the second lever.** 3.45 ms of wall at ~9.66 GFLOP/round
+  (~4 TFLOP/s). Not occupancy-bound. Half-operand simdgroup MMA (or Metal 4
+  tensor ops) at 10/20/40 TFLOP/s would run 0.97/0.48/0.24 ms: **~2.4-3.1 ms
+  recoverable**. KV is already 16-bit; half operands are a dNLL/KL gate, not a
+  policy change.
+- **Ranking by credible wall bound per unit effort:** (1) 3-column dense Q5_K,
+  ~3.75 ms ceiling, one kernel family; (2) attention-core MMA/half,
+  ~2.4-3.1 ms, new core; (3) attention staging ~1.0 ms exposed but ~0.3-0.4
+  realized (Flash-Next's equivalent cut was a wash from slower strided reads);
+  (4) routed compute ~0.25 ms to the V41-VY3X ceiling. **Call: build the
+  3-column dense path first.**
+- Every retained arm thermal 0 except the 64K cell at **level 1 after** its
+  window (flagged). Evidence: `~/qwen-runs/2026-11-10-v41-bounds2/`. No merge
+  or running job.
+
+## 2026-11-09 - V4.1 Controls-Early Post: Bitwise But Slower; Post Tail Not Sinkhorn
+
+- **Report only; no runtime change.** Shipped source remains **`686b37d3a`**.
+  M5 Ultra, GSQ-RCO IQ2_XS, 32K, paired same-binary ABBA. Model:
+  `docs/bench/2026-11-09-v41-decode-reachable-limit.md`.
+- **Built and measured, deleted:** compute a wide site's controls (sigmoid +
+  20-round Sinkhorn) right after HC pre as a 1-threadgroup kernel, and make the
+  post apply-only, so the prologue can overlap the attention core / routed
+  experts. Same arithmetic, bitwise per sequence (GPU witness passed; every
+  arm's full-vocabulary hashes identical). **Slower**, not neutral:
+
+  | width | controls off | controls on | delta |
+  | ---: | ---: | ---: | ---: |
+  | 1 | 14.067 ms | 14.129 ms | +0.44% |
+  | 2 | 21.982 ms | 21.957 ms | -0.11% |
+  | 3 | 25.909 ms | 26.095 ms | +0.72% |
+  | 4 | 30.358 ms | 31.274 ms | **+3.02%** |
+
+  The fused post computes the controls in threadgroup memory alongside the
+  apply; the split adds a global write/read round-trip and a dependent dispatch
+  the apply must wait for. **The post tail is the apply's own work and the
+  layer dependency, not the Sinkhorn prologue.** `QWEN_V41_HC_CONTROLS_EARLY`
+  was removed with the change.
+- **Routed cross-check:** `RoutedRead` saves 2.66 ms of the 27.9 ms wall, so
+  2.66 ms of routed compute is on the critical path (not overlapped); the
+  ~5.6 ms read is the overlapped part. One-line answer as asked.
+- **Next:** the only remaining priced, work-removing lever is attention staging
+  (0.86 ms `AttentionIo`): column-native per-sequence attention state, or a
+  sequence-axis projection that reads the per-sequence buffers directly. Do
+  not reschedule per-sequence posts again. Every retained arm thermal 0 except
+  several cells that hit **level 1 after** the timed window (flagged). Evidence:
+  `~/qwen-runs/2026-11-10-v41-ce/`. No merge or running job.
+
+## 2026-11-09 - V4.1 B=3 Priced: Posts Are A Tail, Batching Neutral
+
+- **Report only; no runtime change.** Base/shipped source **`b9cf1af98`** (the
+  prior entry's per-dispatch `profile` probe). M5 Ultra, GSQ-RCO IQ2_XS, 32K.
+  Model and tables: `docs/bench/2026-11-09-v41-decode-reachable-limit.md`.
+- **`decode_bounds` wall pricing at B=3** (n=32, thermal 0; two controls
+  27.943 / 27.916 ms, 0.1%): AttentionIo **-0.86 ms** (batched gather/scatter
+  columns + rank-norm phase); PostControls **-1.55 ms** (`hc_post_controls` +
+  `ffn_post_controls`); AllHc -1.93 (so `hc_pre_batch` -0.38); RoutedRead
+  **-2.66 ms** (routed compute with its read kept); RoutedHold -8.27 ms.
+  Routed read is ~5.6 ms of ~6.9 GB, **~1.23 TB/s**, at/above the streaming
+  reference; routed is a compute+read split, not a read-efficiency lever.
+- **Widths:** B=1 903 dispatches / 16.79 ms isolated service; B=2 1,809 /
+  28.64; B=3 2,189 / 34.33; B=4 2,569 / 42.34. The batched-path fixed cost is
+  not one term: it is the per-sequence posts (1.55 ms) and attention staging
+  (0.86 ms) on the dependency chain.
+- **Sequence-batched attention mHC post: measured, neutral, deleted.** One
+  dispatch with a sequence depth row instead of one per sequence; bitwise
+  (1 GPU witness passed; every arm's full-vocabulary hashes identical).
+  Paired same-binary ABBA at 32K: B=2 **21.675 vs 21.719 ms (+0.20%)**, B=3
+  **26.223 vs 26.238 ms (+0.06%)**, B=4 **30.329 vs 30.360 ms (+0.10%)**; the
+  B=4 arm has identical code on/off, so **<~0.2% is the noise floor**. Causal
+  waves already co-schedule the per-sequence posts, so merging them changes
+  neither arithmetic nor critical path.
+- **Next:** shorten the post tail (compute the Sinkhorn controls after HC pre
+  while attention/routed runs, making the post apply-only; or fuse the FFN
+  post into the routed-down epilogue) against the 1.55 ms PostControls bound;
+  remove attention staging (0.86 ms) with column-native state or a
+  sequence-axis projection; then a 3-column skinny dense path. Do not re-price
+  routed without beating the V41-VY3X +9.4% ceiling. Tasks: **V41-NQTZ**
+  (umbrella) and its child **V41-72HM**.
+- Every retained arm thermal 0 except several cells that reached **level 1
+  after** their timed window (flagged); no level-2 run retained. Evidence on
+  M5: `~/qwen-runs/2026-11-10-v41-price/`,
+  `~/qwen-runs/2026-11-10-v41-hcb/`. No merge or running job.
+
+## 2026-11-09 - V4.1 Decode Repriced: Dead Time Small, Two Candidate Fixes Negative
+
+- **Report plus a probe; no runtime change shipped.** Base **`bcb1b46b8`**;
+  shipped source **`7225aabd4`** adds only a per-dispatch `profile` mode to the
+  `--features perf-ablations` example `v41_batch_depth`. Same M5 Ultra, four-shard
+  **GSQ-RCO IQ2_XS** artifact, 32K. Full model and tables:
+  `docs/bench/2026-11-09-v41-decode-reachable-limit.md`.
+- **Baseline (this session, 32K).** Solo **14.02 native / 13.76 causal** ms;
+  B=3 **28.09 native / 25.09 causal** ms. Ledger fit still **F = 12.3 ms,
+  m = 4.2 ms/seq** over B=2..4; B=1 is cheaper than F + m because it takes the
+  unbatched path. Byte floors at 1.106 TB/s: **7.41 ms** (B=1, 8.034 GB weights)
+  and **11.8 ms** (B=3: shared weights once + 3 disjoint top-6 routed reads +
+  3 KV rings, ~13.1 GB). Math floor ~1.3 ms, not binding.
+- **Dead time is 1.3-1.5 us per dispatch, not 4.7 us.** `dispatch_deadtime`
+  (`measure/fn-widths-deadtime`, same M5) measures 64-dispatch slopes:
+  serial-dependent **1.19-2.74 us** (tg8x128 1.19, tg64x128 1.36, norm 2.74),
+  serial-independent within noise, concurrent **0.12-0.76 us**. The frozen-graph
+  **4.65 us/dispatch** is a cost per removed dependency (it also overlaps real
+  per-sequence work). Reachable launch budget at B=3 is ~2,189 x 1.4 us =
+  **3.1 ms**, and the causal executor already hides most of it.
+- **Per-dispatch census at 32K.** Solo **903 dispatches/round**, isolated service
+  **16.79 ms** (wall 13.76). B=3 **2,189 dispatches/round**, isolated service
+  **34.33 ms** (wall 25.09); the 9.2 ms difference is concurrency already in
+  place. B=3 family shares: routed **30.1%**, attention core+qkv+output+index+
+  owner **45.5%**, shared expert **9.0%**, post/HC/router/Engram **~16%**
+  (families overlap). Dense Q5_K never reaches streaming for medium `n_out`
+  (head 1,123 GB/s; output_b ~600; shared expert 369 at B=3, 468 at B=1;
+  q_b 693 at B=1).
+- **Two candidates built, measured and deleted.** (1) Two-row Q5_K *matvec*
+  (`NR0=2`): off-path for V4.1 (B=1 uses `kernel_expert_native_q5_K_f32_split`,
+  B=3 uses `kernel_dense_skinny_mma_q5_K_f32`); paired off/on **21.630 vs
+  21.719 ms** at B=2 and **26.429 vs 26.583 ms** at B=3. (2) Ragged skinny
+  K-split fill of small-`n_out` grids: exact (max relative error 9.09e-7,
+  5 passed / 2 ignored) but slower, **26.058 vs 26.245 ms** at B=3 (+0.71%)
+  and **14.199 vs 14.516 ms** at B=1 (one level-1 arm). The overlapped
+  production schedule already fills the idle SIMD slots, so per-kernel grid
+  occupancy is not a lever; the extra partial reduction only adds work.
+- **Reachable limit.** B=3 **~20-22 ms** (from 25.1, +12-20%) only by cutting
+  routed mixed-instruction work (census: hot weights 8% faster, hard), batching
+  the per-sequence combine/HC-post/BF16-router dispatches, and a 3-column-
+  specialized skinny projection. Fixing isolated dispatch gaps alone does not
+  reach it. Next: batch `ffn_post`/`hc_post`/router across sequences, then a
+  narrow-column dense path.
+- Every timed arm thermal **0** except one B=1 fill arm at **level 1** (flagged;
+  not rerun because the change was rejected); the rejected r2 B=2/B=3 cells ran
+  at level 1. Numeric witness ran under the lease with
+  `QWEN_REQUIRE_METAL_TESTS=1`. Build
+  `nice -n 10 cargo build --offline --locked --release -p qwen-llm --features
+  perf-ablations --example v41_batch_depth`; profile mode is
+  `BINARY MODEL DEPTH BATCH 8 profile`; paired runs set
+  `QWEN_V41_SKINNY_FILL=0/1` or `QWEN_MATVEC_Q5_K_R2=0/1`. Evidence on M5:
+  `~/qwen-runs/2026-11-09-v41-decode-f/{profile-b1-32,profile-b3-32}.json`,
+  `.../base-b1-32`, `.../base-b3-32`, `.../fill/`. No merge or running job.
 
 ## 2026-11-09 - V4.1 Causal Waves At Solo, B=2 And B=4: Default On
 

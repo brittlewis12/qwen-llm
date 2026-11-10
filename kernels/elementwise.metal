@@ -641,6 +641,29 @@ kernel void kernel_scatter_offset_f32_to_f16(
     y[args.dst_off + tid] = (half)x[tid];
 }
 
+struct scatter_offset_members_args {
+    uint n;
+    uint dst_off[4];
+};
+
+// Member-axis twin of `kernel_scatter_offset_f32_to_f16`: grid height selects
+// one independent destination cache and its position offset. The per-element
+// conversion and store are identical, so each row is bitwise equal to a
+// separate dispatch.
+kernel void kernel_scatter_offset_f32_to_f16_members(
+        constant scatter_offset_members_args & args [[buffer(0)]],
+        device const float * x [[buffer(1)]],
+        device       half  * y0 [[buffer(2)]],
+        device       half  * y1 [[buffer(3)]],
+        device       half  * y2 [[buffer(4)]],
+        device       half  * y3 [[buffer(5)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    const uint member = gid.y;
+    if (member >= 4u || gid.x >= args.n) return;
+    device half * y = member == 0u ? y0 : member == 1u ? y1 : member == 2u ? y2 : y3;
+    y[args.dst_off[member] + gid.x] = (half)x[member * args.n + gid.x];
+}
+
 // Fused K+V scatter: writes both K and V into their respective F16 caches
 // in a single dispatch. K and V always share the same `n` (= kv_dim) and
 // the same `dst_off` (= position * kv_dim) at decode time, so we amortize

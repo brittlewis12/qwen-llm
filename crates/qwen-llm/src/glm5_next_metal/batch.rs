@@ -24,6 +24,10 @@ pub fn with_batch_attention<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
     projection::with_batch_attention(enabled, f)
 }
 #[cfg(feature = "perf-ablations")]
+pub fn with_batch_index<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+    projection::with_batch_index(enabled, f)
+}
+#[cfg(feature = "perf-ablations")]
 /// Encode and GPU-span milliseconds from the most recent batched step.
 pub fn take_last_step_timing() -> Option<(f64, f64)> {
     projection::take_timing()
@@ -908,20 +912,36 @@ impl Glm5NextSession<'_> {
         // geometry is required by the single compressed-capacity argument;
         // unequal cache shapes keep the incumbent per-member route rather
         // than failing after encoding begins.
-        let latents = seqs
+        let states = seqs
             .iter()
             .map(|seq| match &seq.layers[block] {
-                LayerState::Mla { latent, .. } => Ok(latent),
+                LayerState::Mla {
+                    latent,
+                    pending,
+                    pooled,
+                } => Ok((latent, pending, pooled)),
                 _ => invalid("not MLA"),
             })
             .collect::<Result<Vec<_>>>()?;
+        let latents: Vec<&MetalTensor> = states.iter().map(|state| state.0).collect();
         let batch_attention = selection_stride.is_some()
             && projection::features() & projection::ATTENTION != 0
             && rows >= 2
             && latents
                 .windows(2)
                 .all(|pair| pair[0].shape == pair[1].shape);
-        if !views {
+        let batch_index = selection_stride.is_some()
+            && projection::features() & projection::INDEX != 0
+            && rows >= 2
+            && crate::metal::mat_vec_q8_0_lcpp_enabled()
+            && mla.indexer.query.dtype == GgmlType::Q8_0
+            && mla.indexer.key.dtype == GgmlType::Q8_0
+            && mla.indexer.pool_gate.dtype == GgmlType::Q8_0
+            && states
+                .windows(2)
+                .all(|pair| pair[0].2.shape == pair[1].2.shape);
+        let (index_dim, ih) = (c.indexer_head_dim as usize, c.indexer_head_count as usize);
+        if !views && !batch_index {
             for (w, y) in [
                 (&mla.indexer.key, &p.index_key),
                 (&mla.indexer.pool_gate, &p.index_gate),
@@ -939,6 +959,48 @@ impl Glm5NextSession<'_> {
                     rows,
                 )?;
             }
+        }
+        if batch_index {
+            let sp = p.sparse.as_ref().expect("preflighted sparse scratch");
+            let query_width = ih * index_dim;
+            crate::metal::encode_mat_vec_q8_0_batch_f32(
+                ctx,
+                enc,
+                &mla.indexer.query,
+                &v(&p.query_r),
+                &v(&sp.index_query),
+                q_rank,
+                query_width,
+                rows,
+            )?;
+            crate::metal::encode_mat_vec_q8_0_batch_f32(
+                ctx,
+                enc,
+                &mla.indexer.key,
+                &v(&p.normed),
+                &v(&p.index_key),
+                h,
+                index_dim,
+                rows,
+            )?;
+            crate::metal::encode_mat_vec_q8_0_batch_f32(
+                ctx,
+                enc,
+                &mla.indexer.pool_gate,
+                &v(&p.normed),
+                &v(&p.index_gate),
+                h,
+                index_dim,
+                rows,
+            )?;
+            crate::metal::encode_scatter_offset_f32_to_f16(
+                ctx,
+                enc,
+                &v(&sp.index_query),
+                &sp.index_query_f16,
+                0,
+                query_width * rows,
+            )?;
         }
         for (r, seq) in seqs.iter().enumerate() {
             let s = &seq.s;
@@ -982,7 +1044,16 @@ impl Glm5NextSession<'_> {
             } else {
                 std::borrow::Cow::Borrowed(&s.latent)
             };
-            encode_scatter_offset_f32_to_f16(ctx, enc, &latent_row, latent, seq.position * kv, kv)?;
+            if !batch_index {
+                encode_scatter_offset_f32_to_f16(
+                    ctx,
+                    enc,
+                    &latent_row,
+                    latent,
+                    seq.position * kv,
+                    kv,
+                )?;
+            }
             if batch_attention {
                 grouped_matvec(
                     ctx,
@@ -1009,70 +1080,150 @@ impl Glm5NextSession<'_> {
             // Indexer cache maintenance from token zero. The pool this token
             // completes is published before attention: a query at visible length
             // L scores the first L / 4 pools, including its own.
-            let index_dim = c.indexer_head_dim as usize;
-            seq.stage(enc, Glm5NextStage::MlaIndexer, Some(block))?;
-            matvec(
+            if batch_index {
+                let sp = p.sparse.as_ref().expect("preflighted sparse scratch");
+                seq.stage(enc, Glm5NextStage::MlaIndexer, Some(block))?;
+                matvec(
+                    ctx,
+                    enc,
+                    &mla.indexer.head_weights,
+                    &normed,
+                    &row(&sp.index_weights, r, ih),
+                    h,
+                    ih,
+                )?;
+            } else {
+                seq.stage(enc, Glm5NextStage::MlaIndexer, Some(block))?;
+                matvec(
+                    ctx,
+                    enc,
+                    &mla.indexer.key,
+                    &normed,
+                    &s.index_key,
+                    h,
+                    index_dim,
+                )?;
+                matvec(
+                    ctx,
+                    enc,
+                    &mla.indexer.pool_gate,
+                    &normed,
+                    &s.index_gate,
+                    h,
+                    index_dim,
+                )?;
+                encode_indexer_append(
+                    ctx,
+                    enc,
+                    &s.index_key,
+                    &s.index_gate,
+                    &mla.indexer.key_norm,
+                    &mla.indexer.key_norm_bias,
+                    &mla.indexer.pool_position,
+                    pending,
+                    pooled,
+                    seq.position,
+                    c.layer_norm_epsilon,
+                )?;
+                let scale = 1.0 / (head_dim as f32).sqrt();
+                let visible = seq.position + 1;
+                if let Some(stride) = selection_stride {
+                    let scores = p
+                        .sparse
+                        .as_ref()
+                        .unwrap()
+                        .scores
+                        .view_subrange((r * stride) as u64, vec![pooled.shape[1], 1]);
+                    seq.encode_sparse_scores(
+                        ctx, enc, mla, pooled, visible, block, &query_r, &normed, &scores,
+                    )?;
+                } else if visible >= c.sparse_frontier() as usize {
+                    seq.encode_sparse_attention_inputs(
+                        ctx, enc, mla, latent, pooled, mla_index, visible, scale, block, &query_r,
+                        &normed,
+                    )?;
+                } else {
+                    seq.stage(enc, Glm5NextStage::DenseAttention, Some(block))?;
+                    encode_latent_attention(
+                        ctx,
+                        enc,
+                        &s.query_latent,
+                        latent,
+                        &s.no_sink,
+                        &s.output_latent,
+                        seq.position,
+                        1,
+                        scale,
+                    )?;
+                }
+            }
+        }
+        if batch_index {
+            let sp = p.sparse.as_ref().expect("preflighted sparse scratch");
+            let query_width = ih * index_dim;
+            crate::metal::encode_scale_f32_in_place(
                 ctx,
                 enc,
-                &mla.indexer.key,
-                &normed,
-                &s.index_key,
-                h,
-                index_dim,
+                &sp.index_weights
+                    .view_subrange(0, vec![ih as u64, rows as u64]),
+                1.0 / (query_width as f32).sqrt(),
             )?;
-            matvec(
+            let offsets = seqs.iter().map(|seq| seq.position * kv).collect::<Vec<_>>();
+            crate::metal::encode_scatter_offset_f32_to_f16_members(
                 ctx,
                 enc,
-                &mla.indexer.pool_gate,
-                &normed,
-                &s.index_gate,
-                h,
-                index_dim,
+                &v(&p.latent),
+                &latents,
+                &offsets,
+                kv,
             )?;
-            encode_indexer_append(
+            let append_states = states
+                .iter()
+                .zip(seqs.iter())
+                .map(|(state, seq)| (state.1, state.2, seq.position))
+                .collect::<Vec<_>>();
+            crate::metal::encode_indexer_append_members(
                 ctx,
                 enc,
-                &s.index_key,
-                &s.index_gate,
+                &v(&p.index_key),
+                &v(&p.index_gate),
                 &mla.indexer.key_norm,
                 &mla.indexer.key_norm_bias,
                 &mla.indexer.pool_position,
-                pending,
-                pooled,
-                seq.position,
+                &append_states,
                 c.layer_norm_epsilon,
             )?;
-            let scale = 1.0 / (head_dim as f32).sqrt();
-            let visible = seq.position + 1;
-            if let Some(stride) = selection_stride {
-                let scores = p
-                    .sparse
-                    .as_ref()
-                    .unwrap()
-                    .scores
-                    .view_subrange((r * stride) as u64, vec![pooled.shape[1], 1]);
-                seq.encode_sparse_scores(
-                    ctx, enc, mla, pooled, visible, block, &query_r, &normed, &scores,
-                )?;
-            } else if visible >= c.sparse_frontier() as usize {
-                seq.encode_sparse_attention_inputs(
-                    ctx, enc, mla, latent, pooled, mla_index, visible, scale, block, &query_r,
-                    &normed,
-                )?;
-            } else {
-                seq.stage(enc, Glm5NextStage::DenseAttention, Some(block))?;
-                encode_latent_attention(
-                    ctx,
-                    enc,
-                    &s.query_latent,
-                    latent,
-                    &s.no_sink,
-                    &s.output_latent,
-                    seq.position,
-                    1,
-                    scale,
-                )?;
-            }
+            let pool_capacity = states[0].2.shape[1] as usize;
+            let max_pools = seqs
+                .iter()
+                .map(|seq| (seq.position + 1) / c.indexer_pool as usize)
+                .max()
+                .unwrap_or(0);
+            let pooled = states.iter().map(|state| state.2).collect::<Vec<_>>();
+            let scores = sp
+                .scores
+                .view_subrange(0, vec![pool_capacity as u64, rows as u64]);
+            crate::metal::encode_lightning_scores_f16_matrix_members(
+                ctx,
+                enc,
+                &crate::metal::LightningScores {
+                    queries: &sp
+                        .index_query_f16
+                        .view_subrange(0, vec![index_dim as u64, ih as u64, rows as u64]),
+                    head_weights: &sp
+                        .index_weights
+                        .view_subrange(0, vec![ih as u64, rows as u64]),
+                    keys: pooled[0],
+                    visible_counts: &sp.visible_pools.view_subrange(0, vec![rows as u64]),
+                    scores: &scores,
+                },
+                &pooled,
+                ih,
+                index_dim,
+                pool_capacity,
+                max_pools,
+                rows,
+            )?;
         }
         if let Some(stride) = selection_stride {
             selection::encode(ctx, enc, seqs, mla_index, stride)?;

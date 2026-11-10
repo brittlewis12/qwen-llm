@@ -81,6 +81,140 @@ pub fn encode_indexer_append_rows(
     )
 }
 
+/// [`encode_indexer_append`] over two to four independent members: `raw_key`
+/// and `raw_gate` are `[128, rows]`, each member has its own pending/pooled
+/// cache and position. The per-token LayerNorm and pool publish are the same
+/// body, so every member is bitwise equal to a separate call.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_indexer_append_members(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    raw_key: &MetalTensor,
+    raw_gate: &MetalTensor,
+    norm_weight: &MetalTensor,
+    norm_bias: &MetalTensor,
+    ape: &MetalTensor,
+    states: &[(&MetalTensor, &MetalTensor, usize)],
+    eps: f32,
+) -> Result<(), MetalError> {
+    const K: &str = "indexer_append_members";
+    require_serial(K, enc)?;
+    let rows = states.len();
+    if !(2..=4).contains(&rows) || !eps.is_finite() || eps <= 0.0 {
+        return Err(bad_shape(
+            K,
+            "needs two to four members and finite positive epsilon",
+        ));
+    }
+    let d = INDEXER_DIM as u64;
+    check_tensor(
+        K,
+        raw_key,
+        GgmlType::F32,
+        &[d, rows as u64],
+        false,
+        "raw key",
+    )?;
+    check_tensor(
+        K,
+        raw_gate,
+        GgmlType::F32,
+        &[d, rows as u64],
+        false,
+        "raw gate",
+    )?;
+    check_tensor(K, norm_weight, GgmlType::F32, &[d], false, "norm weight")?;
+    check_tensor(K, norm_bias, GgmlType::F32, &[d], false, "norm bias")?;
+    check_tensor(
+        K,
+        ape,
+        GgmlType::F32,
+        &[d, INDEXER_POOL as u64],
+        false,
+        "ape",
+    )?;
+    let inputs = [
+        (raw_key, "raw key"),
+        (raw_gate, "raw gate"),
+        (norm_weight, "norm weight"),
+        (norm_bias, "norm bias"),
+        (ape, "ape"),
+    ];
+    let mut positions = [0u32; 4];
+    for (i, (pending, pooled, position)) in states.iter().enumerate() {
+        check_tensor(
+            K,
+            pending,
+            GgmlType::F16,
+            &[d, 2, INDEXER_POOL as u64],
+            true,
+            "pending",
+        )?;
+        if pooled.dtype != GgmlType::F16 || pooled.shape.len() != 2 || pooled.shape[0] != d {
+            return Err(bad_shape(K, "pooled must be F16 [128, pools]"));
+        }
+        let pools = pooled.shape[1];
+        check_tensor(K, pooled, GgmlType::F16, &[d, pools], true, "pooled")?;
+        if (*position / INDEXER_POOL as usize) as u64 >= pools {
+            return Err(bad_shape(
+                K,
+                format!("member {i} position {position} beyond {pools} pools"),
+            ));
+        }
+        positions[i] =
+            u32::try_from(*position).map_err(|_| bad_shape(K, "position exceeds u32"))?;
+        for (t, name) in [(*pending, "pending"), (*pooled, "pooled")] {
+            check_disjoint(K, t, &inputs)?;
+            for (other_pending, other_pooled, _) in &states[..i] {
+                check_disjoint(
+                    K,
+                    t,
+                    &[
+                        (*other_pending, "other pending"),
+                        (*other_pooled, "other pooled"),
+                    ],
+                )?;
+            }
+        }
+        check_disjoint(K, pooled, &[(*pending, "pending")])?;
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        positions: [u32; 4],
+        eps: f32,
+    }
+    let pso = ctx.pipeline("kernel_glm53_indexer_append_members")?;
+    if pso.maxTotalThreadsPerThreadgroup() < INDEXER_DIM {
+        return Err(bad_shape(K, "needs 128 threads per member"));
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &Args { positions, eps });
+    enc.set_tensor(1, raw_key);
+    enc.set_tensor(2, raw_gate);
+    enc.set_tensor(3, norm_weight);
+    enc.set_tensor(4, norm_bias);
+    enc.set_tensor(5, ape);
+    for (slot, i) in (6..=13).zip(0..4) {
+        let (pending, pooled, _) = states[i.min(rows - 1)];
+        enc.set_tensor(slot, if slot % 2 == 0 { pending } else { pooled });
+    }
+    enc.set_threadgroup_memory(0, 4 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: rows,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: INDEXER_DIM,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn encode(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -550,6 +684,120 @@ mod tests {
                     .zip(&pooled)
                     .all(|(a, e)| ulp_close(*a, *e)),
                 "pooled after {position}"
+            );
+        }
+    }
+
+    /// Member-axis append: four independent pending/pooled caches and
+    /// positions in one dispatch are bitwise equal to four single calls.
+    #[test]
+    fn indexer_append_members_match_single_dispatches_bitwise() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const M: usize = 4;
+        let d = INDEXER_DIM;
+        let weight: Vec<f32> = (0..d).map(|c| 0.6 + ((c * 7) % 13) as f32 * 0.05).collect();
+        let bias: Vec<f32> = (0..d)
+            .map(|c| ((c * 5) % 11) as f32 * 0.03 - 0.15)
+            .collect();
+        let ape: Vec<f32> = (0..d * 4)
+            .map(|i| ((i * 13) % 17) as f32 * 0.21 - 1.6)
+            .collect();
+        let w_t = f32_tensor(&ctx, &weight, vec![d as u64]);
+        let b_t = f32_tensor(&ctx, &bias, vec![d as u64]);
+        let ape_t = f32_tensor(&ctx, &ape, vec![d as u64, 4]);
+        let positions = [3usize, 7, 10, 14];
+        let pools = 5;
+        let mut keys = vec![0.0f32; d * M];
+        let mut gates = vec![0.0f32; d * M];
+        for m in 0..M {
+            for c in 0..d {
+                keys[m * d + c] =
+                    1.0 + ((c * 31 + m * 17) % 97) as f32 / 1024.0 * (1.0 + (c % 3) as f32);
+                gates[m * d + c] = ((c * 23 + m * 41) % 89) as f32 * 0.0731 - 3.0;
+            }
+        }
+        let raw_key_t = f32_tensor(&ctx, &keys, vec![d as u64, M as u64]);
+        let raw_gate_t = f32_tensor(&ctx, &gates, vec![d as u64, M as u64]);
+        let make_pending = || {
+            offset_tensor(
+                &ctx,
+                16,
+                &vec![0u8; d * 2 * 4 * 2],
+                16,
+                vec![d as u64, 2, 4],
+                GgmlType::F16,
+            )
+        };
+        let make_pooled = || {
+            offset_tensor(
+                &ctx,
+                16,
+                &vec![0u8; d * pools * 2],
+                16,
+                vec![d as u64, pools as u64],
+                GgmlType::F16,
+            )
+        };
+        let member_pending: Vec<MetalTensor> = (0..M).map(|_| make_pending()).collect();
+        let member_pooled: Vec<MetalTensor> = (0..M).map(|_| make_pooled()).collect();
+        let single_pending: Vec<MetalTensor> = (0..M).map(|_| make_pending()).collect();
+        let single_pooled: Vec<MetalTensor> = (0..M).map(|_| make_pooled()).collect();
+        let states: Vec<(&MetalTensor, &MetalTensor, usize)> = member_pending
+            .iter()
+            .zip(&member_pooled)
+            .zip(positions)
+            .map(|((p, q), pos)| (p, q, pos))
+            .collect();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        encode_indexer_append_members(
+            &ctx,
+            &enc,
+            &raw_key_t,
+            &raw_gate_t,
+            &w_t,
+            &b_t,
+            &ape_t,
+            &states,
+            1e-6,
+        )
+        .unwrap();
+        enc.end();
+        command.commit();
+        wait_completed(&command).unwrap();
+        for m in 0..M {
+            let key_row = f32_tensor(&ctx, &keys[m * d..(m + 1) * d], vec![d as u64]);
+            let gate_row = f32_tensor(&ctx, &gates[m * d..(m + 1) * d], vec![d as u64]);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let enc = KernelEncoder::begin(&command);
+            encode_indexer_append(
+                &ctx,
+                &enc,
+                &key_row,
+                &gate_row,
+                &w_t,
+                &b_t,
+                &ape_t,
+                &single_pending[m],
+                &single_pooled[m],
+                positions[m],
+                1e-6,
+            )
+            .unwrap();
+            enc.end();
+            command.commit();
+            wait_completed(&command).unwrap();
+            assert_eq!(
+                read_f16(&member_pending[m]),
+                read_f16(&single_pending[m]),
+                "member {m} pending differs"
+            );
+            assert_eq!(
+                read_f16(&member_pooled[m]),
+                read_f16(&single_pooled[m]),
+                "member {m} pooled differs"
             );
         }
     }

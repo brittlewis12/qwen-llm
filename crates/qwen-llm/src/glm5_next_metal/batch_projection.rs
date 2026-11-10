@@ -13,6 +13,7 @@ pub(super) const MLA: u8 = 4;
 pub(super) const SELECT: u8 = 8;
 pub(super) const KDA: u8 = 16;
 pub(super) const ATTENTION: u8 = 32;
+pub(super) const INDEX: u8 = 64;
 crate::env_flag!(
     /// Default-on M5 Fast/Half independent decode KDA grid over two to four members, with separate state buffers and unchanged arithmetic. Zero restores per-member dispatches; ordinary decode, prefill and Exact/F32 policies are unchanged.
     default_on kda_enabled,
@@ -23,6 +24,11 @@ crate::env_flag!(
     default_on attention_enabled,
     "QWEN_GLM53_BATCH_ATTENTION"
 );
+crate::env_flag!(
+    /// Default-on M5 Fast/Half independent decode index-chain batching: token-axis Q8 query/key/pool-gate GEMV, packed index queries/weights, member-axis scatter, indexer append and lightning scores. Zero restores the per-member index chain; ordinary decode, prefill and Exact/F32 policies are unchanged.
+    default_on index_enabled,
+    "QWEN_GLM53_BATCH_INDEX"
+);
 #[cfg(test)]
 thread_local! { static OVERRIDE:std::cell::Cell<Option<u8>>=const {std::cell::Cell::new(None)}; }
 pub(super) fn features() -> u8 {
@@ -32,6 +38,7 @@ pub(super) fn features() -> u8 {
     }
     (if kda_enabled() { KDA } else { 0 })
         | (if attention() { ATTENTION } else { 0 })
+        | (if index() { INDEX } else { 0 })
         | (if enabled() { Q6 | ROUTER | MLA } else { 0 })
         | (if super::selection::requested() {
             SELECT
@@ -41,7 +48,7 @@ pub(super) fn features() -> u8 {
 }
 #[cfg(test)]
 pub(super) fn with_features<T>(v: u8, f: impl FnOnce() -> T) -> T {
-    assert_eq!(v & !63, 0);
+    assert_eq!(v & !127, 0);
     struct Reset(Option<u8>);
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -162,5 +169,35 @@ pub(super) fn with_batch_attention<T>(enabled: bool, f: impl FnOnce() -> T) -> T
         }
     }
     let _reset = Reset(ATTENTION_OVERRIDE.with(|c| c.replace(Some(enabled))));
+    f()
+}
+
+#[cfg(feature = "perf-ablations")]
+thread_local! {static INDEX_OVERRIDE:std::cell::Cell<Option<bool>>=const {std::cell::Cell::new(None)};}
+#[cfg(feature = "perf-ablations")]
+fn index_enabled_override() -> bool {
+    INDEX_OVERRIDE
+        .with(|c| c.get())
+        .unwrap_or_else(index_enabled)
+}
+fn index() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    {
+        index_enabled_override()
+    }
+    #[cfg(not(feature = "perf-ablations"))]
+    {
+        index_enabled()
+    }
+}
+#[cfg(feature = "perf-ablations")]
+pub(super) fn with_batch_index<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            INDEX_OVERRIDE.with(|c| c.set(self.0));
+        }
+    }
+    let _reset = Reset(INDEX_OVERRIDE.with(|c| c.replace(Some(enabled))));
     f()
 }

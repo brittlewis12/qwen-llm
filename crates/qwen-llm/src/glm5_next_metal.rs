@@ -2667,7 +2667,7 @@ pub use lens::Glm5NextCapture;
 pub use packed::batch::take_last_step_timing;
 pub use packed::batch::{GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch};
 #[cfg(feature = "perf-ablations")]
-pub use packed::batch::{with_batch_attention, with_batch_waves};
+pub use packed::batch::{with_batch_attention, with_batch_index, with_batch_waves};
 pub use packed::{FastPrecision, PackedLineage};
 pub use snapshot::{Glm5NextSnapshot, SNAPSHOT_POLICY_VERSION, snapshot_bytes};
 

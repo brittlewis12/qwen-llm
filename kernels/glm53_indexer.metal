@@ -118,6 +118,45 @@ kernel void kernel_glm53_indexer_append_rows(
     }
 }
 
+struct glm53_indexer_append_members_args {
+    uint positions[4];
+    float eps;
+};
+
+// Member-axis twin of `kernel_glm53_indexer_append`: one 128-thread
+// threadgroup per independent member, its own pending/pooled cache and its
+// own position. The per-token LayerNorm, pool gate and pool publish are the
+// same body, so each member's caches are bitwise equal to separate calls.
+kernel void kernel_glm53_indexer_append_members(
+        constant glm53_indexer_append_members_args & args [[buffer(0)]],
+        device const float * raw_key [[buffer(1)]],
+        device const float * raw_gate [[buffer(2)]],
+        device const float * norm_weight [[buffer(3)]],
+        device const float * norm_bias [[buffer(4)]],
+        device const float * ape [[buffer(5)]],
+        device half * pending0 [[buffer(6)]],
+        device half * pooled0 [[buffer(7)]],
+        device half * pending1 [[buffer(8)]],
+        device half * pooled1 [[buffer(9)]],
+        device half * pending2 [[buffer(10)]],
+        device half * pooled2 [[buffer(11)]],
+        device half * pending3 [[buffer(12)]],
+        device half * pooled3 [[buffer(13)]],
+        threadgroup float * reduce [[threadgroup(0)]],
+        uint member [[threadgroup_position_in_grid]],
+        ushort c [[thread_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort sg [[simdgroup_index_in_threadgroup]]) {
+    if (member >= 4u) return;
+    device half * pending = member == 0u ? pending0
+        : member == 1u ? pending1 : member == 2u ? pending2 : pending3;
+    device half * pooled = member == 0u ? pooled0
+        : member == 1u ? pooled1 : member == 2u ? pooled2 : pooled3;
+    glm53_indexer_append_one(args.positions[member], args.eps,
+        raw_key[member * IDX_D + c], raw_gate[member * IDX_D + c],
+        norm_weight, norm_bias, ape, pending, pooled, reduce, c, lane, sg);
+}
+
 struct glm53_indexer_expand_args {
     uint top_pools;   // pool-id slots per query (512)
     uint row_slots;   // row-id slots per query (>= 4 * top_pools + 3)

@@ -2056,6 +2056,89 @@ pub fn encode_scatter_offset_f32_to_f16(
     Ok(())
 }
 
+/// Member-axis twin of [`encode_scatter_offset_f32_to_f16`]: `src` holds
+/// `rows` consecutive `n`-element rows and `dsts[row]` receives row `row` at
+/// `offsets[row]`. The per-element conversion and store are identical, so each
+/// row is bitwise equal to a separate dispatch.
+pub fn encode_scatter_offset_f32_to_f16_members(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    src: &MetalTensor,
+    dsts: &[&MetalTensor],
+    offsets: &[usize],
+    n: usize,
+) -> Result<(), MetalError> {
+    if src.dtype != GgmlType::F32 || n == 0 || !(2..=4).contains(&dsts.len()) {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_members",
+            detail: "needs F32 src, positive n and two to four members".into(),
+        });
+    }
+    if offsets.len() != dsts.len() || src.n_elements() as usize != n * dsts.len() {
+        return Err(MetalError::BadShape {
+            kernel: "scatter_offset_f32_to_f16_members",
+            detail: format!(
+                "src.n={} must be n={n} x members, offsets={}",
+                src.n_elements(),
+                offsets.len()
+            ),
+        });
+    }
+    let mut dst_off = [0u32; 4];
+    for (i, (dst, off)) in dsts.iter().zip(offsets).enumerate() {
+        if dst.dtype != GgmlType::F16 {
+            return Err(MetalError::BadShape {
+                kernel: "scatter_offset_f32_to_f16_members",
+                detail: format!("member {i} destination is not F16"),
+            });
+        }
+        if (off + n) as u64 > dst.n_elements() {
+            return Err(MetalError::BadShape {
+                kernel: "scatter_offset_f32_to_f16_members",
+                detail: format!(
+                    "member {i} dst_off+n={} > dst.n={}",
+                    off + n,
+                    dst.n_elements()
+                ),
+            });
+        }
+        dst_off[i] = *off as u32;
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        dst_off: [u32; 4],
+    }
+    let pso = ctx.pipeline("kernel_scatter_offset_f32_to_f16_members")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n as u32,
+            dst_off,
+        },
+    );
+    enc.set_tensor(1, src);
+    for (slot, i) in (2..=5).zip(0..4) {
+        enc.set_tensor(slot, dsts.get(i).copied().unwrap_or(dsts[0]));
+    }
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    enc.dispatch(
+        MTLSize {
+            width: n.div_ceil(tg_threads),
+            height: dsts.len(),
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Fused K+V scatter — writes K and V into their respective F16 caches at
 /// `dst_off` in a single dispatch. K and V always share `n` and `dst_off`
 /// at decode time (`n = kv_dim, dst_off = position * kv_dim`), so we
@@ -3349,6 +3432,67 @@ mod tests {
                 "V mismatch at slot={dst_off_slot}"
             );
             eprintln!("[scatter_kv_fused slot={dst_off_slot}] byte-identical to unfused");
+        }
+    }
+
+    /// Member-axis scatter: four independent destination caches and offsets
+    /// in one dispatch are byte-identical to four single dispatches.
+    #[test]
+    fn scatter_members_match_single_dispatches() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const N: usize = 257;
+        const M: usize = 4;
+        let cap = N + 16;
+        let offsets = [0usize, 3, 7, 11];
+        let src: Vec<f32> = (0..N * M)
+            .map(|i| ((i % 29) as f32 - 14.0) * 0.0625)
+            .collect();
+        let src_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&src),
+            vec![N as u64, M as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let member_dst: Vec<MetalTensor> = (0..M)
+            .map(|_| MetalTensor::zeros_f16(&ctx, vec![cap as u64]).unwrap())
+            .collect();
+        let single_dst: Vec<MetalTensor> = (0..M)
+            .map(|_| MetalTensor::zeros_f16(&ctx, vec![cap as u64]).unwrap())
+            .collect();
+        let dst_refs: Vec<&MetalTensor> = member_dst.iter().collect();
+        one_shot(&ctx, |enc| {
+            encode_scatter_offset_f32_to_f16_members(&ctx, enc, &src_t, &dst_refs, &offsets, N)
+        })
+        .unwrap();
+        for m in 0..M {
+            let row = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&src[m * N..(m + 1) * N]),
+                vec![N as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            one_shot(&ctx, |enc| {
+                encode_scatter_offset_f32_to_f16(&ctx, enc, &row, &single_dst[m], offsets[m], N)
+            })
+            .unwrap();
+            let n_bytes = cap * 2;
+            let a: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    member_dst[m].buffer.contents().as_ptr() as *const u8,
+                    n_bytes,
+                )
+            };
+            let b: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    single_dst[m].buffer.contents().as_ptr() as *const u8,
+                    n_bytes,
+                )
+            };
+            assert_eq!(a, b, "member {m} scatter differs");
         }
     }
 

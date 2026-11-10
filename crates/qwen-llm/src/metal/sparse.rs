@@ -180,6 +180,153 @@ pub fn encode_lightning_scores_f16_matrix(
     Ok(())
 }
 
+/// [`encode_lightning_scores_f16_matrix`] over two to four independent
+/// member key caches: query row `i` scores `keys[i]`. Queries, head weights,
+/// visibility and the query-major score table are shared. The per-query dot
+/// products and reduction order are unchanged, so each query's scores are
+/// bitwise equal to its own single-cache dispatch. Requires equal key
+/// geometry (`[head_dim, row_capacity]`).
+pub fn encode_lightning_scores_f16_matrix_members(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &LightningScores<'_>,
+    keys: &[&MetalTensor],
+    head_count: usize,
+    head_dim: usize,
+    row_capacity: usize,
+    max_dispatched_rows: usize,
+    query_count: usize,
+) -> Result<(), MetalError> {
+    const K: &str = "lightning_scores_f16_matrix_members";
+    require_serial(K, enc)?;
+    let kernel = match (head_count, head_dim) {
+        (64, 128) => "kernel_deepseek_v4_lightning_indexer_scores_f16_matrix_ceiling_members",
+        (32, 128) => "kernel_lightning_indexer_scores_f16_matrix_h32_members",
+        _ => {
+            return Err(bad_shape(
+                K,
+                format!("needs 32 or 64 heads of width 128, got {head_count}x{head_dim}"),
+            ));
+        }
+    };
+    if !(2..=4).contains(&keys.len())
+        || row_capacity == 0
+        || query_count == 0
+        || max_dispatched_rows == 0
+        || max_dispatched_rows > row_capacity
+        || query_count != keys.len()
+    {
+        return Err(bad_shape(
+            K,
+            format!(
+                "{} member keys, rows {max_dispatched_rows}/{row_capacity}, {query_count} queries",
+                keys.len()
+            ),
+        ));
+    }
+    let overflow = || bad_shape(K, "element counts exceed 32-bit shader offsets");
+    for elements in [
+        row_capacity.checked_mul(query_count),
+        head_count.checked_mul(query_count),
+        (head_count * head_dim).checked_mul(query_count),
+        row_capacity.checked_mul(head_dim),
+    ] {
+        let elements = elements.ok_or_else(overflow)?;
+        if u32::try_from(elements).is_err() {
+            return Err(overflow());
+        }
+    }
+    let (h, d, r, q) = (
+        head_count as u64,
+        head_dim as u64,
+        row_capacity as u64,
+        query_count as u64,
+    );
+    check_tensor(K, b.queries, GgmlType::F16, &[d, h, q], false, "queries")?;
+    check_tensor(
+        K,
+        b.head_weights,
+        GgmlType::F32,
+        &[h, q],
+        false,
+        "head weights",
+    )?;
+    check_tensor(
+        K,
+        b.visible_counts,
+        GgmlType::I32,
+        &[q],
+        false,
+        "visible counts",
+    )?;
+    check_tensor(K, b.scores, GgmlType::F32, &[r, q], true, "scores")?;
+    let fixed = [
+        (b.queries, "queries"),
+        (b.head_weights, "head weights"),
+        (b.visible_counts, "visible counts"),
+        (b.scores, "scores"),
+    ];
+    for (i, key) in keys.iter().enumerate() {
+        check_tensor(
+            K,
+            key,
+            GgmlType::F16,
+            &[d, r],
+            false,
+            &format!("member keys {i}"),
+        )?;
+        check_disjoint(K, key, &fixed)?;
+        for other in &keys[..i] {
+            check_disjoint(K, key, &[(*other, "earlier member keys")])?;
+        }
+    }
+    let threads = head_count / 8 * 32;
+    let threadgroup_bytes = 8 * 128 * 2 + 8 * head_count * 4;
+    let pso = ctx.pipeline(kernel)?;
+    if pso.threadExecutionWidth() != 32
+        || pso.maxTotalThreadsPerThreadgroup() < threads
+        || ctx.device.maxThreadgroupMemoryLength() < threadgroup_bytes
+    {
+        return Err(bad_shape(
+            K,
+            format!("needs {threads} 32-lane threads and {threadgroup_bytes} threadgroup bytes"),
+        ));
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &ScoreArgs {
+            head_count: to_u32(K, head_count, "heads")?,
+            head_dim: to_u32(K, head_dim, "head dim")?,
+            row_capacity: to_u32(K, row_capacity, "row capacity")?,
+            query_count: to_u32(K, query_count, "queries")?,
+        },
+    );
+    enc.set_tensor(1, b.queries);
+    enc.set_tensor(2, b.head_weights);
+    enc.set_tensor(3, keys[0]);
+    enc.set_tensor(4, b.visible_counts);
+    enc.set_tensor(5, b.scores);
+    for (slot, i) in (6..=8).zip(1..4) {
+        enc.set_tensor(slot, keys.get(i).copied().unwrap_or(keys[0]));
+    }
+    enc.set_threadgroup_memory(0, 8 * 128 * 2);
+    enc.set_threadgroup_memory(1, 8 * head_count * 4);
+    enc.dispatch(
+        MTLSize {
+            width: max_dispatched_rows.div_ceil(8),
+            height: query_count,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Buffers for [`encode_select_top_k_ids`].
 pub struct TopKSelection<'a> {
     /// F32 `[row_capacity, queries]`.
@@ -542,6 +689,120 @@ mod tests {
                     "batch of {count} from {q0}: query {i}"
                 );
             }
+        }
+    }
+
+    /// Member-axis scores: four independent key caches in one dispatch are
+    /// bitwise equal to four single-cache dispatches.
+    #[test]
+    fn h32_scores_members_match_single_key_dispatches_bitwise() {
+        let Some(ctx) = crate::test_fixtures::metal_context_or_skip() else {
+            return;
+        };
+        const ROWS: usize = 320;
+        const M: usize = 4;
+        let keys_f: Vec<Vec<f16>> = (0..M)
+            .map(|m| {
+                noise(20 + m as u32, ROWS * D, 1.0)
+                    .into_iter()
+                    .map(f16::from_f32)
+                    .collect()
+            })
+            .collect();
+        let keys_t: Vec<MetalTensor> = keys_f
+            .iter()
+            .map(|k| tensor(&ctx, k, vec![D as u64, ROWS as u64], GgmlType::F16))
+            .collect();
+        let queries: Vec<f16> = noise(31, M * H * D, 0.5)
+            .into_iter()
+            .map(f16::from_f32)
+            .collect();
+        let weights = noise(32, M * H, 0.03);
+        let visible = [ROWS as i32, 271, 128, 1];
+        let q = tensor(
+            &ctx,
+            &queries,
+            vec![D as u64, H as u64, M as u64],
+            GgmlType::F16,
+        );
+        let w = tensor(&ctx, &weights, vec![H as u64, M as u64], GgmlType::F32);
+        let v = tensor(&ctx, &visible, vec![M as u64], GgmlType::I32);
+        let s = tensor(
+            &ctx,
+            &vec![7.0f32; ROWS * M],
+            vec![ROWS as u64, M as u64],
+            GgmlType::F32,
+        );
+        let key_refs: Vec<&MetalTensor> = keys_t.iter().collect();
+        run(&ctx, |enc| {
+            encode_lightning_scores_f16_matrix_members(
+                &ctx,
+                enc,
+                &LightningScores {
+                    queries: &q,
+                    head_weights: &w,
+                    keys: &keys_t[0],
+                    visible_counts: &v,
+                    scores: &s,
+                },
+                &key_refs,
+                H,
+                D,
+                ROWS,
+                ROWS,
+                M,
+            )
+            .unwrap();
+        });
+        let combined = read_f32(&s);
+        for m in 0..M {
+            let qm = tensor(
+                &ctx,
+                &queries[m * H * D..(m + 1) * H * D],
+                vec![D as u64, H as u64, 1],
+                GgmlType::F16,
+            );
+            let wm = tensor(
+                &ctx,
+                &weights[m * H..(m + 1) * H],
+                vec![H as u64, 1],
+                GgmlType::F32,
+            );
+            let vm = tensor(&ctx, &visible[m..m + 1], vec![1], GgmlType::I32);
+            let sm = tensor(
+                &ctx,
+                &vec![9.0f32; ROWS],
+                vec![ROWS as u64, 1],
+                GgmlType::F32,
+            );
+            run(&ctx, |enc| {
+                encode_lightning_scores_f16_matrix(
+                    &ctx,
+                    enc,
+                    &LightningScores {
+                        queries: &qm,
+                        head_weights: &wm,
+                        keys: &keys_t[m],
+                        visible_counts: &vm,
+                        scores: &sm,
+                    },
+                    H,
+                    D,
+                    ROWS,
+                    visible[m] as usize,
+                    1,
+                )
+                .unwrap();
+            });
+            let alone = read_f32(&sm);
+            let vis = visible[m] as usize;
+            assert!(
+                combined[m * ROWS..m * ROWS + vis]
+                    .iter()
+                    .zip(&alone[..vis])
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "member {m} scores differ"
+            );
         }
     }
 

@@ -42,43 +42,6 @@ inline void expert_dequantize_iq2_xs(device const uchar * blk, short il,
     }
 }
 
-// Vector IQ2_S twin of latent_dequantize_iq2_s: one 64-bit grid word per eight
-// weights gives a float4 magnitude pair, and one sign byte gives a uint4 mask
-// for select. The arithmetic stays (dl * magnitude) * sign, element-exact to
-// the scalar decoder unless Metal reassociates under -ffast-math; the probe
-// checks bitwise equality.
-inline void expert_dequantize_iq2_s_vec(device const uchar * blk_bytes, short il,
-                                        thread float4x4 & reg) {
-    const half d_h = *((device const half *)blk_bytes);
-    device const uchar * qbase = blk_bytes + 2;
-    device const uchar * qh = qbase + QT_QK_K / 4;
-    device const uchar * scales = qh + QT_QK_K / 32;
-
-    const uint ib32 = uint(il >> 1);
-    const uint ih = uint(il & 1);
-    device const uchar * qs = qbase + 4u * ib32 + 2u * ih;
-    device const uchar * signs = qs + QT_QK_K / 8;
-
-    const uint qh_lane = uint(qh[ib32]) >> (4u * ih);
-    const uint scale = (uint(scales[ib32]) >> (4u * ih)) & 0x0fu;
-    const float dl = float(d_h) * (0.5f + float(scale)) * 0.25f;
-
-    QT_FOR_UNROLL (int gsel = 0; gsel < 2; ++gsel) {
-        const uint code = uint(qs[gsel])
-            | ((qh_lane << (8u - 2u * uint(gsel))) & 0x300u);
-        const ulong g = qt_iq2s_grid[code];
-        const uint sign_bits = uint(signs[gsel]);
-        QT_FOR_UNROLL (int part = 0; part < 2; ++part) {
-            const uint word = uint(g >> (32u * uint(part)));
-            const float4 mag = float4(uint4(word, word >> 8, word >> 16, word >> 24) & 255u);
-            const uint4 mask = uint4(1u, 2u, 4u, 8u) << (4u * uint(part));
-            const float4 sign = select(float4(1.0f), float4(-1.0f),
-                                       (uint4(sign_bits) & mask) != 0);
-            reg[2 * gsel + part] = dl * mag * sign;
-        }
-    }
-}
-
 // Q5_K with 16-byte quant/high-bit loads (two vector loads instead of 32
 // byte loads per 16 weights). Same arithmetic as latent_dequantize_q5_K, so
 // decoded values are bitwise equal. Needs 16-byte aligned blocks: the 176-byte
@@ -678,43 +641,6 @@ inline void expert_iq2_xxs_rows_dot_k(
     }
 }
 
-// Same dot with a 2x group unroll: the next group's activation load and
-// q2/aux decode can overlap the current group's FMAs. Per-accumulator group
-// order is unchanged, so the arithmetic is the incumbent's unless the
-// compiler reassociates under -ffast-math; stream hashes are the check.
-template <uint NB32>
-inline void expert_iq2_xxs_rows_dot_k_u2(
-        device const uchar * row0, device const float * x, ushort lane,
-        threadgroup const ulong * grid_table, threadgroup const uchar * sign_table,
-        thread float * sum) {
-    constexpr ulong ROW_BYTES = ulong(NB32 / 8u) * 66u;
-    float yl[32];
-    #pragma clang loop unroll_count(2)
-    for (uint ib32 = lane; ib32 < NB32; ib32 += 32u) {
-        expert_load_x16(x + 32u * ib32, yl);
-        expert_load_x16(x + 32u * ib32 + 16u, yl + 16);
-        const ulong offset = ulong(ib32 / 8u) * 66u;
-        const uint ib = ib32 % 8u;
-        QT_FOR_UNROLL (uint r = 0; r < EXPERT_IQ2_ROWS; ++r) {
-            device const uchar * block = row0 + ulong(r) * ROW_BYTES + offset;
-            device const ushort * q2 = (device const ushort *)(block + 2) + 4u * ib;
-            const float db = float(*((device const half *)block));
-            device const uchar * aux8 = (device const uchar *)q2;
-            const uint aux32 = uint(q2[2]) | (uint(q2[3]) << 16);
-            const float d = db * (0.5f + float(aux32 >> 28));
-            float s = 0.0f;
-            QT_FOR_UNROLL (ushort l = 0; l < 4; ++l) {
-                threadgroup const uchar * g = (threadgroup const uchar *)(grid_table + aux8[l]);
-                const uchar signs = sign_table[(aux32 >> (7u * l)) & 127u];
-                QT_FOR_UNROLL (ushort j = 0; j < 8; ++j) {
-                    s += yl[8 * l + j] * float(g[j]) * ((signs & qt_kmask_iq2xs[j]) ? -1.0f : 1.0f);
-                }
-            }
-            sum[r] += d * s * 0.25f;
-        }
-    }
-}
-
 // kernel_expert_native_iq2_xxs_f32_split at K = 32 * NB32; n_out even.
 template <uint NB32>
 [[max_total_threads_per_threadgroup(128)]]
@@ -750,56 +676,6 @@ kernel void kernel_expert_native_iq2_xxs_f32_split_k(
     device const float * x = input + (projection == 2 ? selected : ulong(token)) * (32u * NB32);
     float sum[EXPERT_IQ2_ROWS] = {0.0f};
     expert_iq2_xxs_rows_dot_k<NB32>(row0, x, lane, grid_table, sign_table, sum);
-    QT_FOR_UNROLL (uint r = 0; r < EXPERT_IQ2_ROWS; ++r) {
-        const float value = simd_sum(sum[r]);
-        if (lane == 0) {
-            const ulong out_index = out_first + r;
-            if (args.mode == 1) {
-                const float g = min(output[out_index], args.clamp);
-                const float u = clamp(value, -args.clamp, args.clamp);
-                output[out_index] = (g / (1.0f + exp(-g))) * u;
-            } else {
-                output[out_index] = value;
-            }
-        }
-    }
-}
-
-// kernel_expert_native_iq2_xxs_f32_u2_split at K = 32 * NB32; n_out even.
-template <uint NB32>
-[[max_total_threads_per_threadgroup(128)]]
-kernel void kernel_expert_native_iq2_xxs_f32_u2_split_k(
-        constant expert_native_args & args [[buffer(0)]],
-        device const uchar * bank [[buffer(1)]],
-        device const float * input [[buffer(2)]],
-        device const int * ids [[buffer(3)]],
-        device const int * status [[buffer(4)]],
-        device float * output [[buffer(5)]],
-        uint3 group [[threadgroup_position_in_grid]],
-        ushort lane [[thread_index_in_simdgroup]],
-        ushort simd [[simdgroup_index_in_threadgroup]],
-        ushort tid [[thread_index_in_threadgroup]]) {
-    constexpr ulong ROW_BYTES = ulong(NB32 / 8u) * 66u;
-    threadgroup ulong grid_table[256];
-    threadgroup uchar sign_table[128];
-    expert_iq2_xxs_tables(grid_table, sign_table, tid);
-    const uint first = (group.x * 4u + uint(simd)) * EXPERT_IQ2_ROWS;
-    const uint slot = group.y;
-    const uint token = group.z;
-    if (first >= args.n_out || slot >= args.top_k) return;
-    const ulong selected = ulong(token) * args.top_k + slot;
-    const ulong out_first = selected * args.n_out + first;
-    const bool ready = status[token] == 1;
-    const int expert = ready ? ids[selected] : -1;
-    if (!(ready && expert >= 0 && uint(expert) < args.experts)) {
-        if (lane < EXPERT_IQ2_ROWS) output[out_first + lane] = 0.0f;
-        return;
-    }
-    device const uchar * row0 = bank + (ulong(expert) * args.n_out + first) * ROW_BYTES;
-    const uint projection = args.mode & EXPERT_NATIVE_PROJECTION_MASK;
-    device const float * x = input + (projection == 2 ? selected : ulong(token)) * (32u * NB32);
-    float sum[EXPERT_IQ2_ROWS] = {0.0f};
-    expert_iq2_xxs_rows_dot_k_u2<NB32>(row0, x, lane, grid_table, sign_table, sum);
     QT_FOR_UNROLL (uint r = 0; r < EXPERT_IQ2_ROWS; ++r) {
         const float value = simd_sum(sum[r]);
         if (lane == 0) {
@@ -1136,15 +1012,6 @@ kernel void kernel_expert_native_gate_up_f32_k(
 EXPERT_IQ2_XXS_SPEC("5120", 160)
 EXPERT_IQ2_XXS_SPEC("2304", 72)
 
-// 2x-unrolled split-loop down instances (A/B candidate).
-#define EXPERT_IQ2_XXS_SPEC_U2(KNAME, NB32) \
-    template [[host_name("kernel_expert_native_iq2_xxs_f32_u2_split_k" KNAME)]] kernel void \
-        kernel_expert_native_iq2_xxs_f32_u2_split_k<NB32>(constant expert_native_args &, \
-        device const uchar *, device const float *, device const int *, device const int *, \
-        device float *, uint3, ushort, ushort, ushort);
-EXPERT_IQ2_XXS_SPEC_U2("5120", 160)
-EXPERT_IQ2_XXS_SPEC_U2("2304", 72)
-
 #define EXPERT_NATIVE_SPEC(NAME, KNAME, RNAME, BYTES, NL, DEQ, K, ROWS) \
     template [[host_name("kernel_expert_native_" NAME "_f32_k" KNAME "_r" RNAME)]] kernel void \
         kernel_expert_native_f32_k<BYTES, NL, DEQ, K, ROWS>(constant expert_native_args &, \
@@ -1160,8 +1027,8 @@ EXPERT_IQ2_XXS_SPEC_U2("2304", 72)
 EXPERT_NATIVE_SPEC_ROWS("iq2_xs", 74, 16, expert_dequantize_iq2_xs, "4", 4)
 EXPERT_NATIVE_SPEC_ROWS("iq2_s", QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_iq2_s, "4", 4)
 
-// Ragged-tail down instances: K/16 not a multiple of 32 (Flash-Next K=640,
-// V4.1 K=2304). Same args and grid as the `_k..._r4` twin.
+// Ragged-tail Flash-Next down instances: K/16=40 is not a multiple of 32.
+// Same args and grid as the `_k640_r4` twins.
 #define EXPERT_NATIVE_RAGGED(NAME, KNAME, RNAME, BYTES, NL, DEQ, K, ROWS) \
     template [[host_name("kernel_expert_native_" NAME "_f32_ragged_k" KNAME "_r" RNAME)]] kernel void \
         kernel_expert_native_f32_ragged_k<BYTES, NL, DEQ, K, ROWS>(constant expert_native_args &, \
@@ -1170,22 +1037,6 @@ EXPERT_NATIVE_SPEC_ROWS("iq2_s", QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_
 EXPERT_NATIVE_RAGGED("q2_0", "640", "4", QT_Q2_0_BYTES, QT_Q2_0_NL, latent_dequantize_q2_0, 640, 4)
 EXPERT_NATIVE_RAGGED("iq4_nl", "640", "4", QT_IQ4_NL_BYTES, QT_IQ4_NL_NL, latent_dequantize_iq4_nl, 640, 4)
 EXPERT_NATIVE_RAGGED("q8_0", "640", "4", QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequantize_q8_0, 640, 4)
-EXPERT_NATIVE_RAGGED("iq2_xs", "2304", "4", 74, 16, expert_dequantize_iq2_xs, 2304, 4)
-EXPERT_NATIVE_RAGGED("iq2_s", "2304", "4", QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_iq2_s, 2304, 4)
-
-// Vector-decoder instances of the same kernels (IQ2_S only), A/B candidates.
-#define EXPERT_NATIVE_SPEC_VEC(NAME, KNAME, RNAME, BYTES, NL, DEQ, K, ROWS) \
-    template [[host_name("kernel_expert_native_" NAME "_f32_vec_k" KNAME "_r" RNAME)]] kernel void \
-        kernel_expert_native_f32_k<BYTES, NL, DEQ, K, ROWS>(constant expert_native_args &, \
-        device const uchar *, device const float *, device const int *, device const int *, \
-        device float *, uint3, ushort, ushort); \
-    template [[host_name("kernel_expert_native_gate_up_" NAME "_f32_vec_k" KNAME "_r" RNAME)]] kernel void \
-        kernel_expert_native_gate_up_f32_k<BYTES, NL, DEQ, K, ROWS>(constant expert_native_args &, \
-        device const uchar *, device const float *, device const int *, device const int *, \
-        device float *, device const uchar *, uint3, ushort, ushort);
-EXPERT_NATIVE_SPEC_VEC("iq2_s", "2560", "4", QT_IQ2_S_BYTES, QT_IQ2_S_NL, expert_dequantize_iq2_s_vec, 2560, 4)
-EXPERT_NATIVE_SPEC_VEC("iq2_s", "2304", "4", QT_IQ2_S_BYTES, QT_IQ2_S_NL, expert_dequantize_iq2_s_vec, 2304, 4)
-EXPERT_NATIVE_SPEC_VEC("iq2_s", "4096", "4", QT_IQ2_S_BYTES, QT_IQ2_S_NL, expert_dequantize_iq2_s_vec, 4096, 4)
 
 // Multi-output GLM batch decode: unchanged per-channel F32 FMA chains,
 // reusing activation fragments for independent output channels.
@@ -1337,8 +1188,6 @@ inline void glm_batch_gate_up(
             args, gate_bank, input, ids, status, output, up_bank, up_values, group, lane, simd); \
     }
 GLM_BATCH_IQ(tg64, 2, latent_dequantize_iq2_s, latent_dequantize_iq3_s)
-// A/B candidate: same 64-thread schedule with the vector IQ2_S decoder.
-GLM_BATCH_IQ(vec, 2, expert_dequantize_iq2_s_vec, latent_dequantize_iq3_s)
 
 // Two dense Q8_0 projections of one F32 activation in one dispatch (the V4.1
 // decode query-rank and KV-latent projections both read the layer input).

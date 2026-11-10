@@ -93,22 +93,6 @@ required-features = ["perf-ablations"]
 name = "fn_down_tail_rate"
 required-features = ["perf-ablations"]
 
-[[example]]
-name = "v41_down_tail_rate"
-required-features = ["perf-ablations"]
-
-[[example]]
-name = "v41_iq2xxs_down_rate"
-required-features = ["perf-ablations"]
-
-[[example]]
-name = "glm_gate_up_vec_rate"
-required-features = ["perf-ablations"]
-
-[[example]]
-name = "fn_gate_up_vec_rate"
-required-features = ["perf-ablations"]
-
 [[bench]]
 name = "kernels"
 harness = false

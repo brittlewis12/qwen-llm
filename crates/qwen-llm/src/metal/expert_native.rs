@@ -96,8 +96,8 @@ fn iq2_spec() -> bool {
 }
 
 crate::env_flag!(
-    /// Ragged-tail down kernel for shapes whose K/16 is not a multiple of 32 (Flash-Next K=640, V4.1 K=2304). Runs one full 32-fragment pass, then spreads the remainder over all 32 lanes as one (fragment, channel) dot each. Per-channel tails stay ascending, but the cross-lane F32 reduction regroups the sum, so this is not bitwise with the incumbent and is gated by dNLL/KL. Zero restores the incumbent `_k..._r4` kernels.
-    default_off native_ragged, "QWEN_EXPERT_NATIVE_RAGGED"
+    /// Ragged-tail Flash-Next expert-down kernel (IQ4_NL/Q2_0/Q8_0 at K=640, where K/16=40 is not a multiple of 32). Runs one full 32-fragment pass, then spreads the 8-fragment tail over all 32 lanes as one (fragment, channel) dot each instead of a full four-channel pass on eight active lanes. Per-channel tails stay ascending, but the cross-lane F32 reduction regroups the sum, so this is not bitwise with the incumbent and is gated by dNLL/KL. Zero restores the incumbent `_k640_r4` kernels.
+    default_on native_ragged, "QWEN_EXPERT_NATIVE_RAGGED"
 );
 
 /// Ragged selection with the whole-round `pair-ragged` screen override, and an
@@ -146,15 +146,8 @@ fn native_spec_pipeline(
             } else {
                 "iq2_s"
             };
-            // K=2304 is V4.1's ragged down projection; gate/up is K=5120 and
-            // stays on the exact-multiple kernel.
-            let kind = if !fused && n_in == 2304 && native_ragged_selected() {
-                "f32_ragged_k"
-            } else {
-                "f32_k"
-            };
             (
-                format!("kernel_expert_native_{gate_up}{suffix}_{kind}{n_in}_r{IQ2_SPEC_ROWS}"),
+                format!("kernel_expert_native_{gate_up}{suffix}_f32_k{n_in}_r{IQ2_SPEC_ROWS}"),
                 IQ2_SPEC_ROWS,
             )
         }

@@ -2,6 +2,7 @@ use super::*;
 
 const TREE_KERNEL: &str = "kernel_qwen4exp_topk_guarded_f32";
 const SIMD_KERNEL: &str = "kernel_qwen4exp_topk_guarded_simd_f32";
+const MEMBERS_KERNEL: &str = "kernel_qwen4exp_topk_guarded_simd_members_f32";
 
 /// `0` keeps the tree-reduction guarded top-k; the default takes each round's
 /// arg-max with SIMD reductions (same selection, ties, nonfinite fallback and
@@ -94,6 +95,83 @@ pub(crate) fn encode_with_status(
         },
     );
     Ok(())
+}
+
+/// Encode one guarded top-k threadgroup per independent member. Returns false
+/// without encoding when the SIMD kernel is rolled back or a layout/PSO does
+/// not fit, so the caller can use the per-member route.
+pub(crate) fn encode_members_with_status(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    logits: &[&MetalTensor],
+    ids: &[&MetalTensor],
+    weights: &[&MetalTensor],
+    status: &[&MetalTensor],
+) -> Result<bool, Qwen4ExpMoeError> {
+    let b = logits.len();
+    if b != ids.len() || b != weights.len() || b != status.len() || !(2..=4).contains(&b) {
+        return Ok(false);
+    }
+    if kernel() != SIMD_KERNEL {
+        return Ok(false);
+    }
+    validate_encoder(ctx, enc)?;
+    let mut tensors: Vec<(&str, &MetalTensor)> = Vec::with_capacity(4 * b);
+    for i in 0..b {
+        require_tensor(
+            "guarded top-k logits",
+            logits[i],
+            GgmlType::F32,
+            &[512],
+            false,
+        )?;
+        require_tensor("guarded top-k IDs", ids[i], GgmlType::I32, &[10], true)?;
+        require_tensor(
+            "guarded top-k weights",
+            weights[i],
+            GgmlType::F32,
+            &[10],
+            true,
+        )?;
+        require_tensor("guarded top-k status", status[i], GgmlType::I32, &[1], true)?;
+        tensors.extend([
+            ("logits", logits[i]),
+            ("IDs", ids[i]),
+            ("weights", weights[i]),
+            ("status", status[i]),
+        ]);
+    }
+    require_same_device(ctx, &tensors)?;
+    require_disjoint(&tensors)?;
+    require_pipeline_capacity(ctx, MEMBERS_KERNEL, 512, 6144)?;
+    if ctx.pipeline(MEMBERS_KERNEL)?.threadExecutionWidth() != 32 {
+        return Ok(false);
+    }
+    enc.set_pipeline(&ctx.pipeline(MEMBERS_KERNEL)?);
+    enc.set_bytes_slice(0, &[512u32, 10]);
+    for i in 0..4 {
+        let j = i.min(b - 1);
+        enc.set_tensor(1 + i, logits[j]);
+        enc.set_tensor(5 + i, ids[j]);
+        enc.set_tensor(9 + i, weights[j]);
+        enc.set_tensor(13 + i, status[j]);
+    }
+    for slot in 0..3 {
+        enc.set_threadgroup_memory(slot, 2048);
+    }
+    enc.dispatch(
+        objc2_metal::MTLSize {
+            width: b,
+            height: 1,
+            depth: 1,
+        },
+        objc2_metal::MTLSize {
+            width: 512,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(true)
 }
 
 #[cfg(test)]

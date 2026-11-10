@@ -9,6 +9,20 @@ crate::env_flag!(
     /// Four output channels per SIMD for independent Flash-Next native expert grids. 0 keeps the generic token grids.
     default_on tiles_enabled,"QWEN_FN_BATCH_EXPERT_TILES"
 );
+crate::env_flag!(
+    /// Batch the independent guarded top-k selection across members. Requires the fused shared/router projections and the SIMD guarded kernel; otherwise members keep their own top-k. 0 restores per-member top-k.
+    default_on batch_topk_enabled, "QWEN_FN_MOE_BATCH_TOPK"
+);
+fn batch_topk_selected() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    {
+        return crate::metal::fn_batch_probe::axis("moe_batch_topk", batch_topk_enabled());
+    }
+    #[cfg(not(feature = "perf-ablations"))]
+    {
+        batch_topk_enabled()
+    }
+}
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Args {
@@ -77,6 +91,8 @@ pub(crate) fn encode_into<'a>(
     let x = scratch
         .shared_output
         .view_subrange(0, vec![g.hidden_size as u64, rows as u64]);
+    let batch_topk = batch_topk_selected();
+    let mut fused_flags = Vec::with_capacity(rows);
     for (w, input) in members.iter_mut().zip(inputs) {
         reserve_command(w, enc)?;
         let b = Qwen4ExpMoeSingletonBuffers {
@@ -93,7 +109,10 @@ pub(crate) fn encode_into<'a>(
             output: &w.output,
         };
         let fused = projections::try_encode(ctx, enc, input, weights, b)?;
-        encode_singleton_router(ctx, enc, input, weights, b, fused)?;
+        fused_flags.push(fused);
+        if !(batch_topk && fused) {
+            encode_singleton_router(ctx, enc, input, weights, b, fused)?;
+        }
         if fused {
             let n = g.shared_intermediate_size as u64;
             encode_silu_mul_f32(
@@ -107,6 +126,32 @@ pub(crate) fn encode_into<'a>(
             encode_singleton_shared_gate_up(ctx, enc, input, weights, b)?;
         }
         encode_singleton_shared_down(ctx, enc, weights, b)?;
+    }
+    if batch_topk {
+        if fused_flags.iter().all(|&fused| fused) {
+            let logits: Vec<_> = members.iter().map(|w| &w.router_logits).collect();
+            let ids: Vec<_> = members.iter().map(|w| &w.topk_ids).collect();
+            let topk_weights: Vec<_> = members.iter().map(|w| &w.topk_weights).collect();
+            let status: Vec<_> = members.iter().map(|w| &w.route_status).collect();
+            if !guarded_topk::encode_members_with_status(
+                ctx,
+                enc,
+                &logits,
+                &ids,
+                &topk_weights,
+                &status,
+            )? {
+                for w in &members {
+                    super::encode_singleton_topk(ctx, enc, g, w)?;
+                }
+            }
+        } else {
+            for (w, &fused) in members.iter().zip(&fused_flags) {
+                if fused {
+                    super::encode_singleton_topk(ctx, enc, g, w)?;
+                }
+            }
+        }
     }
     let args = Args {
         hidden: g.hidden_size as u32,

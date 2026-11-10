@@ -1771,6 +1771,36 @@ fn encode_singleton_router(
     Ok(())
 }
 
+fn encode_singleton_topk(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    g: Qwen4ExpMoeMetalGeometry,
+    w: &Qwen4ExpMoeMetalWorkspace,
+) -> Result<(), Qwen4ExpMoeError> {
+    if w.guarded_topk && guarded_topk::eligible(g.expert_count, g.experts_per_token) {
+        guarded_topk::encode_with_status(
+            ctx,
+            enc,
+            &w.router_logits,
+            &w.topk_ids,
+            &w.topk_weights,
+            &w.route_status,
+        )?;
+    } else {
+        encode_topk_logits_softmax_f32_status(
+            ctx,
+            enc,
+            &w.router_logits,
+            &w.topk_ids,
+            &w.topk_weights,
+            &w.route_status,
+            g.expert_count,
+            g.experts_per_token,
+        )?;
+    }
+    Ok(())
+}
+
 fn encode_singleton_gate_up(
     ctx: &MetalContext,
     enc: &KernelEncoder,

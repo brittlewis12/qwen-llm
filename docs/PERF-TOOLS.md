@@ -1338,7 +1338,8 @@ Rules:
 - Computation-skipping attribution knobs (`QWEN_DECODE_GDN_NOOP_*`,
   `QWEN_DECODE_MOE_NOOP_*`, `QWEN_PREFILL_NOOP_*`, and
   `QWEN_PREFILL_MOE_GROUPED_ZERO_FILL`) only work in an explicitly identified
-  diagnostic build: `cargo build --release -p qwen-cli --features perf-ablations`.
+  diagnostic build: `cargo build --release -p qwen-cli --features perf-ablations
+  --bin qwen --bin qwen-bench`.
   The build identity records `perf-ablations`; product binaries refuse to
   start if any ablation setting is present without the feature.
 - Dense GDN front traces split the projection bucket into `gdn_qkv`, `gdn_z`, and

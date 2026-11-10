@@ -65,11 +65,13 @@ newer, and Xcode with its Metal toolchain, so that `xcrun metal` and
 `xcodebuild -downloadComponent MetalToolchain`.
 
 ```sh
-cargo build --release -p qwen-cli
+cargo build --release -p qwen-cli --bin qwen --bin qwen-bench
 ```
 
-This puts `qwen`, `qwen-bench`, `qwen-lens` and a few smaller tools in
-`target/release/`. The examples below assume they are on your `PATH`.
+This puts `qwen` and `qwen-bench` in `target/release/`. The examples below
+assume they are on your `PATH`. The smaller tools (`qwen-lens`, `qwen-tok`,
+`qwen-census`, `qwen-grammar-oracle`) build the same way when named with
+`--bin`; naming only the binaries you need avoids linking every CLI target.
 
 The Metal kernels are compiled during the build and embedded in the binaries.
 The build also compiles a separate Metal 4 TensorOps library when the local

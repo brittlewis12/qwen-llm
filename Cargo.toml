@@ -92,6 +92,16 @@ debug = "line-tables-only"
 inherits = "release"
 debug = "full"
 
+# Screening profile for A/B work: release optimization without the
+# cross-crate fat-LTO link. Use only when both arms use the same profile;
+# an iter timing is not comparable to a release timing. The product binary
+# and any performance claim stay on release until a paired check says
+# otherwise.
+[profile.iter]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
 # Tests run optimized: numerical tolerances and timing-sensitive paths are
 # qualified at opt-level 3, and the debug profile is both a correctness
 # confound and several times slower. Thin LTO keeps edit-test loops

@@ -4,6 +4,8 @@
 //!
 //! Invoked at `cargo build` time. Recompiles when inputs or the worktree change.
 
+use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -14,6 +16,51 @@ const DEFAULT_METALLIB_TARGET: &str = "14.0";
 const METAL_LANGUAGE: &str = "metal3.1";
 const TENSOR_METAL_LANGUAGE: &str = "metal4.0";
 const TENSOR_METAL_TARGET: &str = "26.0";
+
+fn hash_key_part(hasher: &mut Sha256, label: &str, value: &[u8]) {
+    hasher.update((label.len() as u64).to_be_bytes());
+    hasher.update(label.as_bytes());
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(out, "{byte:02x}").unwrap();
+    }
+    out
+}
+
+/// Cache key for one `.metal` source. Source bytes, language, target,
+/// compiler identity, SDK and the fixed optimization flags all participate,
+/// so neither an edit nor a toolchain/flag change can reuse stale AIR.
+fn source_cache_key(
+    src: &Path,
+    language: &str,
+    target: &str,
+    compiler_identity: &str,
+    sdk_version: &str,
+) -> anyhow::Result<String> {
+    let source = std::fs::read(src)?;
+    let mut hasher = Sha256::new();
+    hash_key_part(&mut hasher, "language", language.as_bytes());
+    hash_key_part(&mut hasher, "target", target.as_bytes());
+    hash_key_part(&mut hasher, "compiler", compiler_identity.as_bytes());
+    hash_key_part(&mut hasher, "sdk", sdk_version.as_bytes());
+    hash_key_part(&mut hasher, "flags", b"-O3 -ffast-math");
+    hash_key_part(&mut hasher, "source", &source);
+    Ok(hex_digest(&hasher.finalize()))
+}
+
+fn cached(key_path: &Path, artifact: &Path, key: &str) -> bool {
+    std::fs::read_to_string(key_path)
+        .map(|stored| stored == key)
+        .unwrap_or(false)
+        && std::fs::metadata(artifact)
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
+}
 
 fn main() -> anyhow::Result<()> {
     // MTLResidencySetDescriptor is available on macOS 15 and newer. Keep the
@@ -107,6 +154,8 @@ fn main() -> anyhow::Result<()> {
             "kernels_tensor",
             TENSOR_METAL_TARGET,
             TENSOR_METAL_LANGUAGE,
+            &compiler_identity,
+            &sdk_version,
         )?,
         Err(reason) => {
             println!(
@@ -152,6 +201,8 @@ fn main() -> anyhow::Result<()> {
         &out_dir,
         "kernels",
         &target,
+        &compiler_identity,
+        &sdk_version,
     )?;
     compile_metallib(
         &kernels_dir.join("research"),
@@ -159,6 +210,8 @@ fn main() -> anyhow::Result<()> {
         &out_dir,
         "kernels_research",
         &target,
+        &compiler_identity,
+        &sdk_version,
     )?;
     Ok(())
 }
@@ -180,8 +233,19 @@ fn compile_metallib(
     out_dir: &Path,
     name: &str,
     target: &str,
+    compiler_identity: &str,
+    sdk_version: &str,
 ) -> anyhow::Result<()> {
-    compile_metallib_with_language(dir, watched_dir, out_dir, name, target, METAL_LANGUAGE)
+    compile_metallib_with_language(
+        dir,
+        watched_dir,
+        out_dir,
+        name,
+        target,
+        METAL_LANGUAGE,
+        compiler_identity,
+        sdk_version,
+    )
 }
 
 fn compile_metallib_with_language(
@@ -191,6 +255,8 @@ fn compile_metallib_with_language(
     name: &str,
     target: &str,
     language: &str,
+    compiler_identity: &str,
+    sdk_version: &str,
 ) -> anyhow::Result<()> {
     let metallib = out_dir.join(format!("{name}.metallib"));
     if !dir.exists() {
@@ -226,7 +292,21 @@ fn compile_metallib_with_language(
             out_dir.join(format!("{name}_{stem}.air"))
         })
         .collect();
+    let mut library_parts: Vec<(PathBuf, String)> = Vec::with_capacity(metal_files.len());
     for (src, air) in metal_files.iter().zip(air_files.iter()) {
+        let key = source_cache_key(src, language, target, compiler_identity, sdk_version)?;
+        let stem = src.file_stem().unwrap().to_string_lossy();
+        let key_path = out_dir.join(format!("{name}_{stem}.key"));
+        if cached(&key_path, air, &key) {
+            library_parts.push((air.clone(), key));
+            continue;
+        }
+        // Drop the sidecar first and compile through a temporary path, so a
+        // failed or interrupted compile can never leave an artifact whose
+        // sidecar still claims it is current.
+        let _ = std::fs::remove_file(&key_path);
+        let temp_air = air.with_extension("air.tmp");
+        let _ = std::fs::remove_file(&temp_air);
         let status = Command::new("xcrun")
             .args(["-sdk", "macosx", "metal", "-c"])
             .arg("-O3")
@@ -235,20 +315,42 @@ fn compile_metallib_with_language(
             .arg(format!("-mmacosx-version-min={target}"))
             .arg(src)
             .arg("-o")
-            .arg(air)
+            .arg(&temp_air)
             .status()?;
         if !status.success() {
+            let _ = std::fs::remove_file(&temp_air);
             anyhow::bail!("metal compile failed for {}", src.display());
         }
+        std::fs::rename(&temp_air, air)?;
+        std::fs::write(&key_path, &key)?;
+        library_parts.push((air.clone(), key));
     }
-    let status = Command::new("xcrun")
-        .args(["-sdk", "macosx", "metallib"])
-        .args(&air_files)
-        .arg("-o")
-        .arg(&metallib)
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("metallib link failed for {name}");
+    // Relink only when the ordered source/key set changed or the archive is
+    // missing. AIR and metallib output is deterministic for fixed inputs.
+    let mut library_hasher = Sha256::new();
+    hash_key_part(&mut library_hasher, "library", name.as_bytes());
+    for (air, key) in &library_parts {
+        hash_key_part(&mut library_hasher, "air", air.to_string_lossy().as_bytes());
+        hash_key_part(&mut library_hasher, "key", key.as_bytes());
+    }
+    let library_key = hex_digest(&library_hasher.finalize());
+    let library_key_path = out_dir.join(format!("{name}.metallib.key"));
+    if !cached(&library_key_path, &metallib, &library_key) {
+        let _ = std::fs::remove_file(&library_key_path);
+        let temp_metallib = metallib.with_extension("metallib.tmp");
+        let _ = std::fs::remove_file(&temp_metallib);
+        let status = Command::new("xcrun")
+            .args(["-sdk", "macosx", "metallib"])
+            .args(&air_files)
+            .arg("-o")
+            .arg(&temp_metallib)
+            .status()?;
+        if !status.success() {
+            let _ = std::fs::remove_file(&temp_metallib);
+            anyhow::bail!("metallib link failed for {name}");
+        }
+        std::fs::rename(&temp_metallib, &metallib)?;
+        std::fs::write(&library_key_path, &library_key)?;
     }
     Ok(())
 }

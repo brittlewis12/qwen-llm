@@ -123,6 +123,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "direct output route engagement"
                     );
                 }
+                if mode == "pair-moe_batch_projections" {
+                    assert_eq!(
+                        fn_batch_probe::observed("moe_batch_projections") > 0,
+                        arm == 1,
+                        "member FFN projection engagement"
+                    );
+                }
                 if j >= 8 {
                     ms[arm].push(elapsed);
                     for k in 0..3 {

@@ -92,9 +92,14 @@ pub(crate) fn encode_into<'a>(
         .shared_output
         .view_subrange(0, vec![g.hidden_size as u64, rows as u64]);
     let batch_topk = batch_topk_selected();
+    for w in members.iter_mut() {
+        reserve_command(w, enc)?;
+    }
+    let member_refs: Vec<_> = members.iter().map(|m| &**m).collect();
+    let projected = projections::try_encode_members(ctx, enc, inputs, weights, &member_refs)?;
+    drop(member_refs);
     let mut fused_flags = Vec::with_capacity(rows);
     for (w, input) in members.iter_mut().zip(inputs) {
-        reserve_command(w, enc)?;
         let b = Qwen4ExpMoeSingletonBuffers {
             guarded_topk: w.guarded_topk,
             router_logits: &w.router_logits,
@@ -108,7 +113,11 @@ pub(crate) fn encode_into<'a>(
             shared_output: &w.shared_output,
             output: &w.output,
         };
-        let fused = projections::try_encode(ctx, enc, input, weights, b)?;
+        let fused = if projected {
+            true
+        } else {
+            projections::try_encode(ctx, enc, input, weights, b)?
+        };
         fused_flags.push(fused);
         if !(batch_topk && fused) {
             encode_singleton_router(ctx, enc, input, weights, b, fused)?;

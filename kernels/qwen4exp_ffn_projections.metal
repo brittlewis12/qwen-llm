@@ -491,3 +491,35 @@ FN_PACKET(kernel_qwen4exp_ffn_projections_3_1,3,1)
 FN_PACKET(kernel_qwen4exp_ffn_projections_3_2,3,2)
 
 FN_PACKET(kernel_qwen4exp_ffn_projections_3_3,3,3)
+
+// Member-axis fused packet: one flat grid over (projection group, member).
+// Each member has private input/projection/router/scale buffers; the four
+// shared weights are bound once and served from cache. The per-row projection
+// arithmetic and output layout are the one-token kernel's.
+#define FN_PACKET_MEMBERS(NAME,G,U) \
+kernel void NAME(device const uchar*gw [[buffer(0)]],device const uchar*uw [[buffer(1)]],device const float*rw [[buffer(2)]],device const float*sw [[buffer(3)]],device const float*x0 [[buffer(4)]],device const float*x1 [[buffer(5)]],device const float*x2 [[buffer(6)]],device const float*x3 [[buffer(7)]],device float*p0 [[buffer(8)]],device float*p1 [[buffer(9)]],device float*p2 [[buffer(10)]],device float*p3 [[buffer(11)]],device float*r0 [[buffer(12)]],device float*r1 [[buffer(13)]],device float*r2 [[buffer(14)]],device float*r3 [[buffer(15)]],device float*s0 [[buffer(16)]],device float*s1 [[buffer(17)]],device float*s2 [[buffer(18)]],device float*s3 [[buffer(19)]],constant uint &groups [[buffer(20)]],threadgroup float*s [[threadgroup(0)]],uint position [[threadgroup_position_in_grid]],ushort sg [[simdgroup_index_in_threadgroup]],ushort lane [[thread_index_in_simdgroup]]) { \
+    const uint member = position / groups; \
+    const uint group = position % groups; \
+    device const float*x = member==0?x0:member==1?x1:member==2?x2:x3; \
+    device float*projections = member==0?p0:member==1?p1:member==2?p2:p3; \
+    device float*router = member==0?r0:member==1?r1:member==2?r2:r3; \
+    device float*scale = member==0?s0:member==1?s1:member==2?s2:s3; \
+    fn_packet<G,U>(group,sg,lane,gw,uw,rw,sw,x,projections,router,scale,s); \
+}
+
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_0_0,0,0)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_0_1,0,1)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_0_2,0,2)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_0_3,0,3)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_1_0,1,0)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_1_1,1,1)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_1_2,1,2)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_1_3,1,3)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_2_0,2,0)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_2_1,2,1)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_2_2,2,2)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_2_3,2,3)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_3_0,3,0)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_3_1,3,1)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_3_2,3,2)
+FN_PACKET_MEMBERS(kernel_qwen4exp_ffn_projections_members_3_3,3,3)

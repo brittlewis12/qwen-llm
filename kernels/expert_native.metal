@@ -827,7 +827,11 @@ inline void expert_native_rows_dot_k_ragged(device const uchar * row0,
         QT_FOR_UNROLL (ushort s = ROWS; s < 32u; s *= 2u) {
             extra += simd_shuffle_xor(extra, s);
         }
-        if (lane < ROWS) sum[lane] += extra;
+        // Keep the accumulator indices compile-time so `sum` stays in
+        // registers (a dynamic `sum[lane]` forces a select/local array).
+        QT_FOR_UNROLL (ushort r = 0; r < ROWS; ++r) {
+            if (lane == r) sum[r] += extra;
+        }
     }
 }
 

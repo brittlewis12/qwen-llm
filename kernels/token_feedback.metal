@@ -276,3 +276,39 @@ kernel void kernel_token_sample_blocks(
     for(uint i=start;i<end;++i){float y=weights[i]-correction,t=cum+y;correction=(t-cum)-y;cum=t;if(target<cum || i+1==limit){token[0]=int(sorted[i].id);return;}}
     token[0]=INT_MIN;
 }
+
+// ---- GLM batched loop plumbing ---------------------------------------------
+// Per-member token gather and sparse/index controls encoded at the start of the
+// forward command, so a prepared next frame never writes a buffer the in-flight
+// frame reads.
+struct glm_token_rows_args { uint rows; uint pad0; uint pad1; uint pad2; };
+kernel void kernel_glm_token_rows(
+    device const int *t0 [[buffer(0)]],
+    device const int *t1 [[buffer(1)]],
+    device const int *t2 [[buffer(2)]],
+    device const int *t3 [[buffer(3)]],
+    device int *dst [[buffer(4)]],
+    constant glm_token_rows_args &a [[buffer(5)]],
+    uint i [[thread_position_in_grid]]) {
+    if(i>=a.rows)return;
+    dst[i]=(i==0)?t0[0]:(i==1)?t1[0]:(i==2)?t2[0]:t3[0];
+}
+struct glm_sparse_args { uint visible[4]; uint pool; uint rows; uint blocks; uint stride; };
+kernel void kernel_glm_sparse_member(
+    device int *pools [[buffer(0)]],
+    device int *visible [[buffer(1)]],
+    device int *status [[buffer(2)]],
+    constant glm_sparse_args &a [[buffer(3)]],
+    uint i [[thread_position_in_grid]]) {
+    if(i==0){pools[0]=(int)(a.visible[0]/a.pool);visible[0]=(int)a.visible[0];}
+    if(i<a.blocks)status[i]=-1;
+}
+kernel void kernel_glm_sparse_shared(
+    device int *pools [[buffer(0)]],
+    device int *visible [[buffer(1)]],
+    device int *status [[buffer(2)]],
+    constant glm_sparse_args &a [[buffer(3)]],
+    uint i [[thread_position_in_grid]]) {
+    if(i<a.rows){pools[i]=(int)(a.visible[i]/a.pool);visible[i]=(int)a.visible[i];}
+    if(i<a.rows*a.blocks){uint mla=i/a.rows,row=i%a.rows;status[mla*a.stride+row]=-1;}
+}

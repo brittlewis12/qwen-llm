@@ -7,8 +7,12 @@
 //! scratch for this call; no state or scratch escapes across requests.
 
 use super::*;
-use crate::metal::encode_copy_offset_f32;
-use objc2_metal::MTLResource;
+use crate::metal::{GpuTokenSampler, encode_copy_offset_f32};
+use crate::sampling::{Sampler, SamplingConfig};
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLResource, MTLSize};
+use std::time::Instant;
 
 #[path = "batch_projection.rs"]
 mod projection;
@@ -49,11 +53,37 @@ pub const GLM5_NEXT_MAX_BATCH_SIZE: usize = 4;
 /// and changes the reduction order. Exact and Fast/F32
 /// members are refused before mutation and must use ordinary `forward`.
 /// B = 1 always calls ordinary `forward`, including its mode contracts.
+#[derive(Clone, Debug, Default)]
+pub struct GlmBatchLoopStats {
+    pub sampled_tokens: usize,
+    pub forwarded_tokens: usize,
+    pub emitted_tokens: usize,
+    pub encode_cpu_ms: f64,
+    pub completion_wait_ms: f64,
+    pub gpu_ms: f64,
+    pub wall_ms: f64,
+    pub stopped_on_eos: usize,
+    pub terminal_tokens: Vec<i32>,
+}
+
+struct LoopInFlight(Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>);
+impl Drop for LoopInFlight {
+    fn drop(&mut self) {
+        if let Some(command) = self.0.take()
+            && command.status() != objc2_metal::MTLCommandBufferStatus::NotEnqueued
+        {
+            crate::metal::wait_unchecked(&command);
+        }
+    }
+}
+
 pub struct Glm5NextBatch {
     logits: MetalTensor,
     weights_instance: u64,
     max_members: usize,
     expert_rows: bool,
+    gpu_samplers: Vec<Option<(SamplingConfig, GpuTokenSampler)>>,
+    tokens: Vec<MetalTensor>,
 }
 
 fn projection_geometry(dtype: GgmlType, shape: &[u64]) -> bool {
@@ -162,6 +192,10 @@ impl Glm5NextBatch {
             weights_instance: weights.instance,
             max_members,
             expert_rows: batch_expert_rows_enabled(),
+            gpu_samplers: (0..max_members).map(|_| None).collect(),
+            tokens: (0..max_members)
+                .map(|_| MetalTensor::zeros_i32(ctx, vec![1]))
+                .collect::<std::result::Result<Vec<_>, MetalError>>()?,
         })
     }
 
@@ -175,6 +209,92 @@ impl Glm5NextBatch {
         ctx: &MetalContext,
         sessions: &mut [&mut Glm5NextSession<'_>],
         tokens: &[u32],
+    ) -> Result<Vec<Vec<f32>>> {
+        self.step_inner(ctx, sessions, tokens, true)
+    }
+
+    /// Forward the batch and sample every member on the GPU, reading back only
+    /// tokens. This is the non-pipelined arm; the one-ahead loop builds on the
+    /// same per-member sampler cache and token slots.
+    pub fn step_tokens(
+        &mut self,
+        ctx: &MetalContext,
+        sessions: &mut [&mut Glm5NextSession<'_>],
+        samplers: &mut [&mut Sampler],
+        tokens: &[u32],
+    ) -> Result<Vec<u32>> {
+        let count = sessions.len();
+        if count < 2 || count != samplers.len() || count != tokens.len() || count > self.max_members
+        {
+            return invalid("invalid independent sampling batch width");
+        }
+        let vocab = sessions[0].weights.config.vocab_size as usize;
+        for (i, sampler) in samplers.iter().enumerate() {
+            let config = sampler.config();
+            let rebuild = match &self.gpu_samplers[i] {
+                Some((cached, _)) => *cached != config,
+                None => true,
+            };
+            if rebuild {
+                self.gpu_samplers[i] = Some((config, GpuTokenSampler::new(ctx, vocab, config)?));
+            }
+        }
+        let uniforms: Vec<f32> = samplers.iter().map(|s| s.gpu_uniform(0)).collect();
+        let result = (|| -> Result<Vec<u32>> {
+            self.step_inner(ctx, sessions, tokens, false)?;
+            let command = ctx
+                .queue
+                .commandBuffer()
+                .ok_or_else(|| Glm5NextMetalError::Invalid("no sampling command buffer".into()))?;
+            let enc = KernelEncoder::begin(&command);
+            for i in 0..count {
+                self.gpu_samplers[i]
+                    .as_ref()
+                    .expect("GPU sampler")
+                    .1
+                    .encode(
+                        ctx,
+                        &enc,
+                        &row(&self.logits, i, vocab),
+                        &self.tokens[i],
+                        uniforms[i],
+                    )?;
+            }
+            enc.end();
+            command.commit();
+            wait_completed(&command)?;
+            let mut out = Vec::with_capacity(count);
+            for token in self.tokens.iter().take(count) {
+                let value = read_i32(token)?[0];
+                if value < 0 || value as usize >= vocab {
+                    return invalid(format!("GPU sampler selected invalid token {value}"));
+                }
+                out.push(value as u32);
+            }
+            Ok(out)
+        })();
+        match result {
+            Ok(out) => {
+                for sampler in samplers.iter_mut() {
+                    sampler.commit_gpu_draw();
+                }
+                Ok(out)
+            }
+            Err(error) => {
+                for s in sessions.iter_mut() {
+                    s.poisoned = true;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn step_inner(
+        &mut self,
+        ctx: &MetalContext,
+        sessions: &mut [&mut Glm5NextSession<'_>],
+        tokens: &[u32],
+        read_logits: bool,
     ) -> Result<Vec<Vec<f32>>> {
         let count = sessions.len();
         if count == 0 || count != tokens.len() || count > self.max_members {
@@ -233,10 +353,13 @@ impl Glm5NextBatch {
         refs[0].encode_independent_batch(
             ctx,
             &refs,
-            tokens,
+            Some(tokens),
+            None,
             &self.logits,
             self.expert_rows,
             selection_stride,
+            false,
+            true,
         )?;
         let p = refs[0].packed.as_ref().expect("preflighted");
         for (block, r) in p.routes.iter().enumerate() {
@@ -279,17 +402,295 @@ impl Glm5NextBatch {
             selection::validate(&refs)?;
         }
         let vocab = refs[0].weights.config.vocab_size as usize;
-        let result = (0..count)
-            .map(|r| read_f32(&row(&self.logits, r, vocab)))
-            .collect::<Result<Vec<_>>>()?;
-        if result.iter().flatten().any(|x| !x.is_finite()) {
-            return invalid("non-finite independent batch logits");
-        }
+        let result = if read_logits {
+            let values = (0..count)
+                .map(|r| read_f32(&row(&self.logits, r, vocab)))
+                .collect::<Result<Vec<_>>>()?;
+            if values.iter().flatten().any(|x| !x.is_finite()) {
+                return invalid("non-finite independent batch logits");
+            }
+            values
+        } else {
+            Vec::new()
+        };
         for s in sessions.iter_mut() {
             s.position += 1;
             s.poisoned = false;
         }
         Ok(result)
+    }
+
+    fn cache_loop_samplers(
+        &mut self,
+        ctx: &MetalContext,
+        sessions: &[&Glm5NextSession<'_>],
+        samplers: &mut [&mut Sampler],
+    ) -> Result<usize> {
+        let count = sessions.len();
+        let vocab = sessions[0].weights.config.vocab_size as usize;
+        for (i, sampler) in samplers.iter().enumerate() {
+            let config = sampler.config();
+            let rebuild = match &self.gpu_samplers[i] {
+                Some((cached, _)) => *cached != config,
+                None => true,
+            };
+            if rebuild {
+                self.gpu_samplers[i] = Some((config, GpuTokenSampler::new(ctx, vocab, config)?));
+            }
+        }
+        Ok(vocab)
+    }
+
+    fn prepare_loop_frame(
+        &self,
+        ctx: &MetalContext,
+        sessions: &mut [&mut Glm5NextSession<'_>],
+        positions: &[usize],
+        host_tokens: Option<&[u32]>,
+        uniforms: &[f32],
+        selection_stride: Option<usize>,
+    ) -> Result<Retained<ProtocolObject<dyn MTLCommandBuffer>>> {
+        let count = sessions.len();
+        let vocab = sessions[0].weights.config.vocab_size as usize;
+        for (s, &p) in sessions.iter_mut().zip(positions) {
+            s.position = p;
+        }
+        let refs: Vec<_> = sessions.iter().map(|s| &**s).collect();
+        let command = refs[0]
+            .encode_independent_batch(
+                ctx,
+                &refs,
+                host_tokens,
+                if host_tokens.is_none() {
+                    Some(&self.tokens[..count])
+                } else {
+                    None
+                },
+                &self.logits,
+                self.expert_rows,
+                selection_stride,
+                true,
+                false,
+            )?
+            .expect("uncommitted batch command");
+        let enc = KernelEncoder::begin(&command);
+        for i in 0..count {
+            self.gpu_samplers[i]
+                .as_ref()
+                .expect("GPU sampler")
+                .1
+                .encode(
+                    ctx,
+                    &enc,
+                    &row(&self.logits, i, vocab),
+                    &self.tokens[i],
+                    uniforms[i],
+                )?;
+        }
+        enc.end();
+        Ok(command)
+    }
+
+    fn validate_loop_frame(
+        &self,
+        sessions: &[&Glm5NextSession<'_>],
+        frame_positions: &[usize],
+        selection_stride: Option<usize>,
+    ) -> Result<()> {
+        let count = sessions.len();
+        let p = sessions[0].packed.as_ref().expect("preflighted");
+        for (block, r) in p.routes.iter().enumerate() {
+            if let Some(r) = r {
+                let statuses = read_i32(&rows_view(&r.status, count))?;
+                if let Some((row, &status)) = statuses
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| **s != ROUTE_STATUS_READY)
+                {
+                    return Err(Glm5NextMetalError::KernelValidation {
+                        stage: "independent route",
+                        block,
+                        row: Some(row),
+                        status,
+                    });
+                }
+            }
+        }
+        for (row, s) in sessions.iter().enumerate() {
+            if selection_stride.is_none()
+                && frame_positions[row] + 1 >= s.weights.config.sparse_frontier() as usize
+            {
+                let statuses = read_i32(&s.sparse.as_ref().expect("preflighted").select_status)?;
+                if let Some((index, &status)) = statuses
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| **s != crate::metal::SELECT_STATUS_OK)
+                {
+                    return Err(Glm5NextMetalError::KernelValidation {
+                        stage: "independent sparse selection",
+                        block: mla_block(&s.weights.config, index),
+                        row: Some(row),
+                        status,
+                    });
+                }
+            }
+        }
+        if selection_stride.is_some() {
+            selection::validate(sessions)?;
+        }
+        Ok(())
+    }
+
+    /// One-ahead token loop over a fixed independent member set. Frame 0
+    /// forwards the caller's pending tokens; later frames read each member's
+    /// previous token from GPU storage and append that member's sampler to the
+    /// same command. The next command is encoded while the current executes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_gpu_tokens(
+        &mut self,
+        ctx: &MetalContext,
+        sessions: &mut [&mut Glm5NextSession<'_>],
+        samplers: &mut [&mut Sampler],
+        pending: &[u32],
+        max_tokens: usize,
+        eos: &[&[i32]],
+        mut emit: impl FnMut(usize, u32) -> bool,
+    ) -> Result<GlmBatchLoopStats> {
+        let count = sessions.len();
+        if count < 2
+            || count > self.max_members
+            || max_tokens == 0
+            || samplers.len() != count
+            || pending.len() != count
+            || eos.len() != count
+        {
+            return invalid("invalid GLM batch loop extents");
+        }
+        for (s, &t) in sessions.iter().zip(pending) {
+            if s.weights.instance != self.weights_instance
+                || s.poisoned
+                || t as usize >= s.weights.config.vocab_size as usize
+                || s.position >= s.capacity
+                || max_tokens > s.capacity - s.position
+            {
+                return invalid("GLM batch member is not ready for a token loop");
+            }
+        }
+        if sessions
+            .iter()
+            .any(|s| !batch_mode(s.packed_lineage(), s.fast_precision()))
+        {
+            return invalid("independent batch needs Fast/Half members");
+        }
+        if sessions[0].packed.as_ref().is_none_or(|p| p.rows < count) {
+            return invalid("independent batch activation workspace too small");
+        }
+        if self.logits.buffer.device().registryID() != ctx.device.registryID() {
+            return invalid("independent batch device differs");
+        }
+        let starts: Vec<usize> = sessions.iter().map(|s| s.position).collect();
+        let selection_stride =
+            selection::stride(ctx, &sessions.iter().map(|s| &**s).collect::<Vec<_>>());
+        for s in sessions.iter_mut() {
+            s.poisoned = true;
+        }
+        let _qos = crate::metal::GpuThreadQos::enter();
+        let started = Instant::now();
+        let mut stats = GlmBatchLoopStats::default();
+        let u0: Vec<f32> = samplers.iter().map(|s| s.gpu_uniform(0)).collect();
+        let positions0: Vec<usize> = starts.clone();
+        let mut current = self.prepare_loop_frame(
+            ctx,
+            sessions,
+            &positions0,
+            Some(pending),
+            &u0,
+            selection_stride,
+        )?;
+        let mut running = LoopInFlight(Some(current.clone()));
+        let t = Instant::now();
+        current.commit();
+        stats.encode_cpu_ms += t.elapsed().as_secs_f64() * 1e3;
+        let mut sampled = 0usize;
+        let vocab = sessions[0].weights.config.vocab_size as usize;
+        let mut terminal = vec![-1i32; count];
+        let mut stop = false;
+        loop {
+            let next = if sampled + 1 < max_tokens {
+                let positions: Vec<usize> = starts.iter().map(|s| s + sampled + 1).collect();
+                let uniforms: Vec<f32> = samplers.iter().map(|s| s.gpu_uniform(1)).collect();
+                let t = Instant::now();
+                let command = self.prepare_loop_frame(
+                    ctx,
+                    sessions,
+                    &positions,
+                    None,
+                    &uniforms,
+                    selection_stride,
+                )?;
+                stats.encode_cpu_ms += t.elapsed().as_secs_f64() * 1e3;
+                Some(command)
+            } else {
+                None
+            };
+            let frame_positions: Vec<usize> = starts.iter().map(|s| s + sampled).collect();
+            let t = Instant::now();
+            wait_completed(&current)?;
+            stats.completion_wait_ms += t.elapsed().as_secs_f64() * 1e3;
+            let elapsed = (current.GPUEndTime() - current.GPUStartTime()) * 1e3;
+            if elapsed.is_finite() && elapsed > 0. {
+                stats.gpu_ms += elapsed;
+            }
+            let mut tokens = Vec::with_capacity(count);
+            for token in self.tokens.iter().take(count) {
+                let value = read_i32(token)?[0];
+                if value < 0 || value as usize >= vocab {
+                    return invalid(format!("GPU sampler selected invalid token {value}"));
+                }
+                tokens.push(value as u32);
+            }
+            self.validate_loop_frame(
+                &sessions.iter().map(|s| &**s).collect::<Vec<_>>(),
+                &frame_positions,
+                selection_stride,
+            )?;
+            running.0 = None;
+            for i in 0..count {
+                let token = tokens[i];
+                terminal[i] = token as i32;
+                if eos[i].contains(&terminal[i]) {
+                    stats.stopped_on_eos += 1;
+                    stop = true;
+                } else {
+                    stats.emitted_tokens += 1;
+                    if !emit(i, token) {
+                        stop = true;
+                    }
+                }
+            }
+            sampled += 1;
+            stats.sampled_tokens += count;
+            for sampler in samplers.iter_mut() {
+                sampler.commit_gpu_draw();
+            }
+            if stop || sampled >= max_tokens {
+                break;
+            }
+            let mut next = next.expect("a continuing burst prepared a frame");
+            let t = Instant::now();
+            next.commit();
+            stats.encode_cpu_ms += t.elapsed().as_secs_f64() * 1e3;
+            running.0 = Some(next.clone());
+            current = next;
+        }
+        for (s, &start) in sessions.iter_mut().zip(&starts) {
+            s.position = start + sampled;
+            s.poisoned = false;
+        }
+        stats.forwarded_tokens = sampled * count;
+        stats.terminal_tokens = terminal;
+        stats.wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        Ok(stats)
     }
 }
 
@@ -329,26 +730,169 @@ fn copy(
     encode_copy_offset_f32(ctx, enc, src, 0, dst, n)?;
     Ok(())
 }
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GlmTokenRowsArgs {
+    rows: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GlmSparseArgs {
+    visible: [u32; 4],
+    pool: u32,
+    rows: u32,
+    blocks: u32,
+    stride: u32,
+}
+fn encode_glm_token_rows(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    tokens: &[MetalTensor],
+    dst: &MetalTensor,
+    rows: usize,
+) -> Result<()> {
+    enc.set_pipeline(&ctx.pipeline("kernel_glm_token_rows")?);
+    enc.set_bytes(
+        5,
+        &GlmTokenRowsArgs {
+            rows: rows as u32,
+            pad0: 0,
+            pad1: 0,
+            pad2: 0,
+        },
+    );
+    for i in 0..4 {
+        let t = &tokens[i.min(tokens.len().saturating_sub(1))];
+        enc.set_tensor(i, t);
+    }
+    enc.set_tensor(4, dst);
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 4,
+            height: 1,
+            depth: 1,
+        },
+    );
+    enc.buffer_barrier();
+    Ok(())
+}
+#[allow(clippy::too_many_arguments)]
+fn encode_glm_sparse_member(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    pools: &MetalTensor,
+    visible: &MetalTensor,
+    status: &MetalTensor,
+    visible_position: usize,
+    pool: usize,
+    blocks: usize,
+) -> Result<()> {
+    enc.set_pipeline(&ctx.pipeline("kernel_glm_sparse_member")?);
+    let mut args = GlmSparseArgs {
+        visible: [0; 4],
+        pool: pool as u32,
+        rows: 1,
+        blocks: blocks as u32,
+        stride: blocks as u32,
+    };
+    args.visible[0] = visible_position as u32;
+    enc.set_bytes(3, &args);
+    enc.set_tensor(0, pools);
+    enc.set_tensor(1, visible);
+    enc.set_tensor(2, status);
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: blocks.max(1),
+            height: 1,
+            depth: 1,
+        },
+    );
+    enc.buffer_barrier();
+    Ok(())
+}
+#[allow(clippy::too_many_arguments)]
+fn encode_glm_sparse_shared(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    pools: &MetalTensor,
+    visible: &MetalTensor,
+    status: &MetalTensor,
+    visible_positions: &[usize],
+    pool: usize,
+    blocks: usize,
+    rows: usize,
+    stride: usize,
+) -> Result<()> {
+    enc.set_pipeline(&ctx.pipeline("kernel_glm_sparse_shared")?);
+    let mut args = GlmSparseArgs {
+        visible: [0; 4],
+        pool: pool as u32,
+        rows: rows as u32,
+        blocks: blocks as u32,
+        stride: stride as u32,
+    };
+    for (i, &v) in visible_positions.iter().take(4).enumerate() {
+        args.visible[i] = v as u32;
+    }
+    enc.set_bytes(3, &args);
+    enc.set_tensor(0, pools);
+    enc.set_tensor(1, visible);
+    enc.set_tensor(2, status);
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: (rows * blocks).max(rows).max(1),
+            height: 1,
+            depth: 1,
+        },
+    );
+    enc.buffer_barrier();
+    Ok(())
+}
+
 impl Glm5NextSession<'_> {
+    #[allow(clippy::too_many_arguments)]
     fn encode_independent_batch(
         &self,
         ctx: &MetalContext,
         seqs: &[&Self],
-        tokens: &[u32],
+        tokens: Option<&[u32]>,
+        device_tokens: Option<&[MetalTensor]>,
         logits: &MetalTensor,
         expert_rows: bool,
         selection_stride: Option<usize>,
-    ) -> Result<()> {
+        device_round: bool,
+        commit: bool,
+    ) -> Result<Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>> {
         let w = self.weights;
         let c = &w.config;
         let p = self.packed.as_ref().unwrap();
-        let rows = tokens.len();
+        let rows = seqs.len();
         let h = c.hidden_size as usize;
         assert!(rows <= p.rows);
-        write_i32(
-            &rows_view(&p.token, rows),
-            &tokens.iter().map(|t| *t as i32).collect::<Vec<_>>(),
-        )?;
+        if let Some(tokens) = tokens {
+            write_i32(
+                &rows_view(&p.token, rows),
+                &tokens.iter().map(|t| *t as i32).collect::<Vec<_>>(),
+            )?;
+        }
         let v = |t: &MetalTensor| rows_view(t, rows);
         #[cfg(any(test, feature = "perf-ablations"))]
         let encode_started = std::time::Instant::now();
@@ -362,6 +906,52 @@ impl Glm5NextSession<'_> {
         } else {
             KernelEncoder::begin(&command)
         };
+        if let Some(device_tokens) = device_tokens {
+            encode_glm_token_rows(ctx, &enc, device_tokens, &v(&p.token), rows)?;
+        }
+        if device_round {
+            let blocks = c.block_count(MixerKind::Mla);
+            let pool = c.indexer_pool as usize;
+            if selection_stride.is_some() {
+                let sp = p.sparse.as_ref().ok_or_else(|| {
+                    Glm5NextMetalError::Invalid("independent sparse batch has no scratch".into())
+                })?;
+                let visibles: Vec<usize> = seqs.iter().map(|s| s.position + 1).collect();
+                encode_glm_sparse_shared(
+                    ctx,
+                    &enc,
+                    &sp.visible_pools,
+                    &sp.visible_rows,
+                    &sp.select_status,
+                    &visibles,
+                    pool,
+                    blocks,
+                    rows,
+                    sp.rows,
+                )?;
+            } else {
+                for s in seqs {
+                    let visible_after = s.position + 1;
+                    if visible_after >= c.sparse_frontier() as usize {
+                        let sp = s.sparse.as_ref().ok_or_else(|| {
+                            Glm5NextMetalError::Invalid(
+                                "independent sparse member has no scratch".into(),
+                            )
+                        })?;
+                        encode_glm_sparse_member(
+                            ctx,
+                            &enc,
+                            &sp.visible_pools,
+                            &sp.visible_rows,
+                            &sp.select_status,
+                            visible_after,
+                            pool,
+                            blocks,
+                        )?;
+                    }
+                }
+            }
+        }
         encode_get_rows_f32(
             ctx,
             &enc,
@@ -683,16 +1273,22 @@ impl Glm5NextSession<'_> {
             enc.finish_causal_scope(ctx, false)?;
         }
         enc.end();
-        #[cfg(any(test, feature = "perf-ablations"))]
-        let encode_ms = encode_started.elapsed().as_secs_f64() * 1e3;
-        command.commit();
-        wait_completed(&command)?;
-        #[cfg(any(test, feature = "perf-ablations"))]
-        projection::record_timing(
-            encode_ms,
-            (command.GPUEndTime() - command.GPUStartTime()) * 1e3,
-        );
-        Ok(())
+        if commit {
+            #[cfg(any(test, feature = "perf-ablations"))]
+            let encode_ms = encode_started.elapsed().as_secs_f64() * 1e3;
+            command.commit();
+            wait_completed(&command)?;
+            #[cfg(any(test, feature = "perf-ablations"))]
+            projection::record_timing(
+                encode_ms,
+                (command.GPUEndTime() - command.GPUStartTime()) * 1e3,
+            );
+            Ok(None)
+        } else {
+            #[cfg(any(test, feature = "perf-ablations"))]
+            let _ = encode_started;
+            Ok(Some(command))
+        }
     }
     fn encode_batch_kda(
         &self,

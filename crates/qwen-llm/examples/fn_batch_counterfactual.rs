@@ -151,6 +151,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "member BF16 mixer engagement"
                     );
                 }
+                if mode == "pair-ragged" {
+                    assert_eq!(
+                        fn_batch_probe::observed("native_ragged") > 0,
+                        arm == 1,
+                        "ragged expert-down engagement"
+                    );
+                }
                 if j >= 8 {
                     ms[arm].push(elapsed);
                     for k in 0..3 {

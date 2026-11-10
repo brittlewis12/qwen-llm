@@ -100,6 +100,21 @@ crate::env_flag!(
     default_off native_ragged, "QWEN_EXPERT_NATIVE_RAGGED"
 );
 
+/// Ragged selection with the whole-round `pair-ragged` screen override, and an
+/// engagement counter the harness can assert on.
+fn native_ragged_selected() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    {
+        let selected = crate::metal::fn_batch_probe::axis("ragged", native_ragged());
+        if selected {
+            crate::metal::fn_batch_probe::observe("native_ragged", 1);
+        }
+        return selected;
+    }
+    #[cfg(not(feature = "perf-ablations"))]
+    native_ragged()
+}
+
 /// Output channels per simdgroup of the shape-specialized IQ2_XS / IQ2_S
 /// kernels (`kernel_expert_native_{,gate_up_}iq2_{xs,s}_f32_k*_r*`).
 const IQ2_SPEC_ROWS: usize = 4;
@@ -133,7 +148,7 @@ fn native_spec_pipeline(
             };
             // K=2304 is V4.1's ragged down projection; gate/up is K=5120 and
             // stays on the exact-multiple kernel.
-            let kind = if !fused && n_in == 2304 && native_ragged() {
+            let kind = if !fused && n_in == 2304 && native_ragged_selected() {
                 "f32_ragged_k"
             } else {
                 "f32_k"
@@ -239,7 +254,7 @@ fn batch_tile_pipeline(
             Some(("kernel_expert_native_gate_up_iq4_xs_f32_k2560_r4", 8))
         }
         (GgmlType::Q2_0, 640, 2560, false) => Some((
-            if native_ragged() {
+            if native_ragged_selected() {
                 "kernel_expert_native_q2_0_f32_ragged_k640_r4"
             } else {
                 "kernel_expert_native_q2_0_f32_k640_r4"
@@ -247,7 +262,7 @@ fn batch_tile_pipeline(
             16,
         )),
         (GgmlType::IQ4_NL, 640, 2560, false) => Some((
-            if native_ragged() {
+            if native_ragged_selected() {
                 "kernel_expert_native_iq4_nl_f32_ragged_k640_r4"
             } else {
                 "kernel_expert_native_iq4_nl_f32_k640_r4"
@@ -255,7 +270,7 @@ fn batch_tile_pipeline(
             16,
         )),
         (GgmlType::Q8_0, 640, 2560, false) => Some((
-            if native_ragged() {
+            if native_ragged_selected() {
                 "kernel_expert_native_q8_0_f32_ragged_k640_r4"
             } else {
                 "kernel_expert_native_q8_0_f32_k640_r4"

@@ -774,6 +774,63 @@ inline void expert_native_rows_dot_k(device const uchar * row0, device const flo
     }
 }
 
+// Ragged-tail twin of expert_native_rows_dot_k: the full 32-fragment passes
+// are unchanged, then the trailing K/16 % 32 fragments are spread over all 32
+// lanes as one (fragment, channel) dot each instead of paying a full ROWS-
+// channel pass on the few active lanes. K=640/ROWS=4 (Flash-Next down) is one
+// full pass plus 32 single-channel dots; K=2304/ROWS=4 (V4.1 down) is four full
+// passes plus 64 dots. Per-channel tails are summed in ascending fragment
+// order, but the cross-lane reduction regroups the F32 sum, so this is not
+// bitwise with the incumbent; dNLL/KL is the gate.
+template <ushort BYTES, ushort NL,
+          void (*DEQ)(device const uchar *, short, thread float4x4 &),
+          uint K, ushort ROWS>
+inline void expert_native_rows_dot_k_ragged(device const uchar * row0,
+                                            device const float * x, ushort lane,
+                                            thread float * sum) {
+    constexpr ulong ROW_BYTES = ulong(K / (16u * NL)) * BYTES;
+    constexpr uint KTILES = K / 16u;
+    constexpr uint FULL = KTILES / 32u;
+    constexpr uint REM = KTILES % 32u;
+    #pragma clang loop unroll(disable)
+    for (uint k = uint(lane) * 16u; k < FULL * 512u; k += 512u) {
+        float xv[16];
+        expert_load_x16(x + k, xv);
+        const ulong block = ulong(k / (16u * NL)) * BYTES;
+        const short il = short((k / 16u) % NL);
+        QT_FOR_UNROLL (ushort r = 0; r < ROWS; ++r) {
+            float4x4 decoded;
+            DEQ(row0 + ulong(r) * ROW_BYTES + block, il, decoded);
+            QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
+                sum[r] = fma(decoded[i / 4][i % 4], xv[i], sum[r]);
+            }
+        }
+    }
+    if (REM != 0u) {
+        float extra = 0.0f;
+        // 32 is a multiple of ROWS, so every dot a lane takes is the same
+        // channel, lane % ROWS.
+        for (uint d = lane; d < REM * ROWS; d += 32u) {
+            const uint frag = FULL * 32u + d / ROWS;
+            const uint ch = d % ROWS;
+            const uint k = frag * 16u;
+            float xv[16];
+            expert_load_x16(x + k, xv);
+            const ulong block = ulong(k / (16u * NL)) * BYTES;
+            const short il = short((k / 16u) % NL);
+            float4x4 decoded;
+            DEQ(row0 + ulong(ch) * ROW_BYTES + block, il, decoded);
+            QT_FOR_UNROLL (uint i = 0; i < 16; ++i) {
+                extra = fma(decoded[i / 4][i % 4], xv[i], extra);
+            }
+        }
+        QT_FOR_UNROLL (ushort s = ROWS; s < 32u; s *= 2u) {
+            extra += simd_shuffle_xor(extra, s);
+        }
+        if (lane < ROWS) sum[lane] += extra;
+    }
+}
+
 // One projection (gate 0 / up+SwiGLU 1 / down 2), F32 operands; n_out a
 // multiple of ROWS. Grid: (ceil(n_out / (4 * ROWS)), top_k, rows).
 template <ushort BYTES, ushort NL,
@@ -812,6 +869,61 @@ kernel void kernel_expert_native_f32_k(
     float sum[ROWS];
     QT_FOR_UNROLL (ushort r = 0; r < ROWS; ++r) sum[r] = 0.0f;
     expert_native_rows_dot_k<BYTES, NL, DEQ, K, ROWS>(row0, x, lane, sum);
+    QT_FOR_UNROLL (ushort r = 0; r < ROWS; ++r) {
+        const float value = simd_sum(sum[r]);
+        if (lane == 0) {
+            const ulong out_index = out_first + r;
+            if (args.mode == 1) {
+                const float g = min(output[out_index], args.clamp);
+                const float u = clamp(value, -args.clamp, args.clamp);
+                output[out_index] = (g / (1.0f + exp(-g))) * u;
+            } else {
+                output[out_index] = value;
+            }
+        }
+    }
+}
+
+// Ragged-tail down projection: same grid, args and epilogue as
+// kernel_expert_native_f32_k, but the K loop uses
+// expert_native_rows_dot_k_ragged. Selected by expert_native.rs only for the
+// shapes whose K/16 is not a multiple of 32.
+template <ushort BYTES, ushort NL,
+          void (*DEQ)(device const uchar *, short, thread float4x4 &),
+          uint K, ushort ROWS>
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_expert_native_f32_ragged_k(
+        constant expert_native_args & args [[buffer(0)]],
+        device const uchar * bank [[buffer(1)]],
+        device const float * input [[buffer(2)]],
+        device const int * ids [[buffer(3)]],
+        device const int * status [[buffer(4)]],
+        device float * output [[buffer(5)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd [[simdgroup_index_in_threadgroup]]) {
+    constexpr ulong ROW_BYTES = ulong(K / (16u * NL)) * BYTES;
+    const uint first = (group.x * 4u + uint(simd)) * ROWS;
+    const uint slot = group.y;
+    const uint token = group.z;
+    if (first >= args.n_out || slot >= args.top_k) return;
+    const ulong selected = ulong(token) * args.top_k + slot;
+    const ulong out_first = selected * args.n_out + first;
+    if (status[token] != 1) {
+        if (lane < ROWS) output[out_first + lane] = 0.0f;
+        return;
+    }
+    const int expert = ids[selected];
+    if (expert < 0 || uint(expert) >= args.experts) {
+        if (lane < ROWS) output[out_first + lane] = 0.0f;
+        return;
+    }
+    device const uchar * row0 = bank + (ulong(expert) * args.n_out + first) * ROW_BYTES;
+    const uint projection = args.mode & EXPERT_NATIVE_PROJECTION_MASK;
+    device const float * x = input + (projection == 2 ? selected : ulong(token)) * K;
+    float sum[ROWS];
+    QT_FOR_UNROLL (ushort r = 0; r < ROWS; ++r) sum[r] = 0.0f;
+    expert_native_rows_dot_k_ragged<BYTES, NL, DEQ, K, ROWS>(row0, x, lane, sum);
     QT_FOR_UNROLL (ushort r = 0; r < ROWS; ++r) {
         const float value = simd_sum(sum[r]);
         if (lane == 0) {
@@ -914,6 +1026,19 @@ EXPERT_IQ2_XXS_SPEC("2304", 72)
     EXPERT_NATIVE_SPEC(NAME, "2304", RNAME, BYTES, NL, DEQ, 2304, ROWS)
 EXPERT_NATIVE_SPEC_ROWS("iq2_xs", 74, 16, expert_dequantize_iq2_xs, "4", 4)
 EXPERT_NATIVE_SPEC_ROWS("iq2_s", QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_iq2_s, "4", 4)
+
+// Ragged-tail down instances: K/16 not a multiple of 32 (Flash-Next K=640,
+// V4.1 K=2304). Same args and grid as the `_k..._r4` twin.
+#define EXPERT_NATIVE_RAGGED(NAME, KNAME, RNAME, BYTES, NL, DEQ, K, ROWS) \
+    template [[host_name("kernel_expert_native_" NAME "_f32_ragged_k" KNAME "_r" RNAME)]] kernel void \
+        kernel_expert_native_f32_ragged_k<BYTES, NL, DEQ, K, ROWS>(constant expert_native_args &, \
+        device const uchar *, device const float *, device const int *, device const int *, \
+        device float *, uint3, ushort, ushort);
+EXPERT_NATIVE_RAGGED("q2_0", "640", "4", QT_Q2_0_BYTES, QT_Q2_0_NL, latent_dequantize_q2_0, 640, 4)
+EXPERT_NATIVE_RAGGED("iq4_nl", "640", "4", QT_IQ4_NL_BYTES, QT_IQ4_NL_NL, latent_dequantize_iq4_nl, 640, 4)
+EXPERT_NATIVE_RAGGED("q8_0", "640", "4", QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequantize_q8_0, 640, 4)
+EXPERT_NATIVE_RAGGED("iq2_xs", "2304", "4", 74, 16, expert_dequantize_iq2_xs, 2304, 4)
+EXPERT_NATIVE_RAGGED("iq2_s", "2304", "4", QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_iq2_s, 2304, 4)
 
 // Multi-output GLM batch decode: unchanged per-channel F32 FMA chains,
 // reusing activation fragments for independent output channels.

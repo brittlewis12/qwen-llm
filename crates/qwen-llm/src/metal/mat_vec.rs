@@ -724,6 +724,86 @@ pub fn encode_mat_vec_iq4_nl_f32(
     )
 }
 
+/// Member-axis twin of the fast IQ4_NL matvec for a weight shared by 2..=4
+/// independent decode rows. Returns false without encoding when layouts,
+/// dtype or the fast pipeline do not fit, so callers keep per-member calls.
+pub(crate) fn encode_shared_down_iq4_nl_members_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    xs: &[&MetalTensor],
+    ys: &[&MetalTensor],
+    n_in: usize,
+    n_out: usize,
+) -> Result<bool, MetalError> {
+    let b = xs.len();
+    if ys.len() != b
+        || !(2..=4).contains(&b)
+        || !matvec_iq4_nl_fast_enabled()
+        || weight.dtype != GgmlType::IQ4_NL
+        || !n_in.is_multiple_of(32)
+        || !weight.offset.is_multiple_of(16)
+        || n_in == 0
+        || n_out == 0
+    {
+        return Ok(false);
+    }
+    for (x, y) in xs.iter().zip(ys) {
+        if x.dtype != GgmlType::F32
+            || y.dtype != GgmlType::F32
+            || x.n_elements() as usize != n_in
+            || y.n_elements() as usize != n_out
+            || !x.offset.is_multiple_of(4)
+            || !y.offset.is_multiple_of(4)
+        {
+            return Ok(false);
+        }
+    }
+    let pso = match ctx.pipeline("kernel_fn_shared_down_iq4_nl_members_f32") {
+        Ok(p) if p.threadExecutionWidth() == 32 && p.maxTotalThreadsPerThreadgroup() >= 64 => p,
+        Ok(_) | Err(MetalError::NoFunction(_) | MetalError::Pipeline(_, _)) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        groups: u32,
+    }
+    // Incumbent fast kernel: 2 simdgroups, 2 rows per simdgroup.
+    let groups = n_out.div_ceil(4);
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            groups: groups as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    for i in 0..4 {
+        let j = i.min(b - 1);
+        enc.set_tensor(2 + i, xs[j]);
+        enc.set_tensor(6 + i, ys[j]);
+    }
+    enc.set_threadgroup_memory(0, 32 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: groups * b,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 64,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(true)
+}
+
 pub(crate) fn encode_mat_vec_block256_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,

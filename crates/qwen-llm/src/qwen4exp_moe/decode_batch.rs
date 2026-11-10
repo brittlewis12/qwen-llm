@@ -23,6 +23,20 @@ fn batch_topk_selected() -> bool {
         batch_topk_enabled()
     }
 }
+crate::env_flag!(
+    /// Batch the shared-expert SiLU and IQ4_NL down projection across members after the member-axis fused projections. 0 keeps per-member SiLU/down.
+    default_on batch_shared_enabled, "QWEN_FN_MOE_BATCH_SHARED"
+);
+fn batch_shared_selected() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    {
+        return crate::metal::fn_batch_probe::axis("moe_batch_shared", batch_shared_enabled());
+    }
+    #[cfg(not(feature = "perf-ablations"))]
+    {
+        batch_shared_enabled()
+    }
+}
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Args {
@@ -98,6 +112,10 @@ pub(crate) fn encode_into<'a>(
     let member_refs: Vec<_> = members.iter().map(|m| &**m).collect();
     let projected = projections::try_encode_members(ctx, enc, inputs, weights, &member_refs)?;
     drop(member_refs);
+    let batch_shared = batch_shared_selected()
+        && projected
+        && (2..=4).contains(&rows)
+        && weights.shared_down.dtype == GgmlType::IQ4_NL;
     let mut fused_flags = Vec::with_capacity(rows);
     for (w, input) in members.iter_mut().zip(inputs) {
         let b = Qwen4ExpMoeSingletonBuffers {
@@ -122,19 +140,21 @@ pub(crate) fn encode_into<'a>(
         if !(batch_topk && fused) {
             encode_singleton_router(ctx, enc, input, weights, b, fused)?;
         }
-        if fused {
-            let n = g.shared_intermediate_size as u64;
-            encode_silu_mul_f32(
-                ctx,
-                enc,
-                &w.shared_output.view_subrange(0, vec![n]),
-                &w.shared_output.view_subrange(n, vec![n]),
-                &w.shared_inner,
-            )?;
-        } else {
-            encode_singleton_shared_gate_up(ctx, enc, input, weights, b)?;
+        if !(batch_shared && fused) {
+            if fused {
+                let n = g.shared_intermediate_size as u64;
+                encode_silu_mul_f32(
+                    ctx,
+                    enc,
+                    &w.shared_output.view_subrange(0, vec![n]),
+                    &w.shared_output.view_subrange(n, vec![n]),
+                    &w.shared_inner,
+                )?;
+            } else {
+                encode_singleton_shared_gate_up(ctx, enc, input, weights, b)?;
+            }
+            encode_singleton_shared_down(ctx, enc, weights, b)?;
         }
-        encode_singleton_shared_down(ctx, enc, weights, b)?;
     }
     if batch_topk {
         if fused_flags.iter().all(|&fused| fused) {
@@ -158,6 +178,65 @@ pub(crate) fn encode_into<'a>(
             for (w, &fused) in members.iter().zip(&fused_flags) {
                 if fused {
                     super::encode_singleton_topk(ctx, enc, g, w)?;
+                }
+            }
+        }
+    }
+    if batch_shared {
+        let n = g.shared_intermediate_size as u64;
+        let gates: Vec<_> = members
+            .iter()
+            .map(|w| w.shared_output.view_subrange(0, vec![n]))
+            .collect();
+        let ups: Vec<_> = members
+            .iter()
+            .map(|w| w.shared_output.view_subrange(n, vec![n]))
+            .collect();
+        let gate_refs: Vec<_> = gates.iter().collect();
+        let up_refs: Vec<_> = ups.iter().collect();
+        let inner_refs: Vec<_> = members.iter().map(|w| &w.shared_inner).collect();
+        let out_refs: Vec<_> = members.iter().map(|w| &w.shared_output).collect();
+        let silu_ok =
+            crate::metal::encode_silu_mul_members_f32(ctx, enc, &gate_refs, &up_refs, &inner_refs)?;
+        let down_ok = silu_ok
+            && crate::metal::encode_shared_down_iq4_nl_members_f32(
+                ctx,
+                enc,
+                weights.shared_down,
+                &inner_refs,
+                &out_refs,
+                g.shared_intermediate_size,
+                g.hidden_size,
+            )?;
+        if silu_ok && down_ok {
+            #[cfg(feature = "perf-ablations")]
+            crate::metal::fn_batch_probe::observe("moe_batch_shared", rows);
+        } else {
+            for w in members.iter() {
+                let b = Qwen4ExpMoeSingletonBuffers {
+                    guarded_topk: w.guarded_topk,
+                    router_logits: &w.router_logits,
+                    topk_ids: &w.topk_ids,
+                    topk_weights: &w.topk_weights,
+                    shared_scale: &w.shared_gate,
+                    route_status: &w.route_status,
+                    routed_inner: &w.routed_inner,
+                    routed_expert_output: &w.routed_expert_output,
+                    shared_inner: &w.shared_inner,
+                    shared_output: &w.shared_output,
+                    output: &w.output,
+                };
+                if !silu_ok {
+                    encode_silu_mul_f32(
+                        ctx,
+                        enc,
+                        &w.shared_output.view_subrange(0, vec![n]),
+                        &w.shared_output.view_subrange(n, vec![n]),
+                        &w.shared_inner,
+                    )?;
+                }
+                if !down_ok {
+                    super::encode_singleton_shared_down(ctx, enc, weights, b)?;
                 }
             }
         }

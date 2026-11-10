@@ -202,6 +202,38 @@ kernel void kernel_silu_mul_f32(
     out[tid] = silu_g * up[tid];
 }
 
+struct silu_members_args {
+    uint n;
+    uint groups;
+    uint threads;
+};
+
+kernel void kernel_silu_mul_members_f32(
+        constant silu_members_args & args [[buffer(0)]],
+        device const float * gate0 [[buffer(1)]],
+        device const float * gate1 [[buffer(2)]],
+        device const float * gate2 [[buffer(3)]],
+        device const float * gate3 [[buffer(4)]],
+        device const float * up0 [[buffer(5)]],
+        device const float * up1 [[buffer(6)]],
+        device const float * up2 [[buffer(7)]],
+        device const float * up3 [[buffer(8)]],
+        device float * out0 [[buffer(9)]],
+        device float * out1 [[buffer(10)]],
+        device float * out2 [[buffer(11)]],
+        device float * out3 [[buffer(12)]],
+        uint position [[threadgroup_position_in_grid]],
+        uint tid [[thread_position_in_threadgroup]]) {
+    const uint member = position / args.groups;
+    const uint index = (position % args.groups) * args.threads + tid;
+    if (index >= args.n) return;
+    device const float * gate = member == 0 ? gate0 : member == 1 ? gate1 : member == 2 ? gate2 : gate3;
+    device const float * up = member == 0 ? up0 : member == 1 ? up1 : member == 2 ? up2 : up3;
+    device float * out = member == 0 ? out0 : member == 1 ? out1 : member == 2 ? out2 : out3;
+    const float g = gate[index];
+    out[index] = (g / (1.0f + exp(-g))) * up[index];
+}
+
 // Activation VJP for the SwiGLU inner product. The ordinary arm differentiates
 // SiLU exactly. The RelP arm applies both the identity rule (detach SiLU's
 // sigmoid factor) and half rule (split product relevance evenly by branch).

@@ -560,6 +560,76 @@ pub fn encode_silu_mul_f32(
     encode_elementwise_2in_1out(ctx, enc, "kernel_silu_mul_f32", gate, up, out)
 }
 
+/// Member-axis `silu(gate) * up` for independent decode members. Returns false
+/// when the layouts or pipeline do not fit, so callers keep per-member calls.
+pub fn encode_silu_mul_members_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gates: &[&MetalTensor],
+    ups: &[&MetalTensor],
+    outs: &[&MetalTensor],
+) -> Result<bool, MetalError> {
+    let b = gates.len();
+    if b != ups.len() || b != outs.len() || !(2..=4).contains(&b) {
+        return Ok(false);
+    }
+    let n = gates[0].n_elements() as usize;
+    if n == 0 {
+        return Ok(false);
+    }
+    for i in 0..b {
+        for tensor in [gates[i], ups[i], outs[i]] {
+            if tensor.dtype != GgmlType::F32
+                || tensor.n_elements() as usize != n
+                || !tensor.offset.is_multiple_of(4)
+            {
+                return Ok(false);
+            }
+        }
+    }
+    let pso = ctx.pipeline("kernel_silu_mul_members_f32")?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 256 {
+        return Ok(false);
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        groups: u32,
+        threads: u32,
+    }
+    let threads = 256usize;
+    let groups = n.div_ceil(threads);
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n as u32,
+            groups: groups as u32,
+            threads: threads as u32,
+        },
+    );
+    for i in 0..4 {
+        let j = i.min(b - 1);
+        enc.set_tensor(1 + i, gates[j]);
+        enc.set_tensor(5 + i, ups[j]);
+        enc.set_tensor(9 + i, outs[j]);
+    }
+    enc.dispatch(
+        MTLSize {
+            width: groups * b,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(true)
+}
+
 /// Gated attention: out = x * sigmoid(gate). Used after attention before the
 /// output projection, and supports `out` aliasing `x`.
 pub fn encode_sigmoid_mul_f32(

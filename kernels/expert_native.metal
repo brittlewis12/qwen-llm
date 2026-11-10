@@ -42,6 +42,43 @@ inline void expert_dequantize_iq2_xs(device const uchar * blk, short il,
     }
 }
 
+// Vector IQ2_S twin of latent_dequantize_iq2_s: one 64-bit grid word per eight
+// weights gives a float4 magnitude pair, and one sign byte gives a uint4 mask
+// for select. The arithmetic stays (dl * magnitude) * sign, element-exact to
+// the scalar decoder unless Metal reassociates under -ffast-math; the probe
+// checks bitwise equality.
+inline void expert_dequantize_iq2_s_vec(device const uchar * blk_bytes, short il,
+                                        thread float4x4 & reg) {
+    const half d_h = *((device const half *)blk_bytes);
+    device const uchar * qbase = blk_bytes + 2;
+    device const uchar * qh = qbase + QT_QK_K / 4;
+    device const uchar * scales = qh + QT_QK_K / 32;
+
+    const uint ib32 = uint(il >> 1);
+    const uint ih = uint(il & 1);
+    device const uchar * qs = qbase + 4u * ib32 + 2u * ih;
+    device const uchar * signs = qs + QT_QK_K / 8;
+
+    const uint qh_lane = uint(qh[ib32]) >> (4u * ih);
+    const uint scale = (uint(scales[ib32]) >> (4u * ih)) & 0x0fu;
+    const float dl = float(d_h) * (0.5f + float(scale)) * 0.25f;
+
+    QT_FOR_UNROLL (int gsel = 0; gsel < 2; ++gsel) {
+        const uint code = uint(qs[gsel])
+            | ((qh_lane << (8u - 2u * uint(gsel))) & 0x300u);
+        const ulong g = qt_iq2s_grid[code];
+        const uint sign_bits = uint(signs[gsel]);
+        QT_FOR_UNROLL (int part = 0; part < 2; ++part) {
+            const uint word = uint(g >> (32u * uint(part)));
+            const float4 mag = float4(uint4(word, word >> 8, word >> 16, word >> 24) & 255u);
+            const uint4 mask = uint4(1u, 2u, 4u, 8u) << (4u * uint(part));
+            const float4 sign = select(float4(1.0f), float4(-1.0f),
+                                       (uint4(sign_bits) & mask) != 0);
+            reg[2 * gsel + part] = dl * mag * sign;
+        }
+    }
+}
+
 // Q5_K with 16-byte quant/high-bit loads (two vector loads instead of 32
 // byte loads per 16 weights). Same arithmetic as latent_dequantize_q5_K, so
 // decoded values are bitwise equal. Needs 16-byte aligned blocks: the 176-byte
@@ -1136,6 +1173,20 @@ EXPERT_NATIVE_RAGGED("q8_0", "640", "4", QT_Q8_0_BYTES, QT_Q8_0_NL, latent_dequa
 EXPERT_NATIVE_RAGGED("iq2_xs", "2304", "4", 74, 16, expert_dequantize_iq2_xs, 2304, 4)
 EXPERT_NATIVE_RAGGED("iq2_s", "2304", "4", QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_iq2_s, 2304, 4)
 
+// Vector-decoder instances of the same kernels (IQ2_S only), A/B candidates.
+#define EXPERT_NATIVE_SPEC_VEC(NAME, KNAME, RNAME, BYTES, NL, DEQ, K, ROWS) \
+    template [[host_name("kernel_expert_native_" NAME "_f32_vec_k" KNAME "_r" RNAME)]] kernel void \
+        kernel_expert_native_f32_k<BYTES, NL, DEQ, K, ROWS>(constant expert_native_args &, \
+        device const uchar *, device const float *, device const int *, device const int *, \
+        device float *, uint3, ushort, ushort); \
+    template [[host_name("kernel_expert_native_gate_up_" NAME "_f32_vec_k" KNAME "_r" RNAME)]] kernel void \
+        kernel_expert_native_gate_up_f32_k<BYTES, NL, DEQ, K, ROWS>(constant expert_native_args &, \
+        device const uchar *, device const float *, device const int *, device const int *, \
+        device float *, device const uchar *, uint3, ushort, ushort);
+EXPERT_NATIVE_SPEC_VEC("iq2_s", "2560", "4", QT_IQ2_S_BYTES, QT_IQ2_S_NL, expert_dequantize_iq2_s_vec, 2560, 4)
+EXPERT_NATIVE_SPEC_VEC("iq2_s", "2304", "4", QT_IQ2_S_BYTES, QT_IQ2_S_NL, expert_dequantize_iq2_s_vec, 2304, 4)
+EXPERT_NATIVE_SPEC_VEC("iq2_s", "4096", "4", QT_IQ2_S_BYTES, QT_IQ2_S_NL, expert_dequantize_iq2_s_vec, 4096, 4)
+
 // Multi-output GLM batch decode: unchanged per-channel F32 FMA chains,
 // reusing activation fragments for independent output channels.
 EXPERT_NATIVE_SPEC("iq2_s", "4096", "4", QT_IQ2_S_BYTES, QT_IQ2_S_NL, latent_dequantize_iq2_s, 4096, 4)
@@ -1286,6 +1337,8 @@ inline void glm_batch_gate_up(
             args, gate_bank, input, ids, status, output, up_bank, up_values, group, lane, simd); \
     }
 GLM_BATCH_IQ(tg64, 2, latent_dequantize_iq2_s, latent_dequantize_iq3_s)
+// A/B candidate: same 64-thread schedule with the vector IQ2_S decoder.
+GLM_BATCH_IQ(vec, 2, expert_dequantize_iq2_s_vec, latent_dequantize_iq3_s)
 
 // Two dense Q8_0 projections of one F32 activation in one dispatch (the V4.1
 // decode query-rank and KV-latent projections both read the layer input).

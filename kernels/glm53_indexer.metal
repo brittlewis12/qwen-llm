@@ -143,10 +143,11 @@ kernel void kernel_glm53_indexer_append_members(
         device half * pending3 [[buffer(12)]],
         device half * pooled3 [[buffer(13)]],
         threadgroup float * reduce [[threadgroup(0)]],
-        uint member [[threadgroup_position_in_grid]],
+        uint3 tgpig [[threadgroup_position_in_grid]],
         ushort c [[thread_index_in_threadgroup]],
         ushort lane [[thread_index_in_simdgroup]],
         ushort sg [[simdgroup_index_in_threadgroup]]) {
+    const uint member = tgpig.x;
     if (member >= 4u) return;
     device half * pending = member == 0u ? pending0
         : member == 1u ? pending1 : member == 2u ? pending2 : pending3;

@@ -97,6 +97,10 @@ required-features = ["perf-ablations"]
 name = "v41_down_tail_rate"
 required-features = ["perf-ablations"]
 
+[[example]]
+name = "v41_iq2xxs_down_rate"
+required-features = ["perf-ablations"]
+
 [[bench]]
 name = "kernels"
 harness = false

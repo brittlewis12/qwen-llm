@@ -83,3 +83,19 @@ required-features = ["perf-ablations"]
 [[example]]
 name = "glm_append_iq3_down"
 required-features = ["perf-ablations"]
+
+[[example]]
+name = "spec_batch_rows"
+required-features = ["perf-ablations"]
+
+[[example]]
+name = "spec_dflash_accept"
+required-features = ["perf-ablations"]
+
+[[example]]
+name = "spec_nextn_accept"
+required-features = ["perf-ablations"]
+
+[[example]]
+name = "spec_verify_cost"
+required-features = ["perf-ablations"]

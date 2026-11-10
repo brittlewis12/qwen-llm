@@ -69,6 +69,35 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - **Next:** a clean GLM BA morning when the 48K arm can stay below level 2, and
   a load-matched V4.1 repeat to resolve whether its small negative is order
   effect or real.
+## 2026-11-10 - GLM Batched One-Ahead Loop Shipped; 6-7% At B=2..4
+
+- Shipped default-on **`QWEN_SERVE_GLM_BATCH_GPU_LOOP`** (`0` restores serial
+  host sampling), base main `fb1890c06` with the GLM width/index batching.
+- **The old 74/96 `step_tokens` mismatch was the probe, not the sampler.** The
+  host warm loop forwarded without sampling while the GPU warm loop consumed
+  eight draws; after resetting both streams, **0/96**. Non-pipelined GPU
+  sampling is exact but break-even (host 29.82 vs GPU 29.97 ms).
+- **Pipelined loop:** device token gather and device sparse/index controls are
+  encoded from constant args at the start of each command (no host writes to
+  in-flight buffers); the batched forward returns an uncommitted command; the
+  per-member `GpuTokenSampler` is appended in-command; the next frame is encoded
+  while the current executes, with predicted positions under `GpuThreadQos`.
+- **Native paired A/B, 32K/48K, load 36, QoS on:** 32K B2 **23.84 -> 22.32
+  (+6.82%)**, B3 **29.05 -> 27.18 (+6.89%)**, B4 **34.02 -> 32.02 (+6.25%)**;
+  48K **23.99 -> 22.58 (+6.24%)**, **29.33 -> 27.48 (+6.72%)**, **34.85 ->
+  32.61 (+6.87%)**. Greedy and released tokens **0 mismatches** in every cell;
+  loop encode 1.6-2.0 ms/round, wait 20-31, GPU 22-32. 48K ended at thermal 2
+  but the GPU spans and gains are stable.
+- **Three-agent serve A/B was thermally blocked.** Two attempts aborted at
+  pressure 2 during the GLM warm (the one completed reference arm: 75.64 tps,
+  gap p50 27.83 ms). A light single-arm serve smoke with the loop on completed
+  at thermal 0: 42.36 tps, gap p50 26.88 ms, validating the `advance_group` and
+  pending-transition cursor path; there is no paired serve comparison.
+- The width lane's fallbacks are preserved: serial `step` still writes host
+  controls and commits the command; the loop's device controls cover both the
+  shared stride path and the per-member path.
+- Raw: `~/qwen-runs/2026-11-10-glm-loop/{loop-ab-32k-final,loop-ab-48k-final,loop-smoke,loop-smoke2}.json*`;
+  serve `~/qwen-runs/2026-11-10-serve-loop/glm-loop-{pair-25s,pair-light,smoke,smoke2}`.
 
 ## 2026-11-10 - Flash-Next Batch Loop Shipped; GPU-Thread QoS Is Cross-Family
 

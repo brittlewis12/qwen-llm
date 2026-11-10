@@ -13,6 +13,34 @@ mod experiment {
         println!("{v}");
         std::io::stdout().flush().unwrap();
     }
+    struct Load {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        threads: Vec<std::thread::JoinHandle<()>>,
+    }
+    impl Load {
+        fn start(n: usize) -> Self {
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let threads = (0..n)
+                .map(|_| {
+                    let stop = stop.clone();
+                    std::thread::spawn(move || {
+                        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            std::hint::spin_loop();
+                        }
+                    })
+                })
+                .collect();
+            Self { stop, threads }
+        }
+    }
+    impl Drop for Load {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            while let Some(thread) = self.threads.pop() {
+                let _ = thread.join();
+            }
+        }
+    }
     fn metrics(a: &[f32], b: &[f32], target: usize) -> (bool, f64, f64, f64) {
         assert_eq!(a.len(), b.len());
         assert!(a.iter().chain(b).all(|v| v.is_finite()), "nonfinite logits");
@@ -56,6 +84,8 @@ mod experiment {
         anyhow::ensure!(matches!(mode, "all" | "timing" | "quality"));
         assert!(std::env::var_os("QWEN_METAL_LEASE_FD").is_some());
         let cohort = args.get(5).map(String::as_str).unwrap_or("distinct");
+        let probe_qos = args.get(6).is_some_and(|v| v == "1");
+        let probe_load: usize = args.get(7).and_then(|v| v.parse().ok()).unwrap_or(0);
         anyhow::ensure!(matches!(cohort, "distinct" | "forked"));
         let ctx = MetalContext::new()?;
         let g = GgufFile::open(&args[1])?;
@@ -161,6 +191,8 @@ mod experiment {
                             )
                         })?;
                     }
+                    let _qos = GpuThreadQos::enter_if(probe_qos);
+                    let _load = (probe_load > 0).then(|| Load::start(probe_load));
                     let mut times = Vec::new();
                     for p in 0..16 {
                         let t = Instant::now();
@@ -174,7 +206,9 @@ mod experiment {
                         std::hint::black_box(out);
                         times.push(t.elapsed().as_secs_f64() * 1e3);
                     }
-                    emit(json!({"kind":"timing","width":width,"arm":arm,"on":on,"wall_ms":times}));
+                    emit(
+                        json!({"kind":"timing","width":width,"arm":arm,"on":on,"qos":probe_qos,"load":probe_load,"wall_ms":times}),
+                    );
                 }
             }
         }

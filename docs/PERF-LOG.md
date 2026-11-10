@@ -235,6 +235,55 @@ tensor tile must lift the medium-`n_out` shapes, not just the head.
   K=1 first, success bar **>=1.15x delivered inter-token**. Do not build M4
   first. Details: `bench/2026-11-09-fn-mtp/README.md`; raw headers
   `header-audit.json` and `mtp-head-inventory.json`.
+## 2026-11-10 - Flash-Next Shared-Expert And Bootstrap HC Batches
+
+- Ship default-on **`QWEN_FN_MOE_BATCH_SHARED`**; set 0 to restore per-member
+  shared-expert SiLU/down. The member-axis shared SiLU feeds a new IQ4_NL down
+  matvec twin (`kernel_fn_shared_down_iq4_nl_members_f32`) that gives each
+  member its own input/output but keeps the incumbent per-row reduction order.
+  Paired 32K B4, 128 steps, same binary, bootstrap HC on both arms:
+  **28.033 -> 27.287 ms (+2.74%)**, streams bitwise, dNLL/KL **0**. An earlier
+  dense few-row MMA down route measured **+2.07%** but changed the reduction
+  order, so it was replaced rather than shipped. Q8_0 shared down stays on the
+  per-member route.
+- Ship default-on **`QWEN_FN_ZERO_ONE_HC_BATCH`**; set 0 to restore one
+  bootstrap pass per member. The layers-zero-one HC norm/down/up reads and
+  injection now span members; GDN, MoE and PLE keep per-member private state
+  and buffers. Paired 32K B4: **28.746 -> 28.229 ms (+1.83%)**, streams
+  bitwise, dNLL/KL **0**. This removes most of the ~88 per-member HC
+  bootstrap/final dispatches from the serial chain.
+- **Hygiene.** Both arms thermal max **1**; packets were briefly delayed by
+  other lanes. `scripts/check-contracts.sh` passes.
+- Combined **`iter`** sweep, same binary, control sets both new flags 0,
+  default enables both. 32K uses 48 samples in both orders; 48K uses 24 and a
+  single `both` run. All per-width stream hashes match across configs (B1..4,
+  both depths). Native `step()` ms/round:
+
+  | Depth | Config | B=1 | B=2 | B=3 | B=4 | F ms | m ms/row |
+  | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 32K | control | 13.857 | 20.318 | 24.163 | 28.181 | 12.426 | 3.932 |
+  | 32K | default | 13.821 | 19.942 | 23.357 | **26.910** | 12.951 | **3.484** |
+  | 48K | control | 13.988 | 20.824 | 24.764 | 28.441 | 13.251 | 3.808 |
+  | 48K | default | 14.150 | 20.327 | 23.913 | **27.364** | 13.313 | **3.518** |
+
+  B4 saves **4.51%** at 32K and **3.79%** at 48K; B2 saves 1.85%/2.39% and B3
+  3.34%/3.44%. **m falls from 3.93 to 3.48** at 32K. The 48K control fit is
+  noisier than 32K (24 samples, B1 differs 1.2% between configs), so the 48K
+  default m is the reliable number.
+- **Remaining per-member ledger (32K census, default).** The census B4-B1
+  delta now totals **3.39 ms/row**, close to the fitted **3.48**: RoutedExperts
+  **2.01**, TransportCopy **0.58**, QSA **0.44**, HC **0.40**, GDN **0.35**,
+  FFNShared **0.20**, PLEEmbed **0.04**, routing **0.02**, with the batched
+  dense fewrow/gather-scatter and B1-only paths contributing a **-0.71**
+  correction. Only **~0.42 ms/row** is still per-member: **0.24** unbatched
+  BF16 QSA/mixer projections (78 dispatches; dense lane), **0.08** QSA
+  cache write/publish (killed at the 0.30% gate), **0.05** PLE, **0.03**
+  zero-one MoE finalizer, **0.02** HC final read. The default now emits
+  **1,927** B4 dispatches, down from **2,589** at the pre-GDN/top-k census.
+  Next lever in this lane is the routed-down bandwidth (**0.7-0.9 ms/row**
+  headroom), which needs a retile; r8 lost.
+- Next: routed-down retile study or hand the lane off.
+
 ## 2026-11-10 - Flash-Next Member FFN Projections: +3.98% B4; QSA Cache Killed
 
 - Ship default-on **`QWEN_FN_MOE_BATCH_PROJECTIONS`**; set 0 to restore the

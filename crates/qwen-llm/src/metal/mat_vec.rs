@@ -359,6 +359,83 @@ pub fn encode_mat_vec_bf16_f32(
     )
 }
 
+/// Member-axis twin of the BF16 split-K matvec for a weight shared by 2..=4
+/// independent decode rows. Returns false without encoding when the incumbent
+/// would not use the split-K form or the layouts do not fit, so callers keep
+/// per-member calls.
+pub(crate) fn encode_mat_vec_bf16_f32_tg_members(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    xs: &[&MetalTensor],
+    ys: &[&MetalTensor],
+    n_in: usize,
+    n_out: usize,
+) -> Result<bool, MetalError> {
+    let b = xs.len();
+    if ys.len() != b
+        || !(2..=4).contains(&b)
+        || !bf16_split_k_enabled()
+        || weight.dtype != GgmlType::BF16
+        || !n_in.is_multiple_of(8)
+        || n_in == 0
+        || n_out == 0
+        || !weight.offset.is_multiple_of(16)
+    {
+        return Ok(false);
+    }
+    for (x, y) in xs.iter().zip(ys) {
+        if x.dtype != GgmlType::F32
+            || y.dtype != GgmlType::F32
+            || x.n_elements() as usize != n_in
+            || y.n_elements() as usize != n_out
+            || !x.offset.is_multiple_of(16)
+        {
+            return Ok(false);
+        }
+    }
+    let pso = match ctx.pipeline("kernel_fn_bf16_f32_tg_members") {
+        Ok(p) if p.threadExecutionWidth() == 32 && p.maxTotalThreadsPerThreadgroup() >= 128 => p,
+        Ok(_) | Err(MetalError::NoFunction(_) | MetalError::Pipeline(_, _)) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        groups: u32,
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            groups: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    for i in 0..4 {
+        let j = i.min(b - 1);
+        enc.set_tensor(2 + i, xs[j]);
+        enc.set_tensor(6 + i, ys[j]);
+    }
+    enc.dispatch(
+        MTLSize {
+            width: n_out * b,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(true)
+}
+
 /// [`encode_mat_vec_bf16_f32`] on the simdgroup-per-row kernel, never the
 /// one-threadgroup-per-row split-K form: for short rows (K = 320) the split
 /// form leaves most of each 128-thread threadgroup idle.

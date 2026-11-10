@@ -26,6 +26,21 @@ crate::env_flag!(
     default_on other_mma_enabled, "QWEN_FN_BATCH_OTHER_DENSE_MMA"
 );
 
+crate::env_flag!(
+    /// Batch BF16 mixer projections across independent members with a member-axis twin of the split-K matvec. Same per-row reduction order; 0 restores per-member BF16 projections.
+    default_on bf16_mixer_enabled, "QWEN_FN_BATCH_BF16_MIXER"
+);
+fn bf16_mixer_selected() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    {
+        return crate::metal::fn_batch_probe::axis("bf16_mixer", bf16_mixer_enabled());
+    }
+    #[cfg(not(feature = "perf-ablations"))]
+    {
+        bf16_mixer_enabled()
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CopyArgs {
@@ -102,6 +117,16 @@ impl Scratch {
                     | GgmlType::Q8_0
             );
         let mma = mma_enabled() || other_mma;
+        if enabled()
+            && (2..=4).contains(&b)
+            && bf16_mixer_selected()
+            && w.dtype == GgmlType::BF16
+            && crate::metal::encode_mat_vec_bf16_f32_tg_members(ctx, enc, w, inputs, outputs, k, m)?
+        {
+            #[cfg(feature = "perf-ablations")]
+            crate::metal::fn_batch_probe::observe("bf16_mixer", b);
+            return Ok(());
+        }
         if !enabled() || !(2..=4).contains(&b) || (w.dtype != GgmlType::Q6_K && !other_mma) {
             for (x, y) in inputs.iter().zip(outputs) {
                 encode_mat_vec_dispatch(ctx, enc, w, x, y, k, m)?;

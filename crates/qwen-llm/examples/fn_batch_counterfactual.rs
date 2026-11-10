@@ -144,6 +144,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "member bootstrap HC engagement"
                     );
                 }
+                if mode == "pair-bf16_mixer" {
+                    assert_eq!(
+                        fn_batch_probe::observed("bf16_mixer") > 0,
+                        arm == 1,
+                        "member BF16 mixer engagement"
+                    );
+                }
                 if j >= 8 {
                     ms[arm].push(elapsed);
                     for k in 0..3 {

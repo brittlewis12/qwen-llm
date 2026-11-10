@@ -935,6 +935,58 @@ kernel void kernel_mat_vec_bf16_f32_tg(
     }
 }
 
+struct fn_bf16_members_args {
+    uint n_in;
+    uint n_out;
+    uint groups;
+};
+
+// Member-axis twin of kernel_mat_vec_bf16_f32_tg. The BF16 weight is shared by
+// independent sequences; each threadgroup serves one member row, so every row
+// keeps the incumbent split-K reduction order.
+kernel void kernel_fn_bf16_f32_tg_members(
+        constant fn_bf16_members_args & args [[buffer(0)]],
+        device const uint4 * weight [[buffer(1)]],
+        device const float4 * x0 [[buffer(2)]],
+        device const float4 * x1 [[buffer(3)]],
+        device const float4 * x2 [[buffer(4)]],
+        device const float4 * x3 [[buffer(5)]],
+        device float * y0 [[buffer(6)]],
+        device float * y1 [[buffer(7)]],
+        device float * y2 [[buffer(8)]],
+        device float * y3 [[buffer(9)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        ushort tid   [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    threadgroup float partial[MAT_VEC_BF16_TG / 32];
+    const uint member = min(tgpig / args.groups, 3u);
+    const uint row = tgpig - member * args.groups;
+    device const float4 * x = member == 0 ? x0 : member == 1 ? x1 : member == 2 ? x2 : x3;
+    device float * y = member == 0 ? y0 : member == 1 ? y1 : member == 2 ? y2 : y3;
+    const uint chunks = args.n_in / 8;
+    device const uint4 * w = weight + (ulong)row * chunks;
+    float s0 = 0.0f;
+    float s1 = 0.0f;
+    uint c = tid;
+    for (; c + MAT_VEC_BF16_TG < chunks; c += 2 * MAT_VEC_BF16_TG) {
+        const uint d = c + MAT_VEC_BF16_TG;
+        const uint4 a = w[c];
+        const uint4 b = w[d];
+        s0 += mv_bf16_dot8(a, x[2 * c], x[2 * c + 1]);
+        s1 += mv_bf16_dot8(b, x[2 * d], x[2 * d + 1]);
+    }
+    if (c < chunks) {
+        s0 += mv_bf16_dot8(w[c], x[2 * c], x[2 * c + 1]);
+    }
+    const float sum = simd_sum(s0 + s1);
+    if (tiisg == 0) partial[sgitg] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        y[row] = (partial[0] + partial[1]) + (partial[2] + partial[3]);
+    }
+}
+
 #define FROZEN_LINEAR_VJP_NSG 8
 
 kernel void kernel_frozen_linear_f32_vjp_f32(

@@ -946,7 +946,7 @@ impl FastGpuSampler {
 /// the request carries **no explicit seed**; an explicit seed, `QWEN_FAST_SAMPLER=0`
 /// or `QWEN_GPU_SAMPLER_EXACT=1` keeps the exact sampler. The serve default seed
 /// (42) must not be confused with an explicit one; callers pass `explicit_seed`
-/// from `request.seed.is_some()`.
+/// from the request's parse-time `seed_explicit` intent.
 pub fn fast_sampler_allowed(config: &SamplingConfig, explicit_seed: bool) -> bool {
     config.temperature > 0.0
         && config.temperature.is_finite()

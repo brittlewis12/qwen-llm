@@ -118,6 +118,7 @@ fn muse_served_math_prefix_composition() {
     }
     safety.temperature = Some(0.7);
     safety.seed = Some(99);
+    safety.seed_explicit = true;
     backend.prefix_reuse = false;
     let (_, sampled, _) = run(&mut backend, &safety, &safety_prompt);
     backend.prefix_reuse = true;

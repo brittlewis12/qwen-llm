@@ -456,6 +456,69 @@ pub fn encode_online_selected_attention_split_f16(
     g: SelectedAttentionShape,
     partials: &SelectedAttentionPartials<'_>,
 ) -> Result<(), MetalError> {
+    encode_selected_attention_split(ctx, enc, b, g, partials, &[b.compressed_cache], false)
+}
+
+/// [`encode_online_selected_attention_split_f16`] over two to four
+/// independent member caches: query row `i` reads `caches[i]` while queries,
+/// outputs, selected ids, counts and visibility share the packed row layout.
+/// The per-query partition and arithmetic are unchanged, so each query's
+/// result is bitwise equal to its own single-cache dispatch. Requires
+/// `window == 0`; every cache must have the compressed-cache geometry.
+pub fn encode_online_selected_attention_split_f16_members(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &SelectedAttention<'_>,
+    caches: &[&MetalTensor],
+    g: SelectedAttentionShape,
+    partials: &SelectedAttentionPartials<'_>,
+) -> Result<(), MetalError> {
+    const K: &str = "online_selected_attention_split_members";
+    if !(2..=4).contains(&caches.len()) || g.window != 0 {
+        return Err(bad_shape(K, "needs two to four member caches and window 0"));
+    }
+    let width = LATENT_WIDTH;
+    let rows = [width as u64, g.compressed_capacity as u64];
+    for (i, cache) in caches.iter().enumerate() {
+        check_tensor(
+            K,
+            cache,
+            GgmlType::F16,
+            &rows,
+            false,
+            &format!("member cache {i}"),
+        )?;
+        check_alignment(K, cache, 8, "member cache")?;
+        check_disjoint(
+            K,
+            cache,
+            &[
+                (b.queries, "queries"),
+                (b.output, "output"),
+                (b.selected_ids, "selected ids"),
+                (b.selected_counts, "selected counts"),
+                (b.visible_counts, "visible counts"),
+                (b.sinks, "sinks"),
+                (partials.values, "partial values"),
+                (partials.stats, "partial stats"),
+            ],
+        )?;
+        for other in &caches[..i] {
+            check_disjoint(K, cache, &[(*other, "earlier member cache")])?;
+        }
+    }
+    encode_selected_attention_split(ctx, enc, b, g, partials, caches, true)
+}
+
+fn encode_selected_attention_split(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &SelectedAttention<'_>,
+    g: SelectedAttentionShape,
+    partials: &SelectedAttentionPartials<'_>,
+    caches: &[&MetalTensor],
+    member_caches: bool,
+) -> Result<(), MetalError> {
     const K: &str = "online_selected_attention_split";
     require_serial(K, enc)?;
     validate_selected_attention(b, g)?;
@@ -529,6 +592,7 @@ pub fn encode_online_selected_attention_split_f16(
         scale: f32,
         split_rows: u32,
         splits: u32,
+        member_caches: u32,
     }
     let u = |v: usize, name: &str| super::checks::to_u32(K, v, name);
     let args = Args {
@@ -544,6 +608,7 @@ pub fn encode_online_selected_attention_split_f16(
         scale: g.scale,
         split_rows: u(SELECTED_SPLIT_ROWS, "split rows")?,
         splits: u(splits, "splits")?,
+        member_caches: u32::from(member_caches),
     };
     let simdgroup = MTLSize {
         width: 32,
@@ -562,12 +627,15 @@ pub fn encode_online_selected_attention_split_f16(
     enc.set_tensor(1, b.queries);
     enc.set_tensor(2, b.raw_cache);
     enc.set_tensor(3, b.raw_cache_before_chunk);
-    enc.set_tensor(4, b.compressed_cache);
+    enc.set_tensor(4, caches[0]);
     enc.set_tensor(5, b.selected_ids);
     enc.set_tensor(6, b.selected_counts);
     enc.set_tensor(7, b.visible_counts);
     enc.set_tensor(8, partials.values);
     enc.set_tensor(9, partials.stats);
+    for (slot, i) in (10..=12).zip(1..4) {
+        enc.set_tensor(slot, caches.get(i).copied().unwrap_or(caches[0]));
+    }
     enc.dispatch(
         MTLSize {
             width: g.query_count,

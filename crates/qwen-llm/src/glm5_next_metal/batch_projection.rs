@@ -12,10 +12,16 @@ pub(super) const ROUTER: u8 = 2;
 pub(super) const MLA: u8 = 4;
 pub(super) const SELECT: u8 = 8;
 pub(super) const KDA: u8 = 16;
+pub(super) const ATTENTION: u8 = 32;
 crate::env_flag!(
     /// Default-on M5 Fast/Half independent decode KDA grid over two to four members, with separate state buffers and unchanged arithmetic. Zero restores per-member dispatches; ordinary decode, prefill and Exact/F32 policies are unchanged.
     default_on kda_enabled,
     "QWEN_GLM53_BATCH_KDA"
+);
+crate::env_flag!(
+    /// Default-on M5 Fast/Half independent decode selected attention over two to four member caches in one split dispatch, with the incumbent per-query partition and arithmetic. Zero restores per-member selected attention; ordinary decode, prefill and Exact/F32 policies are unchanged.
+    default_on attention_enabled,
+    "QWEN_GLM53_BATCH_ATTENTION"
 );
 #[cfg(test)]
 thread_local! { static OVERRIDE:std::cell::Cell<Option<u8>>=const {std::cell::Cell::new(None)}; }
@@ -25,6 +31,7 @@ pub(super) fn features() -> u8 {
         return v;
     }
     (if kda_enabled() { KDA } else { 0 })
+        | (if attention() { ATTENTION } else { 0 })
         | (if enabled() { Q6 | ROUTER | MLA } else { 0 })
         | (if super::selection::requested() {
             SELECT
@@ -34,7 +41,7 @@ pub(super) fn features() -> u8 {
 }
 #[cfg(test)]
 pub(super) fn with_features<T>(v: u8, f: impl FnOnce() -> T) -> T {
-    assert_eq!(v & !31, 0);
+    assert_eq!(v & !63, 0);
     struct Reset(Option<u8>);
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -87,15 +94,19 @@ pub(super) fn matmat(
     Ok(false)
 }
 
-#[cfg(test)]
-thread_local! {static TIMING: std::cell::Cell<(f64,f64)>=const {std::cell::Cell::new((0.0,0.0))};}
-#[cfg(test)]
+#[cfg(any(test, feature = "perf-ablations"))]
+thread_local! {static TIMING: std::cell::Cell<Option<(f64,f64)>>=const {std::cell::Cell::new(None)};}
+#[cfg(any(test, feature = "perf-ablations"))]
 pub(super) fn record_timing(encode_ms: f64, gpu_ms: f64) {
-    TIMING.with(|v| v.set((encode_ms, gpu_ms)));
+    TIMING.with(|v| v.set(Some((encode_ms, gpu_ms))));
 }
 #[cfg(test)]
 pub(super) fn timing() -> (f64, f64) {
-    TIMING.with(|v| v.get())
+    TIMING.with(|v| v.get()).unwrap_or((0.0, 0.0))
+}
+#[cfg(feature = "perf-ablations")]
+pub(super) fn take_timing() -> Option<(f64, f64)> {
+    TIMING.with(|v| v.replace(None))
 }
 
 crate::env_flag!(
@@ -121,5 +132,35 @@ pub(super) fn with_batch_waves<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
         }
     }
     let _reset = Reset(WAVES.with(|c| c.replace(Some(enabled))));
+    f()
+}
+
+#[cfg(feature = "perf-ablations")]
+thread_local! {static ATTENTION_OVERRIDE:std::cell::Cell<Option<bool>>=const {std::cell::Cell::new(None)};}
+#[cfg(feature = "perf-ablations")]
+fn attention_enabled_override() -> bool {
+    ATTENTION_OVERRIDE
+        .with(|c| c.get())
+        .unwrap_or_else(attention_enabled)
+}
+fn attention() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    {
+        attention_enabled_override()
+    }
+    #[cfg(not(feature = "perf-ablations"))]
+    {
+        attention_enabled()
+    }
+}
+#[cfg(feature = "perf-ablations")]
+pub(super) fn with_batch_attention<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<bool>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ATTENTION_OVERRIDE.with(|c| c.set(self.0));
+        }
+    }
+    let _reset = Reset(ATTENTION_OVERRIDE.with(|c| c.replace(Some(enabled))));
     f()
 }

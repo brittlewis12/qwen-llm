@@ -423,3 +423,154 @@ fn selected_tensor_attention_masks_logits_equal_to_no_sink_and_rejects_bad_bindi
             .all(|v| v.is_finite() && (*v - 0.25).abs() < 1e-6)
     );
 }
+
+#[test]
+fn selected_member_attention_matches_independent_dispatches_bitwise() {
+    let Some(ctx) = context() else {
+        return;
+    };
+    let rows = 4;
+    let slots = 33;
+    let f = Fixture::new(&ctx, rows, slots);
+    let capacity = f.g.compressed_capacity;
+    let caches: Vec<MetalTensor> = (0..rows)
+        .map(|r| {
+            let values: Vec<half::f16> = (0..capacity * 512)
+                .map(|i| half::f16::from_f32(((i * 53 + r * 97 + 11) % 251) as f32 * 0.004 - 0.5))
+                .collect();
+            offset_tensor(
+                &ctx,
+                8,
+                bytemuck::cast_slice(&values),
+                8,
+                vec![512, capacity as u64],
+                GgmlType::F16,
+            )
+        })
+        .collect();
+    // One dispatch per member, each with its own cache, into the reference row.
+    for r in 0..rows {
+        let per_row = 64 * selected_attention_splits(0, slots);
+        let values = MetalTensor::zeros_f32(&ctx, vec![512, per_row as u64]).unwrap();
+        let stats = MetalTensor::zeros_f32(&ctx, vec![2, per_row as u64]).unwrap();
+        let q = f.q.view_subrange((r * 32768) as u64, vec![32768, 1]);
+        let ids = f
+            .ids
+            .view_subrange((r * slots) as u64, vec![slots as u64, 1]);
+        let counts = f.counts.view_subrange(r as u64, vec![1]);
+        let visible = f.visible.view_subrange(r as u64, vec![1]);
+        let out = f.out.view_subrange((r * 32768) as u64, vec![32768, 1]);
+        let b = SelectedAttention {
+            queries: &q,
+            raw_cache: &caches[r],
+            raw_cache_before_chunk: &caches[r],
+            compressed_cache: &caches[r],
+            selected_ids: &ids,
+            selected_counts: &counts,
+            visible_counts: &visible,
+            sinks: &f.sinks,
+            output: &out,
+        };
+        let g = SelectedAttentionShape {
+            query_count: 1,
+            query_token_offset: 0,
+            token_count: 1,
+            ..f.g
+        };
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        encode_online_selected_attention_split_f16(
+            &ctx,
+            &enc,
+            &b,
+            g,
+            &SelectedAttentionPartials {
+                values: &values,
+                stats: &stats,
+            },
+        )
+        .unwrap();
+        enc.end();
+        command.commit();
+        wait_completed(&command).unwrap();
+    }
+    // One member-axis dispatch over all four caches.
+    let units = rows * 64 * selected_attention_splits(0, slots);
+    let values = MetalTensor::zeros_f32(&ctx, vec![512, units as u64]).unwrap();
+    let stats = MetalTensor::zeros_f32(&ctx, vec![2, units as u64]).unwrap();
+    let cache_refs: Vec<&MetalTensor> = caches.iter().collect();
+    let b = SelectedAttention {
+        queries: &f.q,
+        raw_cache: &caches[0],
+        raw_cache_before_chunk: &caches[0],
+        compressed_cache: &caches[0],
+        selected_ids: &f.ids,
+        selected_counts: &f.counts,
+        visible_counts: &f.visible,
+        sinks: &f.sinks,
+        output: &f.reference,
+    };
+    let command = ctx.queue.commandBuffer().unwrap();
+    let enc = KernelEncoder::begin(&command);
+    encode_online_selected_attention_split_f16_members(
+        &ctx,
+        &enc,
+        &b,
+        &cache_refs,
+        f.g,
+        &SelectedAttentionPartials {
+            values: &values,
+            stats: &stats,
+        },
+    )
+    .unwrap();
+    enc.end();
+    command.commit();
+    wait_completed(&command).unwrap();
+    let separate = tensor_f32_at_offset(&f.out);
+    let fused = tensor_f32_at_offset(&f.reference);
+    assert_eq!(
+        separate.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        fused.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn selected_member_attention_rejects_shared_and_windowed_shapes() {
+    let Some(ctx) = context() else {
+        return;
+    };
+    let f = Fixture::new(&ctx, 2, 33);
+    let units = 2 * 64 * selected_attention_splits(0, 33);
+    let values = MetalTensor::zeros_f32(&ctx, vec![512, units as u64]).unwrap();
+    let stats = MetalTensor::zeros_f32(&ctx, vec![2, units as u64]).unwrap();
+    let caches: Vec<&MetalTensor> = vec![&f.cache, &f.cache];
+    let b = f.buffers(&f.out);
+    let command = ctx.queue.commandBuffer().unwrap();
+    let enc = KernelEncoder::begin(&command);
+    let one = encode_online_selected_attention_split_f16_members(
+        &ctx,
+        &enc,
+        &b,
+        &caches[..1],
+        f.g,
+        &SelectedAttentionPartials {
+            values: &values,
+            stats: &stats,
+        },
+    );
+    assert!(one.is_err());
+    let windowed = encode_online_selected_attention_split_f16_members(
+        &ctx,
+        &enc,
+        &b,
+        &caches,
+        SelectedAttentionShape { window: 1, ..f.g },
+        &SelectedAttentionPartials {
+            values: &values,
+            stats: &stats,
+        },
+    );
+    assert!(windowed.is_err());
+    enc.end();
+}

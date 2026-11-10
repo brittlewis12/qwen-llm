@@ -2285,6 +2285,11 @@ struct online_selected_split_args {
     ds4_packed_selected_attention_args base;
     uint split_rows;
     uint splits;
+    // Zero: every query reads `compressed_cache`. One: query i (i < 4) reads
+    // an independent member cache bound at buffers 4, 10, 11, 12, so several
+    // independent sessions share one dispatch without changing per-query
+    // arithmetic. Requires window == 0 (selected rows only).
+    uint member_caches;
 };
 
 // Maximum of an empty split's state. Finite, like the host's no-sink logit
@@ -2316,6 +2321,9 @@ kernel void kernel_online_selected_attention_f16_split_partial(
         device const int * visible_counts [[buffer(7)]],
         device float * partial_values [[buffer(8)]],
         device float * partial_stats [[buffer(9)]],
+        device const half * compressed_cache1 [[buffer(10)]],
+        device const half * compressed_cache2 [[buffer(11)]],
+        device const half * compressed_cache3 [[buffer(12)]],
         uint3 group [[threadgroup_position_in_grid]],
         ushort lane [[thread_index_in_simdgroup]]) {
     constant ds4_packed_selected_attention_args & args = split_args.base;
@@ -2324,6 +2332,14 @@ kernel void kernel_online_selected_attention_f16_split_partial(
     const uint split = group.z;
     if (local_query >= args.query_count || head >= args.head_count
             || split >= split_args.splits) return;
+    // Independent members: one cache per query row. The host binds the last
+    // cache again for unused slots.
+    device const half * member_cache = compressed_cache;
+    if (split_args.member_caches != 0u) {
+        member_cache = local_query == 1u ? compressed_cache1
+            : local_query == 2u ? compressed_cache2
+            : local_query == 3u ? compressed_cache3 : compressed_cache;
+    }
 
     const uint token = args.query_token_offset + local_query;
     const uint absolute_position = args.chunk_start_position + token;
@@ -2372,7 +2388,7 @@ kernel void kernel_online_selected_attention_f16_split_partial(
             if (selected_id < 0 || uint(selected_id) >= visible_count
                     || uint(selected_id) >= args.compressed_capacity) continue;
             deepseek_v4_online_attend_f16_row_direct(
-                (device const half4 *)(compressed_cache + uint(selected_id) * args.head_dim),
+                (device const half4 *)(member_cache + uint(selected_id) * args.head_dim),
                 q0, q1, q2, q3, args.scale, lane,
                 maximum, denominator, o0, o1, o2, o3);
         }

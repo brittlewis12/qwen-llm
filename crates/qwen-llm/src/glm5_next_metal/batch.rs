@@ -19,6 +19,15 @@ mod selection;
 pub fn with_batch_waves<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
     projection::with_batch_waves(enabled, f)
 }
+#[cfg(feature = "perf-ablations")]
+pub fn with_batch_attention<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+    projection::with_batch_attention(enabled, f)
+}
+#[cfg(feature = "perf-ablations")]
+/// Encode and GPU-span milliseconds from the most recent batched step.
+pub fn take_last_step_timing() -> Option<(f64, f64)> {
+    projection::take_timing()
+}
 
 crate::env_flag!(
     /// Default-on four-output-channel IQ2_S gate/up and IQ3_S down grids for qualified M5 Fast/Half independent decode batches of two to four members. Zero restores the original F32 token grids; single-token, Exact/F32 and other primitive policies are unchanged.
@@ -337,7 +346,7 @@ impl Glm5NextSession<'_> {
             &tokens.iter().map(|t| *t as i32).collect::<Vec<_>>(),
         )?;
         let v = |t: &MetalTensor| rows_view(t, rows);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "perf-ablations"))]
         let encode_started = std::time::Instant::now();
         let command = ctx
             .queue
@@ -670,11 +679,11 @@ impl Glm5NextSession<'_> {
             enc.finish_causal_scope(ctx, false)?;
         }
         enc.end();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "perf-ablations"))]
         let encode_ms = encode_started.elapsed().as_secs_f64() * 1e3;
         command.commit();
         wait_completed(&command)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "perf-ablations"))]
         projection::record_timing(
             encode_ms,
             (command.GPUEndTime() - command.GPUStartTime()) * 1e3,
@@ -895,6 +904,23 @@ impl Glm5NextSession<'_> {
             c.rms_epsilon,
         )?;
         let views = projection::features() & projection::MLA != 0;
+        // Member-axis attention binds each session's latent cache. Shared
+        // geometry is required by the single compressed-capacity argument;
+        // unequal cache shapes keep the incumbent per-member route rather
+        // than failing after encoding begins.
+        let latents = seqs
+            .iter()
+            .map(|seq| match &seq.layers[block] {
+                LayerState::Mla { latent, .. } => Ok(latent),
+                _ => invalid("not MLA"),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let batch_attention = selection_stride.is_some()
+            && projection::features() & projection::ATTENTION != 0
+            && rows >= 2
+            && latents
+                .windows(2)
+                .all(|pair| pair[0].shape == pair[1].shape);
         if !views {
             for (w, y) in [
                 (&mla.indexer.key, &p.index_key),
@@ -957,16 +983,29 @@ impl Glm5NextSession<'_> {
                 std::borrow::Cow::Borrowed(&s.latent)
             };
             encode_scatter_offset_f32_to_f16(ctx, enc, &latent_row, latent, seq.position * kv, kv)?;
-            grouped_matvec(
-                ctx,
-                enc,
-                &mla.key_absorb,
-                &query,
-                &s.query_latent,
-                head_dim,
-                kv,
-                heads,
-            )?;
+            if batch_attention {
+                grouped_matvec(
+                    ctx,
+                    enc,
+                    &mla.key_absorb,
+                    &query,
+                    &row(&p.query_latent, r, kv * heads),
+                    head_dim,
+                    kv,
+                    heads,
+                )?;
+            } else {
+                grouped_matvec(
+                    ctx,
+                    enc,
+                    &mla.key_absorb,
+                    &query,
+                    &s.query_latent,
+                    head_dim,
+                    kv,
+                    heads,
+                )?;
+            }
             // Indexer cache maintenance from token zero. The pool this token
             // completes is published before attention: a query at visible length
             // L scores the first L / 4 pools, including its own.
@@ -1037,10 +1076,56 @@ impl Glm5NextSession<'_> {
         }
         if let Some(stride) = selection_stride {
             selection::encode(ctx, enc, seqs, mla_index, stride)?;
+            if batch_attention {
+                let sp = p.sparse.as_ref().expect("preflighted sparse scratch");
+                let caches = &latents;
+                let units = memory::split_attention_units(c, rows as u64);
+                crate::metal::encode_online_selected_attention_split_f16_members(
+                    ctx,
+                    enc,
+                    &crate::metal::SelectedAttention {
+                        queries: &p
+                            .query_latent
+                            .view_subrange(0, vec![(kv * heads) as u64, rows as u64]),
+                        raw_cache: caches[0],
+                        raw_cache_before_chunk: caches[0],
+                        compressed_cache: caches[0],
+                        selected_ids: &sp
+                            .row_ids
+                            .view_subrange(0, vec![c.selection_width() as u64, rows as u64]),
+                        selected_counts: &sp.row_counts.view_subrange(0, vec![rows as u64]),
+                        visible_counts: &sp.visible_rows.view_subrange(0, vec![rows as u64]),
+                        sinks: &seqs[0].s.no_sink,
+                        output: &p
+                            .output_latent
+                            .view_subrange(0, vec![(kv * heads) as u64, rows as u64]),
+                    },
+                    caches,
+                    crate::metal::SelectedAttentionShape {
+                        head_count: heads,
+                        query_count: rows,
+                        query_token_offset: 0,
+                        token_count: rows,
+                        chunk_start_position: seqs[0].position,
+                        window: 0,
+                        raw_cache_is_chunk: false,
+                        selected_slots: c.selection_width() as usize,
+                        compressed_capacity: caches[0].shape[1] as usize,
+                        scale: 1.0 / (head_dim as f32).sqrt(),
+                        direct: true,
+                    },
+                    &crate::metal::SelectedAttentionPartials {
+                        values: &sp
+                            .attention_partials
+                            .view_subrange(0, vec![kv as u64, units]),
+                        stats: &sp.attention_partial_stats.view_subrange(0, vec![2, units]),
+                    },
+                )?;
+            }
         }
         for (r, seq) in seqs.iter().enumerate() {
             let s = &seq.s;
-            if selection_stride.is_some() {
+            if selection_stride.is_some() && !batch_attention {
                 let LayerState::Mla { latent, .. } = &seq.layers[block] else {
                     return invalid("not MLA");
                 };
@@ -1065,16 +1150,29 @@ impl Glm5NextSession<'_> {
                 std::borrow::Cow::Borrowed(&s.heads_out)
             };
             seq.stage(enc, Glm5NextStage::MlaOutput, Some(block))?;
-            grouped_matvec(
-                ctx,
-                enc,
-                &mla.value_expand,
-                &s.output_latent,
-                &heads_out,
-                kv,
-                head_dim,
-                heads,
-            )?;
+            if batch_attention {
+                grouped_matvec(
+                    ctx,
+                    enc,
+                    &mla.value_expand,
+                    &row(&p.output_latent, r, kv * heads),
+                    &heads_out,
+                    kv,
+                    head_dim,
+                    heads,
+                )?;
+            } else {
+                grouped_matvec(
+                    ctx,
+                    enc,
+                    &mla.value_expand,
+                    &s.output_latent,
+                    &heads_out,
+                    kv,
+                    head_dim,
+                    heads,
+                )?;
+            }
 
             if !views {
                 copy(

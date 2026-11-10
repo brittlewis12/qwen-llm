@@ -6,6 +6,56 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-10 - Flash-Next BF16 Mixer Batch; Down Retile Negative; Lane Done
+
+- Base **main `bb3fc874c`** (device-input batch step + Flash-Next batched GPU
+  sampling). `step()` logits-path timings; the sampling cursor is a separate
+  path and does not change these dispatch families.
+- Ship default-on **`QWEN_FN_BATCH_BF16_MIXER`**; set 0 to restore per-member
+  BF16 mixer projections. Member-axis twin of the split-K BF16 matvec
+  (`kernel_fn_bf16_f32_tg_members`), same per-row reduction order. Paired 32K
+  B4, 128 steps, streams bitwise, dNLL/KL **0**: **25.880 -> 25.597 ms
+  (+1.11%)** on the sampling base (+0.91% on the device-input base). Removes
+  the 72 per-member QSA BF16 dispatches; 8 zero-one BF16 remain in the
+  device-input prefix (that lane).
+- **Bootstrap HC on the GPU-input step.** `encode_gpu` now uses the member-axis
+  bootstrap path. Paired 32K B4: **26.485 -> 25.835 ms (+2.52%)**, bitwise.
+- **Combined 32K sweep** on the sampling base, 48 samples, control sets all
+  three new flags 0. Final uses both orders; control's desc arm was lost to
+  thermal aborts from external compiles, so control is asc-only:
+
+  | Config | B=1 | B=2 | B=3 | B=4 | F ms | m ms/row |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | control | 14.860 | 20.309 | 23.599 | 27.425 | 13.105 | 3.558 |
+  | final | 14.928 | 19.823 | 22.922 | **26.189** | 13.430 | **3.183** |
+
+  B4 **-4.51%**, B3 -2.87%, B2 -2.39%; **m 3.56 -> 3.18**. All B1..4 stream
+  hashes match across configs. The combined gain is below the arithmetic sum
+  of the isolated pairs because the batches overlap each other's fixed cost.
+- **Expert-down retile is a negative.** Research-only aligned repack
+  (`kernels/research/fn_down_retile.metal`; scales separated, every 16-byte qs
+  block aligned) keeps the incumbent FMA order and is bytewise equal. Heated,
+  interleaved isolated probe on the real grid (2560x640, top-10, 4 rows, 40
+  distinct experts; `crates/qwen-llm/examples/fn_down_retile_rate.rs`):
+  incumbent **712 GB/s** -> repacked **767 GB/s (+7.6%)**, far below the 25%
+  gate. Cold one-dispatch commands read ~2x slower for both, so the probe heats
+  and batches 16 dispatches per command. Not integrated. B4 top-10 gives ~1
+  slot per expert, so a GLM-style M128/N16 MMA retile has no N to amortize.
+- **Final ledger** (final-default census, 32K, device-input base): B4 dispatches
+  **1,863**; B4-B1 delta **3.15 ms/row**, matching the fitted **3.18**.
+  RoutedExperts **2.03**, TransportCopy **0.53**, QSA **0.44**, HC **0.41**,
+  GDN **0.34**, FFNShared **0.19**, PLE **0.03**, routing **0.02**; batched
+  dense/BF16 net **-0.13**, B1-only correction **-0.72**. Still per-member: QSA
+  cache write/publish **0.31 ms/round** (killed at the 0.30% gate), zero-one
+  BF16 prefix **0.33** (device-input lane), PLE **0.08**, zero-one MoE
+  finalizer **0.08**, HC final read **0.08**. No single remaining item bounds
+  above **0.5 ms/round**; dispatch batching in this lane is done. The only
+  larger bound is routed-down bandwidth (0.7-0.9 ms/row), which needs a
+  different retile than the aligned repack tested here.
+- **Hygiene.** Thermal 0-1 on accepted arms; several arms were aborted at
+  thermal 2 by concurrent external compiles and rerun. `check-contracts.sh`
+  passes.
+
 ## 2026-11-10 - V4.1 Design D Probe: Small-M Tensor Tile Is 2-3x Slower
 
 M5 Ultra, GSQ-RCO IQ2_XS, base `98ddc18af`, thin-LTO `iter`. Standalone

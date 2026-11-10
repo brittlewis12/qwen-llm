@@ -284,6 +284,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 json!({"kind":"shape_census","depth":depth,"overflow":report.overflow,"joined":records.len(),"rows":rows})
             );
         }
+        if a.iter().any(|s| s == "--expert-read") {
+            runner.restore_snapshot(&snap)?;
+            let book = TokenPriceBook::default();
+            let cap = book.scope(TokenPriceMode::Capture);
+            runner.forward_token(tokens[phase])?;
+            cap.finish();
+            for rows_per_group in [1usize, 2, 4, 8, 16, 32] {
+                for threads in [32usize, 64, 128, 256, 512] {
+                    let mut best = f64::INFINITY;
+                    let mut bytes = 0u64;
+                    for _ in 0..4 {
+                        let (ms, read) = book.expert_read(&ctx, rows_per_group, threads)?;
+                        if ms < best {
+                            best = ms;
+                        }
+                        bytes = read;
+                    }
+                    println!(
+                        "{}",
+                        json!({"kind":"expert_read","rows_per_group":rows_per_group,"threads":threads,"ms":best,"bytes":bytes,"gbps":bytes as f64 / (best * 1e6)})
+                    );
+                }
+            }
+            return Ok(());
+        }
         // Isolated copy tax, same native wave barriers: no inference result claimed.
         for rep in 0..3 {
             for mask in [

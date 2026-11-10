@@ -171,6 +171,39 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `scripts/bench/with-metal-lease`:
   `fn_native_batch_check MODEL CODE PROSE 32768 16 1,4 census`; the A/B uses
   `fn_batch_counterfactual MODEL CODE PROSE 32768 128 4 pair-members`.
+## 2026-11-09 - Flash-Next M4 Expert Read Ceiling: 436 GB/s, Grid Already There
+
+- Branch **`perf/fn-m4-decode`**, M4 Max laptop, GSQ-RCO IQ3_S. Follow-up to the
+  expert kills above: the prior **336 GB/s** "same-byte stream" was the
+  `kernel_research_v41_expert_stream` probe, which also copied held outputs and
+  used a different loop. A new pure-read kernel (`kernel_research_expert_read`)
+  over the **same captured expert rows and bytes** (982.272 MB) sweeps rows per
+  threadgroup and threads per threadgroup:
+
+  | rows/tg | 32 thr | 64 | 128 | 256 | 512 |
+  | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 1 | 285 | 285 | 218 | 127 | 84 |
+  | 2 | 393 | 391 | 324 | 216 | 149 |
+  | 4 | **436** | 433 | 425 | 330 | 223 |
+  | 8 | 428 | 432 | 423 | 364 | 257 |
+  | 16 | 381 | 419 | 412 | 353 | 255 |
+  | 32 | 263 | 341 | 343 | 292 | 219 |
+
+  (GB/s; best 4 rows/tg x 32 threads = **2.254 ms, 436 GB/s**.)
+- **The incumbent gate/up grid (8 rows/tg, 64 threads) already reads at
+  ~432 GB/s**, within 1% of the best. The grid is not the memory limit. The
+  real expert kernels run at **241 GB/s**: 982 MB would take **2.25 ms** at the
+  read ceiling but takes **4.08 ms**. They are decode-math bound, so a re-grid
+  cannot recover the ~1.8 ms ALU gap. The only remaining lever is a lower
+  precision decode (FP16 sign-collapse), which carries quality risk and is not
+  taken here.
+- **Decision:** stop expert work. Do not re-grid; do not take FP16 without a
+  quality mandate. The shexp+k/v fusion remains a >1 h multi-matrix build for
+  a ~0.15-0.25 ms isolation bound and is also skipped. Evidence:
+  `~/qwen-runs/2026-11-09-fn-m4-roofline/expert-read-32768.iter.jsonl`.
+- Next: final 32K/48K standing on the shipped two-row Q6 default and the
+  practical-bound summary.
+
 ## 2026-11-09 - Flash-Next M4 Experts: Two Kills And A Fusion Price
 
 - Branch **`perf/fn-m4-decode`** on **`2fb21800`**, M4 Max laptop, GSQ-RCO

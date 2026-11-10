@@ -427,7 +427,87 @@ struct Generic {
     bytes: usize,
     checksum: Buffer,
 }
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ExpertReadArgs {
+    row_bytes: u64,
+    n_out: u32,
+    experts: u32,
+    slots: u32,
+    banks: u32,
+    rows_per_group: u32,
+    _pad: u32,
+}
+
 impl TokenPriceBook {
+    /// Pure same-byte read over every captured expert record with `rows_per_group`
+    /// rows per threadgroup and `threads` threads per threadgroup. Returns
+    /// (gpu_ms, useful_bytes). Research only; no dequant and no output writes.
+    pub fn expert_read(
+        &self,
+        ctx: &MetalContext,
+        rows_per_group: usize,
+        threads: usize,
+    ) -> Result<(f64, u64), MetalError> {
+        let records = self.records.borrow();
+        let mut max_groups = 1usize;
+        let mut max_slots = 1usize;
+        for r in records.iter() {
+            if let Some(s) = r.stream.as_ref() {
+                max_groups = max_groups.max((s.args.n_out as usize).div_ceil(rows_per_group));
+                max_slots = max_slots.max(s.args.slots as usize);
+            }
+        }
+        let words = max_groups * max_slots * (threads / 32).max(1);
+        let checksum = ctx.buffer_from(&vec![0u8; words * 4])?;
+        let cmd = ctx.queue.commandBuffer().expect("expert-read command");
+        let enc = KernelEncoder::begin(&cmd);
+        let mut bytes = 0u64;
+        for r in records.iter() {
+            let Some(s) = r.stream.as_ref() else { continue };
+            let groups = (s.args.n_out as usize).div_ceil(rows_per_group);
+            let args = ExpertReadArgs {
+                row_bytes: s.args.row_bytes,
+                n_out: s.args.n_out,
+                experts: s.args.experts,
+                slots: s.args.slots,
+                banks: s.args.banks,
+                rows_per_group: rows_per_group as u32,
+                _pad: 0,
+            };
+            enc.set_pipeline(&ctx.pipeline("kernel_research_expert_read")?);
+            enc.set_bytes(0, &args);
+            enc.set_buffer(1, &s.bindings[0].0, s.bindings[0].1 as u64);
+            enc.set_buffer(2, &s.bindings[1].0, s.bindings[1].1 as u64);
+            enc.set_buffer(3, &s.bindings[2].0, s.bindings[2].1 as u64);
+            enc.set_buffer(4, &checksum, 0);
+            enc.set_threadgroup_memory(0, 0);
+            enc.dispatch(
+                MTLSize {
+                    width: groups,
+                    height: s.args.slots as usize,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: threads,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            bytes += s.args.row_bytes
+                * u64::from(s.args.n_out)
+                * u64::from(s.args.slots)
+                * u64::from(s.args.banks);
+        }
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        if cmd.status() != objc2_metal::MTLCommandBufferStatus::Completed {
+            return Err(MetalError::Counter("expert-read command failed".into()));
+        }
+        Ok(((cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3, bytes))
+    }
+
     /// Isolated held-output copy tax. No inference/session commit is claimed.
     pub fn copy_tax(&self, ctx: &MetalContext, mask: u32) -> Result<f64, MetalError> {
         let cmd = ctx.queue.commandBuffer().expect("copy-tax command");

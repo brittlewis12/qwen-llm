@@ -107,7 +107,12 @@ fn main() -> Result<()> {
     if args.get(1).is_some_and(|v| v == "compare") {
         return compare(&args[2], &args[3]);
     }
-    thermal()?;
+    // A host-load probe deliberately runs hot; the paired on/off arms share
+    // whatever pressure is present.
+    let probe_load: usize = args.get(8).and_then(|v| v.parse().ok()).unwrap_or(0);
+    if probe_load == 0 {
+        thermal()?;
+    }
     let g = Arc::new(GgufFile::open(&args[1])?);
     if args.get(2).is_some_and(|s| s == "inventory") {
         let plan = qwen_llm::deepseek_v41::gguf::plan(&g)?;
@@ -149,7 +154,9 @@ fn main() -> Result<()> {
     let depth: usize = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(32768);
     ensure!([32768, 49152, 65536].contains(&depth), "depth 32K/48K/64K");
     for depth in [depth] {
-        thermal()?;
+        if probe_load == 0 {
+            thermal()?;
+        }
         let target = depth - 4096;
         let p = base.position();
         let t = Instant::now();

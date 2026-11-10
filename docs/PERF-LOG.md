@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-10 - V4.1 Fast Sampler Was Never Reached In Serve; Fixed, Serve Is Neutral
+
+- **Bug.** `fill_sampling_defaults` inserts a fresh seed into every request, so
+  `backend_v41`'s `explicit_seed: request.seed.is_some()` was always true after
+  normalization. Every serve request took the exact/host path; the fast sampler
+  never ran. The native probe set modes directly, so it did not catch this, and
+  the first serve A/B compared host against host.
+- **Fix.** Capture intent at parse: `ServeRequest::seed_explicit` (`x_qwen.seed`
+  sets it; absent means false). Normalization leaves it alone; `backend_v41`
+  reads `request.seed_explicit` into `Run.explicit_seed`. Branch
+  `perf/seed-intent`. Tests: parse, normalize (fresh draw stays implicit and is
+  fast-eligible; seeded stays exact), mixed-batch intent reaches the engine, and
+  two seeded requests produce identical host tokens with GPU sampling on or off.
+- **Corrected serve A/B** (three agents, agent defaults, 25 s, ABBA, fast vs
+  `QWEN_FAST_SAMPLER=0`, both through the sampled step): AB **103.32 -> 104.72
+  tps (+1.36%)**, BA **105.32 -> 103.64 (-1.59%)**, order spread **2.95%**, all
+  four arms **thermal 0**, compile overlapped. `gap_p50` 0.0260-0.0264 s;
+  transition **25.85-26.25 ms**; residual host sampling 0.168/0.175 ->
+  0.139/0.159 ms.
+- **Read:** the serve-level wall effect is **neutral** (within ±1.6%). The
+  sampling pool already overlaps host sampling and the forward dominates a
+  ~26 ms round, so fast device sampling removes CPU work but not wall time at
+  width ~3. The native +7-9% remains a valid measure of serial host sampling,
+  not of the shipped serve cost. The earlier "bubble 1.09 -> 0.00 ms, +7.6%"
+  serve result is superseded: it measured where sampling ran, and its candidate
+  was on the host path.
+- Recommendation: the fix is required for the feature to run at all; keep the
+  default-on flag and the rollback, but do not claim a serve throughput win.
+
 ## 2026-11-10 - Routed Expert Ragged Down: Shipped After Noise-Floor Control (+2.0%)
 
 - **Supersedes the fixed-bound rejection below.** The 128-step outlier was

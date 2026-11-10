@@ -18,15 +18,14 @@ Branch `perf/v41-batch-loop`, built `--profile iter`. Raw runs:
   mismatches** against the host arm at every width, 32 steps x width. Greedy
   through the exact GPU sampler is bitwise equal to host greedy (0
   mismatches at every width).
-- **Serve A/B is small and thermal-confounded; the sampling pool already
-  hides most of the host bubble.** Three-agent ABBA at avg width 2.97, agent
-  defaults: AB **95.80 -> 103.12 tps (+7.6%)**, BA **106.40 -> 100.56
-  (-5.5%)**, order spread 13.1% with opposite directions and thermal 1 on
-  three arms. The clean signal is the bubble itself: `host_ms_per_round`
-  **1.092 -> 0.000** (AB) and **0.768 -> 0.028** (BA), transition **27.29 ->
-  26.96 ms** in the same-thermal AB pair. In serve the released path samples
-  on the pool's worker threads, so removing host sampling buys ~0.3-0.6 ms
-  rather than the native ~2 ms.
+- **Serve is neutral at the wall.** Three-agent ABBA at avg width 2.97, agent
+  defaults, fast vs `QWEN_FAST_SAMPLER=0` (both through the sampled step):
+  AB **103.32 -> 104.72 tps (+1.36%)**, BA **105.32 -> 103.64 (-1.59%)**, order
+  spread 2.95%, all arms thermal 0. `gap_p50` 0.0260-0.0264 s; transition
+  25.85-26.25 ms; residual host sampling 0.168/0.175 -> 0.139/0.159 ms. The
+  sampling pool already overlaps host sampling and the forward dominates, so
+  fast device sampling removes CPU work but not wall time at width ~3. The
+  earlier +7.6% serve number was a bug (see the Serve A/B correction below).
 - **The exact GPU sampler does not win the released preset** (B=2 22.81,
   B=3 27.75, B=4 36.86 ms; -0.5 to -5%) even though it skips the readback:
   its ~0.74 ms/member cost replaces host sampling. It is a correctness arm,
@@ -79,30 +78,52 @@ chi-square/determinism tests in `metal/token_feedback.rs`.
 
 ## Serve A/B
 
+**Correction (2026-11-10, branch `perf/seed-intent`).** The first serve A/B
+below compared `QWEN_SERVE_V41_GPU_SAMPLE=0` against on, but a bug made every
+normalized request look explicitly seeded, so the "on" arm also used host
+sampling. It was the host path plus noise, not the feature. The corrected A/B
+follows; the original rows are kept only to explain the earlier record.
+
 `scripts/bench/serve_realistic_pair.py`, three warm agents, agent defaults
 (no sampling fields, no seed), 25 s windows, ABBA, `--warm-tokens 24000`,
 `--context 196608`, `--max-thermal-pressure 1`. Plan
-`serve-pair/plan-v41-25s.json`.
+`serve-pair/plan-v41-25s.json`. Corrected pair: `serve-seed-pair/pair`,
+`--flag QWEN_FAST_SAMPLER --reference 0 --candidate unset` (both arms keep the
+sampled step; reference forces Host mode).
+
+| order | arm | tps | gap p50 s | transition ms/round | host ms/round | thermal |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| AB | reference (`FAST_SAMPLER=0`) | 103.32 | 0.0264 | 26.254 | 0.168 | 0 |
+| AB | candidate (fast) | 104.72 | 0.0262 | 26.023 | 0.139 | 0 |
+| BA | reference (`FAST_SAMPLER=0`) | 105.32 | 0.0260 | 25.845 | 0.175 | 0 |
+| BA | candidate (fast) | 103.64 | 0.0264 | 26.212 | 0.159 | 0 |
+
+All four arms thermal 0, compile overlapped, order spread 2.95%. Directions are
+opposite: **AB +1.36%, BA -1.59%**. The honest serve-level result is
+**neutral at the wall** (within ±1.6%), with the residual host-sampling term
+~0.02-0.03 ms lower. The sampling pool already overlaps host sampling and the
+forward dominates a ~26 ms round, so fast device sampling removes CPU work but
+not wall time at width ~3.
+
+Superseded (pre-fix) rows, kept for the record:
 
 | order | arm | tps | transition ms/round | host ms/round | thermal |
 | --- | --- | ---: | ---: | ---: | ---: |
 | AB | reference (`GPU_SAMPLE=0`) | 95.80 | 27.29 | 1.092 | 1 |
-| AB | candidate (on) | 103.12 | 26.96 | 0.000 | 1 |
+| AB | candidate (on, but host path) | 103.12 | 26.96 | 0.000 | 1 |
 | BA | reference (`GPU_SAMPLE=0`) | 106.40 | 24.58 | 0.768 | 0 |
-| BA | candidate (on) | 100.56 | 26.98 | 0.028 | 1 |
+| BA | candidate (on, but host path) | 100.56 | 26.98 | 0.028 | 1 |
 
-The AB pair holds thermal constant and shows the intended effect (bubble
-removed, transition 0.33 ms lower, +7.6% throughput). The BA pair is
-thermal-confounded: its reference ran at thermal 0 and its candidate at
-thermal 1. Read this as "the bubble is gone; the serve wall win is inside
-thermal noise", not as a throughput claim. The native A/B above is the clean
-measurement of the mechanism.
+The 1.09 -> 0.00 "bubble removal" there was an artifact of *where* sampling
+ran (scheduler after the round vs inside the step), not a wall win, and the
+candidate was not using the fast sampler at all.
 
 ## Limits
 
 - 32K only; 48K was not run this turn (thermal/lease budget).
-- The native A/B samples serially on the host, which is the pre-pool cost. A
-  serve comparison against a *serial-sampling* serve build would show the
-  larger win but that build is not the shipped default.
+- The native A/B samples serially on the host. That is the clean measurement of
+  the sampler mechanism, but it is not the shipped serve cost: serve's pool
+  already overlaps host sampling, so the serve wall win is ~neutral.
 - Fast-sampler exactness is statistical (chi-square, 4/4 tests) and
   determinism-per-seed; it is not token-identical to the host by design.
+

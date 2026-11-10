@@ -291,6 +291,71 @@ impl Qwen4ExpDecodeBatch {
         }
         Ok(values)
     }
+    /// Device-feedback token loop over a fixed independent member set. The
+    /// first token comes from each member's completed logits; later tokens come
+    /// from one-ahead forwards encoded while the previous command executes.
+    /// Sampling, PLE staging and the token embedding selection stay on the GPU.
+    /// `emit` runs for each non-EOS token; `false` ends the burst (a member
+    /// pausing or finishing) after retaining that token.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_gpu_tokens(
+        &mut self,
+        members: &mut [&mut Qwen4ExpTextRunner<'_, '_, '_>],
+        samplers: &mut [&mut crate::sampling::Sampler],
+        max_tokens: &[usize],
+        eos: &[&[i32]],
+        emit: impl FnMut(usize, i32, &[f32]) -> bool,
+    ) -> Result<crate::qwen4exp_text_session::BatchGpuDecodeStats, Qwen4ExpRuntimeError> {
+        let b = members.len();
+        if !(2..=self.maximum).contains(&b)
+            || samplers.len() != b
+            || max_tokens.len() != b
+            || eos.len() != b
+        {
+            return invalid("invalid native GPU batch width");
+        }
+        let ctx = members[0].ctx;
+        let weights = members[0].weights.clone();
+        let table = members[0].ple_table;
+        for s in members.iter() {
+            if !std::ptr::eq(ctx, s.ctx)
+                || !std::ptr::eq(
+                    Retained::as_ptr(&s.weights.output.buffer),
+                    Retained::as_ptr(&self.head.buffer),
+                )
+                || s.weights.output.offset != self.head.offset
+                || !std::ptr::eq(s.weights.output, weights.output)
+                || s.weights.geometry != self.geometry
+                || s.weights.geometry != weights.geometry
+            {
+                return invalid("native GPU batch weights/device/geometry differ");
+            }
+        }
+        let columns = b.next_power_of_two();
+        let h = self.geometry.hidden_size();
+        let v = self.geometry.vocab_size();
+        let inputs = self.inputs.view_subrange(0, vec![h as u64, columns as u64]);
+        let logits = self.logits.view_subrange(0, vec![v as u64, columns as u64]);
+        let mut workspaces: Vec<_> = members.iter_mut().map(|r| &mut r.workspace).collect();
+        let stats = crate::qwen4exp_text_session::generate_batch_gpu_tokens(
+            ctx,
+            table,
+            &weights,
+            &inputs,
+            &logits,
+            &self.projection,
+            &mut workspaces,
+            samplers,
+            max_tokens,
+            eos,
+            emit,
+        )?;
+        for r in members.iter_mut() {
+            r.last_token_timing = None;
+            r.last_prefill_timing = None;
+        }
+        Ok(stats)
+    }
     /// CPU-staged batch forward: the parent gathers PLE rows and writes the
     /// token IDs, then the GPU runs the shared batch kernels.
     pub fn step_cpu_inputs(

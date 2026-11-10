@@ -4,7 +4,7 @@ use super::*;
 use crate::sampling::{GreedySelection, Sampler};
 use std::time::Instant;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct GpuTokenLoopStats {
     pub sampled_tokens: usize,
     pub emitted_tokens: usize,
@@ -20,6 +20,9 @@ pub struct GpuTokenLoopStats {
     pub first_token_selection_ms: f64,
     pub transition_ms: f64,
     pub first_transition_ms: Option<f64>,
+    /// Per-command host/GPU timeline, captured only under `perf-ablations`.
+    #[cfg(feature = "perf-ablations")]
+    pub timeline: Vec<TokenFrameTimeline>,
 }
 
 pub struct PreparedTokenStep<M> {
@@ -103,14 +106,22 @@ pub fn run_preencoded_tokens<D: GpuTokenLoopDriver>(
         return Ok(stats);
     }
     let mut running = InFlight(None);
+    #[cfg(feature = "perf-ablations")]
+    let mut current_encode_start = host_now_s();
     let mut current = driver.prepare_first(sampler.gpu_uniform(0))?;
+    #[cfg(feature = "perf-ablations")]
+    let mut current_encode_end = host_now_s();
     let mut input_token = None;
     driver.started();
     running.0 = Some(current.command.clone());
     let mut submitted = Instant::now();
     current.command.commit();
+    #[cfg(feature = "perf-ablations")]
+    let mut current_commit = host_now_s();
     loop {
         let encode_started = Instant::now();
+        #[cfg(feature = "perf-ablations")]
+        let next_encode_start = host_now_s();
         let next = if stats.sampled_tokens + 1 < max_tokens {
             Some(driver.prepare_next(
                 &current.token,
@@ -120,12 +131,30 @@ pub fn run_preencoded_tokens<D: GpuTokenLoopDriver>(
         } else {
             None
         };
+        #[cfg(feature = "perf-ablations")]
+        let next_encode_end = host_now_s();
         stats.encode_cpu_ms += encode_started.elapsed().as_secs_f64() * 1e3;
         let wait_started = Instant::now();
+        #[cfg(feature = "perf-ablations")]
+        let wait_start_s = host_now_s();
         let selection = current.readback.receive();
         wait_completed(&current.command)?;
         let token = selection?;
+        #[cfg(feature = "perf-ablations")]
+        let wait_end_s = host_now_s();
         stats.completion_wait_ms += wait_started.elapsed().as_secs_f64() * 1e3;
+        #[cfg(feature = "perf-ablations")]
+        stats.timeline.push(TokenFrameTimeline {
+            frame: stats.sampled_tokens,
+            forward: input_token.is_some(),
+            encode_start_s: current_encode_start,
+            encode_end_s: current_encode_end,
+            commit_s: current_commit,
+            wait_start_s,
+            wait_end_s,
+            gpu_start_s: current.command.GPUStartTime(),
+            gpu_end_s: current.command.GPUEndTime(),
+        });
         running.0 = None;
         if token < 0 || token as usize >= driver.vocab_size() {
             return Err(MetalError::BadShape {
@@ -179,6 +208,12 @@ pub fn run_preencoded_tokens<D: GpuTokenLoopDriver>(
         running.0 = Some(next.command.clone());
         submitted = Instant::now();
         next.command.commit();
+        #[cfg(feature = "perf-ablations")]
+        {
+            current_encode_start = next_encode_start;
+            current_encode_end = next_encode_end;
+            current_commit = host_now_s();
+        }
         current = next;
     }
     stats.wall_ms = started.elapsed().as_secs_f64() * 1e3;

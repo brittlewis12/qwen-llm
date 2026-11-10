@@ -291,6 +291,10 @@ mod causal;
 pub use causal::{TokenPriceBook, TokenPriceGuard, TokenPriceMode};
 mod token_feedback;
 pub use token_feedback::{AsyncTokenReadback, GPU_SAMPLER_ALGORITHM_VERSION, GpuTokenSampler};
+#[cfg(feature = "perf-ablations")]
+mod timeline;
+#[cfg(feature = "perf-ablations")]
+pub use timeline::{TokenFrameTimeline, host_now_s};
 mod token_loop;
 pub use token_loop::{
     GpuTokenLoopDriver, GpuTokenLoopStats, PreparedTokenStep, run_preencoded_tokens,

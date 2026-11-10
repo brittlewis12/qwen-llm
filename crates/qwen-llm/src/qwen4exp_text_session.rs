@@ -63,6 +63,8 @@ pub(crate) mod decode_batch;
 mod device_checkpoint;
 mod gpu_decode;
 mod gpu_inputs;
+pub use batch_loop::BatchGpuDecodeStats;
+pub(crate) use batch_loop::generate as generate_batch_gpu_tokens;
 pub(crate) use batch_loop::step_gpu_inputs as step_batch_gpu_inputs;
 pub(crate) use batch_loop::step_gpu_tokens as step_batch_gpu_tokens;
 pub use gpu_decode::Qwen4ExpGpuDecodeStats;

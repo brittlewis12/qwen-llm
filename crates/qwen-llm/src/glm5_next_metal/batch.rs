@@ -591,6 +591,11 @@ impl Glm5NextBatch {
         let starts: Vec<usize> = sessions.iter().map(|s| s.position).collect();
         let selection_stride =
             selection::stride(ctx, &sessions.iter().map(|s| &**s).collect::<Vec<_>>());
+        self.cache_loop_samplers(
+            ctx,
+            &sessions.iter().map(|s| &**s).collect::<Vec<_>>(),
+            samplers,
+        )?;
         for s in sessions.iter_mut() {
             s.poisoned = true;
         }

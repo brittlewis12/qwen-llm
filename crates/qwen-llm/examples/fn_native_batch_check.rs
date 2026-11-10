@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let both = flags.split(',').any(|f| f == "both");
     let profile = flags.split(',').any(|f| f == "profile");
     let census = flags.split(',').any(|f| f == "census");
+    let loop_mode = flags.split(',').any(|f| f == "loop");
     let mut sequence = widths.clone();
     if both {
         sequence.extend(widths.iter().rev().copied());
@@ -81,6 +82,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         checkpoints.push(r.capture_snapshot()?);
     }
     let mut native = Qwen4ExpDecodeBatch::new(&runners[0], 4)?;
+    if loop_mode {
+        // The checkpoint warm-up already left a healthy completed logits row;
+        // snapshots carry causal state but not the GPU loop's logits-ready bit.
+        let stats = runners[0].generate_gpu_tokens(
+            &mut Sampler::new(SamplingConfig::default())?,
+            32,
+            &[],
+            |_| true,
+        )?;
+        let tokens = stats.forwarded_tokens.max(1) as f64;
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "gpu_token_loop",
+                "depth": depth,
+                "forwarded_tokens": stats.forwarded_tokens,
+                "sampled_tokens": stats.sampled_tokens,
+                "wall_ms": stats.wall_ms,
+                "gpu_ms": stats.gpu_ms,
+                "encode_cpu_ms": stats.encode_cpu_ms,
+                "completion_wait_ms": stats.completion_wait_ms,
+                "ms_per_token": stats.wall_ms / tokens,
+            })
+        );
+        return Ok(());
+    }
     if census {
         for width in [1, 4] {
             for (r, s) in runners.iter_mut().zip(&checkpoints) {

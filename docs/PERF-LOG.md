@@ -36,6 +36,78 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   K=1 first, success bar **>=1.15x delivered inter-token**. Do not build M4
   first. Details: `bench/2026-11-09-fn-mtp/README.md`; raw headers
   `header-audit.json` and `mtp-head-inventory.json`.
+## 2026-11-09 - Flash-Next Width Census: Per-Member Chains, Transport A/B Negative
+
+- Base **`bcb1b46b8`** plus the retained probe commits; M5 Ultra,
+  GSQ-RCO IQ3_S. Bench-only: `fn_native_batch_check` gains a `census` mode
+  that runs one B=1 and one B=4 32K step under `dispatch_census_begin` and
+  `dispatch_profile_begin`, pairing each census row with its isolated
+  dispatch time. No production change.
+- **Census.** 32K, eight excluded warm rounds, one profiled step per width.
+  B=1: **1,132 dispatches / 15.43 ms** isolated GPU; B=4: **2,589 / 30.58
+  ms**. Counts **2.29x**, time **1.98x**. Per-family kernel-name taxonomy
+  (shared-expert/router pieces are split across FFNShared, Routing,
+  SharedExpert and part of DenseProjection):
+
+  | Family | B1 n | B1 ms | B4 n | B4 ms | delta | m us/row |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | RoutedExperts | 98 | 2.358 | 254 | 6.960 | 4.601 | 1534 |
+  | DenseProjection | 231 | 5.572 | 471 | 7.096 | 1.524 | 508 |
+  | HC | 344 | 3.076 | 456 | 4.702 | 1.627 | 542 |
+  | QSA | 144 | 1.902 | 228 | 3.228 | 1.326 | 442 |
+  | GDN | 108 | 0.889 | 228 | 2.613 | 1.724 | 575 |
+  | FFNShared | 94 | 0.987 | 192 | 2.233 | 1.247 | 416 |
+  | Routing | 48 | 0.412 | 192 | 1.732 | 1.320 | 440 |
+  | TransportCopy | 11 | 0.051 | 352 | 1.244 | 1.193 | 398 |
+  | SharedExpert | 48 | 0.146 | 192 | 0.643 | 0.497 | 166 |
+  | PLEEmbed | 4 | 0.025 | 16 | 0.093 | 0.068 | 23 |
+  | Other | 2 | 0.007 | 8 | 0.036 | 0.030 | 10 |
+
+  The isolated B=1 sum is above the 13.7-ms wall round because per-dispatch
+  profiling splits encoders; use deltas and ratios rather than the absolute
+  B=1 sum. The B=4 isolated sum is close to the 30.7-ms wall round.
+- **Where the extra m is.** The extra dispatch count is **1,457**; at the
+  measured ~1.5-us bare dispatch cost that is only **~2.2 ms**, about 14% of
+  the 15.2-ms B4-B1 difference. The rest is real work, bytes and occupancy.
+  Routed experts are near their **~2.05 MB/slot** byte floor: 40 slots/round
+  is ~3.78 GB, about 7.6 ms at 500 GB/s, versus 6.96 ms measured. Dense
+  projections already share weights across rows (1.27x time for 4x rows).
+  The overhead-heavy per-member families are the target: GDN, HC, QSA,
+  FFNShared, Routing, SharedExpert and transport together account for
+  **~9.6 ms of the 15.2-ms extra**, about **3.2 ms/row**.
+- **Routed-expert grouping is not the lever.** With top_k=10, 512 experts
+  and four rows, the expected unique set is **38.5 of 40 slots**; only
+  **3.7%** of slots duplicate an expert. Perfect cross-row grouping saves
+  under **0.3 ms** at B4. The shared-expert/router chains, not duplicate
+  routed weights, are the structural opportunity.
+- **Transport A/B is negative.** A member-axis few-row MMA kernel bypassed
+  the 300 gather/scatter dispatches at B4. Two paired 32K B4 runs:
+  **31.355 -> 31.323 ms (+0.10%)** and **31.622 -> 31.588 ms (+0.11%)**;
+  stream hashes bitwise equal and dNLL/KL **0**. The isolated 1.06-ms
+  transport time is hidden by the surrounding matmul/occupancy, so the
+  change was **deleted**. Isolated profile time is not additive here.
+- **B=1 reconciliation.** `forward_token` at 32K is **13.62-13.84 ms**: it
+  commits and waits per token and returns the full-vocabulary logits row.
+  The serve standing **~11.6 ms (87 tok/s)** is the GPU token loop:
+  `generate_gpu_tokens` prepares one command ahead, samples on GPU, and
+  returns only the selected token; serve defaults `gpu_token_loop: true`.
+  The **~2 ms** difference is host synchronization plus full-logits
+  readback, not extra model work. A `loop` probe mode is retained for a
+  direct confirmation; its first run was queued behind another lane and
+  stopped before measurement.
+- **Next.** Land a row-axis GDN controls+prep kernel first (split controls
+  and prep if the 31-buffer stage limit requires it), then a row-axis MoE
+  router/shared-expert chain. Both target the ~3.2 ms/row of per-member
+  overhead and are measurable with the existing paired B=4 harness.
+- **Hygiene.** Census thermal **1/1/1**, compile overlap 143 samples. A/B
+  arms **0/1/1** and **1/1/2**, compile overlap 155/161 samples; the second
+  ended at level 2 after its last sample. The queued loop waiter was stopped
+  by exact PID. Evidence: `~/qwen-runs/2026-11-09-fn-width-dispatch/`.
+- **Reproduce:** build with `nice -n 10 cargo build --offline --locked
+  --release -p qwen-llm --example fn_native_batch_check`, then run under
+  `scripts/bench/with-metal-lease`:
+  `fn_native_batch_check MODEL CODE PROSE 32768 16 1,4 census`; the A/B uses
+  `fn_batch_counterfactual MODEL CODE PROSE 32768 128 4 pair-members`.
 
 ## 2026-11-09 - Flash-Next Widths And Dispatch Dead Time Measured
 

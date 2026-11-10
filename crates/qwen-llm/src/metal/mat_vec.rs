@@ -1193,7 +1193,7 @@ pub fn encode_mat_vec_iq3_s_nc2_f32(
 crate::env_flag!(default_on matvec_iq4_xs_fast_enabled, "QWEN_MATVEC_IQ4_XS_FAST");
 
 pub(crate) fn mat_vec_packet_quant_enabled(q6: bool, iq4: bool) -> bool {
-    (!q6 || q6k_r1_enabled()) && (!iq4 || matvec_iq4_xs_fast_enabled())
+    (!q6 || q6k_r1_setting() != Some(false)) && (!iq4 || matvec_iq4_xs_fast_enabled())
 }
 
 pub fn encode_mat_vec_iq4_xs_f32(
@@ -2679,7 +2679,7 @@ pub fn encode_mat_vec_q6_k_f32(
             detail: format!("weight.dtype = {:?}, expected Q6_K", weight.dtype),
         });
     }
-    let r1 = q6k_r1_enabled() && n_out <= 16_384;
+    let r1 = q6k_r1(ctx, n_out);
     let pso = ctx.pipeline(if r1 {
         "kernel_mat_vec_q6_K_f32_r1"
     } else {
@@ -4806,13 +4806,67 @@ mod tests {
     }
 }
 
-/// `0` keeps two rows per simdgroup for every Q6_K mat-vec; by default
-/// matrices of at most 16384 rows run one row per simdgroup (each row's
-/// lanes, loop order and reduction are unchanged, so outputs are bitwise
-/// equal; small matrices get twice the simdgroups).
+/// `0` keeps two rows per simdgroup for every Q6_K mat-vec; `1` restores one
+/// row per simdgroup on tensor-free Apple9. By default matrices of at most
+/// 16384 rows run one row per simdgroup on every other tier; the tensor-free
+/// Apple9 laptop uses two rows, which measured 0.13-0.17 ms/token faster at
+/// 32K/48K with bitwise-equal outputs (same per-row lanes, loop and reduction).
 const Q6K_R1_ENV: &str = "QWEN_Q6K_R1";
 
-fn q6k_r1_enabled() -> bool {
-    static R1: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *R1.get_or_init(|| std::env::var(Q6K_R1_ENV).as_deref() != Ok("0"))
+/// None follows the tier default. The tensor-free Apple9 tier is the M4 laptop.
+fn q6k_r1_setting() -> Option<bool> {
+    static SETTING: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *SETTING.get_or_init(|| match std::env::var(Q6K_R1_ENV).as_deref() {
+        Ok("0") => Some(false),
+        Ok("1") => Some(true),
+        _ => None,
+    })
+}
+
+fn q6k_two_row_tier(ctx: &MetalContext) -> bool {
+    static TWO_ROW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TWO_ROW.get_or_init(|| {
+        ctx.device.supportsFamily(objc2_metal::MTLGPUFamily::Apple9)
+            && !ctx.tensor_ops_status().is_available()
+    })
+}
+
+/// Research override for same-process paired arms: 0 follows the environment,
+/// 1 forces one row per simdgroup where it is eligible, 2 forces two rows.
+#[cfg(feature = "perf-ablations")]
+static Q6K_R1_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(feature = "perf-ablations")]
+pub fn diagnostic_q6k_r1(mode: u8) -> impl Drop {
+    use std::sync::atomic::Ordering;
+    assert!(mode <= 2);
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            Q6K_R1_OVERRIDE.store(0, Ordering::SeqCst);
+        }
+    }
+    Q6K_R1_OVERRIDE.store(mode, Ordering::SeqCst);
+    Guard
+}
+
+fn q6k_r1(ctx: &MetalContext, n_out: usize) -> bool {
+    let eligible = n_out <= 16_384;
+    let base = eligible
+        && match q6k_r1_setting() {
+            Some(value) => value,
+            None => !q6k_two_row_tier(ctx),
+        };
+    #[cfg(feature = "perf-ablations")]
+    {
+        match Q6K_R1_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+            1 => eligible,
+            2 => false,
+            _ => base,
+        }
+    }
+    #[cfg(not(feature = "perf-ablations"))]
+    {
+        base
+    }
 }

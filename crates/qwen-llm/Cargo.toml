@@ -73,6 +73,14 @@ required-features = ["perf-ablations"]
 name = "fn_m4_qsa"
 required-features = ["perf-ablations"]
 
+[[example]]
+name = "fn_m4_token_price"
+required-features = ["perf-ablations"]
+
+[[example]]
+name = "fn_m4_q6_cohort"
+required-features = ["perf-ablations"]
+
 [[bench]]
 name = "kernels"
 harness = false

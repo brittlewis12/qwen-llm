@@ -2,6 +2,10 @@
 //! never tensor contents; normal Metal buffer barriers order successive waves.
 use super::*;
 use objc2_metal::MTLBinding;
+#[cfg(feature = "perf-ablations")]
+mod token_price;
+#[cfg(feature = "perf-ablations")]
+pub use token_price::{TokenPriceBook, TokenPriceGuard, TokenPriceMode};
 
 #[cfg(any(test, feature = "perf-ablations"))]
 thread_local! {
@@ -288,9 +292,15 @@ impl KernelEncoder {
         }
         for wave in waves {
             self.buffer_barrier();
-            for i in wave {
+            for &i in &wave {
+                #[cfg(feature = "perf-ablations")]
+                if token_price::replace(ctx, self, &recording.nodes[i])? {
+                    continue;
+                }
                 recording.nodes[i].encode(self);
             }
+            #[cfg(feature = "perf-ablations")]
+            token_price::after_wave(ctx, self, &recording.nodes, &wave)?;
         }
         Ok(())
     }

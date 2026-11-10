@@ -287,6 +287,8 @@ use crate::tensor::{GgmlType, TensorDesc, checked_shape_elements, ggml_type_layo
 mod attn;
 mod bench;
 mod causal;
+#[cfg(feature = "perf-ablations")]
+pub use causal::{TokenPriceBook, TokenPriceGuard, TokenPriceMode};
 mod token_feedback;
 pub use token_feedback::{AsyncTokenReadback, GPU_SAMPLER_ALGORITHM_VERSION, GpuTokenSampler};
 mod token_loop;

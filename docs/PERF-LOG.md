@@ -171,6 +171,77 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `scripts/bench/with-metal-lease`:
   `fn_native_batch_check MODEL CODE PROSE 32768 16 1,4 census`; the A/B uses
   `fn_batch_counterfactual MODEL CODE PROSE 32768 128 4 pair-members`.
+## 2026-11-09 - Flash-Next M4 Single-Stream Census And Q6 Two-Row Decode
+
+- Branch **`perf/fn-m4-decode`**, base main **`f175af1c9`**, M4 Max laptop
+  (`zekrom`), unchanged GSQ-RCO IQ3_S. Single-stream GPU token loop with the
+  causal executor, production defaults. Census, paired arms and
+  teacher-forced cohorts are `perf-ablations` examples; no new `#[ignore]`.
+- **Standing (warm GPU loop, 32K):** **19.454 ms GPU / 19.860 ms wall** per
+  transition, about **50.3 tok/s**; 48K **19.721 / 20.128**. Logical payload
+  is **5.62211 GB/token**; the **506.96 GB/s** streaming floor is **11.09 ms**.
+  The dispatch profile sees **1420 dispatches** and an isolated kernel sum of
+  **22.49 ms**, so the overlapped schedule is **~2.9 ms faster** than serial
+  isolated kernels: dispatch count is not the remaining lever.
+- **Census at 32K** (isolated dispatch profile; `GB/s` uses logical payload,
+  not DRAM counters):
+
+  | Family | Calls | Iso ms | Payload MB | GB/s | Floor ms | Excess ms |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | Q6 head | 1 | 1.020 | 521.47 | 511 | 1.029 | ~0 |
+  | Q6 body | 128 | 3.727 | 1356.36 | 364 | 2.675 | 1.05 |
+  | HC BF16 down+up | 193 | 3.540 | 1271.40 | 359 | 2.508 | 1.03 |
+  | Routed experts | 96 | 4.076 | 982.27 | 241 | 1.937 | 2.14 |
+  | Other dense Q5/Q4/IQ4/F32/BF16 | 318 | ~4.78 | 1155.49 | ~242 | 2.279 | ~0.4-1.0 |
+  | QSA select/index/norm/split | 144 | ~2.30 | ~57 | — | — | ~2.3 |
+  | GDN core | 180 | ~1.0 | 241 state | — | — | ~1.0 |
+  | HC norm/inject | 150 | ~0.72 | 5 | — | — | ~0.7 |
+  | Routing/FFN epilogue | 96 | ~0.94 | 5 | — | — | ~0.9 |
+
+- **Reachable model (non-additive by overlap):** bytes **11.09** + weight-stream
+  excess **~5.2** (experts 2.14, HC 1.03, Q6 1.05, other dense 0.4-1.0) +
+  state/attention/math **~5.1** (QSA 2.3, GDN 1.0, HC norm 0.7, routing 0.9,
+  misc 0.2) = 21.4, reduced to the observed 19.6 by causal overlap. A same-byte
+  stream over the real expert grid recovers **1.151 ms**; Q6 two-row recovers
+  **0.127 ms**; HC two-row register blocking recovers **~0.05 ms (noise)**.
+  Best-verified practical bound is **~17.8-18.5 ms (54-57 tok/s)**. The
+  **11 ms** floor is not reachable on the tensor-free M4: the Q6 head proves
+  SIMD streaming reaches **511 GB/s**, but body/HC/expert matvecs sit at
+  **241-364 GB/s** because per-dispatch format decode is instruction-bound,
+  not globally bandwidth-capped. M5 batch MMA sharing does not apply here.
+- **Ship: Q6 two-row on the tensor-free Apple9 tier, bitwise.** Body Q6
+  matvecs up to 16384 rows use the two-row kernel on that tier; each row keeps
+  its incumbent lanes, loop order and reduction. Rollback **`QWEN_Q6K_R1=1`**
+  restores one row; **`=0` forces two rows everywhere**. M5/other tiers keep
+  one row by default. Dispatch witness: default **129 two-row / 0 r1**,
+  rollback **0 / 129**.
+- **Measured:** same-binary paired GPU-loop autoregression, order-interleaved.
+  32K dedicated 12 pairs: GPU **19.454 -> 19.326 ms (median +0.127, 11/12
+  positive)**, wall **+0.123 (9/12)**. 48K real-text cohort 8 pairs, thermal
+  0 / no rejects: GPU **19.721 -> 19.558 (median +0.160, 8/8)**, wall
+  **+0.179 (8/8)**. Every accepted arm started and ended at thermal **0**; a
+  32K cohort pair 0 was warm-biased and is not the primary estimate. The 48K
+  dedicated arm entered thermal 2 under other lanes' compiles and is discarded.
+- **Accuracy:** 128 teacher-forced real-text targets/depth (code+prose) plus
+  63 random full-vocabulary targets are **bitwise equal**; signed dNLL **0**,
+  KL **0**, argmax flips **0**, max logit error **0**; production equals the
+  candidate hash. The incumbent-repeat arm is also bitwise.
+- **Kill:** HC BF16 two-row register blocking (down/up) is not shipped; it
+  measured **~0.05 ms**, inside noise. The expert same-byte stream is the
+  dequant prize; row packing does not touch it.
+- **Validation:** Q6 one-row/two-row bitwise GPU test passes under Metal API
+  validation; `cargo fmt --check` passes; `scripts/check-contracts.sh` passes
+  on the committed tree. Evidence:
+  **`~/qwen-runs/2026-11-09-fn-m4-roofline/`**.
+- **Reproduce:** `nice -n 10 cargo build --release -p qwen-llm --features
+  perf-ablations --example fn_m4_token_price --example fn_m4_q6_cohort`. Under
+  the lease: `fn_m4_token_price MODEL 32768 12 --q6-ab` and
+  `fn_m4_q6_cohort MODEL CODE PROSE 32768,48000 32 2 8`; census is
+  `fn_m4_token_price MODEL 32768 1 --profile` and `... --experts --profile`.
+- **Next:** routed-expert IQ2_S/IQ3_XXS gate/up block decoders are the largest
+  verified prize (**1.151 ms** same-byte bound; IQ2_S 203 GB/s, IQ3_XXS
+  268 GB/s). Then a deeper Q6-body/HC stream; the row-packing lever is
+  exhausted. No merge.
 
 ## 2026-11-09 - Flash-Next Widths And Dispatch Dead Time Measured
 

@@ -800,3 +800,302 @@ impl AsyncTokenReadback {
             })
     }
 }
+
+/// Fast, distribution-exact categorical draw for the **unforced** agent preset
+/// (`temperature > 0`, `top_p = 1`, `top_k = 0`, `min_p = 0`): Gumbel-max over
+/// the whole vocabulary, `O(V)`, one member-axis dispatch plus a small final
+/// reduce. Every candidate's Gumbel noise is a counter-based hash of
+/// `(seed, member, index)`, so a seeded run is deterministic on this path.
+///
+/// This is **not** token-identical with [`GpuTokenSampler`] or the host sampler
+/// at the same seed; it is statistically exact from `softmax(logits / T)`. The
+/// exact path stays available through [`fast_sampler_allowed`]'s callers.
+pub struct FastGpuSampler {
+    vocab: usize,
+    members: usize,
+    block: usize,
+    blocks: usize,
+    partial: MetalTensor,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GumbelArgs {
+    seed: u64,
+    vocab: u32,
+    members: u32,
+    blocks: u32,
+    block: u32,
+    inv_temp: f32,
+    pad: u32,
+}
+
+impl FastGpuSampler {
+    pub const BLOCK: usize = 512;
+
+    pub fn new(ctx: &MetalContext, vocab: usize, members: usize) -> Result<Self, MetalError> {
+        if vocab == 0 || vocab > i32::MAX as usize || members == 0 {
+            return Err(MetalError::BadShape {
+                kernel: "fast_sampler",
+                detail: "invalid vocabulary width or member count".into(),
+            });
+        }
+        ctx.pipeline("kernel_token_gumbel_block")?;
+        ctx.pipeline("kernel_token_gumbel_final")?;
+        let blocks = vocab.div_ceil(Self::BLOCK);
+        // token_pair is {float value; uint id}; two i32 words per entry.
+        let partial = MetalTensor::zeros_i32(ctx, vec![(2 * blocks * members) as u64])?;
+        Ok(Self {
+            vocab,
+            members,
+            block: Self::BLOCK,
+            blocks,
+            partial,
+        })
+    }
+
+    pub fn vocab(&self) -> usize {
+        self.vocab
+    }
+    pub fn members(&self) -> usize {
+        self.members
+    }
+
+    /// `logits` is `[members * vocab]` F32 (member rows contiguous), `tokens`
+    /// `[members]` I32. All member rows are sampled under the same `seed`.
+    pub fn encode(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        logits: &MetalTensor,
+        tokens: &MetalTensor,
+        seed: u64,
+        temperature: f32,
+    ) -> Result<(), MetalError> {
+        checks::require_serial("fast_sampler", enc)?;
+        checks::check_tensor(
+            "fast_sampler",
+            logits,
+            GgmlType::F32,
+            &[(self.members * self.vocab) as u64],
+            false,
+            "logits",
+        )?;
+        checks::check_tensor(
+            "fast_sampler",
+            tokens,
+            GgmlType::I32,
+            &[self.members as u64],
+            true,
+            "tokens",
+        )?;
+        checks::check_disjoint("fast_sampler", tokens, &[(logits, "logits")])?;
+        if !(temperature > 0.0 && temperature.is_finite()) {
+            return Err(MetalError::BadShape {
+                kernel: "fast_sampler",
+                detail: "temperature must be finite and positive".into(),
+            });
+        }
+        let args = GumbelArgs {
+            seed,
+            vocab: self.vocab as u32,
+            members: self.members as u32,
+            blocks: self.blocks as u32,
+            block: self.block as u32,
+            inv_temp: 1.0 / temperature,
+            pad: 0,
+        };
+        enc.set_pipeline(&ctx.pipeline("kernel_token_gumbel_block")?);
+        enc.set_bytes(0, &args);
+        enc.set_tensor(1, logits);
+        enc.set_tensor(2, &self.partial);
+        enc.dispatch(
+            MTLSize {
+                width: self.blocks,
+                height: self.members,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        enc.set_pipeline(&ctx.pipeline("kernel_token_gumbel_final")?);
+        enc.set_bytes(0, &args);
+        enc.set_tensor(2, &self.partial);
+        enc.set_tensor(3, tokens);
+        enc.dispatch(
+            MTLSize {
+                width: self.members,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        Ok(())
+    }
+}
+
+/// Whether the fast Gumbel sampler may serve this request. Only the unforced
+/// agent preset qualifies (`T>0`, `top_k=0`, `top_p=1`, `min_p=0`) and only when
+/// the request carries **no explicit seed**; an explicit seed, `QWEN_FAST_SAMPLER=0`
+/// or `QWEN_GPU_SAMPLER_EXACT=1` keeps the exact sampler. The serve default seed
+/// (42) must not be confused with an explicit one; callers pass `explicit_seed`
+/// from `request.seed.is_some()`.
+pub fn fast_sampler_allowed(config: &SamplingConfig, explicit_seed: bool) -> bool {
+    config.temperature > 0.0
+        && config.temperature.is_finite()
+        && config.top_k == 0
+        && config.top_p >= 1.0
+        && config.min_p == 0.0
+        && !explicit_seed
+        && std::env::var("QWEN_FAST_SAMPLER").as_deref() != Ok("0")
+        && std::env::var("QWEN_GPU_SAMPLER_EXACT").as_deref() != Ok("1")
+}
+
+#[cfg(test)]
+mod fast_sampler_tests {
+    use super::*;
+
+    fn context() -> Option<MetalContext> {
+        crate::test_fixtures::metal_context_or_skip()
+    }
+
+    fn draw(
+        ctx: &MetalContext,
+        logits: &[f32],
+        vocab: usize,
+        members: usize,
+        seed: u64,
+        temperature: f32,
+    ) -> Vec<i32> {
+        let sampler = FastGpuSampler::new(ctx, vocab, members).unwrap();
+        let x = MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(logits),
+            vec![(members * vocab) as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let tokens = MetalTensor::zeros_i32(ctx, vec![members as u64]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin(&command);
+        sampler
+            .encode(ctx, &enc, &x, &tokens, seed, temperature)
+            .unwrap();
+        enc.end();
+        crate::metal::commit_and_wait(&command).unwrap();
+        crate::metal::test_support::tensor_f32_at_offset(&tokens)
+            .iter()
+            .map(|v| v.to_bits() as i32)
+            .collect()
+    }
+
+    fn repeat_row(row: &[f32], members: usize) -> Vec<f32> {
+        let mut v = Vec::with_capacity(row.len() * members);
+        for _ in 0..members {
+            v.extend_from_slice(row);
+        }
+        v
+    }
+
+    /// Chi-square goodness of fit against the exact softmax for flat, peaked
+    /// and tied logits. Members are independent hashes of the same seed.
+    #[test]
+    fn fast_sampler_matches_softmax_distribution() {
+        let Some(ctx) = context() else {
+            return;
+        };
+        for (name, logits) in [
+            ("flat", vec![0.0f32; 8]),
+            ("peaked", vec![0.0, 0.0, 0.0, 3.0, 3.0, 0.0, 0.0, 0.0]),
+            ("sloped", vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]),
+        ] {
+            let vocab = logits.len();
+            let members = 8192usize;
+            let draws = draw(
+                &ctx,
+                &repeat_row(&logits, members),
+                vocab,
+                members,
+                0x5EED_1234,
+                1.0,
+            );
+            let mut counts = vec![0usize; vocab];
+            for &t in &draws {
+                assert!((0..vocab as i32).contains(&t), "{name}: token {t}");
+                counts[t as usize] += 1;
+            }
+            let max = logits.iter().copied().fold(f32::MIN, f32::max);
+            let exps: Vec<f64> = logits.iter().map(|v| ((v - max) as f64).exp()).collect();
+            let total: f64 = exps.iter().sum();
+            let n = draws.len() as f64;
+            let mut chi2 = 0.0;
+            for (c, e) in counts.iter().zip(&exps) {
+                let expected = e / total * n;
+                chi2 += (*c as f64 - expected).powi(2) / expected;
+            }
+            // df = 7: p > 0.001 needs chi2 < ~24.3; allow generous headroom.
+            assert!(chi2 < 40.0, "{name}: chi^2 {chi2:.1} counts {counts:?}");
+        }
+    }
+
+    #[test]
+    fn fast_sampler_seed_is_deterministic_and_seed_sensitive() {
+        let Some(ctx) = context() else {
+            return;
+        };
+        let logits = repeat_row(&[0.0, 0.25, 1.0, 2.0, 0.5, -1.0], 64);
+        let a = draw(&ctx, &logits, 6, 64, 7, 1.0);
+        let b = draw(&ctx, &logits, 6, 64, 7, 1.0);
+        assert_eq!(a, b, "same seed must reproduce the same tokens");
+        let c = draw(&ctx, &logits, 6, 64, 8, 1.0);
+        assert_ne!(a, c, "a different seed should move some draws");
+    }
+
+    #[test]
+    fn fast_sampler_large_vocab_is_deterministic() {
+        let Some(ctx) = context() else {
+            return;
+        };
+        let vocab = 129_280usize;
+        let logits: Vec<f32> = (0..vocab)
+            .map(|i| (((i.wrapping_mul(2_654_435_761) % 1000) as f32) - 500.) / 37.)
+            .collect();
+        let row = repeat_row(&logits, 4);
+        let a = draw(&ctx, &row, vocab, 4, 99, 1.0);
+        let b = draw(&ctx, &row, vocab, 4, 99, 1.0);
+        assert_eq!(a, b);
+        assert!(a.iter().all(|&t| (0..vocab as i32).contains(&t)));
+    }
+
+    #[test]
+    fn fast_sampler_policy_is_unforced_and_filter_free_only() {
+        let base = SamplingConfig {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 42,
+        };
+        assert!(fast_sampler_allowed(&base, false));
+        assert!(
+            !fast_sampler_allowed(&base, true),
+            "explicit seed forces exact"
+        );
+        let mut filtered = base;
+        filtered.top_p = 0.95;
+        assert!(!fast_sampler_allowed(&filtered, false));
+        filtered = base;
+        filtered.top_k = 200;
+        assert!(!fast_sampler_allowed(&filtered, false));
+        filtered = base;
+        filtered.temperature = 0.0;
+        assert!(!fast_sampler_allowed(&filtered, false));
+    }
+}

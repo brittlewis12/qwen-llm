@@ -292,7 +292,10 @@ pub use causal::{TokenPriceBook, TokenPriceGuard, TokenPriceMode};
 mod qos;
 pub use qos::GpuThreadQos;
 mod token_feedback;
-pub use token_feedback::{AsyncTokenReadback, GPU_SAMPLER_ALGORITHM_VERSION, GpuTokenSampler};
+pub use token_feedback::{
+    AsyncTokenReadback, FastGpuSampler, GPU_SAMPLER_ALGORITHM_VERSION, GpuTokenSampler,
+    fast_sampler_allowed,
+};
 #[cfg(feature = "perf-ablations")]
 mod timeline;
 #[cfg(feature = "perf-ablations")]

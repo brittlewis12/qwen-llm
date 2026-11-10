@@ -312,3 +312,75 @@ kernel void kernel_glm_sparse_shared(
     if(i<a.rows){pools[i]=(int)(a.visible[i]/a.pool);visible[i]=(int)a.visible[i];}
     if(i<a.rows*a.blocks){uint mla=i/a.rows,row=i%a.rows;status[mla*a.stride+row]=-1;}
 }
+// Fast distribution-exact categorical draw for the unforced agent preset
+// (temperature > 0, top_p = 1, top_k = 0, min_p = 0): Gumbel-max over the whole
+// vocabulary. score_i = logit_i / T + gumbel(u_i), where u_i is a counter-based
+// hash of (seed, member, i); the argmax (lowest id on ties) is an exact draw
+// from softmax(logits / T). Unlike kernel_token_sample_*, no host uniform and no
+// sort are used, and the result is not token-identical with the host sampler.
+struct token_gumbel_args {
+    ulong seed;
+    uint vocab;
+    uint members;
+    uint blocks;
+    uint block;
+    float inv_temp;
+    uint pad;
+};
+static inline float token_gumbel_uniform(ulong seed, uint member, uint i) {
+    ulong z = seed ^ (ulong(member) << 40) ^ ((ulong(i) + 1ul) * 0x9E3779B97F4A7C15ul);
+    z ^= z >> 30; z *= 0xBF58476D1CE4E5B9ul;
+    z ^= z >> 27; z *= 0x94D049BB133111EBul;
+    z ^= z >> 31;
+    // (0, 1), 24-bit resolution, never 0 or 1.
+    return (float(z >> 40) + 1.0f) / 16777217.0f;
+}
+static inline token_pair token_pair_winner(token_pair a, token_pair b) {
+    return token_before(a, b) ? a : b;
+}
+kernel void kernel_token_gumbel_block(
+        constant token_gumbel_args & a [[buffer(0)]],
+        device const float * logits [[buffer(1)]],
+        device token_pair * partial [[buffer(2)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        uint tid [[thread_index_in_threadgroup]]) {
+    const uint member = group.y, b = group.x;
+    const uint start = b * a.block, end = min(start + a.block, a.vocab);
+    const uint stride = 256u;
+    token_pair best = { -INFINITY, UINT_MAX };
+    for (uint i = start + tid; i < end; i += stride) {
+        const float u = token_gumbel_uniform(a.seed, member, i);
+        const float score = logits[(ulong(member) * a.vocab) + i] * a.inv_temp
+            - log(-log(u));
+        token_pair c = { score, i };
+        best = token_pair_winner(best, c);
+    }
+    threadgroup token_pair tg[256];
+    tg[tid] = best;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = 128u; s > 0u; s >>= 1) {
+        if (tid < s) tg[tid] = token_pair_winner(tg[tid], tg[tid + s]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) partial[ulong(member) * a.blocks + b] = tg[0];
+}
+kernel void kernel_token_gumbel_final(
+        constant token_gumbel_args & a [[buffer(0)]],
+        device const token_pair * partial [[buffer(2)]],
+        device int * token [[buffer(3)]],
+        uint member [[threadgroup_position_in_grid]],
+        uint tid [[thread_index_in_threadgroup]]) {
+    token_pair best = { -INFINITY, UINT_MAX };
+    for (uint b = tid; b < a.blocks; b += 256u) {
+        token_pair c = partial[ulong(member) * a.blocks + b];
+        best = token_pair_winner(best, c);
+    }
+    threadgroup token_pair tg[256];
+    tg[tid] = best;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = 128u; s > 0u; s >>= 1) {
+        if (tid < s) tg[tid] = token_pair_winner(tg[tid], tg[tid + s]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) token[member] = best.id == UINT_MAX ? INT_MIN : int(best.id);
+}

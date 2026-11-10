@@ -241,6 +241,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 json!({"kind":"dispatch_census","depth":depth,"phase":phase,"overflow":report.overflow,"kernels":kernels})
             );
         }
+        if a.iter().any(|s| s == "--shapes") {
+            runner.restore_snapshot(&snap)?;
+            let book = TokenPriceBook::default();
+            let cap = book.scope(TokenPriceMode::Capture);
+            runner.forward_token(tokens[phase])?;
+            cap.finish();
+            let meta = book.metadata();
+            runner.restore_snapshot(&snap)?;
+            let guard = qwen_llm::metal::dispatch_profile_begin(&ctx, 10_000)?;
+            runner.forward_token(tokens[phase])?;
+            let report = qwen_llm::metal::dispatch_profile_finish(&ctx, guard)?;
+            let records = meta.as_array().cloned().unwrap_or_default();
+            let mut shapes = std::collections::BTreeMap::<
+                (String, Option<u32>, Option<u32>),
+                (usize, u64),
+            >::new();
+            for (r, m) in report.rows.iter().zip(&records) {
+                let args = m
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|v| {
+                        (
+                            v.first().and_then(|x| x.as_u64()).map(|x| x as u32),
+                            v.get(1).and_then(|x| x.as_u64()).map(|x| x as u32),
+                        )
+                    })
+                    .unwrap_or((None, None));
+                let key = (r.kernel.clone(), args.0, args.1);
+                let e = shapes.entry(key).or_default();
+                e.0 += 1;
+                e.1 += r.gpu_ns.unwrap_or(0);
+            }
+            let rows: Vec<_> = shapes
+                .into_iter()
+                .map(|((k, a, b), (n, ns))| {
+                    json!({"kernel": k, "arg0": a, "arg1": b, "calls": n, "ms": ns as f64 / 1e6})
+                })
+                .collect();
+            println!(
+                "{}",
+                json!({"kind":"shape_census","depth":depth,"overflow":report.overflow,"joined":records.len(),"rows":rows})
+            );
+        }
         // Isolated copy tax, same native wave barriers: no inference result claimed.
         for rep in 0..3 {
             for mask in [

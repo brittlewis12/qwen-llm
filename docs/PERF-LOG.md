@@ -171,6 +171,63 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `scripts/bench/with-metal-lease`:
   `fn_native_batch_check MODEL CODE PROSE 32768 16 1,4 census`; the A/B uses
   `fn_batch_counterfactual MODEL CODE PROSE 32768 128 4 pair-members`.
+## 2026-11-09 - Flash-Next M4 Experts: Two Kills And A Fusion Price
+
+- Branch **`perf/fn-m4-decode`** on **`2fb21800`**, M4 Max laptop, GSQ-RCO
+  IQ3_S, single-stream GPU token loop. Screening used the new `iter` profile
+  (cherry-picked **`d26faecb5`**). No production change ships this round: the
+  two expert-decoder candidates are killed and the small-matrix fusion bound
+  is too small to justify a new kernel.
+- **Kill 1: packed-word IQ2_S/IQ3_XXS grid loads.** One 8-byte `qt_iq2s_grid`
+  or 4-byte `moe_iq3xxs_grid` word replaces the byte-at-a-time `constant`
+  reads; every grid code is unchanged. In-schedule GPU saving is
+  **-0.018 ms median (5/12 pairs)**, and the isolated kernels are slightly
+  slower (IQ2_S **0.937 -> 1.002 ms**, IQ3_XXS **0.796 -> 0.826 ms**). Outputs
+  are not bitwise (signed dNLL **+2.3e-4**, mean KL **8.4e-6**, max logit
+  delta 0.227), so Metal reassociates under a changed load expression. The
+  Q2_0 redundant-byte pattern does not exist here: these kernels already use
+  each grid byte for all 4 or 8 values.
+- **Kill 2: IQ2_S direct epilogue.** Each row's gate/up reducers and its
+  `silu(gate)*up` consumer are one simdgroup, so the incumbent threadgroup
+  `totals` round-trip and barrier exchange no value. Removing them is
+  bitwise (63/63 full-vocabulary rows) but saves only **+0.031 ms at 32K
+  (9/12)** and **+0.016 ms at 48K (6/12)**: at the noise floor for 20 calls.
+- **Why:** the all-expert same-byte stream recovers **1.151 ms**, but that
+  pure read itself runs at only **~336 GB/s** (982 MB in 2.925 ms) for the
+  scattered top-10 expert rows, below the 507 GB/s dense streaming roof. The
+  real kernels reach **241 GB/s**; the ~1 ms gap is grid-table lookup and sign
+  arithmetic at roughly 5-6 ops per product. A real decoder needs FP16 or a
+  vector sign-collapse, not load packing.
+- **Q6 per-shape census at 32K** (isolated per dispatch, which overstates
+  small-dispatch cost; 1420 dispatches, no overflow):
+
+  | `n_in x n_out` | Calls | ms | GB/s |
+  | --- | ---: | ---: | ---: |
+  | 6144 x 2560 (ssm/attn out) | 40 | 1.490 | 346 |
+  | 2560 x 10240 (qkv) | 22 | 1.104 | 428 |
+  | 2560 x 248320 (head) | 1 | 1.035 | 504 |
+  | 2560 x 6144 (attn gate) | 14 | 0.474 | 381 |
+  | 2560 x 12288 (attn q) | 5 | 0.296 | 436 |
+  | 2560 x 640 (shexp gate/up) | 26 | 0.246 | 142 |
+  | 2560 x 512 (k/v) | 21 | 0.190 | 119 |
+
+  Body total **1356 MB / 3.80 ms = 357 GB/s**; the head is 504. Larger `n_out`
+  amortizes ramp, but the large projections are already one dispatch per layer
+  and have no same-input partner (layers are sequential).
+- **Fusion price:** the only same-input groups are shared-expert gate/up
+  (26 calls, **0.246 ms**) and k/v (21, **0.190 ms**); fusing them into one
+  dispatch may recover **~0.15-0.25 ms in isolation**, less in the overlapped
+  schedule (the earlier group-512 hold shows ~1.6 ms of isolated small-matvec
+  time is already hidden). The big projections cannot be concatenated across
+  layers, so the ~2 ms hypothesis does not hold on this artifact. Not built.
+- **Evidence:** `~/qwen-runs/2026-11-09-fn-m4-roofline/` (`iq-ab-32768.iter`,
+  `iq2s-direct-32768/48000.iter`, `shapes-32768.iter`). Killed kernels and
+  host routes were reverted; only the `--shapes` probe remains. Every
+  screening arm was thermal 0; level-1 arms were not redone.
+- **Next:** an FP16 or vector-sign-collapse expert gate/up decoder against
+  the **336 GB/s** scatter ceiling; then the small shexp/k-v fusion if a
+  multi-matrix kernel is otherwise wanted. No merge.
+
 ## 2026-11-09 - Flash-Next M4 Single-Stream Census And Q6 Two-Row Decode
 
 - Branch **`perf/fn-m4-decode`**, base main **`f175af1c9`**, M4 Max laptop

@@ -1362,6 +1362,7 @@ fn prepared_request(backend: &Glm5NextBackend<'_, '_>, body: Value) -> Arc<Prepa
         validated,
         prompt,
         boundaries,
+        tokens: None,
     })
 }
 

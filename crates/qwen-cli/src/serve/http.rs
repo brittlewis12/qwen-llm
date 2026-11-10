@@ -35,6 +35,14 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(35);
 const SOCKET_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_READ_DEADLINE: Duration = Duration::from_secs(30);
+/// Rollback for worker-side full-prompt tokenization: `0` returns the encode
+/// to the resident owner.
+const WORKER_TOKENIZE_ENV: &str = "QWEN_SERVE_WORKER_TOKENIZE";
+
+pub(crate) fn worker_tokenize_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| qwen_llm::env_flag::read_default_on(WORKER_TOKENIZE_ENV))
+}
 
 /// Streaming sink handed to the backend. `piece` delivers generated text;
 /// `tick` is called between prefill chunks so the transport can heartbeat
@@ -65,11 +73,23 @@ pub(crate) trait GenerationSink {
 /// Process headroom read before each admitted output growth step.
 pub(crate) type Headroom = fn() -> Option<u64>;
 
+/// A backend's prompt tokenizer, made available to the HTTP worker so a long
+/// prompt is encoded beside the owner rather than on the decode thread.
+pub(crate) struct PromptTokens {
+    pub(crate) tokenizer: Arc<dyn qwen_llm::tokenizer::Tokenize + Send + Sync>,
+    pub(crate) add_special: bool,
+    pub(crate) vocab_size: u32,
+    pub(crate) family: &'static str,
+}
+
 pub(crate) struct PreparedResponse {
     pub(crate) validated: super::request_profile::ValidatedRequest,
     pub(crate) prompt: String,
     /// Boundaries the family renderer recorded in `prompt`, if any.
     pub(crate) boundaries: Option<PromptBoundaries>,
+    /// Checked prompt ids when the worker could tokenize them; None keeps the
+    /// owner-side `encode_checked` path.
+    pub(crate) tokens: Option<Vec<u32>>,
 }
 
 impl PreparedResponse {
@@ -160,6 +180,18 @@ pub(crate) trait GenerationBackend {
         request: &ServeRequest,
     ) -> Result<(String, Option<PromptBoundaries>), ServeError> {
         self.render_prompt(request).map(|prompt| (prompt, None))
+    }
+    /// The tokenizer the HTTP worker may use for this family's full prompt.
+    fn prompt_tokens(&self) -> Option<PromptTokens> {
+        None
+    }
+    /// Render and, when available, tokenize on the calling (worker) thread.
+    fn render_and_tokenize_prepared(
+        &self,
+        request: &ServeRequest,
+    ) -> Result<(String, Option<PromptBoundaries>, Option<Vec<u32>>), ServeError> {
+        let (prompt, boundaries) = self.render_prepared(request)?;
+        Ok((prompt, boundaries, None))
     }
     /// Render is already done; `prompt` is the exact model input. The
     /// backend streams raw generated text into `sink` and returns the
@@ -996,7 +1028,7 @@ fn handle_responses(
         Err(error) => return write_serve_error(&mut writer, &error),
     };
     let request = validated.request();
-    let (prompt, boundaries) = match backend.render_prepared(request) {
+    let (prompt, boundaries, tokens) = match backend.render_and_tokenize_prepared(request) {
         Ok(rendered) => rendered,
         Err(error) => return write_serve_error(&mut writer, &error),
     };
@@ -1013,6 +1045,7 @@ fn handle_responses(
         validated,
         prompt,
         boundaries,
+        tokens,
     });
     let request = prepared.request();
     if !request.stream {

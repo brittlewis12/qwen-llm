@@ -829,9 +829,10 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         request: &ServeRequest,
         prompt: &str,
         boundaries: Option<PromptBoundaries>,
+        tokens: Option<&[u32]>,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
-        let mut run = match self.begin_generation(request, prompt, boundaries, sink)? {
+        let mut run = match self.begin_generation(request, prompt, boundaries, tokens, sink)? {
             execution::Begun::Complete(outcome) => return Ok(outcome),
             execution::Begun::Run(run) => run,
         };
@@ -897,6 +898,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         request: &ServeRequest,
         prompt: &str,
         boundaries: Option<PromptBoundaries>,
+        tokens: Option<&[u32]>,
         sink: &mut dyn GenerationSink,
     ) -> Result<execution::Begun<'w>, BackendFailure> {
         self.idle_residency.before_request();
@@ -911,13 +913,17 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         let vocab_size = self.prepared.artifact.config().vocab_size;
         let tokenizer = self.prepared.artifact.tokenizer();
         // The renderer writes [gMASK]<sop>; the glm4 tokenizer adds nothing.
-        let tokens = decode_loop::encode_checked(
-            tokenizer,
-            prompt,
-            false,
-            vocab_size,
-            crate::family_profile::profile(qwen_llm::model_family::ModelFamily::Glm5Next).display,
-        )?;
+        let tokens = match tokens {
+            Some(tokens) => tokens.to_vec(),
+            None => decode_loop::encode_checked(
+                tokenizer,
+                prompt,
+                false,
+                vocab_size,
+                crate::family_profile::profile(qwen_llm::model_family::ModelFamily::Glm5Next)
+                    .display,
+            )?,
+        };
         let required = decode_loop::required_forwards(
             crate::family_profile::profile(qwen_llm::model_family::ModelFamily::Glm5Next).display,
             tokens.len(),
@@ -1689,6 +1695,15 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
 }
 
 impl GenerationBackend for Glm5NextBackend<'_, '_> {
+    fn prompt_tokens(&self) -> Option<super::http::PromptTokens> {
+        Some(super::http::PromptTokens {
+            tokenizer: self.prepared.artifact.tokenizer_arc()
+                as std::sync::Arc<dyn qwen_llm::tokenizer::Tokenize + Send + Sync>,
+            add_special: false,
+            vocab_size: self.prepared.artifact.config().vocab_size,
+            family: FAMILY,
+        })
+    }
     fn max_active(&self) -> usize {
         self.scheduler
             .as_ref()
@@ -1736,7 +1751,7 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
-        self.generate_with(request, prompt, None, sink)
+        self.generate_with(request, prompt, None, None, sink)
     }
 
     fn generate_prepared(
@@ -1748,6 +1763,7 @@ impl GenerationBackend for Glm5NextBackend<'_, '_> {
             prepared.request(),
             &prepared.prompt,
             prepared.boundaries,
+            prepared.tokens.as_deref(),
             sink,
         )
     }

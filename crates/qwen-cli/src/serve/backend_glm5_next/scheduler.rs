@@ -18,12 +18,16 @@ const LIVE_STATES: &str = "QWEN_SERVE_GLM_LIVE_STATES";
 const PREFILL_FAIR: &str = "QWEN_SERVE_GLM_PREFILL_FAIR";
 /// Target decode service percentage under mixed load (1..=90, default 10).
 const DECODE_PERCENT: &str = "QWEN_SERVE_GLM_DECODE_PERCENT";
+/// Persistent threads that sample a multi-member step beside the owner; 0
+/// samples serially on the owner (rollback). Default: max_active - 1.
+const SAMPLE_WORKERS: &str = "QWEN_SERVE_GLM_SAMPLE_WORKERS";
 #[derive(Clone, Copy)]
 pub(super) struct Config {
     pub active: usize,
     pub live: usize,
     pub fair: bool,
     pub decode_percent: usize,
+    pub sample_workers: usize,
 }
 fn parse(key: &str, value: Option<&str>) -> Result<usize> {
     let n = match value {
@@ -48,6 +52,16 @@ fn parse_percent(value: Option<&str>) -> Result<usize> {
     );
     Ok(n)
 }
+fn parse_workers(key: &str, value: Option<&str>) -> Result<usize> {
+    let n = match value {
+        None => return Ok(usize::MAX), // resolved to max_active - 1 by the caller
+        Some(s) => s
+            .parse::<usize>()
+            .with_context(|| format!("{key} must be a non-negative integer"))?,
+    };
+    Ok(n)
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
@@ -55,6 +69,10 @@ impl Config {
             decode_percent: parse_percent(std::env::var(DECODE_PERCENT).ok().as_deref())?,
             active: parse(MAX_ACTIVE, std::env::var(MAX_ACTIVE).ok().as_deref())?,
             live: parse(LIVE_STATES, std::env::var(LIVE_STATES).ok().as_deref())?,
+            sample_workers: parse_workers(
+                SAMPLE_WORKERS,
+                std::env::var(SAMPLE_WORKERS).ok().as_deref(),
+            )?,
         })
     }
 }
@@ -101,10 +119,17 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         batch.step(self.ctx, &mut [&mut a, &mut b], &[token, token])?;
         a.forward(self.ctx, token)?;
         self.batch = Some(batch);
-        self.scheduler = Some(
-            Driver::new(config.active).with_prefill_policy(config.fair, config.decode_percent),
-        );
-        tracing::info!(target:"qwen_diag","serve batch: family=glm5_next max_active={} live_states={} arithmetic=fast_half",config.active,config.live);
+        let sample_workers = if config.sample_workers == usize::MAX {
+            config.active.saturating_sub(1)
+        } else {
+            config.sample_workers
+        };
+        let driver = Driver::new(config.active)
+            .with_prefill_policy(config.fair, config.decode_percent)
+            .with_sample_workers(sample_workers)?;
+        let sample_workers = driver.sample_workers();
+        self.scheduler = Some(driver);
+        tracing::info!(target:"qwen_diag","serve batch: family=glm5_next max_active={} live_states={} sample_workers={} arithmetic=fast_half",config.active,config.live,sample_workers);
         Ok(())
     }
     pub(super) fn take_idle(&mut self, tokens: &[u32], lineage: PackedLineage) {
@@ -200,10 +225,13 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
         p: &PreparedResponse,
         sink: &mut dyn GenerationSink,
     ) -> Result<Begun<Self::Run>, BackendFailure> {
-        match self
-            .0
-            .begin_generation(p.request(), &p.prompt, p.boundaries, sink)
-        {
+        match self.0.begin_generation(
+            p.request(),
+            &p.prompt,
+            p.boundaries,
+            p.tokens.as_deref(),
+            sink,
+        ) {
             Ok(execution::Begun::Complete(o)) => Ok(Begun::Complete(o)),
             Ok(execution::Begun::Run(mut r)) => {
                 r.session = self.0.session.take();
@@ -253,15 +281,19 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
         cursor: &mut DecodeCursor,
         sink: &mut dyn GenerationSink,
         reserve: u64,
+        presampled: Option<crate::serve::backend_v41::sample_pool::Sampled>,
     ) -> Result<Advance, BackendFailure> {
         run.reserve = reserve;
         cursor.advance(
             &mut run.sampler,
-            None,
+            presampled,
             self.0.prepared.artifact.tokenizer(),
             sink,
             crate::shutdown::checkpoint,
         )
+    }
+    fn sampler_mut(run: &mut Self::Run) -> Option<&mut qwen_llm::sampling::Sampler> {
+        Some(&mut run.sampler)
     }
     fn advance_single(
         &mut self,

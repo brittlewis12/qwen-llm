@@ -12,13 +12,13 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
-pub(super) type Sampled = Result<SampledToken, SamplingError>;
+pub(crate) type Sampled = Result<SampledToken, SamplingError>;
 
 /// One member's sampling work: moved to a thread and back.
-pub(super) struct SampleJob {
-    pub(super) sampler: Sampler,
-    pub(super) logits: Vec<f32>,
-    pub(super) sampled: Option<Sampled>,
+pub(crate) struct SampleJob {
+    pub(crate) sampler: Sampler,
+    pub(crate) logits: Vec<f32>,
+    pub(crate) sampled: Option<Sampled>,
 }
 
 struct Ticket {
@@ -43,14 +43,14 @@ struct Worker {
     thread: Option<JoinHandle<()>>,
 }
 
-pub(super) struct SamplePool {
+pub(crate) struct SamplePool {
     workers: Vec<Worker>,
     done: Receiver<Ticket>,
 }
 
 impl SamplePool {
     /// `workers` threads beside the owner, which samples one share itself.
-    pub(super) fn new(workers: usize) -> std::io::Result<Self> {
+    pub(crate) fn new(workers: usize) -> std::io::Result<Self> {
         let (done_tx, done) = channel();
         let mut pool = Self {
             workers: Vec::with_capacity(workers),
@@ -60,7 +60,7 @@ impl SamplePool {
             let (jobs, rx) = channel::<Ticket>();
             let done = done_tx.clone();
             let thread = std::thread::Builder::new()
-                .name(format!("v41-sample-{index}"))
+                .name(format!("serve-sample-{index}"))
                 .spawn(move || {
                     while let Ok(ticket) = rx.recv() {
                         if done.send(ticket.run()).is_err() {
@@ -76,14 +76,14 @@ impl SamplePool {
         Ok(pool)
     }
 
-    pub(super) fn workers(&self) -> usize {
+    pub(crate) fn workers(&self) -> usize {
         self.workers.len()
     }
 
     /// Sample every job and return them in input order. Job `i` runs on lane
     /// `i % (workers + 1)`; lane 0 is the calling thread. A panic in any job
     /// resumes on the caller after every job has returned.
-    pub(super) fn sample_all(&mut self, jobs: Vec<SampleJob>) -> Vec<SampleJob> {
+    pub(crate) fn sample_all(&mut self, jobs: Vec<SampleJob>) -> Vec<SampleJob> {
         let lanes = self.workers.len() + 1;
         let count = jobs.len();
         let mut own = Vec::new();

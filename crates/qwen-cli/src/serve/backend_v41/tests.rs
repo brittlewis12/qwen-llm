@@ -149,6 +149,7 @@ fn warm_header_fold_keeps_shared_cuts_and_publishes_endpoint_logits() {
                     shared_prefix_end: shared_cut,
                     generation_header_start: Some(header_cut),
                 }),
+                None,
                 &mut Sink,
                 0,
                 &mut engine,
@@ -976,7 +977,7 @@ fn v41_backend_defaults_prompt_budget_and_loopback_only() {
     // Native tokenizer/config mismatch must still fail before execution.
     assert!(
         Settings::new(
-            backend.settings.tokenizer,
+            std::sync::Arc::clone(&backend.settings.tokenizer),
             64,
             8,
             SamplingConfig::default(),

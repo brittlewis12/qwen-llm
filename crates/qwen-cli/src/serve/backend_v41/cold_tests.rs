@@ -220,7 +220,7 @@ fn whole_cold_plan_yields_without_snapshots_then_preserves_shared_interior_and_b
         };
         let result = settings
             .execute_with_engine(
-                ceiling, &request, &prompt, bounds, &mut Sink, &mut probe, &mut cache,
+                ceiling, &request, &prompt, bounds, None, &mut Sink, &mut probe, &mut cache,
             )
             .unwrap();
         assert!(cache.committed);
@@ -301,7 +301,7 @@ fn extension_case(
     };
     let result = settings
         .execute_with_engine(
-            ceiling, &request, &prompt, bounds, &mut Sink, &mut probe, &mut cache,
+            ceiling, &request, &prompt, bounds, None, &mut Sink, &mut probe, &mut cache,
         )
         .unwrap();
     assert!(cache.committed);

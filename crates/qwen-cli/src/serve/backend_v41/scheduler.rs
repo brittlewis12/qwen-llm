@@ -509,6 +509,7 @@ impl<S> Scheduler<S> {
             job.prepared.request(),
             &job.prepared.prompt,
             job.prepared.boundaries,
+            job.prepared.tokens.as_deref(),
             &mut Publish(job.sink.as_mut()),
             others,
             &mut Observed {
@@ -652,7 +653,7 @@ impl<S> Scheduler<S> {
         let advanced = cursor.advance(
             &mut run.sampler,
             presampled,
-            &settings.tokenizer,
+            settings.tokenizer.as_ref(),
             &mut budgeted,
             crate::shutdown::checkpoint,
         );

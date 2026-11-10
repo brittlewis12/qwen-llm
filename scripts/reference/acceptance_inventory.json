@@ -6244,6 +6244,20 @@
     "reason": "Fake feedback/runtime with nonblocking sinks: bounded lone-member bursts yield to peers and park before forwarding on backpressure; no Metal context."
   },
   {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::pooled_sampling_preserves_tokens_rng_draws_and_step_schedule",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted batch members compare pooled and owner sampling by tokens, RNG draw counts and step schedule; no Metal context, model or network."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::pooled_sampling_matches_agent_temperature_rng",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted batch members at GLM's released temperature-1/nucleus-0.95 settings compare pooled and owner sampling by tokens, RNG draw counts and step schedule; no Metal context, model or network."
+  },
+  {
     "target": "lib",
     "name": "deepseek_v41::forward::attention_gpu::tests::score_keys::score_keys_timing",
     "class": "timing",

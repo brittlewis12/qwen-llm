@@ -879,11 +879,12 @@ impl<'a> Runtime for Owner<'a> {
         cursor: &mut DecodeCursor,
         sink: &mut dyn GenerationSink,
         reserve: u64,
+        presampled: Option<crate::serve::backend_v41::sample_pool::Sampled>,
     ) -> Result<Advance, BackendFailure> {
         run.reserve = reserve;
         cursor.advance(
             &mut run.sampler,
-            None,
+            presampled,
             self.tokenizer,
             sink,
             crate::shutdown::checkpoint,

@@ -11,6 +11,7 @@ use qwen_llm::deepseek_v41::forward::{Forward, RequestMemoryEstimate, StateError
 use qwen_llm::metal::{HostMemoryHeadroom, MetalContext, MetalMemorySignals};
 use qwen_llm::sampling::{Sampler, SamplingConfig};
 use std::io;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -254,7 +255,7 @@ mod execution;
 #[path = "backend_v41/io.rs"]
 mod memory_io;
 mod reuse;
-mod sample_pool;
+pub(crate) mod sample_pool;
 mod scheduler;
 
 pub(crate) struct Backend<'a> {
@@ -305,7 +306,7 @@ pub(crate) fn admit_request_memory(
 }
 
 pub(crate) struct Settings {
-    tokenizer: NativeTokenizer,
+    tokenizer: Arc<NativeTokenizer>,
     context: usize,
     limits: OutputLimits,
     sampling: SamplingConfig,
@@ -321,13 +322,14 @@ pub(crate) struct Settings {
 
 impl Settings {
     pub(crate) fn new(
-        tokenizer: NativeTokenizer,
+        tokenizer: impl Into<Arc<NativeTokenizer>>,
         context: usize,
         default_max: usize,
         sampling: SamplingConfig,
         eos: u32,
         model_id: String,
     ) -> Result<Self> {
+        let tokenizer = tokenizer.into();
         ensure!(
             context > 0 && default_max > 0 && default_max <= context,
             "V4.1 default output limit must fit positive context"
@@ -361,6 +363,16 @@ impl Settings {
             prefill_fair: qwen_llm::env_flag::read_default_on(PREFILL_FAIR_ENV),
             decode_percent,
         })
+    }
+
+    pub(crate) fn prompt_tokens(&self) -> super::http::PromptTokens {
+        super::http::PromptTokens {
+            tokenizer: Arc::clone(&self.tokenizer)
+                as Arc<dyn qwen_llm::tokenizer::Tokenize + Send + Sync>,
+            add_special: false,
+            vocab_size: self.tokenizer.n_vocab(),
+            family: "V4.1",
+        }
     }
 
     fn profile(&self) -> RequestProfile {
@@ -593,6 +605,9 @@ impl scheduler::BatchEngine<qwen_llm::deepseek_v41::forward::State> for ForwardE
 }
 
 impl GenerationBackend for Backend<'_> {
+    fn prompt_tokens(&self) -> Option<super::http::PromptTokens> {
+        Some(self.settings.prompt_tokens())
+    }
     fn model_id(&self) -> &str {
         &self.settings.model_id
     }
@@ -684,7 +699,7 @@ impl GenerationBackend for Backend<'_> {
                 "V4.1 request resolved to a non-V4.1 output protocol",
             )));
         };
-        self.generate_prompt(request, prompt, None, max_bytes, sink)
+        self.generate_prompt(request, prompt, None, None, max_bytes, sink)
     }
 
     fn generate_prepared(
@@ -703,6 +718,7 @@ impl GenerationBackend for Backend<'_> {
             prepared.request(),
             &prepared.prompt,
             prepared.boundaries,
+            prepared.tokens.as_deref(),
             *max_bytes,
             sink,
         )
@@ -715,6 +731,7 @@ impl Backend<'_> {
         request: &ServeRequest,
         prompt: &str,
         boundaries: Option<super::http::PromptBoundaries>,
+        tokens: Option<&[u32]>,
         ceiling: super::output_memory::OutputByteCeiling,
         sink: &mut dyn GenerationSink,
     ) -> std::result::Result<GenerationOutcome, BackendFailure> {
@@ -737,6 +754,7 @@ impl Backend<'_> {
             request,
             prompt,
             boundaries,
+            tokens,
             sink,
             &mut scheduler::Observed {
                 engine: &mut engine,

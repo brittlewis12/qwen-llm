@@ -2,6 +2,7 @@ use super::*;
 use crate::serve::events::Usage;
 use crate::serve::output_partition::GenerationEnd;
 use crate::serve::owner_activity::OwnerActivity;
+use qwen_llm::tokenizer::{TokError, Tokenize};
 use std::sync::mpsc::channel;
 
 const WAIT: Duration = Duration::from_secs(2);
@@ -61,9 +62,67 @@ fn pipeline() -> (OwnerActivity, HttpProxy, Receiver<Work>) {
             control: control(),
             activity: Arc::new(guard),
             batched: false,
+            prompt_tokens: None,
         },
         incoming,
     )
+}
+
+struct ByteTokenizer;
+impl Tokenize for ByteTokenizer {
+    fn encode(&self, text: &str, _: bool) -> Result<Vec<i32>, TokError> {
+        Ok(text.bytes().map(i32::from).collect())
+    }
+    fn try_decode_piece_bytes(&self, token: i32) -> Result<Vec<u8>, TokError> {
+        Ok(vec![
+            u8::try_from(token).map_err(|_| TokError::InvalidToken(token))?,
+        ])
+    }
+    fn try_decode_piece(&self, token: i32) -> Result<String, TokError> {
+        Ok(String::from_utf8_lossy(&self.try_decode_piece_bytes(token)?).into_owned())
+    }
+    fn try_decode(&self, tokens: &[i32]) -> Result<String, TokError> {
+        Ok(
+            String::from_utf8_lossy(&tokens.iter().map(|t| *t as u8).collect::<Vec<_>>())
+                .into_owned(),
+        )
+    }
+    fn decode(&self, tokens: &[i32]) -> String {
+        self.try_decode(tokens).unwrap()
+    }
+    fn n_vocab(&self) -> u32 {
+        256
+    }
+    fn bos(&self) -> Option<i32> {
+        None
+    }
+    fn eos(&self) -> Option<i32> {
+        Some(0)
+    }
+}
+
+#[test]
+fn worker_tokenizes_the_prepared_prompt_off_the_owner() {
+    let (_activity, mut proxy, _incoming) = pipeline();
+    proxy.prompt_tokens = Some(http::PromptTokens {
+        tokenizer: Arc::new(ByteTokenizer),
+        add_special: false,
+        vocab_size: 256,
+        family: "test",
+    });
+    let profile = RequestProfile::test_qwen();
+    let request = profile
+        .parse(&serde_json::json!({
+            "model":"test","input":"x","max_output_tokens":4
+        }))
+        .unwrap();
+    let (prompt, _boundaries, tokens) = proxy
+        .render_and_tokenize_prepared(&request)
+        .expect("worker prepare");
+    assert_eq!(
+        tokens,
+        Some(prompt.bytes().map(u32::from).collect::<Vec<_>>())
+    );
 }
 
 fn prepared() -> Arc<PreparedResponse> {
@@ -76,6 +135,7 @@ fn prepared() -> Arc<PreparedResponse> {
             .unwrap(),
         prompt: "already rendered".into(),
         boundaries: None,
+        tokens: None,
     })
 }
 

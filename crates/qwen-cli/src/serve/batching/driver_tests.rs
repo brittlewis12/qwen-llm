@@ -74,6 +74,8 @@ struct Fake {
     prefill_service: Duration,
     decode_service: Duration,
     cancel_during: Option<Arc<AtomicBool>>,
+    sampler_draws: Vec<usize>,
+    sampling: Option<SamplingConfig>,
 }
 fn logits(s: &State) -> Vec<f32> {
     let mut v = vec![-100.; 256];
@@ -101,13 +103,13 @@ impl Runtime for Fake {
             left: n,
             prompt: n,
             maximum: p.request().max_output_tokens.unwrap_or(8),
-            sampler: Sampler::new(SamplingConfig {
+            sampler: Sampler::new(self.sampling.unwrap_or(SamplingConfig {
                 temperature: 0.,
                 top_k: 1,
                 top_p: 1.,
                 min_p: 0.,
                 seed: 1,
-            })
+            }))
             .unwrap(),
         })))
     }
@@ -147,8 +149,12 @@ impl Runtime for Fake {
         c: &mut DecodeCursor,
         s: &mut dyn GenerationSink,
         _: u64,
+        presampled: Option<crate::serve::backend_v41::sample_pool::Sampled>,
     ) -> Result<Advance, BackendFailure> {
-        c.advance(&mut r.sampler, None, &Bytes, s, || Ok(()))
+        c.advance(&mut r.sampler, presampled, &Bytes, s, || Ok(()))
+    }
+    fn sampler_mut(r: &mut Self::Run) -> Option<&mut Sampler> {
+        Some(&mut r.sampler)
     }
     fn advance_single(
         &mut self,
@@ -256,6 +262,7 @@ impl Runtime for Fake {
                 .map(|x| *x as u32)
                 .collect::<Vec<_>>()
         );
+        self.sampler_draws.push(r.sampler.draws());
         self.commits.push(r.state.consumed);
         Ok(GenerationOutcome {
             end: GenerationEnd::TokenLimit,
@@ -336,6 +343,7 @@ fn submit(
         validated: profile.validate(request).unwrap(),
         prompt: prompt.to_string(),
         boundaries: None,
+        tokens: None,
     };
     let seen = Rc::new(RefCell::new(Seen {
         credit,
@@ -389,6 +397,53 @@ fn scheduler_serial_limit_keeps_one_forward_per_transition() {
     }
     assert!(e.steps.iter().all(|n| *n == 1));
 }
+fn run_sampling(
+    workers: usize,
+    sampling: Option<SamplingConfig>,
+) -> (Vec<Vec<u32>>, Vec<usize>, Vec<usize>) {
+    let mut d = Driver::new(3).with_sample_workers(workers).unwrap();
+    assert_eq!(d.sample_workers(), workers);
+    let mut e = Fake {
+        sampling,
+        ..Fake::default()
+    };
+    let cs: Vec<_> = (0..3).map(|_| submit(&mut d, 5, true, 100)).collect();
+    finish(&mut d, &mut e);
+    if sampling.is_none() {
+        for (s, _) in cs {
+            terminal_ok(&s);
+        }
+    }
+    (e.commits, e.sampler_draws, e.steps)
+}
+
+#[test]
+fn pooled_sampling_preserves_tokens_rng_draws_and_step_schedule() {
+    let serial = run_sampling(0, None);
+    let pooled = run_sampling(2, None);
+    assert_eq!(pooled.0, serial.0);
+    assert_eq!(pooled.1, serial.1);
+    assert_eq!(pooled.2, serial.2);
+}
+
+#[test]
+fn pooled_sampling_matches_agent_temperature_rng() {
+    // GLM's released defaults: temperature 1 and nucleus 0.95.
+    let sampling = Some(SamplingConfig {
+        temperature: 1.,
+        top_k: 0,
+        top_p: 0.95,
+        min_p: 0.,
+        seed: 42,
+    });
+    let serial = run_sampling(0, sampling);
+    let pooled = run_sampling(2, sampling);
+    assert_eq!(pooled.0, serial.0);
+    assert_eq!(pooled.1, serial.1);
+    assert_eq!(pooled.2, serial.2);
+    assert!(serial.1.iter().all(|&draws| draws > 0));
+}
+
 #[test]
 fn scheduler_loaded_prefill_is_bounded_and_alternates_with_decode() {
     let mut d = Driver::new(3).with_prefill_policy(false, 10);

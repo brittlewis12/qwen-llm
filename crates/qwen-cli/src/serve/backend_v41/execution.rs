@@ -71,6 +71,7 @@ impl Settings {
             request,
             prompt,
             boundaries,
+            None,
             sink,
             &mut engine,
             reuse,
@@ -83,11 +84,14 @@ impl Settings {
         request: &ServeRequest,
         prompt: &str,
         boundaries: Option<super::super::http::PromptBoundaries>,
+        tokens: Option<&[u32]>,
         sink: &mut dyn GenerationSink,
         engine: &mut impl Engine<S>,
         reuse: &mut impl reuse::Reuse<S>,
     ) -> std::result::Result<GenerationOutcome, BackendFailure> {
-        let mut run = self.begin(ceiling, request, prompt, boundaries, sink, 0, engine, reuse)?;
+        let mut run = self.begin(
+            ceiling, request, prompt, boundaries, tokens, sink, 0, engine, reuse,
+        )?;
         while !run.prefilled() {
             self.prefill_slice(
                 &mut run,
@@ -128,7 +132,7 @@ impl Settings {
                     vocab_size: *vocab as u32,
                 },
                 sampler,
-                &self.tokenizer,
+                self.tokenizer.as_ref(),
                 &mut budgeted,
                 |token| {
                     if cancelled(cancel) {
@@ -165,6 +169,7 @@ impl Settings {
         request: &ServeRequest,
         prompt: &str,
         boundaries: Option<super::super::http::PromptBoundaries>,
+        tokens: Option<&[u32]>,
         sink: &mut dyn GenerationSink,
         extra_reserve: u64,
         engine: &mut impl Engine<S>,
@@ -173,13 +178,16 @@ impl Settings {
         let maximum = self.limits.max_tokens(request);
         // Check the output-only lower bound before tokenization or state allocation.
         super::super::decode_loop::required_forwards("V4.1", 1, maximum, self.context)?;
-        let ids = super::super::decode_loop::encode_checked(
-            &self.tokenizer,
-            prompt,
-            false,
-            self.tokenizer.n_vocab(),
-            "V4.1",
-        )?;
+        let ids = match tokens {
+            Some(tokens) => tokens.to_vec(),
+            None => super::super::decode_loop::encode_checked(
+                self.tokenizer.as_ref(),
+                prompt,
+                false,
+                self.tokenizer.n_vocab(),
+                "V4.1",
+            )?,
+        };
         let mut checkpoint_cuts = Vec::new();
         let mut generation_cut = None;
         let mut shared_cut = None;

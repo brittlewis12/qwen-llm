@@ -6,6 +6,7 @@
 use super::{ExecutionMode, Glm5NextConfig, Glm5NextModel, generation_stops};
 use crate::gguf::GgufFile;
 use crate::tokenizer::NativeTokenizer;
+use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
 #[error("GLM-5.3 artifact {code}: {message}")]
@@ -81,7 +82,7 @@ impl<'a> Glm5NextArtifactLayout<'a> {
             .map_err(|e| failure("glm5_next_tokenizer", e))?;
         Ok(Glm5NextPreparedArtifact {
             layout: self,
-            tokenizer,
+            tokenizer: Arc::new(tokenizer),
         })
     }
 }
@@ -89,7 +90,7 @@ impl<'a> Glm5NextArtifactLayout<'a> {
 /// A GLM-5.3 artifact whose layout, coverage and tokenizer are admitted.
 pub struct Glm5NextPreparedArtifact<'a> {
     layout: Glm5NextArtifactLayout<'a>,
-    tokenizer: NativeTokenizer,
+    tokenizer: Arc<NativeTokenizer>,
 }
 
 impl<'a> Glm5NextPreparedArtifact<'a> {
@@ -112,6 +113,11 @@ impl<'a> Glm5NextPreparedArtifact<'a> {
 
     pub fn tokenizer(&self) -> &NativeTokenizer {
         &self.tokenizer
+    }
+
+    /// The shared admission tokenizer, for off-owner full-prompt encoding.
+    pub fn tokenizer_arc(&self) -> Arc<NativeTokenizer> {
+        Arc::clone(&self.tokenizer)
     }
 
     /// Generation policy is separate: forward-only lanes do not stop.

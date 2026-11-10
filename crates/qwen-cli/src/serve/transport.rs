@@ -231,6 +231,8 @@ struct HttpProxy {
     /// The owner schedules this request with others: deeper piece channel,
     /// no per-piece acknowledgement, wake the owner on submission.
     batched: bool,
+    /// Full-prompt tokenization on this worker when the family offers it.
+    prompt_tokens: Option<http::PromptTokens>,
 }
 
 impl GenerationBackend for HttpProxy {
@@ -252,6 +254,38 @@ impl GenerationBackend for HttpProxy {
         request: &ServeRequest,
     ) -> Result<(String, Option<super::http::PromptBoundaries>), ServeError> {
         self.profile.render_prepared(request)
+    }
+    fn prompt_tokens(&self) -> Option<http::PromptTokens> {
+        self.prompt_tokens.as_ref().map(|p| http::PromptTokens {
+            tokenizer: Arc::clone(&p.tokenizer),
+            add_special: p.add_special,
+            vocab_size: p.vocab_size,
+            family: p.family,
+        })
+    }
+    fn render_and_tokenize_prepared(
+        &self,
+        request: &ServeRequest,
+    ) -> Result<
+        (
+            String,
+            Option<super::http::PromptBoundaries>,
+            Option<Vec<u32>>,
+        ),
+        ServeError,
+    > {
+        let (prompt, boundaries) = self.render_prepared(request)?;
+        let tokens = match &self.prompt_tokens {
+            Some(p) if http::worker_tokenize_enabled() => Some(super::decode_loop::encode_checked(
+                p.tokenizer.as_ref(),
+                &prompt,
+                p.add_special,
+                p.vocab_size,
+                p.family,
+            )?),
+            _ => None,
+        };
+        Ok((prompt, boundaries, tokens))
     }
 
     /// Worker-side failures after generation (partition) reach the owner
@@ -440,6 +474,7 @@ impl Connection {
             None,
             0,
             false,
+            backend.prompt_tokens(),
         )
     }
 
@@ -461,6 +496,7 @@ impl Connection {
             None,
             0,
             true,
+            backend.prompt_tokens(),
         )
     }
 
@@ -484,6 +520,7 @@ impl Connection {
             Some(execution),
             extra_cpu_reserve,
             false,
+            None,
         )
     }
 
@@ -498,6 +535,7 @@ impl Connection {
         execution: Option<super::control::ExecutionPermit>,
         extra_cpu_reserve: u64,
         batched: bool,
+        prompt_tokens: Option<http::PromptTokens>,
     ) -> Result<Self> {
         #[cfg(test)]
         let fault = START_FAULT.take();
@@ -526,6 +564,7 @@ impl Connection {
             extra_cpu_reserve,
             headroom: qwen_llm::metal::effective_host_memory_remaining_bytes,
             batched,
+            prompt_tokens,
         };
         #[cfg(test)]
         if let Some(headroom) = PROXY_HEADROOM.take() {

@@ -2,10 +2,11 @@
 //! Native state, cache policy and admission stay in the runtime adapter.
 use super::{BatchSink, Job, shutting_down};
 use crate::serve::{
+    backend_v41::sample_pool::{SampleJob, SamplePool, Sampled},
     decode_cursor::{Advance, DecodeCursor},
     http::{BackendFailure, GenerationOutcome, GenerationSink, PreparedResponse},
-    items::ServeError,
 };
+use qwen_llm::sampling::Sampler;
 use std::{
     collections::VecDeque,
     io,
@@ -43,7 +44,13 @@ pub(crate) trait Runtime {
         cursor: &mut DecodeCursor,
         sink: &mut dyn GenerationSink,
         reserve: u64,
+        presampled: Option<Sampled>,
     ) -> Result<Advance, BackendFailure>;
+    /// The member's sampler, for a pool that samples a whole step before any
+    /// member is consumed. Runtimes without pooled sampling leave this None.
+    fn sampler_mut(_run: &mut Self::Run) -> Option<&mut Sampler> {
+        None
+    }
     /// Optional bounded feedback burst, only with one active request and no
     /// queued peer. Returning None retains ordinary token-at-a-time advance.
     fn advance_single(
@@ -129,6 +136,7 @@ pub(crate) struct Driver<R> {
     decode_budget: Duration,
     native_failed: bool,
     park_timeout: Duration,
+    sample_pool: Option<SamplePool>,
 }
 impl<R> Driver<R> {
     pub(crate) fn new(max_active: usize) -> Self {
@@ -142,7 +150,19 @@ impl<R> Driver<R> {
             decode_budget: Duration::ZERO,
             native_failed: false,
             park_timeout: Duration::from_secs(30),
+            sample_pool: None,
         }
+    }
+    /// Sample a multi-member step on persistent threads beside the owner.
+    /// `0` keeps sampling serial on the owner, exactly as before.
+    pub(crate) fn with_sample_workers(mut self, workers: usize) -> std::io::Result<Self> {
+        self.sample_pool = (workers > 0)
+            .then(|| SamplePool::new(workers))
+            .transpose()?;
+        Ok(self)
+    }
+    pub(crate) fn sample_workers(&self) -> usize {
+        self.sample_pool.as_ref().map_or(0, SamplePool::workers)
     }
     pub(crate) fn with_prefill_policy(mut self, fair: bool, percent: usize) -> Self {
         assert!((1..=90).contains(&percent));
@@ -212,7 +232,12 @@ impl<R> Driver<R> {
             }
         }
     }
-    fn advance<E: Runtime<Run = R>>(&mut self, index: usize, runtime: &mut E) {
+    fn advance<E: Runtime<Run = R>>(
+        &mut self,
+        index: usize,
+        presampled: Option<Sampled>,
+        runtime: &mut E,
+    ) {
         let Some(reserve) = self.total_reserve(runtime) else {
             return self.fail(
                 index,
@@ -233,7 +258,7 @@ impl<R> Driver<R> {
         } else {
             None
         }
-        .unwrap_or_else(|| runtime.advance(run, cursor, &mut sink, reserve));
+        .unwrap_or_else(|| runtime.advance(run, cursor, &mut sink, reserve, presampled));
         let extra = cursor.completed_transitions().saturating_sub(before);
         a.steps += extra;
         a.feedback_steps += extra;
@@ -264,6 +289,47 @@ impl<R> Driver<R> {
             }
         }
     }
+    /// Run every member's sampler on the pool before any member is consumed.
+    /// Samplers and logits move out and back; a job keeps its result, logits
+    /// and next RNG state exactly as owner sampling would.
+    fn presample<E: Runtime<Run = R>>(
+        &mut self,
+        results: &mut [(usize, Result<Vec<f32>, String>, f64, usize)],
+    ) -> Vec<Option<Sampled>> {
+        let mut presampled: Vec<Option<Sampled>> = results.iter().map(|_| None).collect();
+        let Some(pool) = self.sample_pool.as_mut() else {
+            return presampled;
+        };
+        let members: Vec<usize> = (0..results.len())
+            .filter(|&k| results[k].1.is_ok())
+            .collect();
+        if members.len() < 2 {
+            return presampled;
+        }
+        let mut jobs = Vec::with_capacity(members.len());
+        for &k in &members {
+            let index = results[k].0;
+            let run = self.active[index].run.as_mut().expect("decoding run");
+            let sampler =
+                E::sampler_mut(run).expect("a pooled runtime exposes every member's sampler");
+            let placeholder = Sampler::new(qwen_llm::sampling::SamplingConfig::default())
+                .expect("default sampler");
+            jobs.push(SampleJob {
+                sampler: std::mem::replace(sampler, placeholder),
+                logits: std::mem::take(results[k].1.as_mut().expect("logits")),
+                sampled: None,
+            });
+        }
+        for (&k, job) in members.iter().zip(pool.sample_all(jobs)) {
+            let index = results[k].0;
+            let run = self.active[index].run.as_mut().expect("decoding run");
+            *E::sampler_mut(run).expect("sampler") = job.sampler;
+            *results[k].1.as_mut().expect("logits") = job.logits;
+            presampled[k] = job.sampled;
+        }
+        presampled
+    }
+
     fn step_one<E: Runtime<Run = R>>(
         &mut self,
         index: usize,
@@ -334,7 +400,10 @@ impl<R> Driver<R> {
         // Descending indices allow a completion/failure to retire one member
         // without changing the identity of any result still to be delivered.
         results.sort_by_key(|x| std::cmp::Reverse(x.0));
-        for (index, result, elapsed, width) in results {
+        let mut presampled = self.presample::<E>(&mut results);
+        for ((index, result, elapsed, width), presampled) in
+            results.into_iter().zip(presampled.drain(..))
+        {
             let a = &mut self.active[index];
             a.next = None;
             match a.cursor.as_mut().expect("cursor").on_logits(
@@ -348,7 +417,7 @@ impl<R> Driver<R> {
                     a.width_sum += width;
                     a.width_max = a.width_max.max(width);
                     a.batched += usize::from(width > 1);
-                    self.advance(index, runtime);
+                    self.advance(index, presampled, runtime);
                 }
             }
         }
@@ -490,7 +559,7 @@ impl<R> Driver<R> {
                     }
                     if let Some(cursor) = cursor {
                         a.cursor = Some(cursor);
-                        self.advance(i, runtime);
+                        self.advance(i, None, runtime);
                     }
                 }
             }

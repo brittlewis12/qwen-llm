@@ -385,6 +385,7 @@ fn prepared_json(settings: &Settings, body: Value) -> Arc<PreparedResponse> {
         validated,
         prompt,
         boundaries,
+        tokens: None,
     })
 }
 

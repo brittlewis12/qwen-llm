@@ -14,6 +14,12 @@ pub struct Qwen4ExpDecodeBatch {
     inputs: MetalTensor,
     logits: MetalTensor,
     tokens: Vec<MetalTensor>,
+    gpu_samplers: Vec<
+        Option<(
+            crate::sampling::SamplingConfig,
+            crate::metal::GpuTokenSampler,
+        )>,
+    >,
     maximum: usize,
     #[cfg(feature = "perf-ablations")]
     pub diagnostic_ms: [f64; 3],
@@ -114,6 +120,7 @@ impl Qwen4ExpDecodeBatch {
             tokens: (0..maximum)
                 .map(|_| MetalTensor::zeros_i32(ctx, vec![1]))
                 .collect::<Result<_, _>>()?,
+            gpu_samplers: (0..maximum).map(|_| None).collect(),
             maximum,
             #[cfg(feature = "perf-ablations")]
             diagnostic_ms: [0.; 3],
@@ -186,6 +193,92 @@ impl Qwen4ExpDecodeBatch {
             &self.tokens[..b],
             &mut diagnostic,
         )?;
+        #[cfg(feature = "perf-ablations")]
+        {
+            self.diagnostic_ms = diagnostic;
+        }
+        #[cfg(not(feature = "perf-ablations"))]
+        let _ = diagnostic;
+        for r in members.iter_mut() {
+            r.last_token_timing = None;
+            r.last_prefill_timing = None;
+        }
+        Ok(values)
+    }
+    /// Device-input batch forward that samples every member on the GPU at the
+    /// end of the command. The host writes the pending token and reads back only
+    /// the next tokens; the next round is still encoded after this wait.
+    pub fn step_tokens(
+        &mut self,
+        members: &mut [&mut Qwen4ExpTextRunner<'_, '_, '_>],
+        samplers: &mut [&mut crate::sampling::Sampler],
+        tokens: &[u32],
+    ) -> Result<Vec<u32>, Qwen4ExpRuntimeError> {
+        let b = members.len();
+        if !(2..=self.maximum).contains(&b) || tokens.len() != b || samplers.len() != b {
+            return invalid("invalid native GPU-sampling batch width");
+        }
+        let ctx = members[0].ctx;
+        let weights = members[0].weights.clone();
+        let table = members[0].ple_table;
+        for (s, &t) in members.iter().zip(tokens) {
+            if !std::ptr::eq(ctx, s.ctx)
+                || !std::ptr::eq(
+                    Retained::as_ptr(&s.weights.output.buffer),
+                    Retained::as_ptr(&self.head.buffer),
+                )
+                || s.weights.output.offset != self.head.offset
+                || !std::ptr::eq(s.weights.output, weights.output)
+                || s.weights.geometry != self.geometry
+                || s.weights.geometry != weights.geometry
+            {
+                return invalid("native batch weights/device/geometry differ");
+            }
+            s.validate_prefill_request(&[t])?;
+        }
+        let vocab = self.geometry.vocab_size();
+        for (i, sampler) in samplers.iter().enumerate() {
+            let config = sampler.config();
+            let rebuild = match &self.gpu_samplers[i] {
+                Some((cached, _)) => *cached != config,
+                None => true,
+            };
+            if rebuild {
+                self.gpu_samplers[i] = Some((
+                    config,
+                    crate::metal::GpuTokenSampler::new(ctx, vocab, config)?,
+                ));
+            }
+        }
+        let uniforms: Vec<f32> = samplers.iter().map(|s| s.gpu_uniform(0)).collect();
+        let gpu_samplers: Vec<&crate::metal::GpuTokenSampler> = self.gpu_samplers[..b]
+            .iter()
+            .map(|s| &s.as_ref().expect("GPU sampler").1)
+            .collect();
+        let columns = b.next_power_of_two();
+        let h = self.geometry.hidden_size();
+        let v = self.geometry.vocab_size();
+        let inputs = self.inputs.view_subrange(0, vec![h as u64, columns as u64]);
+        let logits = self.logits.view_subrange(0, vec![v as u64, columns as u64]);
+        let mut workspaces: Vec<_> = members.iter_mut().map(|r| &mut r.workspace).collect();
+        let mut diagnostic = [0f64; 3];
+        let values = crate::qwen4exp_text_session::step_batch_gpu_tokens(
+            ctx,
+            table,
+            &weights,
+            &inputs,
+            &logits,
+            &self.projection,
+            &mut workspaces,
+            tokens,
+            &self.tokens[..b],
+            &gpu_samplers,
+            &uniforms,
+            &mut diagnostic,
+        )?;
+        for sampler in samplers.iter_mut() {
+            sampler.commit_gpu_draw();
+        }
         #[cfg(feature = "perf-ablations")]
         {
             self.diagnostic_ms = diagnostic;

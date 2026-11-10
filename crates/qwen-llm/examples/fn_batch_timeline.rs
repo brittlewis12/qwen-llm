@@ -57,6 +57,7 @@ unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
 }
 const QOS_CLASS_DEFAULT: u32 = 0x15;
+const QOS_CLASS_USER_INITIATED: u32 = 0x19;
 const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
 
 struct StopOnDrop<'a>(&'a AtomicBool);
@@ -143,7 +144,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let width: usize = a.get(6).map_or(Ok(3), |s| s.parse())?;
     let warm: usize = a.get(7).map_or(Ok(8), |s| s.parse())?;
     let load: usize = a.get(8).map_or(Ok(0), |s| s.parse())?;
-    let qos = a.get(9).is_some_and(|s| s == "1");
+    let qos: u32 = a.get(9).map_or(Ok(0), |s| s.parse())?;
+    let qos_class = match qos {
+        1 => QOS_CLASS_USER_INTERACTIVE,
+        2 => QOS_CLASS_USER_INITIATED,
+        _ => 0,
+    };
     assert!(steps > 1 && warm > 0 && (2..=4).contains(&width));
     let ctx = MetalContext::new()?;
     let gg = GgufFile::open(&a[1])?;
@@ -290,11 +296,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }));
             }
-            if qos {
+            if qos_class != 0 {
                 // Raise only the loop thread after the load threads have been
                 // spawned, so they keep the default class.
                 unsafe {
-                    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+                    pthread_set_qos_class_self_np(qos_class, 0);
                 }
             }
             let started = Instant::now();
@@ -310,7 +316,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .unwrap();
             let wall = started.elapsed().as_secs_f64() * 1e3;
-            if qos {
+            if qos_class != 0 {
                 unsafe {
                     pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0);
                 }

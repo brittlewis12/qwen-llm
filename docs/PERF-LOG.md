@@ -55,6 +55,40 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - **Hygiene.** Thermal 0-1 on accepted arms; several arms were aborted at
   thermal 2 by concurrent external compiles and rerun. `check-contracts.sh`
   passes.
+## 2026-11-10 - Fast top_k=0 GPU Sampler: 38 -> ~1 ms; Batched V4.1/GLM Break-Even
+
+- **Host semantics first.** Sampler-v1 always orders candidates by descending
+  logit with ascending token-id ties; it uses a stable 3-pass 11/11/10-bit LSD
+  radix over the logit half. `top_p=1` does **not** avoid the sort.
+- **GPU fast path.** Replaced the unbounded tile+merge sort with the same stable
+  radix order (chunk histograms + per-bucket bases + stable scatter), precomputed
+  the categorical weights in parallel, and replaced the single-thread
+  vocabulary scan with a block-parallel Kahan scan (block sums + block prefix +
+  local exact scan). Sampler alone at 129K on M5: **V4.1 0.95 ms, GLM 0.96 ms,
+  FN 0.23 ms**; the old unbounded path was **~38 ms**.
+- **Exactness.** The strict standard test passes. A broad adversarial test
+  (flat/peaked/ties/signed-zero/sparse-inf, 67 uniforms, 4 presets) shows
+  **23/1608 (1.4%)** f32-vs-f64 boundary flips; the old sequential sampler flips
+  at the same boundaries. This is the documented F32 candidate-arithmetic limit,
+  not a regression.
+- **Batched V4.1/GLM sampling is break-even, not +8-9%.** V4.1 released
+  **-0.6% / -0.3%** (32K/49K), GLM **+0.6% / +1.1%**. The host sampler is
+  ~0.75-0.95 ms **per member** and the GPU full-vocab sampler is ~0.95 ms per
+  member, so three members cost more on the GPU than on the host. **Do not ship
+  batched GPU sampling for V4.1/GLM.** The V4.1 greedy gain (+4-5.5%) is only
+  the slower host greedy sampler.
+- **B=1 finding.** GLM's default-on GPU token loop uses `GpuTokenSampler` at
+  `top_k=0`, so the old ~38 ms sampler was on the solo path; the fast sampler is
+  a large solo improvement. V4.1 B=1 uses `decode_serial` host sampling, so it
+  is unchanged.
+- **Rollback.** There is no dedicated sampler flag. The escape hatch is
+  `QWEN_GLM53_GPU_TOKEN_LOOP=0`, which restores host sampling for the GLM solo
+  path; the sampled ordering and the F32 boundary behavior are otherwise
+  identical to sampler-v1.
+- GLM native `step_tokens` prototype still shows 74/96 token mismatches against
+  the host; it needs integration work and is not shipped.
+- Raw: `~/qwen-runs/2026-11-10-batch-loop/sampler-ab.json`; microbenchmark
+  `gpu_sampler_topk0` (`--profile iter`).
 
 ## 2026-11-10 - V4.1 Design D Probe: Small-M Tensor Tile Is 2-3x Slower
 

@@ -6,6 +6,70 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-10 - Serve Standing: Morning Main vs Tonight Main, Three Agents
+
+- **Question:** how much faster is real three-agent serving on tonight's main
+  than this morning's, per tier-1 family? Servers: morning **`bcb1b46b8`**,
+  tonight **`487d0b57b`**; release `--bin qwen` builds in separate M5
+  worktrees (`--bin qwen-tok` once from tonight for the harness). Harness is
+  tonight's `scripts/bench/serve_realistic.py`, three agents, three **48K**
+  roots, seed **20261109**, real agent sampling (no fields; model defaults),
+  **40 s** windows, `--warm-cool 45` (60 for the GLM retry), 30 s arm cool,
+  60 s between arms, AB then BA packets.
+- Each arm is one fresh server. `host` is `round_budget.host_ms_per_round`
+  (median content gap minus native round wall); FN's phase line has no
+  `transition_ms`, so its harness "host" equals the gap and is marked n/a.
+  Load is the mean/max 1-minute load inside the measured window.
+
+  | Family | Order | Build | tok/s | Gap p50 ms | Host ms/round | Thermal | Compile overlap | Load mean/max |
+  | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: |
+  | V4.1 | AB | morning | 98.900 | 26.73 | 1.067 | 0 | yes | 45.4 / 51.0 |
+  | V4.1 | AB | tonight | 98.875 | 26.25 | 0.430 | 1 | yes | 18.6 / 20.5 |
+  | V4.1 | BA | tonight | 97.850 | 26.81 | 1.111 | 0 | yes | 47.7 / 49.4 |
+  | V4.1 | BA | morning | 100.500 | 26.23 | 1.006 | 0 | no | 13.7 / 13.8 |
+  | GLM | AB | morning | 68.575 | 31.11 | 2.665 | 0 | yes | 14.3 / 14.6 |
+  | GLM | AB | tonight | 79.850 | 27.80 | 1.143 | 0 | no | 11.7 / 12.4 |
+  | GLM | BA | tonight | 71.525 | 28.43 | 1.055 | 1 | yes | 24.9 / 26.1 |
+  | GLM | BA | morning | n/a | n/a | n/a | 2 | n/a | n/a |
+  | Flash-Next | AB | morning | 101.350 | 27.60 | n/a | 0 | yes | 15.3 / 17.5 |
+  | Flash-Next | AB | tonight | 141.300 | 19.63 | n/a | 0 | yes | 18.0 / 18.4 |
+  | Flash-Next | BA | tonight | 136.100 | 19.69 | n/a | 0 | yes | 25.5 / 26.1 |
+  | Flash-Next | BA | morning | 102.425 | 28.19 | n/a | 0 | yes | 27.5 / 29.7 |
+
+- **Morning -> tonight delivered ratio (tonight/morning):**
+
+  | Family | AB | BA | Geomean | Spread |
+  | --- | ---: | ---: | ---: | ---: |
+  | V4.1 | 0.9997 | 0.9736 | **0.9866 (-1.34%)** | -0.03% to -2.64% |
+  | GLM | **1.1644 (+16.44%)** | not measured | +16.44% | one order only |
+  | Flash-Next | 1.3942 | 1.3288 | **1.3611 (+36.11%)** | +32.88% to +39.42% |
+
+  Gap p50 moved V4.1 0.9823 / 1.0223 (flat), GLM 0.8937, Flash-Next 0.7114 /
+  0.6983. V4.1 is therefore **flat within the order/load spread**, not a
+  measurable win: the two orders differ by 2.6 points and the AB/BA loads were
+  inversely matched (AB favored tonight 45 vs 19, BA favored morning 14 vs 48).
+  Flash-Next is a clear **1.36x** and GLM a clear **1.16x** in the one clean
+  order available.
+- **Thermal/load/compile:** accepted arms are thermal **0/1**; no level-2 arm
+  was accepted. The first V4.1 AB attempt lost its tonight arm at level 2 in
+  preflight and was discarded; AB was redone as `v41-ab2`. The GLM BA morning
+  arm failed at level 2 twice (warm-up cooling, then the 40 s window; the retry
+  used `--warm-cool 60 --cool 45`) and has no summary, so GLM has no BA ratio;
+  the AB loads were similar (14.3 / 11.7), but the morning arm had a compiler
+  overlap sample and the tonight arm did not. Flash-Next arms all had compiler
+  overlap, with similar within-order loads. Loads ranged **10-51**; the M5 was
+  never made quiet, as requested.
+- **Lease:** every packet held the lease for **6.0-12.3 min**, all under the
+  15-minute cap; no packet was extended or requeued for more time. Builds were
+  outside the lease.
+- Evidence: `~/qwen-runs/2026-11-10-serve-standing/` (`v41-ab2`, `v41-ba`,
+  `glm-ab`, `glm-ba`, `glm-ba-morning2`, `fn-ab`, `fn-ba`, plus the discarded
+  `v41-ab` attempt; summaries, launch records, thermals, per-5-s load logs and
+  arm events). Branch `bench/serve-standing-1110`; no merge.
+- **Next:** a clean GLM BA morning when the 48K arm can stay below level 2, and
+  a load-matched V4.1 repeat to resolve whether its small negative is order
+  effect or real.
+
 ## 2026-11-10 - Flash-Next Batch Loop Shipped; GPU-Thread QoS Is Cross-Family
 
 - **Shipped default-on:** `QWEN_SERVE_FN_BATCH_GPU_LOOP` now runs the whole

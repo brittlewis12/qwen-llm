@@ -24,11 +24,18 @@ pub(crate) fn encode(
     members: &mut [&mut Qwen4ExpPostPleBlockMetalWorkspace],
     projection: &crate::qwen4exp_metal::decode_projection::Scratch,
     moe_scratch: Option<&crate::qwen4exp_moe::Qwen4ExpMoePackedMotorScratch>,
+    validate: bool,
 ) -> Result<(), Qwen4ExpPostPleBlockError> {
     validate_encoder(ctx, enc)?;
     let direct = direct_enabled();
-    for ((w, &p), &x) in members.iter().zip(positions).zip(inputs) {
-        validate_and_preflight(ctx, p, x, weights, w)?;
+    // Device-owned pipelined frames use positions ahead of the CPU committed
+    // lengths, which lag one frame. The caller validates the first frame; later
+    // frames keep the geometry/shape checks inside the mixers and only need the
+    // control scalars the GPU input prefix already wrote.
+    if validate {
+        for ((w, &p), &x) in members.iter().zip(positions).zip(inputs) {
+            validate_and_preflight(ctx, p, x, weights, w)?;
+        }
     }
     for w in members.iter_mut() {
         reserve_command(w, enc)?;
@@ -92,6 +99,7 @@ pub(crate) fn encode(
                 ctx,
                 enc,
                 &mixed,
+                positions,
                 w,
                 states,
                 projection,

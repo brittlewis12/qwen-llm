@@ -7,13 +7,14 @@ pub(crate) fn encode_into<'a>(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     inputs: &[&MetalTensor],
+    positions: &[usize],
     weights: QwenSparseAttentionMetalWeights<'_>,
     mut members: Vec<&'a mut QwenSparseAttentionMetalWorkspace>,
     scratch: &Scratch,
     destinations: &[&MetalTensor],
     direct: bool,
 ) -> Result<(), Qwen4ExpQsaError> {
-    if destinations.len() != members.len() {
+    if destinations.len() != members.len() || positions.len() != members.len() {
         return invalid("native destination/member count differs");
     }
     if direct {
@@ -34,9 +35,21 @@ pub(crate) fn encode_into<'a>(
         preflight(ctx, weights)?;
     }
     let mut controls = Vec::with_capacity(members.len());
-    for w in &mut members {
-        let (p, n) = prepare_control_scalars(w)?;
-        reserve_command(w, enc, n, 0)?;
+    for (i, w) in members.iter_mut().enumerate() {
+        // A device-owned frame already wrote this member's position-dependent
+        // control scalars in the GPU input prefix. The CPU workspace's
+        // committed length lags one frame behind the pipeline.
+        let (p, n) = if enc.gpu_owned() {
+            let p = positions[i];
+            if p >= w.geometry.capacity {
+                return invalid("native QSA pipeline position exceeds capacity");
+            }
+            (p, p + 1)
+        } else {
+            let (p, n) = prepare_control_scalars(w)?;
+            reserve_command(w, enc, n, 0)?;
+            (p, n)
+        };
         controls.push((p, n));
     }
     for (weight, field) in [

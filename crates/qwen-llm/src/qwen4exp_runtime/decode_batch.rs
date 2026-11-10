@@ -3,12 +3,17 @@ use super::*;
 use crate::qwen4exp_text_session::{
     QWEN4EXP_TEXT_SESSION_DYNAMIC_RESERVE_BYTES, decode_batch as encode,
 };
+crate::env_flag!(
+    /// Read each member's token from a device buffer and stage PLE/embedding/controls on the GPU. 0 restores the CPU PLE row gather.
+    default_on gpu_inputs_enabled, "QWEN_FN_BATCH_GPU_INPUTS"
+);
 
 pub struct Qwen4ExpDecodeBatch {
     head: MetalTensor,
     geometry: crate::qwen4exp_text_session::Qwen4ExpTextSessionMetalGeometry,
     inputs: MetalTensor,
     logits: MetalTensor,
+    tokens: Vec<MetalTensor>,
     maximum: usize,
     #[cfg(feature = "perf-ablations")]
     pub diagnostic_ms: [f64; 3],
@@ -106,6 +111,9 @@ impl Qwen4ExpDecodeBatch {
             geometry: runner.weights.geometry.clone(),
             inputs: MetalTensor::zeros_f32(ctx, vec![h as u64, columns as u64])?,
             logits: MetalTensor::zeros_f32(ctx, vec![v as u64, columns as u64])?,
+            tokens: (0..maximum)
+                .map(|_| MetalTensor::zeros_i32(ctx, vec![1]))
+                .collect::<Result<_, _>>()?,
             maximum,
             #[cfg(feature = "perf-ablations")]
             diagnostic_ms: [0.; 3],
@@ -119,6 +127,80 @@ impl Qwen4ExpDecodeBatch {
         self.logits.n_bytes() * 2
     }
     pub fn step(
+        &mut self,
+        members: &mut [&mut Qwen4ExpTextRunner<'_, '_, '_>],
+        tokens: &[u32],
+    ) -> Result<Vec<Vec<f32>>, Qwen4ExpRuntimeError> {
+        if gpu_inputs_enabled() && members.len() > 1 {
+            return self.step_gpu_inputs(members, tokens);
+        }
+        self.step_cpu_inputs(members, tokens)
+    }
+    /// Device-input batch forward. The host samples the token as usual, writes
+    /// it into the member's device token buffer, and the GPU input prefix gathers
+    /// PLE rows, selects the embedding and writes the control scalars. This
+    /// removes the CPU PLE gather from every batched round.
+    pub fn step_gpu_inputs(
+        &mut self,
+        members: &mut [&mut Qwen4ExpTextRunner<'_, '_, '_>],
+        tokens: &[u32],
+    ) -> Result<Vec<Vec<f32>>, Qwen4ExpRuntimeError> {
+        let b = members.len();
+        if !(2..=self.maximum).contains(&b) || tokens.len() != b {
+            return invalid("invalid native GPU-input batch width");
+        }
+        let ctx = members[0].ctx;
+        let weights = members[0].weights.clone();
+        let table = members[0].ple_table;
+        for (s, &t) in members.iter().zip(tokens) {
+            if !std::ptr::eq(ctx, s.ctx)
+                || !std::ptr::eq(
+                    Retained::as_ptr(&s.weights.output.buffer),
+                    Retained::as_ptr(&self.head.buffer),
+                )
+                || s.weights.output.offset != self.head.offset
+                || !std::ptr::eq(s.weights.output, weights.output)
+                || s.weights.geometry != self.geometry
+                || s.weights.geometry != weights.geometry
+            {
+                return invalid("native batch weights/device/geometry differ");
+            }
+            s.validate_prefill_request(&[t])?;
+        }
+        let columns = b.next_power_of_two();
+        let h = self.geometry.hidden_size();
+        let v = self.geometry.vocab_size();
+        let inputs = self.inputs.view_subrange(0, vec![h as u64, columns as u64]);
+        let logits = self.logits.view_subrange(0, vec![v as u64, columns as u64]);
+        let mut workspaces: Vec<_> = members.iter_mut().map(|r| &mut r.workspace).collect();
+        let mut diagnostic = [0f64; 3];
+        let values = crate::qwen4exp_text_session::step_batch_gpu_inputs(
+            ctx,
+            table,
+            &weights,
+            &inputs,
+            &logits,
+            &self.projection,
+            &mut workspaces,
+            tokens,
+            &self.tokens[..b],
+            &mut diagnostic,
+        )?;
+        #[cfg(feature = "perf-ablations")]
+        {
+            self.diagnostic_ms = diagnostic;
+        }
+        #[cfg(not(feature = "perf-ablations"))]
+        let _ = diagnostic;
+        for r in members.iter_mut() {
+            r.last_token_timing = None;
+            r.last_prefill_timing = None;
+        }
+        Ok(values)
+    }
+    /// CPU-staged batch forward: the parent gathers PLE rows and writes the
+    /// token IDs, then the GPU runs the shared batch kernels.
+    pub fn step_cpu_inputs(
         &mut self,
         members: &mut [&mut Qwen4ExpTextRunner<'_, '_, '_>],
         tokens: &[u32],

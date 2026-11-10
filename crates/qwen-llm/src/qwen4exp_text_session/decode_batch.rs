@@ -59,6 +59,102 @@ pub(crate) fn encode(
             s,
         )?;
     }
+    encode_post_zero_one(
+        ctx, enc, weights, members, &positions, inputs, logits, projection, true,
+    )
+}
+
+/// GPU-feedback batch forward. Each member's token is read from a device tensor
+/// by `GpuInputs`, so no host token is staged and the next command can be
+/// encoded while this one executes. `positions[i]` is the position that token is
+/// consumed at, not the workspace's published `committed_length` (which lags the
+/// pipeline by one frame).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_gpu(
+    ctx: &MetalContext,
+    enc: &mut KernelEncoder,
+    feedback: &[&MetalTensor],
+    positions: &[usize],
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    members: &mut [&mut Qwen4ExpTextSessionMetalWorkspace],
+    inputs: &MetalTensor,
+    logits: &MetalTensor,
+    gpu_inputs: &[&super::gpu_inputs::GpuInputs],
+    projection: &crate::qwen4exp_metal::decode_projection::Scratch,
+    validate: bool,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    validate_encoder(ctx, enc)?;
+    let h = weights.geometry.hidden_size();
+    let v = weights.geometry.vocab_size();
+    let b = members.len();
+    let columns = b.next_power_of_two();
+    if feedback.len() != b || positions.len() != b || gpu_inputs.len() != b {
+        return invalid("GPU batch forward member extents differ");
+    }
+    require_tensor(
+        "batch head inputs",
+        inputs,
+        GgmlType::F32,
+        &[h as u64, columns as u64],
+        true,
+    )?;
+    require_tensor(
+        "batch logits",
+        logits,
+        GgmlType::F32,
+        &[v as u64, columns as u64],
+        true,
+    )?;
+    require_disjoint(&[("batch inputs", inputs), ("batch logits", logits)])?;
+    for s in members.iter() {
+        if s.geometry != weights.geometry {
+            return invalid("batch member geometry differs");
+        }
+        s.require_idle()?;
+    }
+    for (&p, s) in positions.iter().zip(members.iter()) {
+        if p >= s.geometry.capacity() {
+            return invalid("GPU batch position exceeds session capacity");
+        }
+    }
+    // Device input prefix: PLE rows, control scalars, PLE history and the token
+    // embedding selection all read the sampled token from GPU storage. Argument
+    // pointees need explicit fences before the model wave records scopes.
+    for ((&p, &feedback), gpu_inputs) in
+        positions.iter().zip(feedback.iter()).zip(gpu_inputs.iter())
+    {
+        gpu_inputs.encode(ctx, enc, feedback, p)?;
+    }
+    // SAFETY: the token loop owns every member exclusively until it drains each
+    // committed command; all token-dependent staging is on the device.
+    unsafe {
+        enc.delegate_session_owner(positions[0]);
+    }
+    for (i, s) in members.iter_mut().enumerate() {
+        let history = s.zero_one.gpu_decode_history();
+        encode_zero_one_stage(ctx, enc, 0, positions[i], history, weights, s)?;
+    }
+    encode_post_zero_one(
+        ctx, enc, weights, members, positions, inputs, logits, projection, validate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_post_zero_one(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weights: &Qwen4ExpTextSessionMetalWeights<'_>,
+    members: &mut [&mut Qwen4ExpTextSessionMetalWorkspace],
+    positions: &[usize],
+    inputs: &MetalTensor,
+    logits: &MetalTensor,
+    projection: &crate::qwen4exp_metal::decode_projection::Scratch,
+    validate: bool,
+) -> Result<(), Qwen4ExpTextSessionError> {
+    let h = weights.geometry.hidden_size();
+    let v = weights.geometry.vocab_size();
+    let b = members.len();
+    let columns = b.next_power_of_two();
     {
         let mut layers = Vec::with_capacity(b);
         let mut residuals = Vec::with_capacity(b);
@@ -81,12 +177,13 @@ pub(crate) fn encode(
             crate::qwen4exp_post_ple_block::decode_batch::encode(
                 ctx,
                 enc,
-                &positions,
+                positions,
                 &residuals,
                 weights.post_ple[layer],
                 &mut blocks,
                 projection,
                 moe_scratch,
+                validate,
             )?;
         }
     }

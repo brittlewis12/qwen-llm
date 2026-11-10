@@ -55,6 +55,7 @@ use std::fmt;
 use std::mem::size_of;
 use std::time::Instant;
 
+mod batch_loop;
 mod capture;
 #[cfg(test)]
 mod checkpoint;
@@ -62,6 +63,7 @@ pub(crate) mod decode_batch;
 mod device_checkpoint;
 mod gpu_decode;
 mod gpu_inputs;
+pub(crate) use batch_loop::step_gpu_inputs as step_batch_gpu_inputs;
 pub use gpu_decode::Qwen4ExpGpuDecodeStats;
 pub(crate) use gpu_decode::generate as generate_gpu_tokens;
 pub(crate) use gpu_inputs::GpuPleBankCache;

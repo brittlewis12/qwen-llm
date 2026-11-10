@@ -70,6 +70,10 @@ name = "dispatch_deadtime"
 required-features = ["perf-ablations"]
 
 [[example]]
+name = "dense_band_census"
+required-features = ["perf-ablations"]
+
+[[example]]
 name = "fn_m4_qsa"
 required-features = ["perf-ablations"]
 

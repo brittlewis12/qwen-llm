@@ -405,6 +405,23 @@ fn pair_skinny_q8_0_matches_per_column_kernel() {
     eprintln!("[dense-skinny] Q8_0 pair max |skinny - per-column| / output scale {worst:.2e}");
 }
 
+/// The split floor is deliberately narrow: it changes the grouped output_a
+/// bank and nothing else at the V4.1 dense shapes (default floor 3).
+#[test]
+fn skinny_split_floor_changes_only_the_grouped_bank() {
+    if super::super::dense_skinny_min_blocks() != 3 {
+        return;
+    }
+    let split = super::super::skinny_k_split;
+    assert_eq!(split(20, 144), 5, "shared gate/up keeps split 5");
+    assert_eq!(split(9, 320), 3, "shared down keeps split 3");
+    assert_eq!(split(5, 2048), 5, "q_b keeps its natural split 5");
+    assert_eq!(split(32, 320), 8, "output_b keeps split 8");
+    assert_eq!(split(16, 512), 4, "grouped output_a halves to split 4");
+    assert_eq!(split(24, 1600), 2, "Engram keeps split 2");
+    assert_eq!(split(160, 112), 8, "Q8 pair keeps split 8");
+}
+
 #[test]
 fn grouped_and_pair_skinny_reject_bad_bindings_before_dispatch() {
     let Some(ctx) = metal_test_context() else {

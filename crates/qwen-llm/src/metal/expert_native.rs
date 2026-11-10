@@ -1386,6 +1386,31 @@ const DENSE_SKINNY_CHANNELS: usize = 16;
 /// extra splitting measured neutral on a 40-core one).
 const DENSE_SKINNY_TARGET_SIMDGROUPS: usize = 2560;
 
+/// Minimum K blocks each simdgroup should own when a split halves the block
+/// loop or more. Below this the per-slice prologue, dequant setup and final
+/// partial reduction are amortized over too little streaming work.
+///
+/// Three is the value the 2026-11-10 census supports: shared_down (9 blocks)
+/// keeps split 3 (forcing it to split 1 measured 1.76x slower), while the
+/// grouped output_a bank (16 blocks) halves to split 4 (558 -> 622 GB/s at
+/// B=3; 269 -> 590 at B=2). q_b (5 blocks) is below the twofold threshold, so
+/// it keeps its natural split, which the wall preferred.
+const DENSE_SKINNY_MIN_BLOCKS: usize = 3;
+
+/// `DENSE_SKINNY_MIN_BLOCKS`, overridable with
+/// `QWEN_V41_DENSE_SPLIT_MIN_BLOCKS` (1 restores the old split-at-any-cost
+/// heuristic; values above 8 are ignored).
+fn dense_skinny_min_blocks() -> usize {
+    static MIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::env::var("QWEN_V41_DENSE_SPLIT_MIN_BLOCKS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| (1..=8).contains(&n))
+            .unwrap_or(DENSE_SKINNY_MIN_BLOCKS)
+    })
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct DenseSkinnyArgs {
@@ -1414,9 +1439,24 @@ struct DensePairSkinnyArgs {
 /// K split of the skinny kernels: the smallest divisor of the K block count
 /// (at most 8 simdgroups per threadgroup) that brings the grid to
 /// `DENSE_SKINNY_TARGET_SIMDGROUPS`, else the largest divisor at most 8.
+///
+/// The floor only narrows the split when at least a twofold subdivision is
+/// still available under it (`blocks / min_blocks >= 2`). A projection with
+/// few blocks keeps the natural split: with five blocks the floor would force
+/// a single slice, and the 2026-11-10 census showed the extra simdgroups are
+/// already neutral in isolation and preferred on the overlapped wall. The
+/// floor changes exactly the grouped output_a bank (16 blocks -> split 4,
+/// 558 -> 622 GB/s isolated) and leaves every other V4.1 dense shape as it
+/// was.
 fn skinny_k_split(blocks: usize, channel_groups: usize) -> usize {
+    let min_blocks = dense_skinny_min_blocks().max(1);
+    let cap = if min_blocks > 1 && blocks / min_blocks >= 2 {
+        (blocks / min_blocks).clamp(1, 8)
+    } else {
+        8
+    };
     let mut split = 1;
-    for d in (1..=8).filter(|&d| blocks.is_multiple_of(d)) {
+    for d in (1..=cap).filter(|&d| blocks.is_multiple_of(d)) {
         split = d;
         if channel_groups * d >= DENSE_SKINNY_TARGET_SIMDGROUPS {
             break;
@@ -1503,6 +1543,7 @@ pub fn encode_dense_skinny_q5_k(
         n_out,
         1,
         cols,
+        None,
     )
 }
 
@@ -1538,6 +1579,73 @@ pub fn encode_grouped_skinny_q5_k(
         n_out,
         groups,
         cols,
+        None,
+    )
+}
+
+/// Probe-only variant of `encode_dense_skinny_q5_k` with an explicit K split
+/// (simdgroups per threadgroup) instead of the automatic `skinny_k_split`.
+/// Used by the `perf-ablations` census to sweep splits; production always
+/// takes the automatic path.
+#[cfg(feature = "perf-ablations")]
+#[allow(clippy::too_many_arguments)]
+pub fn encode_dense_skinny_q5_k_split_probe(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    cols: usize,
+    split: usize,
+) -> Result<(), MetalError> {
+    const K: &str = "dense_skinny_q5_k_split_probe";
+    let shape = [n_in as u64, n_out as u64];
+    encode_skinny_q5_k(
+        ctx,
+        enc,
+        K,
+        (weight, &shape),
+        input,
+        output,
+        n_in,
+        n_out,
+        1,
+        cols,
+        Some(split),
+    )
+}
+
+/// Probe-only grouped variant; see `encode_dense_skinny_q5_k_split_probe`.
+#[cfg(feature = "perf-ablations")]
+#[allow(clippy::too_many_arguments)]
+pub fn encode_grouped_skinny_q5_k_split_probe(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    groups: usize,
+    cols: usize,
+    split: usize,
+) -> Result<(), MetalError> {
+    const K: &str = "grouped_skinny_q5_k_split_probe";
+    let shape = [n_in as u64, n_out as u64, groups as u64];
+    encode_skinny_q5_k(
+        ctx,
+        enc,
+        K,
+        (bank, &shape),
+        input,
+        output,
+        n_in,
+        n_out,
+        groups,
+        cols,
+        Some(split),
     )
 }
 
@@ -1553,6 +1661,7 @@ fn encode_skinny_q5_k(
     n_out: usize,
     groups: usize,
     cols: usize,
+    split: Option<usize>,
 ) -> Result<(), MetalError> {
     let k = kernel;
     require_serial(k, enc)?;
@@ -1599,7 +1708,9 @@ fn encode_skinny_q5_k(
     )?;
     check_disjoint(k, output, &[(input, "input"), (weight, "weight")])?;
     check_device(ctx, enc, k, &[weight, input, output])?;
-    let split = skinny_k_split(n_in / 256, n_out.div_ceil(DENSE_SKINNY_CHANNELS) * groups);
+    let split = split.unwrap_or_else(|| {
+        skinny_k_split(n_in / 256, n_out.div_ceil(DENSE_SKINNY_CHANNELS) * groups)
+    });
     let pso = skinny_pipeline(ctx, k, "kernel_dense_skinny_mma_q5_K_f32", split)?;
     let (block, bytes) = GgmlType::Q5_K.storage_layout().expect("Q5_K layout");
     let row_bytes = n_in as u64 / block * bytes;
@@ -1681,6 +1792,63 @@ pub fn encode_dense_pair_skinny_q8_0(
     (n_in, n_a, n_b): (usize, usize, usize),
     cols: usize,
 ) -> Result<(), MetalError> {
+    encode_dense_pair_skinny_q8_0_impl(
+        ctx,
+        enc,
+        a,
+        b,
+        input,
+        y_a,
+        y_b,
+        (n_in, n_a, n_b),
+        cols,
+        None,
+    )
+}
+
+/// Probe-only pair variant with an explicit K split; see
+/// `encode_dense_skinny_q5_k_split_probe`.
+#[cfg(feature = "perf-ablations")]
+#[allow(clippy::too_many_arguments)]
+pub fn encode_dense_pair_skinny_q8_0_split_probe(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    a: &MetalTensor,
+    b: &MetalTensor,
+    input: &MetalTensor,
+    y_a: &MetalTensor,
+    y_b: &MetalTensor,
+    (n_in, n_a, n_b): (usize, usize, usize),
+    cols: usize,
+    split: usize,
+) -> Result<(), MetalError> {
+    encode_dense_pair_skinny_q8_0_impl(
+        ctx,
+        enc,
+        a,
+        b,
+        input,
+        y_a,
+        y_b,
+        (n_in, n_a, n_b),
+        cols,
+        Some(split),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_dense_pair_skinny_q8_0_impl(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    a: &MetalTensor,
+    b: &MetalTensor,
+    input: &MetalTensor,
+    y_a: &MetalTensor,
+    y_b: &MetalTensor,
+    (n_in, n_a, n_b): (usize, usize, usize),
+    cols: usize,
+    split: Option<usize>,
+) -> Result<(), MetalError> {
     const K: &str = "dense_pair_skinny_q8_0";
     require_serial(K, enc)?;
     if !dense_pair_skinny_supported(a.dtype, b.dtype, n_in, n_a, n_b, cols) {
@@ -1739,7 +1907,8 @@ pub fn encode_dense_pair_skinny_q8_0(
     }
     check_disjoint(K, y_a, &[(y_b, "output b")])?;
     check_device(ctx, enc, K, &[a, b, input, y_a, y_b])?;
-    let split = skinny_k_split(n_in / 32, (n_a + n_b).div_ceil(DENSE_SKINNY_CHANNELS));
+    let split = split
+        .unwrap_or_else(|| skinny_k_split(n_in / 32, (n_a + n_b).div_ceil(DENSE_SKINNY_CHANNELS)));
     let pso = skinny_pipeline(ctx, K, "kernel_dense_pair_skinny_mma_q8_0_f32", split)?;
     enc.set_pipeline(&pso);
     enc.set_bytes(

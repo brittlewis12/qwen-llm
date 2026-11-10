@@ -75,8 +75,10 @@ fn causal(
 ) -> Result<(), Qwen4ExpGdnError> {
     let g = weights.geometry;
     let b = members.len();
-    for (w, x) in members.iter().zip(inputs) {
-        encode_recurrence_prepare(ctx, enc, x, weights, w)?;
+    if !super::controls::encode_batch(ctx, enc, inputs, weights, members)? {
+        for (w, x) in members.iter().zip(inputs) {
+            encode_recurrence_prepare(ctx, enc, x, weights, w)?;
+        }
     }
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]

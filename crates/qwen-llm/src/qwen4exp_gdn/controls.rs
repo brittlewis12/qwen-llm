@@ -13,6 +13,26 @@ crate::env_flag!(
     "QWEN_FN_GDN_PREP_FUSED"
 );
 
+crate::env_flag!(
+    /// Batch the independent member GDN controls and prep in row-axis grids, replacing per-member controls+prep dispatches. Keeps the same F32 control reductions and causal conv/L2 arithmetic. Unsupported geometry, alignment, PSOs or a disabled fused route fall back to the per-member path.
+    default_off batch_members_enabled,
+    "QWEN_FN_GDN_BATCH_MEMBERS"
+);
+
+fn batch_members_selected() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    {
+        return crate::metal::fn_batch_probe::axis("gdn_batch_members", batch_members_enabled());
+    }
+    #[cfg(not(feature = "perf-ablations"))]
+    {
+        batch_members_enabled()
+    }
+}
+
+const CONTROLS_MEMBERS: &str = "kernel_qwen4exp_gdn_controls_members_f32";
+const PREP_MEMBERS: &str = "kernel_qwen4exp_gdn_prep_members_f32";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Fusion {
     Incumbent,
@@ -167,6 +187,139 @@ pub(super) fn try_encode(
     } else {
         Fusion::Controls
     })
+}
+
+fn batch_eligible(ctx: &MetalContext, g: GatedDeltaNetMetalGeometry) -> bool {
+    batch_members_selected()
+        && eligible(g)
+        && prep_enabled()
+        && g.key_heads == 16
+        && crate::metal::l2_pair_cooperative_enabled()
+        && ctx.tensor_ops_status().is_available()
+        && [CONTROLS_MEMBERS, PREP_MEMBERS].into_iter().all(|name| {
+            ctx.pipeline(name).is_ok_and(|p| {
+                p.threadExecutionWidth() == 32
+                    && p.maxTotalThreadsPerThreadgroup() >= 128
+                    && p.staticThreadgroupMemoryLength() <= ctx.device.maxThreadgroupMemoryLength()
+            })
+        })
+}
+
+/// Encode the member-axis controls and prep pair. Returns false without
+/// encoding when the fused prep route, layout or PSOs are unavailable.
+pub(super) fn encode_batch(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    inputs: &[&MetalTensor],
+    weights: GatedDeltaNetMetalWeights<'_>,
+    members: &[&mut GatedDeltaNetMetalWorkspace],
+) -> Result<bool, MetalError> {
+    let b = inputs.len();
+    if members.len() != b || !(2..=4).contains(&b) {
+        return Ok(false);
+    }
+    let g = members[0].geometry;
+    if !batch_eligible(ctx, g) {
+        return Ok(false);
+    }
+    if !weights.beta.offset.is_multiple_of(16) || !weights.alpha.offset.is_multiple_of(16) {
+        return Ok(false);
+    }
+    for (member, input) in members.iter().zip(inputs) {
+        if member.geometry != g || member.state_poisoned || !input.offset.is_multiple_of(16) {
+            return Ok(false);
+        }
+        for tensor in [
+            &member.beta,
+            &member.alpha,
+            &member.decay,
+            &member.qkv,
+            &member.conv_state,
+            &member.qkv_conv,
+            &member.query_norm,
+            &member.key_norm,
+        ] {
+            if !tensor.offset.is_multiple_of(4) {
+                return Ok(false);
+            }
+        }
+    }
+    if !weights.conv.offset.is_multiple_of(4) {
+        return Ok(false);
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        heads: u32,
+        eps: f32,
+    }
+    let args = Args {
+        n_in: 2560,
+        heads: 48,
+        eps: g.eps,
+    };
+
+    enc.set_pipeline(&ctx.pipeline(CONTROLS_MEMBERS)?);
+    enc.set_bytes(0, &args);
+    for i in 0..4 {
+        enc.set_tensor(1 + i, inputs[i.min(b - 1)]);
+    }
+    for (slot, tensor) in [
+        (5, weights.beta),
+        (6, weights.alpha),
+        (7, weights.dt_bias),
+        (8, weights.a),
+    ] {
+        enc.set_tensor(slot, tensor);
+    }
+    for i in 0..4 {
+        let member = &members[i.min(b - 1)];
+        enc.set_tensor(9 + i, &member.beta);
+        enc.set_tensor(13 + i, &member.alpha);
+        enc.set_tensor(17 + i, &member.decay);
+    }
+    enc.set_threadgroup_memory(0, 256);
+    enc.dispatch(
+        MTLSize {
+            width: 36,
+            height: 1,
+            depth: b,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+
+    enc.set_pipeline(&ctx.pipeline(PREP_MEMBERS)?);
+    enc.set_bytes(0, &args);
+    for i in 0..4 {
+        let member = &members[i.min(b - 1)];
+        enc.set_tensor(1 + i, &member.qkv);
+        enc.set_tensor(5 + i, &member.conv_state);
+        enc.set_tensor(10 + i, &member.qkv_conv);
+        enc.set_tensor(14 + i, &member.query_norm);
+        enc.set_tensor(18 + i, &member.key_norm);
+    }
+    enc.set_tensor(9, weights.conv);
+    enc.set_threadgroup_memory(0, 0);
+    enc.dispatch(
+        MTLSize {
+            width: 20,
+            height: 1,
+            depth: b,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    #[cfg(feature = "perf-ablations")]
+    crate::metal::fn_batch_probe::observe("gdn_batch_members", b);
+    Ok(true)
 }
 
 #[cfg(test)]

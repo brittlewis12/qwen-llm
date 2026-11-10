@@ -1,0 +1,29 @@
+{
+  "event": "summary",
+  "prompt_tokens": 47697,
+  "scored_rows": 128,
+  "sampling": {
+    "temperature": 1.0,
+    "top_k": 0,
+    "top_p": 0.95,
+    "min_p": 0.0,
+    "seed": 42,
+    "draws": 128,
+    "algorithm_version": 1
+  },
+  "one_step_tv": 0.798232382377049,
+  "one_step_filtered": 0.7991684704778343,
+  "greedy_agreement": 0.796875,
+  "second_step_chain_tv": 0.796737526239224,
+  "second_step_chain_filtered": 0.7975871198516755,
+  "second_step_on_trajectory_rows": 90,
+  "second_step_on_trajectory_tv": 0.8141326376506645,
+  "second_step_on_trajectory_filtered": 0.8141741366405731,
+  "chain_product_filtered": 0.6374064786446847,
+  "head_step_ms_median_excluding_first": 1.722041,
+  "head_step_ms_mean_excluding_first": 1.7496529212598422,
+  "head_steps": 127,
+  "sampler_diagnose_ms_target_median": 0.95325,
+  "sampler_diagnose_ms_draft_median": 0.9560000000000001,
+  "sampler_diagnose_iters": 64
+}

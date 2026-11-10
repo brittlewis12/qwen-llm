@@ -178,6 +178,104 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   10, then the `glm-batch-next/run.py` IQ mode with `--variants 0,1 --width N`
   and `summarize_iq.py`. Raw packets under
   `~/qwen-runs/2026-11-09-glm-batch-28/` on the M5. No merge or push.
+## 2026-11-09 - GLM NextN Head Cost And T=1 Acceptance Measured
+
+- **Follow-up; research only.** M5 Ultra, stock GLM UD-IQ3_XXS at 48K
+  (47,697-token quality-v1 code document 8), native block-45 NextN head executed
+  through the llama.cpp MTP path, 128 on-policy T=1 / top_p 0.95 / seed-42
+  rows. `pmset -g therm` reports no thermal warning level recorded; the probe
+  did not enter level 2.
+- Head step **1.722 ms** median / **1.750 ms** mean (steps 2-128; first step
+  214.8 ms warm-up) at 48K. Head-history init **3,881 ms**. One draft
+  `Sampler::diagnose` at T=1 / top_p 0.95 over the 154K row is **0.953 ms**, so
+  a production draft step is **~2.68 ms**.
+- Acceptance: one-step filtered **0.7992 ± 0.0196** (SEM), full-vocabulary TV
+  0.7982, greedy 0.7969; second step on-trajectory **0.8142 ± 0.0214** (90
+  rows), chain 0.7976 (127). The old 0.716 was an 11K agent prompt. Signed
+  teacher-forced dNLL (head minus target) **+0.337 ± 0.110** mean, **+0.0034**
+  median; KL 0.378. This is drafter quality; rejection sampling keeps the
+  emitted distribution exact.
+- Economics with the measured batch path V(2)/V(3)=23.69/27.81 ms, ring
+  1.201 ms/row, sampler 0.953: K=1 **1.233x** (1.202x with +0.75 ms causal),
+  K=2 **1.312x** (1.285x). Today's packed verifier is still **0.938x** (K=1).
+  At B=3 the adaptive policy is **0.645-0.686x**. B=1 is 0.27% of GLM wall.
+  Head-history break-even is ~**1,050** emitted tokens (K=1) / ~**835** (K=2)
+  before the causal penalty (~**1,180** / ~**895** with it) if the 3.88 s pass
+  is not fused or reused.
+- **Call: no-build for aggregate throughput.** Optional solo proof: K=1,
+  B=1, causal 2-row batch-path verify, per-row target and head state rings,
+  `active_sequences==1`; success bar >=1.15x delivered and distribution-exact.
+  Rough 2-3 engineer-weeks; the B=3/B=4 kernel work has ~1.0 pass-through.
+- Sensitivity: if the other lane's 2-3 ms batched fixed cost is removed, with
+  the same +0.75 ms causal penalty solo K=1 becomes **1.29-1.34x**, K=2
+  **1.36-1.40x**, and the break-even falls to ~700-900 emitted tokens; B=3
+  stays 0.65-0.68x because the non-spec batch gets the same saving. GLM's own
+  fit implies only ~0.8 ms of removable B=1 overhead, so the transfer is
+  uncertain.
+- [Measured head, acceptance, projections and limits](bench/2026-11-09-spec-econ/README.md#follow-up-measured-nextn-head-cost-and-t1-acceptance-measured);
+  reductions `nextn_quality.py`, `nextn_project.py`.
+
+## 2026-11-09 - GLM Batch-Path Verify Cost And Per-Row Replay Ring
+
+- **Follow-up; research only.** M5 Ultra, stock GLM UD-IQ3_XXS at **49152**.
+  One prefilled sequence snapshotted and restored into independent members; a
+  `Glm5NextBatch` round prices K+1 rows through the batch kernel path:
+  **23.69 / 27.81 / 32.26 ms** for 2/3/4 rows (11.85 / 9.27 / 8.06 ms/row),
+  versus the packed verifier's **32.67 / 77.74 / 50.39 ms**. The shared-snapshot
+  B=3 is within 1.1% of the distinct-document 28.12-ms control. This is a
+  conservative upper bound: a causal verify serializes KDA/attention, so add
+  roughly **0.5-1 ms**.
+- Compact append checkpoint (KDA conv/state + MLA pending; KV/latent caches are
+  visibility-gated): **152,813,568 priced bytes (145.7 MiB)**, copy median
+  **1.20 ms** (~127 GB/s), independent of depth/width. A per-row state ring
+  therefore removes the serial replay for **1.2 ms and 153 MB per row**:
+  K=1 **1.2 ms/153 MB**, K=2 **2.4 ms/306 MB**, K=7 **8.4 ms/1.07 GB**.
+  Current replay is 59-80 ms/packet for DFlash2 and an expected 5.3 ms per
+  rejected NextN one-step.
+- Corrected single-agent NextN projections (S=18.60, head 1.5-2.36 ms,
+  checkpoint charged): K=1 **1.17-1.21x**, K=2 **1.16-1.25x** with the recorded
+  0.716 held constant and a skeptical 0.5 second step. The **1.27-1.35x** edge
+  needs free replay, a 1.5-ms head and constant recursive acceptance; **1.4x**
+  needs V at the bottom of the measured range as well. Adaptive policy
+  speculates only at B=1 (0.27% of GLM wall), worth <0.1% aggregate and about
+  1.2x solo-window token rate.
+- [Batch row table, replay design and scenario projections](bench/2026-11-09-spec-econ/README.md#follow-up-batch-path-verify-cost-and-replay-design-measured).
+
+## 2026-11-09 - GLM Speculation Does Not Pay At The Three-Agent Workload
+
+- **Research only; no engine, kernel, serve or drafter change.** M5 Ultra,
+  stock GLM UD-IQ3_XXS at depth **49152**, frozen quality-v1 code tokens,
+  canonical lease. Probes `spec_verify_cost` / `spec_dflash_accept`, reduction
+  `scripts/research/spec-econ/analyze.py`. Thermal state is **unverified**:
+  `notifyutil` and `pmset -g therm` both fail on this host (the probe's `9` is
+  the parse of the failure text), though sample spread was small.
+- Agents run at GLM's released **T=1 / top_p 0.95 / top_k 0** because opencode
+  sends no sampling fields; the repo's throughput harness sends greedy. Both
+  were measured. Code DFlash2 acceptance is **0.387 / 0.405 / 0.563** per draft
+  (T=1 doc 8, T=0 doc 8, T=1 doc 9), 2.8-4.0x the October gameplay 14.1%.
+- Ordinary serial **18.60 ms/token**; packed verify **V(2)/V(4)/V(8) =
+  32.67 / 50.39 / 123.17 ms**; three independent sequences in one round
+  **28.12 ms (9.37 ms/member)**. The curve is non-monotonic (V3 77.74, V5
+  107.91); 4 rows is the cheapest shape at 12.60 ms/row. The November batched
+  kernels improved the batch, **not the verifier**: V8 matches the Nov 6
+  8K diagnostic.
+- DFlash2 end to end at 48K: **19.5 / 19.8 / 24.0 tok/s** versus 53.8 serial,
+  i.e. **0.36-0.45x**. Per speculative packet: verify **117.6-121.9 ms** and
+  partial-commit replay **59.1-79.7 ms**. Verifying a full 8-row block while
+  accepting 3-4 drafts, then replaying the retained prefix serially, is the cost.
+- Economics: NextN one-step break-even alpha is **0.837** against the recorded
+  **0.716** overlap; **0.93x at B=1** and **0.47x at B=3**. A free 8-row block
+  with **100% acceptance** is still **0.61x at B=3**, because verifying 8 rows
+  (123 ms) emits at most 8 while a 28.1 ms round emits 3. B=1 is <0.3% of GLM
+  wall in the steady ledger.
+- DSpine has no GLM head (Qwen3-8B / Qwen3.8-27B only) and does not change
+  verify cost. DSpark has no official GLM head and its confidence scheduler
+  cannot make V(4) 50 ms or V(8) 123 ms cheap. V4.1's in-checkpoint DSpark
+  (`mtp.*`) is explicitly excluded by this repo; Flash-Next inventories
+  `nextn` as `ignored_mtp`. Recommendation: build a cheaper multi-row verifier
+  and remove the serial retained-prefix replay before any drafter, and price
+  against B=3.
+- [Protocol, measured tables, availability matrix and limits](bench/2026-11-09-spec-econ/README.md).
 
 ## 2026-11-09 - V4.1 B3 Causal Waves Default On
 

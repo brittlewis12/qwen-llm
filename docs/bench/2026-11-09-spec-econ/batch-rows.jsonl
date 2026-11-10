@@ -1,0 +1,8 @@
+{"event":"header","depth":49152,"reps":8,"max_width":4,"device":{"version":"qwen_device_info_v9","features":[],"name":"Apple M5 Ultra","architecture":"applegpu_g17d","registry_id":4294969719,"gpu_families":{"apple7":true,"apple8":true,"apple9":true,"apple10":true,"metal3":true,"metal4":true},"max_threadgroup_memory_bytes":32768,"max_buffer_length_bytes":179357827072,"recommended_max_working_set_bytes":257698037760,"unified_memory":true,"host_page_size_bytes":16384,"physical_memory_bytes":274877906944,"os_version":"27.0.1","os_build":"26A434","product_metallib_deployment_target":"14.0","research_metallib_deployment_target":"14.0","metallib_compiler_identity":"Apple metal version 32023.921 (metalfe-32023.921.6)","metallib_sdk_version":"27.0"},"vocab":154880,"fixture_blake3":"59d14add04243c7138826a0100cdee7a1d92abf7738c75d3647307fe496eff0c"}
+{"event":"prefill","ms":58415.936541}
+{"event":"checkpoint","priced_bytes":152813568,"copy_ms":[4.270334,1.251625,0.812708,1.119416,1.168375,0.892625,1.2378339999999999,1.232833],"copy_median":1.200604,"session_buffer_bytes":3234480128,"capacity":49216}
+{"event":"restore","ms":167.66083400000002}
+{"event":"batch","width":2,"ms":[23.121667,23.844666,23.798833,23.669334,23.698084,23.6815,23.735791,23.68775],"median":23.692917,"per_member_median":11.8464585}
+{"event":"batch","width":3,"ms":[27.846916,27.937958,27.791957999999997,27.224166,27.83525,27.975291,27.790415999999997,27.327625],"median":27.813603999999998,"per_member_median":9.271201333333332}
+{"event":"batch","width":4,"ms":[32.356417,31.509500000000003,32.234333,32.298500000000004,32.074375,32.157208,32.350708,32.28025],"median":32.2572915,"per_member_median":8.064322875}
+{"event":"complete"}

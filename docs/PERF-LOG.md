@@ -186,6 +186,30 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   shared stride path and the per-member path.
 - Raw: `~/qwen-runs/2026-11-10-glm-loop/{loop-ab-32k-final,loop-ab-48k-final,loop-smoke,loop-smoke2}.json*`;
   serve `~/qwen-runs/2026-11-10-serve-loop/glm-loop-{pair-25s,pair-light,smoke,smoke2}`.
+## 2026-11-10 - V4.1 Fast Gumbel Sampler: 0.016-0.020 ms/Member, Tests Pass
+
+- **New sampler; not yet wired into the V4.1 loop.** Branch `perf/v41-batch-loop`
+  (base `fb1890c06`). M5 Ultra. `FastGpuSampler` is a Gumbel-max draw over the
+  whole vocabulary: two kernels (block argmax + final reduce), `O(V)`, one
+  member-axis dispatch, counter-based `(seed, member, index)` uniform. It is
+  **distribution-exact but not token-identical** with the host or
+  `GpuTokenSampler` at the same seed. `GpuTokenSampler`'s exact path untouched.
+- **Price (`fast_gpu_sampler` probe, 129,280 vocab, 300 reps):** median GPU
+  command time **0.0164 ms** (members 1), **0.0202 ms** (3), **0.0104 ms** (4);
+  wall 0.20-0.26 ms is single-command submit/wait overhead, not in-command cost.
+  Versus the exact GPU sampler at ~0.74 ms/member, the sampling term in a
+  pipelined loop becomes negligible.
+- **Tests (M5, `QWEN_REQUIRE_METAL_TESTS=1`, 4 passed / 0 failed):** chi-square
+  goodness of fit against exact softmax for flat, peaked and sloped logits over
+  8,192 draws (chi2 well under the df=7 p=0.001 bound); same-seed determinism and
+  seed sensitivity; 129,280-vocab determinism across two runs; and the "not
+  forced" policy (only `T>0`, `top_k=0`, `top_p=1`, `min_p=0`, no explicit seed;
+  `QWEN_FAST_SAMPLER=0` / `QWEN_GPU_SAMPLER_EXACT=1` force the exact path).
+- **Semantics:** the serve default seed (42) is *not* an explicit seed; callers
+  pass `explicit_seed = request.seed.is_some()`. Interface is `members`-axis and
+  takes a seed + temperature, so a future nucleus variant can extend it.
+- Next: the V4.1 pipelined batch loop (device-side embedding + Engram rows,
+  in-command sampling, Framed on the Flash-Next driver). Not yet built.
 
 ## 2026-11-10 - Flash-Next Batch Loop Shipped; GPU-Thread QoS Is Cross-Family
 

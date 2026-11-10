@@ -34,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profile = flags.split(',').any(|f| f == "profile");
     let census = flags.split(',').any(|f| f == "census");
     let loop_mode = flags.split(',').any(|f| f == "loop");
+    let loop_release = flags.split(',').any(|f| f == "release");
     let mut sequence = widths.clone();
     if both {
         sequence.extend(widths.iter().rev().copied());
@@ -86,7 +87,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The checkpoint warm-up already left a healthy completed logits row;
         // snapshots carry causal state but not the GPU loop's logits-ready bit.
         let stats = runners[0].generate_gpu_tokens(
-            &mut Sampler::new(SamplingConfig::default())?,
+            &mut Sampler::new(if loop_release {
+                SamplingConfig::qwen38_flash_next(1)
+            } else {
+                SamplingConfig::default()
+            })?,
             32,
             &[],
             |_| true,

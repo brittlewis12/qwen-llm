@@ -117,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshots.push(r.capture_snapshot()?);
     }
     let mut native = Qwen4ExpDecodeBatch::new(&runners_a[0], max_width)?;
-    let configs = [
+    let mut configs = vec![
         (
             "greedy",
             SamplingConfig {
@@ -130,6 +130,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         ("released", SamplingConfig::qwen38_flash_next(1)),
     ];
+    // The standing only needs the released preset; skip the greedy phase.
+    if std::env::var("FN_AB_RELEASED_ONLY").as_deref() == Ok("1") {
+        configs.remove(0);
+    }
     let mut phases = Vec::new();
     for (name, config) in configs {
         let mut cells = Vec::new();

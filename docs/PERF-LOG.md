@@ -171,6 +171,48 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `scripts/bench/with-metal-lease`:
   `fn_native_batch_check MODEL CODE PROSE 32768 16 1,4 census`; the A/B uses
   `fn_batch_counterfactual MODEL CODE PROSE 32768 128 4 pair-members`.
+## 2026-11-09 - Flash-Next M4 Single-Stream: Final Standing And Practical Bound
+
+- Branch **`perf/fn-m4-decode`**, M4 Max laptop, GSQ-RCO IQ3_S. Release build,
+  `fn_gpu_decode_integration --standing`, 64 tokens, two reps per arm,
+  **thermal 0 at every arm**, one background compiler. Final production
+  (`causal+gpu loop`) standing:
+
+  | Depth | Default tok/s | Default GPU ms | `QWEN_Q6K_R1=1` tok/s | Rollback GPU ms | Serial tok/s |
+  | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 32K | **50.53** | 19.43 | 50.76 | 19.36 | 42.06 |
+  | 48K | **49.54** | 19.77 | 49.94 | 19.62 | 41.01 |
+
+  The coarse two-process standing cannot resolve the **0.6-0.8%** two-row Q6
+  effect and slightly favors the rollback; the primary evidence remains the
+  paired same-binary A/B (**+0.127 ms at 32K, 11/12; +0.160 ms at 48K, 8/8,
+  bitwise**). The executor plus GPU loop is **+20%** over serial at both depths.
+- **Practical bound.** Logical payload is **5.62211 GB/token**; at 506.96 GB/s
+  the paper floor is **11.09 ms**. Measured streaming ceilings are lower per
+  family: Q6 head **504 GB/s**, large Q6 body shapes **428-436** (the dense
+  2560x6144 / 6144x2560 output shapes reach 346-381), HC BF16 **359**, routed
+  experts pure-read **436** while the real decode runs **241**. State/attention
+  math adds roughly QSA **2.3 ms**, GDN **1.0**, HC norm/inject **0.7**,
+  routing/epilogue **0.9**. A perfect F32/bitwise implementation lands near
+  **19.2-19.4 ms (51-52 tok/s)**, which is where this lane sits; allowing a
+  quality-risky FP16 expert decode plus deep kernel work bounds at
+  **~17.8-18.5 ms (54-57 tok/s)**. The 11 ms / 90 tok/s roof is not reachable
+  on the tensor-free M4: per-dispatch format decode, not global bandwidth, is
+  the binding constraint.
+- **Shipped:** two-row Q6 body matvec on tensor-free Apple9 (`2fb21800`),
+  rollback `QWEN_Q6K_R1=1`. **Killed with mechanisms:** packed-word IQ2_S/
+  IQ3_XXS grid loads (GPU flat, non-bitwise), IQ2_S barrier-free epilogue
+  (bitwise, +0.03/0.02 ms noise), expert re-grid (incumbent grid already reads
+  at 432 of a 436 GB/s pure-read ceiling), small-matrix fusion (bound
+  ~0.15-0.25 ms, cannot concatenate the large per-layer projections).
+- **Tools added:** `--profile iter` (cherry-picked `d26faecb5`), `--shapes`
+  per-dispatch shape census, and a parameterized expert pure-read sweep.
+  Evidence: `~/qwen-runs/2026-11-09-fn-m4-roofline/` (`final-standing.jsonl`,
+  `expert-read-32768.iter.jsonl`, `shapes-32768.iter.jsonl`).
+- **Next:** only an FP16/vector sign-collapse expert gate/up under a quality
+  mandate, against the 436 -> 241 GB/s decode gap; then deeper HC/Q6-body
+  streaming. Otherwise the lane is at its safe bound. No merge.
+
 ## 2026-11-09 - Flash-Next M4 Expert Read Ceiling: 436 GB/s, Grid Already There
 
 - Branch **`perf/fn-m4-decode`**, M4 Max laptop, GSQ-RCO IQ3_S. Follow-up to the

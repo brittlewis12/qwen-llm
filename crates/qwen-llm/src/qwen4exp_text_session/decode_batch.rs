@@ -48,16 +48,34 @@ pub(crate) fn encode(
             ctx, enc, t, p, table, weights, s,
         )?);
     }
-    for (i, s) in members.iter_mut().enumerate() {
-        encode_zero_one_stage(
+    if b >= 2 && crate::qwen4exp_layers_zero_one::decode_batch::selected_for_batch() {
+        let mut zero_one = Vec::with_capacity(b);
+        let mut destinations = Vec::with_capacity(b);
+        for s in members.iter_mut() {
+            zero_one.push(&mut s.zero_one);
+            destinations.push(&s.hyper_residual);
+        }
+        crate::qwen4exp_layers_zero_one::decode_batch::encode(
             ctx,
             enc,
-            tokens[i],
-            positions[i],
-            histories[i].clone(),
-            weights,
-            s,
+            tokens,
+            &histories,
+            weights.zero_one,
+            &mut zero_one,
+            &destinations,
         )?;
+    } else {
+        for (i, s) in members.iter_mut().enumerate() {
+            encode_zero_one_stage(
+                ctx,
+                enc,
+                tokens[i],
+                positions[i],
+                histories[i].clone(),
+                weights,
+                s,
+            )?;
+        }
     }
     encode_post_zero_one(
         ctx, enc, weights, members, &positions, inputs, logits, projection, true,

@@ -275,7 +275,56 @@ pub struct Qwen4ExpLayerZeroMetalWorkspace {
     encode_failed: bool,
 }
 
+/// Disjoint borrows used by the member-axis bootstrap encoder.
+pub(crate) struct Qwen4ExpLayerZeroBatchParts<'a> {
+    pub token_id: &'a MetalTensor,
+    pub embedding: &'a MetalTensor,
+    pub hyper_residual: &'a MetalTensor,
+    pub attention_output: &'a MetalTensor,
+    pub ffn_output: &'a MetalTensor,
+    pub residual: &'a mut GatedResidualMetalScratch,
+    pub gdn: &'a mut GatedDeltaNetMetalWorkspace,
+    pub moe: &'a mut Qwen4ExpMoeMetalWorkspace,
+}
+
 impl Qwen4ExpLayerZeroMetalWorkspace {
+    pub(crate) fn batch_parts(&mut self) -> Qwen4ExpLayerZeroBatchParts<'_> {
+        Qwen4ExpLayerZeroBatchParts {
+            token_id: &self.token_id,
+            embedding: &self.embedding,
+            hyper_residual: &self.hyper_residual,
+            attention_output: &self.mixer_output,
+            ffn_output: &self.moe_output,
+            residual: &mut self.residual,
+            gdn: &mut self.gdn,
+            moe: &mut self.moe,
+        }
+    }
+
+    /// Reserve the member-axis bootstrap command and reject unhealthy state.
+    pub(crate) fn begin_batch(
+        &mut self,
+        enc: &KernelEncoder,
+    ) -> Result<(), Qwen4ExpLayerZeroError> {
+        self.require_idle()?;
+        if self.state_poisoned || self.encode_failed {
+            return invalid("batch bootstrap requires healthy layer zero");
+        }
+        reserve_command(self, enc)
+    }
+
+    /// Write the token ID CPU-side unless the parent owns a GPU token buffer.
+    pub(crate) fn stage_token(
+        &mut self,
+        enc: &KernelEncoder,
+        token_id: u32,
+    ) -> Result<(), Qwen4ExpLayerZeroError> {
+        if enc.gpu_owned() {
+            return Ok(());
+        }
+        write_token_id(&self.token_id, token_id as i32)
+    }
+
     pub(crate) fn gpu_token_input(&self) -> MetalTensor {
         self.token_id.clone()
     }

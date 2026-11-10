@@ -130,6 +130,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "member FFN projection engagement"
                     );
                 }
+                if mode == "pair-moe_batch_shared" {
+                    assert_eq!(
+                        fn_batch_probe::observed("moe_batch_shared") > 0,
+                        arm == 1,
+                        "member shared-expert engagement"
+                    );
+                }
+                if mode == "pair-zero_one_hc" {
+                    assert_eq!(
+                        fn_batch_probe::observed("zero_one_hc") > 0,
+                        arm == 1,
+                        "member bootstrap HC engagement"
+                    );
+                }
                 if j >= 8 {
                     ms[arm].push(elapsed);
                     for k in 0..3 {

@@ -42,6 +42,8 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLDevice, MTLResource};
 
+pub(crate) mod decode_batch;
+
 const LAYER_ZERO: u32 = 0;
 const LAYER_ONE: u32 = 1;
 
@@ -583,6 +585,36 @@ impl Qwen4ExpLayersZeroOneMetalWorkspace {
         } else {
             Ok(())
         }
+    }
+
+    /// Reserve the member-axis bootstrap command and admit a PLE history update.
+    pub(crate) fn begin_batch(
+        &mut self,
+        enc: &KernelEncoder,
+        next_history: PleHistory,
+    ) -> Result<(), Qwen4ExpLayersZeroOneError> {
+        self.require_idle()?;
+        if self.state_poisoned || self.encode_failed || self.pending_history.is_some() {
+            return invalid("batch bootstrap requires healthy released bootstrap layers");
+        }
+        if !enc.gpu_owned() && !self.ple.has_staged_rows() {
+            return invalid("layers-zero-one PLE rows were not staged by the parent");
+        }
+        reserve_command(self, enc)?;
+        if !enc.gpu_owned() {
+            self.pending_history = Some(next_history);
+        }
+        self.layer_zero.begin_batch(enc)?;
+        Ok(())
+    }
+
+    pub(crate) fn mark_batch_failed(&mut self) {
+        self.encode_failed = true;
+        self.state_poisoned = true;
+    }
+
+    pub(crate) fn output_tensor(&self) -> &MetalTensor {
+        &self.hyper_residual
     }
 }
 

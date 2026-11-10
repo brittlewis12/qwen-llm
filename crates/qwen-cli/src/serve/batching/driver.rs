@@ -69,6 +69,20 @@ pub(crate) trait Runtime {
     ) -> Option<Result<Advance, BackendFailure>> {
         None
     }
+    /// Optional device-feedback burst spanning the whole active batch. The
+    /// runtime forwards every pending token, samples and streams each member on
+    /// the GPU, completes every transition, and returns one outcome per member.
+    /// `None` keeps the ordinary step-and-host-sample path.
+    fn advance_group(
+        &mut self,
+        _runs: &mut [&mut Self::Run],
+        _cursors: &mut [&mut DecodeCursor],
+        _sinks: &mut [&mut dyn GenerationSink],
+        _tokens: &[u32],
+        _reserves: &[u64],
+    ) -> Option<Result<Vec<Advance>, BackendFailure>> {
+        None
+    }
     fn state(run: &mut Self::Run) -> &mut Self::State;
     fn can_step(&self, state: &Self::State) -> bool;
     fn poisoned(state: &Self::State) -> bool;
@@ -254,6 +268,10 @@ impl<R> Driver<R> {
         presampled: Option<Sampled>,
         runtime: &mut E,
     ) {
+        // Keep the GPU-feeding thread schedulable while the forward and its
+        // blocking wait run; a saturated host otherwise wakes it milliseconds
+        // after the GPU has finished.
+        let _qos = qwen_llm::metal::GpuThreadQos::enter();
         let Some(reserve) = self.total_reserve(runtime) else {
             return self.fail(
                 index,
@@ -282,13 +300,24 @@ impl<R> Driver<R> {
         if extra > 0 {
             a.width_max = a.width_max.max(1);
         }
+        self.settle(index, outcome, runtime);
+    }
+    /// Deliver one member's post-decode outcome. Shared by the per-member and
+    /// group device-feedback paths.
+    fn settle<E: Runtime<Run = R>>(
+        &mut self,
+        index: usize,
+        outcome: Result<Advance, BackendFailure>,
+        runtime: &mut E,
+    ) {
         match outcome {
             Err(e) => self.fail(index, e),
             Ok(Advance::Forward(token)) => {
-                a.next = Some(token);
+                self.active[index].next = Some(token);
                 self.publish(index);
             }
             Ok(Advance::Done(generation)) => {
+                let a = &mut self.active[index];
                 if let Err(e) = a.sink.check() {
                     return self.retire(index, Err(BackendFailure::Aborted(e)));
                 }
@@ -371,6 +400,9 @@ impl<R> Driver<R> {
         (index, result, start.elapsed().as_secs_f64() * 1e3, 1)
     }
     fn decode<E: Runtime<Run = R>>(&mut self, members: Vec<usize>, runtime: &mut E) {
+        // The same GPU-feeding thread also runs the batch forward/sampling and
+        // the whole-batch device-feedback burst.
+        let _qos = qwen_llm::metal::GpuThreadQos::enter();
         let (mut batch, mut results) = (Vec::new(), Vec::new());
         for i in members {
             if runtime.can_step(E::state(self.active[i].run.as_mut().expect("run"))) {
@@ -381,6 +413,91 @@ impl<R> Driver<R> {
         }
         if batch.len() == 1 {
             results.push(self.step_one(batch[0], runtime));
+        }
+        // Whole-batch device feedback: the runtime forwards the pending tokens,
+        // samples and streams on the GPU, and completes every transition. Only
+        // when every active member is in the batch, so the member order is the
+        // active order and a retirement at one index cannot renumber another.
+        if results.is_empty() && batch.len() > 1 && batch.len() == self.active.len() {
+            let tokens: Vec<u32> = batch
+                .iter()
+                .map(|&i| self.active[i].next.expect("pending token"))
+                .collect();
+            let reserves: Vec<u64> = self.active.iter().map(|a| a.reserve).collect();
+            let before: Vec<usize> = self
+                .active
+                .iter()
+                .map(|a| a.cursor.as_ref().expect("cursor").completed_transitions())
+                .collect();
+            let burst = {
+                let mut runs = Vec::with_capacity(batch.len());
+                let mut cursors = Vec::with_capacity(batch.len());
+                let mut sinks = Vec::with_capacity(batch.len());
+                for a in self.active.iter_mut() {
+                    runs.push(&mut **a.run.as_mut().expect("run"));
+                    cursors.push(a.cursor.as_mut().expect("cursor"));
+                    sinks.push(Publish {
+                        sink: a.sink.as_mut(),
+                        reserve: a.reserve,
+                    });
+                }
+                let mut sink_refs: Vec<&mut dyn GenerationSink> = sinks
+                    .iter_mut()
+                    .map(|p| p as &mut dyn GenerationSink)
+                    .collect();
+                runtime.advance_group(&mut runs, &mut cursors, &mut sink_refs, &tokens, &reserves)
+            };
+            match burst {
+                None => {}
+                Some(Ok(outcomes)) if outcomes.len() == batch.len() => {
+                    let width = batch.len();
+                    for (i, outcome) in outcomes.into_iter().enumerate().rev() {
+                        let extra = self.active[i]
+                            .cursor
+                            .as_ref()
+                            .expect("cursor")
+                            .completed_transitions()
+                            .saturating_sub(before[i]);
+                        let a = &mut self.active[i];
+                        a.next = None;
+                        a.steps += extra;
+                        a.feedback_steps += extra;
+                        a.width_sum += extra * width;
+                        a.width_max = a.width_max.max(width);
+                        a.batched += extra;
+                        self.settle(i, Ok(outcome), runtime);
+                    }
+                    return;
+                }
+                Some(Ok(outcomes)) => {
+                    self.native_failed = true;
+                    let message = format!(
+                        "group burst returned {} outcomes for {} members",
+                        outcomes.len(),
+                        batch.len()
+                    );
+                    for i in (0..batch.len()).rev() {
+                        self.fail(
+                            i,
+                            crate::serve::items::ServeError::server_error(message.clone()).into(),
+                        );
+                    }
+                    return;
+                }
+                Some(Err(_)) => {
+                    self.native_failed = true;
+                    for i in (0..batch.len()).rev() {
+                        self.fail(
+                            i,
+                            crate::serve::items::ServeError::server_error(
+                                "batched GPU token loop failed",
+                            )
+                            .into(),
+                        );
+                    }
+                    return;
+                }
+            }
         }
         if batch.len() > 1 {
             let tokens: Vec<_> = batch

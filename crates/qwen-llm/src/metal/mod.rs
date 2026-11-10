@@ -289,6 +289,8 @@ mod bench;
 mod causal;
 #[cfg(feature = "perf-ablations")]
 pub use causal::{TokenPriceBook, TokenPriceGuard, TokenPriceMode};
+mod qos;
+pub use qos::GpuThreadQos;
 mod token_feedback;
 pub use token_feedback::{AsyncTokenReadback, GPU_SAMPLER_ALGORITHM_VERSION, GpuTokenSampler};
 #[cfg(feature = "perf-ablations")]

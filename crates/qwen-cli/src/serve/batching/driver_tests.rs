@@ -63,9 +63,11 @@ struct Run {
 #[derive(Default)]
 struct Fake {
     feedback_bursts: bool,
+    group_bursts: bool,
     token_batch: bool,
     token_batches: usize,
     bursts: usize,
+    groups: usize,
     steps: Vec<usize>,
     prefills: Vec<usize>,
     reserves: Vec<u64>,
@@ -193,6 +195,58 @@ impl Runtime for Fake {
                 ..Default::default()
             };
             Ok(c.append_gpu_burst(&tokens, stats, 0.))
+        })())
+    }
+    fn advance_group(
+        &mut self,
+        runs: &mut [&mut Run],
+        cursors: &mut [&mut DecodeCursor],
+        sinks: &mut [&mut dyn GenerationSink],
+        tokens: &[u32],
+        _reserves: &[u64],
+    ) -> Option<Result<Vec<Advance>, BackendFailure>> {
+        if !self.group_bursts {
+            return None;
+        }
+        assert_eq!(runs.len(), cursors.len());
+        assert_eq!(runs.len(), sinks.len());
+        assert_eq!(runs.len(), tokens.len());
+        self.groups += 1;
+        Some((|| {
+            let mut out = Vec::with_capacity(runs.len());
+            for (i, ((run, cursor), sink)) in runs
+                .iter_mut()
+                .zip(cursors.iter_mut())
+                .zip(sinks.iter_mut())
+                .enumerate()
+            {
+                run.state.pos += 1;
+                run.state.consumed.push(tokens[i]);
+                cursor.on_logits(Ok(logits(&run.state)), 1., || Ok(()))?;
+                let mut burst = Vec::new();
+                for k in 0..cursor.remaining_tokens().min(2) {
+                    if k > 0 {
+                        run.state.pos += 1;
+                        run.state.consumed.push(burst[k - 1] as u32);
+                    }
+                    let token = b'a' as i32 + run.state.consumed.len() as i32 % 26;
+                    burst.push(token);
+                    sink.piece(&[token as u8])
+                        .and_then(|()| sink.tick())
+                        .map_err(BackendFailure::Aborted)?;
+                    if !sink.flush_ready().map_err(BackendFailure::Aborted)? {
+                        break;
+                    }
+                }
+                let stats = qwen_llm::metal::GpuTokenLoopStats {
+                    sampled_tokens: burst.len(),
+                    emitted_tokens: burst.len(),
+                    forwarded_tokens: burst.len() - 1,
+                    ..Default::default()
+                };
+                out.push(cursor.append_gpu_burst(&burst, stats, 0.));
+            }
+            Ok(out)
         })())
     }
     fn state(r: &mut Run) -> &mut State {
@@ -722,6 +776,49 @@ fn scheduler_token_batch_skips_host_sampling_and_keeps_lifecycle() {
     );
     assert_eq!(e.commits.len(), 3);
     assert!(!d.take_native_failure());
+}
+
+#[test]
+fn scheduler_group_burst_batches_all_members_and_keeps_lifecycle() {
+    let mut d = Driver::new(3);
+    let mut e = Fake {
+        group_bursts: true,
+        ..Fake::default()
+    };
+    let cs: Vec<_> = (0..3).map(|_| submit(&mut d, 5, true, 100)).collect();
+    finish(&mut d, &mut e);
+    for (s, _) in cs {
+        terminal_ok(&s);
+    }
+    assert!(e.groups > 0);
+    assert!(
+        !e.steps.contains(&3),
+        "a full-width round must use the group path, not step_batch"
+    );
+    assert_eq!(e.commits.len(), 3);
+    assert!(!d.take_native_failure());
+}
+
+#[test]
+fn scheduler_group_burst_backpressure_keeps_each_member_forwardable() {
+    let mut d = Driver::new(2);
+    let mut e = Fake {
+        group_bursts: true,
+        ..Fake::default()
+    };
+    let a = submit(&mut d, 5, false, 100);
+    let b = submit(&mut d, 5, true, 100);
+    for _ in 0..40 {
+        d.pump(&mut e);
+        if b.0.borrow().terminal.is_some() {
+            break;
+        }
+    }
+    terminal_ok(&b.0);
+    assert!(a.0.borrow().terminal.is_none());
+    a.0.borrow_mut().credit = true;
+    finish(&mut d, &mut e);
+    terminal_ok(&a.0);
 }
 
 #[test]

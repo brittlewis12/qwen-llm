@@ -10,6 +10,20 @@ use objc2_metal::{MTLCommandBuffer, MTLCommandBufferStatus};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+crate::env_flag!(
+    /// Poll the token loop's command buffer instead of blocking on it. Keeps the
+    /// thread runnable so it is scheduled promptly under host CPU load, where a
+    /// blocked waiter can lose several milliseconds after the GPU has finished.
+    /// Probe only; hot-spins one core for the wait.
+    default_off spin_wait_requested, "QWEN_GPU_LOOP_SPIN"
+);
+
+crate::env_flag!(
+    /// Poll with `yield_now` instead of a hot spin. Gentler on a loaded host but
+    /// does not observe completion as promptly as `QWEN_GPU_LOOP_SPIN`.
+    default_off yield_wait_requested, "QWEN_GPU_LOOP_YIELD"
+);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WaitMode {
     Block,
@@ -17,21 +31,14 @@ enum WaitMode {
     Yield,
 }
 
-/// Whether a probe asked the token loops to poll instead of blocking on the
-/// command buffer. A runnable thread is scheduled promptly even while the host
-/// CPU is saturated, where a blocked waiter can lose several milliseconds after
-/// the GPU has finished.
 fn wait_mode() -> WaitMode {
-    static MODE: OnceLock<WaitMode> = OnceLock::new();
-    *MODE.get_or_init(|| {
-        if std::env::var_os("QWEN_GPU_LOOP_YIELD").is_some() {
-            WaitMode::Yield
-        } else if std::env::var_os("QWEN_GPU_LOOP_SPIN").is_some() {
-            WaitMode::Spin
-        } else {
-            WaitMode::Block
-        }
-    })
+    if yield_wait_requested() {
+        WaitMode::Yield
+    } else if spin_wait_requested() {
+        WaitMode::Spin
+    } else {
+        WaitMode::Block
+    }
 }
 
 pub fn spin_wait_enabled() -> bool {

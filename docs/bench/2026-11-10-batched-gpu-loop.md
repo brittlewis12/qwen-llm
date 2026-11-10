@@ -239,3 +239,32 @@ corroboration). Thermal was level 1 at both ends.
 - The serve burst still pays one host-staged forward per burst (the pending
   round). Moving that first frame to device inputs is the next increment and is
   already available as `encode_gpu`.
+
+## 7. One-ahead stall: GPU timeline and host QoS
+
+Measured at main `8132edc97` with `fn_batch_timeline` (`--profile iter`,
+`perf-ablations`, M5 GSQ-RCO IQ3_S, released preset, 64 rounds after 8 warm).
+The probe records each command's host encode span, commit, blocking-wait span,
+and Metal `GPUStartTime`/`GPUEndTime` on one `mach_absolute_time` clock.
+
+At idle the pipelined loop is GPU-bound at both widths: B=3 32K round **19.03
+ms** (forward GPU 18.40, encode 2.55, commit-to-start 0.72, inter-frame gap
+0.91, GPU-end-to-wait 0.10) versus serial `step_tokens` **22.34 ms** (+17.4%);
+48K **19.65 vs 23.41** (+19.1%). B=1 round **11.61 ms** (GPU 11.17, gap 0.60),
+so B=1 and B=3 have the same shape and differ only in command-buffer size.
+
+Saturating the host with 36 spinning threads reproduces the earlier negative:
+B=3 32K round **25.62 ms**, GPU unchanged at 18.54, commit-to-start still 0.66,
+but **GPU-end-to-wait 6.63 ms** and encode spikes to 40.3. The GPU is not
+serialized on shared buffers or delayed at commit; the loop thread is simply
+not scheduled when the GPU finishes. Raising that thread to
+`QOS_CLASS_USER_INITIATED` (or user-interactive) for the burst restores the
+idle timeline under the same load: **18.74 ms** (gap 0.77, wake 0.08, encode
+1.78) at 32K and **19.10** at 48K (user-interactive; gap 0.82, wake 0.08).
+Spin-polling the command buffer partially recovers (21.13/21.76) at the cost of
+a hot core; `sched_yield` does not (24.08/26.35).
+
+Consequence: the one-ahead loop was rejected on a measurement taken while other
+lanes were compiling. Wrap `advance_group`'s `generate_gpu_tokens` in a
+user-initiated QoS set/restore and re-run the serve A/B before deciding. Raw:
+`~/qwen-runs/2026-11-10-batch-loop/timeline-{32k,48k,...}.json`.

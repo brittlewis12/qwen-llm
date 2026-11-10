@@ -103,6 +103,46 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   tests `selected_member_attention_matches_independent_dispatches_bitwise` and
   `selected_member_attention_rejects_shared_and_windowed_shapes` pass. No new
   ignored tests. No merge.
+## 2026-11-10 - Batched One-Ahead Loop Was Host-Scheduling Starved, Not Metal
+
+- **Base main `8132edc97`.** Ported the pipelined `generate` loop onto main and
+  added a per-command timeline: host encode span, commit, blocking-wait span
+  and Metal `GPUStartTime`/`GPUEndTime` on one `mach_absolute_time` clock. M5
+  GSQ-RCO IQ3_S, released preset, B=3, 64 rounds after 8 warm. Probe
+  `fn_batch_timeline` (`--profile iter`, `perf-ablations`).
+- **At idle the loop is not stalled; it wins.** 32K: serial GPU-sampled
+  `step_tokens` **22.34 ms/round** (GPU 18.51, encode 2.94, commit+read 0.81)
+  -> pipelined **19.03** (forward GPU 18.40, encode 2.55, commit-to-GPU-start
+  **0.72**, inter-frame GPU gap **0.91**, GPU end-to-wait-return **0.10**),
+  **+17.4%**. 48K: **23.41 -> 19.65 (+19.1%)**. B=1 pipelined: 32K **11.61**
+  (GPU 11.17, gap 0.60), 48K **11.93** (GPU 11.46, gap 0.64). Both shapes
+  pipeline; B=3's slightly larger gap tracks command-buffer size, not
+  serialization.
+- **The earlier -11% was host CPU load, reproduced.** With 36 spinning host
+  threads the B=3 loop goes **19.03 -> 25.62 ms** at 32K (48K 24.52). GPU span
+  is unchanged (18.54); commit-to-start stays 0.66 ms, but **GPU end-to-wait
+  grows to 6.63 ms** and encode spikes to 40.3 ms. So the GPU finishes, then
+  idles while the loop thread waits to be scheduled; it is not a shared-buffer
+  hazard, untracked-resource serialization, or completion-handler delay. Yield
+  (`sched_yield`) does not recover (24.08/26.35).
+- **Cheap fix: raise the loop thread's QoS for the burst.** Setting the caller
+  to `QOS_CLASS_USER_INITIATED` (or user-interactive) after the load threads
+  exist restores the idle timeline under the same 36-way load: 32K **18.74**
+  (gap 0.77, wake 0.08, encode 1.78; user-interactive 18.89), 48K **19.10**
+  (gap 0.82, wake 0.08). Spin-polling the command buffer partially recovers
+  (21.13/21.76) but burns a core. Recommendation: wrap `advance_group`'s
+  `generate_gpu_tokens` in user-initiated set/restore, then re-run the serve
+  A/B; the loop was rejected on a measurement taken while other lanes were
+  compiling, not on its own cost.
+- **V4.1 solo loop:** the scheduling fix is general, but a solo loop only hides
+  V4.1's ~3.5 ms encode, which is already mostly overlapped. Price
+  `round - GPU` first; unless that bubble is >=2 ms it does not look worth it.
+- Raw: `~/qwen-runs/2026-11-10-batch-loop/timeline-{32k,48k,...}.json`
+  (`load`, `spin`, `yield`, `qos`, `qos-init`). Reproduce:
+  `fn_batch_timeline MODEL CODE PROSE 32768|49152 64 3 8 [LOAD] [QOS]` under
+  the Metal lease; `QWEN_GPU_LOOP_SPIN=1` or `QWEN_GPU_LOOP_YIELD=1` for the
+  polling arms. Thermal 0-2 on the loaded arms; GPU span stayed 18.3-18.8 ms,
+  so no throttle is mixed into the comparison.
 
 ## 2026-11-10 - Flash-Next BF16 Mixer Batch; Down Retile Negative; Lane Done
 

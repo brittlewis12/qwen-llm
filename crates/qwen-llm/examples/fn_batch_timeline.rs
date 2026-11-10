@@ -24,7 +24,11 @@ use qwen_llm::{
     sampling::{Sampler, SamplingConfig},
     tokenizer::Tokenizer,
 };
-use std::{fs, time::Instant};
+use std::{
+    fs,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Instant,
+};
 
 #[cfg(not(feature = "perf-ablations"))]
 fn main() {
@@ -46,6 +50,13 @@ fn mean(v: &[f64]) -> f64 {
         0.
     } else {
         v.iter().sum::<f64>() / v.len() as f64
+    }
+}
+
+struct StopOnDrop<'a>(&'a AtomicBool);
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
     }
 }
 
@@ -125,6 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let steps: usize = a.get(5).map_or(Ok(64), |s| s.parse())?;
     let width: usize = a.get(6).map_or(Ok(3), |s| s.parse())?;
     let warm: usize = a.get(7).map_or(Ok(8), |s| s.parse())?;
+    let load: usize = a.get(8).map_or(Ok(0), |s| s.parse())?;
     assert!(steps > 1 && warm > 0 && (2..=4).contains(&width));
     let ctx = MetalContext::new()?;
     let gg = GgufFile::open(&a[1])?;
@@ -252,7 +264,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let single_stats = runners[0].generate_gpu_tokens(&mut single_sampler, steps, &[], |_| true)?;
     let single_wall = single_started.elapsed().as_secs_f64() * 1e3;
 
+    // Pipelined B=3 with the host CPU saturated, reproducing the build-load
+    // conditions under which the earlier A/B regressed.
+    let loaded = if load > 0 {
+        restore(&mut runners, &snapshots, &prefill_logits);
+        for s in samplers.iter_mut() {
+            *s = Sampler::new(config).unwrap();
+        }
+        let stop = AtomicBool::new(false);
+        let (stats, wall) = std::thread::scope(|scope| {
+            let _guard = StopOnDrop(&stop);
+            let mut spins = Vec::with_capacity(load);
+            for _ in 0..load {
+                let stop = &stop;
+                spins.push(scope.spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                }));
+            }
+            let started = Instant::now();
+            let mut members: Vec<_> = runners.iter_mut().collect();
+            let mut refs: Vec<_> = samplers.iter_mut().collect();
+            let stats = native
+                .generate_gpu_tokens(
+                    &mut members,
+                    &mut refs,
+                    &vec![steps; width],
+                    &vec![&[][..]; width],
+                    |_, _, _| true,
+                )
+                .unwrap();
+            let wall = started.elapsed().as_secs_f64() * 1e3;
+            stop.store(true, Ordering::Relaxed);
+            for spin in spins {
+                let _ = spin.join();
+            }
+            (stats, wall)
+        });
+        Some((stats, wall))
+    } else {
+        None
+    };
+
     let serial_round = mean(&round_ms);
+    let loaded_json = loaded.as_ref().map(|(stats, wall)| {
+        serde_json::json!({
+            "wall_ms": wall,
+            "stats_wall_ms": stats.wall_ms,
+            "gpu_ms_total": stats.gpu_ms,
+            "encode_ms_total": stats.encode_cpu_ms,
+            "completion_wait_ms_total": stats.completion_wait_ms,
+            "round_ms": wall / steps as f64,
+            "timeline": timeline_json(&stats.timeline),
+        })
+    });
     println!(
         "{}",
         serde_json::json!({
@@ -287,6 +353,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "round_ms": single_wall / steps as f64,
                 "timeline": timeline_json(&single_stats.timeline),
             },
+            "batch_pipelined_loaded": loaded_json,
         })
     );
     Ok(())

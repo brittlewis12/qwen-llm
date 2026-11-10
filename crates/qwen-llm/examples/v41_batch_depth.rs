@@ -118,7 +118,7 @@ fn main() -> Result<()> {
     );
     let mut base = f.new_state(98304)?;
     let depth: usize = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(32768);
-    ensure!([32768, 65536].contains(&depth), "depth 32K/64K");
+    ensure!([32768, 49152, 65536].contains(&depth), "depth 32K/48K/64K");
     for depth in [depth] {
         thermal()?;
         let target = depth - 4096;
@@ -148,12 +148,12 @@ fn main() -> Result<()> {
         let is_bounds = args.get(5).is_some_and(|s| s == "bounds");
         let is_waves = args.get(5).is_some_and(|s| s == "waves");
         let is_causal = args.get(5).is_some_and(|s| s == "causal");
-        let members = if is_causal {
-            let width: usize = args.get(3).map(|v| v.parse()).transpose()?.unwrap_or(3);
-            ensure!((1..=4).contains(&width), "causal width 1..4");
-            width
-        } else if is_bounds || is_waves {
+        let screen_batch: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(3);
+        let members = if is_bounds || is_waves {
             3
+        } else if is_causal {
+            ensure!((2..=4).contains(&screen_batch), "causal screen width 2..=4");
+            screen_batch
         } else {
             4
         };
@@ -759,6 +759,7 @@ fn causal_screen(
 ) -> Result<()> {
     ensure!((32..=256).contains(&n), "bounded causal screen");
     let width = states.len();
+    ensure!((2..=4).contains(&width), "causal screen width 2..=4");
     let mut reference = None;
     for (arm, enabled) in [false, true, true, false].into_iter().enumerate() {
         let thermal_before = thermal_level()?;
@@ -768,7 +769,7 @@ fn causal_screen(
         let guard = metal::decode_bounds::batch_causal_scope(enabled);
         for j in 0..8 {
             let tokens: Vec<_> = (0..width).map(|i| streams[i][4300 + j]).collect();
-            step(f, states, &tokens, width > 1)?;
+            step(f, states, &tokens, true)?;
         }
         let unix = || {
             std::time::SystemTime::now()
@@ -781,7 +782,7 @@ fn causal_screen(
         let mut heads = Vec::with_capacity(n);
         for j in 0..n {
             let tokens: Vec<_> = (0..width).map(|i| streams[i][4310 + j]).collect();
-            heads.push(step(f, states, &tokens, width > 1)?);
+            heads.push(step(f, states, &tokens, true)?);
         }
         let ms_round = begin.elapsed().as_secs_f64() * 1000. / n as f64;
         let finished_unix = unix();

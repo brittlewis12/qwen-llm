@@ -216,6 +216,9 @@ fn batch_head_enabled() -> bool {
 
 /// Layer-sized causal waves for M5 V4.1 B=2..4. `0` keeps native encoder cuts.
 const BATCH_CAUSAL_ENV: &str = "QWEN_V41_BATCH_CAUSAL_EXECUTOR";
+/// Smallest member count that uses causal waves. Default 2 (B=2..4); `3`
+/// raises the floor to B=3, and `4` limits causal waves to width 4.
+const BATCH_CAUSAL_MIN_WIDTH_ENV: &str = "QWEN_V41_BATCH_CAUSAL_MIN_WIDTH";
 #[cfg(test)]
 thread_local! { pub(super) static BATCH_CAUSAL_OVERRIDE: std::cell::Cell<Option<bool>> = const {std::cell::Cell::new(None)}; }
 fn batch_causal_enabled() -> bool {
@@ -238,6 +241,17 @@ fn batch_causal_enabled() -> bool {
     }
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| crate::env_flag::read_default_on(BATCH_CAUSAL_ENV))
+}
+
+fn batch_causal_min_width() -> usize {
+    static MIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::env::var(BATCH_CAUSAL_MIN_WIDTH_ENV)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|width| (2..=4).contains(width))
+            .unwrap_or(2)
+    })
 }
 
 /// Column scratch of the batched attention projections, `[n, B]` each:
@@ -929,7 +943,8 @@ pub(in super::super) fn run_batch(
                 .queue
                 .commandBuffer()
                 .ok_or("Metal command buffer allocation")?;
-            let causal = (2..=4).contains(&workspaces.len())
+            let causal = workspaces.len() >= batch_causal_min_width()
+                && workspaces.len() <= 4
                 && ctx.device_facts().gpu_families.apple10
                 && batch_causal_enabled();
             let mut stages = if causal {

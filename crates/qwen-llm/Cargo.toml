@@ -105,6 +105,10 @@ required-features = ["perf-ablations"]
 name = "glm_gate_up_vec_rate"
 required-features = ["perf-ablations"]
 
+[[example]]
+name = "fn_gate_up_vec_rate"
+required-features = ["perf-ablations"]
+
 [[bench]]
 name = "kernels"
 harness = false

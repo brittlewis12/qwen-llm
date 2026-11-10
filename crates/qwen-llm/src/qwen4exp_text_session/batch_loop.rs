@@ -257,6 +257,10 @@ pub(crate) fn generate(
         // completion-handler dispatch latency, which dominates the round when
         // the host CPU is busy. The next command is already encoded, so the GPU
         // still overlaps that encode.
+        #[cfg(feature = "perf-ablations")]
+        if crate::metal::spin_wait_enabled() {
+            crate::metal::spin_wait_until_completed(&current.command);
+        }
         wait_completed(&current.command)?;
         #[cfg(feature = "perf-ablations")]
         let wait_end_s = crate::metal::host_now_s();

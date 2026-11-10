@@ -137,6 +137,10 @@ pub fn run_preencoded_tokens<D: GpuTokenLoopDriver>(
         let wait_started = Instant::now();
         #[cfg(feature = "perf-ablations")]
         let wait_start_s = host_now_s();
+        #[cfg(feature = "perf-ablations")]
+        if spin_wait_enabled() {
+            spin_wait_until_completed(&current.command);
+        }
         let selection = current.readback.receive();
         wait_completed(&current.command)?;
         let token = selection?;

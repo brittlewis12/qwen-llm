@@ -294,7 +294,7 @@ pub use token_feedback::{AsyncTokenReadback, GPU_SAMPLER_ALGORITHM_VERSION, GpuT
 #[cfg(feature = "perf-ablations")]
 mod timeline;
 #[cfg(feature = "perf-ablations")]
-pub use timeline::{TokenFrameTimeline, host_now_s};
+pub use timeline::{TokenFrameTimeline, host_now_s, spin_wait_enabled, spin_wait_until_completed};
 mod token_loop;
 pub use token_loop::{
     GpuTokenLoopDriver, GpuTokenLoopStats, PreparedTokenStep, run_preencoded_tokens,

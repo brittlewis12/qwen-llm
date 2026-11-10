@@ -424,6 +424,13 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
         let sampled = stats.sampled_tokens / b;
         let forwarded = stats.forwarded_tokens / b;
         let per_round = stats.wall_ms / sampled.max(1) as f64;
+        // The first frame forwarded the pending tokens and sampled on the GPU,
+        // so complete the pending transition without retaining logits.
+        for cursor in cursors.iter_mut() {
+            if let Err(error) = cursor.on_token(stats.first_frame_ms, crate::shutdown::checkpoint) {
+                return Some(Err(error));
+            }
+        }
         let mut out = Vec::with_capacity(b);
         for i in 0..b {
             let terminal = stats.terminal_tokens.get(i).copied().unwrap_or(-1);

@@ -64,6 +64,8 @@ pub struct GlmBatchLoopStats {
     pub wall_ms: f64,
     pub stopped_on_eos: usize,
     pub terminal_tokens: Vec<i32>,
+    /// Wall time from loop entry to the first sampled token.
+    pub first_frame_ms: f64,
 }
 
 struct LoopInFlight(Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>);
@@ -646,6 +648,9 @@ impl Glm5NextBatch {
             let elapsed = (current.GPUEndTime() - current.GPUStartTime()) * 1e3;
             if elapsed.is_finite() && elapsed > 0. {
                 stats.gpu_ms += elapsed;
+            }
+            if sampled == 0 {
+                stats.first_frame_ms = started.elapsed().as_secs_f64() * 1e3;
             }
             let mut tokens = Vec::with_capacity(count);
             for token in self.tokens.iter().take(count) {

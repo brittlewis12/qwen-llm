@@ -189,7 +189,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for q in &mut quality {
             q.0 /= steps as f64;
             q.1 /= steps as f64;
-            assert!(q.0.abs() <= 0.005 && q.1 <= 0.01);
         }
         let means = ms
             .each_ref()
@@ -203,6 +202,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{}",
             serde_json::json!({"kind":"paired","depth":depth,"steps":steps,"ms":means,"gain":means[0]/means[1]-1.,"paired_ms":ms[0].iter().zip(&ms[1]).map(|(a,b)|a-b).collect::<Vec<_>>(),"diagnostic_encode_gpu_wall_ms":diagnostics,"member_dNLL_KL":quality,"noise_dNLL_KL":[0.,0.],"stream_hash":hashes.map(|h|h.finalize().to_hex().to_string())})
         );
+        for q in &quality {
+            assert!(q.0.abs() <= 0.005 && q.1 <= 0.01, "member dNLL/KL {:?}", q);
+        }
         let fork = other[0].capture_snapshot()?;
         other[1].reset()?;
         other[1].restore_snapshot(&fork)?;

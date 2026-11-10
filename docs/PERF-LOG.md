@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-09 - Flash-Next MTP Stage 1: Current Artifact Has No Head
+
+- Read-only, base **`7613394d9`**, no build/GPU. The GSQ-RCO IQ3_S artifact on
+  both **zekrom** (`$VOLUME/...`) and **metagross** (`$MODELS/...`)
+  has the same header: **48 blocks**, **1,224 tensors**, **176.944 B params**,
+  **no `nextn_predict_layers`**, and **zero `nextn`/`mtp` tensors**.
+  `ignored_mtp` is empty; the loader's appended-MTP inventory is dormant.
+- Published heads are sidecars or grafted shards, not part of the main GGUF:
+  Unsloth shared-Q8_0 **2.79 GB** / shared-Q4_K_M **1.91 GB** / self-contained
+  Q8_0 **4.14 GB**; **32 tensors, 2.607 B params**, one full QSA block,
+  `nextn_predict_layers=1`. Unsloth's UD-Q3_K_XL first shard is metadata-only.
+  No GSQ-RCO IQ3_S artifact carries the head.
+- Agent sampling is **T=1.0 / top_k 20 / top_p 0.95 / min_p 0**
+  (`sampling.rs:84`, `release_sampling.rs:63`); the GGUF declares the same.
+- Conditional arithmetic: head + draft draw **2.2-3.2 ms M5** (675 MB active
+  per draft step: 154 MB block plus 521 MB borrowed Q6_K output) against
+  **S=13.619 ms** at 48K and **V2/V3=20.919/25.667 ms**. K=1/K=2 break-even
+  acceptance is **0.68-0.76**; at a=0.75 K=1 is **1.02x**, K=2 **1.03x**.
+  Published greedy acceptance is 0.66-0.75 and agent T=1 should be lower. M4:
+  a cheap multi-row verify (`V2~1.3S`) gives **~1.16-1.20x** at a=0.75; serial
+  verify loses (**0.79x / 0.68x**). The engine has no M4 batched decode and no
+  2-3-row append measurement.
+- Head history (roughly **1-3 s** at 48K) puts break-even at **~2,000-12,000
+  emitted tokens** in the central case; fusion or reuse is required.
+- **No-build on the current artifact.** If Britt approves a head-bearing
+  artifact, the smallest proof is a stage-2 M5 measurement probe (grafted
+  split; head + draw, T=1 acceptance, causal 2/3-row verify, head history),
+  K=1 first, success bar **>=1.15x delivered inter-token**. Do not build M4
+  first. Details: `bench/2026-11-09-fn-mtp/README.md`; raw headers
+  `header-audit.json` and `mtp-head-inventory.json`.
+
 ## 2026-11-09 - Flash-Next Widths And Dispatch Dead Time Measured
 
 - Base **`bcb1b46b8`** (current main), M5 Ultra, GSQ-RCO IQ3_S. Two bench-only

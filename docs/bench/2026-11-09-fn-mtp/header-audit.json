@@ -1,0 +1,47 @@
+[
+  {
+    "path": "/Volumes/wdblack/weights-archive/qwen3.8-flash-next-gsq-rco-iq3_s/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+    "version": 3,
+    "tensor_count": 1223,
+    "metadata_kv_count": 67,
+    "metadata": {
+      "general.architecture": "qwen4exp",
+      "general.sampling.top_k": 20,
+      "general.sampling.top_p": 0.949999988079071,
+      "general.sampling.temp": 1.0,
+      "general.name": "Qwen3.8-Flash-Next GSQ-RCO"
+    },
+    "nextn_predict_layers": null,
+    "matched_tensors": [],
+    "tensor_params": 125743653760,
+    "tensors": null
+  },
+  {
+    "path": "/Volumes/wdblack/weights-archive/qwen3.8-flash-next-gsq-rco-iq3_s/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf",
+    "version": 3,
+    "tensor_count": 1,
+    "metadata_kv_count": 3,
+    "metadata": {},
+    "nextn_predict_layers": null,
+    "matched_tensors": [],
+    "tensor_params": 51200245760,
+    "tensors": null
+  },
+  {
+    "path": "/tmp/unsloth-ud-q3xl-shard1.gguf",
+    "version": 3,
+    "tensor_count": 0,
+    "metadata_kv_count": 67,
+    "metadata": {
+      "general.architecture": "qwen4exp",
+      "general.sampling.top_k": 20,
+      "general.sampling.top_p": 0.949999988079071,
+      "general.sampling.temp": 1.0,
+      "general.name": "Qwen3.8 Flash Next"
+    },
+    "nextn_predict_layers": null,
+    "matched_tensors": [],
+    "tensor_params": 0,
+    "tensors": null
+  }
+]

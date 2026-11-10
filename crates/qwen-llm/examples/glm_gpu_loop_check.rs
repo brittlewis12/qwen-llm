@@ -37,6 +37,35 @@ fn check(a: &[f32], b: &[f32], target: usize) -> serde_json::Value {
 fn ensure_finite(v: &[f32]) {
     assert!(v.iter().all(|x| x.is_finite()));
 }
+
+struct Load {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+impl Load {
+    fn start(n: usize) -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let threads = (0..n)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+        Self { stop, threads }
+    }
+}
+impl Drop for Load {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        while let Some(thread) = self.threads.pop() {
+            let _ = thread.join();
+        }
+    }
+}
 fn conditions() -> serde_json::Value {
     let read = |cmd: &str, args: &[&str]| {
         String::from_utf8_lossy(
@@ -77,6 +106,8 @@ fn main() -> Result<()> {
     let a: Vec<_> = std::env::args().collect();
     let depth: usize = a[2].parse()?;
     let n: usize = a.get(3).map(|v| v.parse()).transpose()?.unwrap_or(128);
+    let probe_qos = a.get(4).is_some_and(|v| v == "1");
+    let probe_load: usize = a.get(5).and_then(|v| v.parse().ok()).unwrap_or(0);
     let ctx = MetalContext::new()?;
     let g = GgufFile::open(&a[1])?;
     let w = Glm5NextWeights::load(&ctx, &g)?;
@@ -124,6 +155,8 @@ fn main() -> Result<()> {
                     let started_unix = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)?
                         .as_secs_f64();
+                    let _qos = GpuThreadQos::enter_if(probe_qos);
+                    let _load = (probe_load > 0).then(|| Load::start(probe_load));
                     let started = Instant::now();
                     let (first, tokens, forwarded) = if gpu {
                         let st =
@@ -149,7 +182,7 @@ fn main() -> Result<()> {
                         .any(|r| r["thermal"].as_str().unwrap().ends_with(" 2"));
                     println!(
                         "{}",
-                        json!({"attempt":attempt,"pressure2":pressure2,"conditions":observations,"kind":"timing","depth":depth,"temperature":temp,"rep":rep,"gpu":gpu,"wall_ms":wall,"first_ms":first,"tokens":tokens,"tps":forwarded as f64*1e3/(wall-first),"started_unix":started_unix,"finished_unix":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs_f64(),"rustc_before":String::from_utf8_lossy(&rustc_before),"rustc_after":String::from_utf8_lossy(&std::process::Command::new("pgrep").args(["-x","rustc"]).output()?.stdout)})
+                        json!({"attempt":attempt,"pressure2":pressure2,"conditions":observations,"kind":"timing","qos":probe_qos,"load":probe_load,"depth":depth,"temperature":temp,"rep":rep,"gpu":gpu,"wall_ms":wall,"first_ms":first,"tokens":tokens,"tps":forwarded as f64*1e3/(wall-first),"started_unix":started_unix,"finished_unix":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs_f64(),"rustc_before":String::from_utf8_lossy(&rustc_before),"rustc_after":String::from_utf8_lossy(&std::process::Command::new("pgrep").args(["-x","rustc"]).output()?.stdout)})
                     );
                     if !pressure2 {
                         break;

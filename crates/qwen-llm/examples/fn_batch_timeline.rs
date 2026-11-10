@@ -15,7 +15,7 @@
 use qwen_llm::qwen4exp_text_session::Qwen4ExpTextSnapshot;
 use qwen_llm::{
     gguf::GgufFile,
-    metal::MetalContext,
+    metal::{GpuThreadQos, MetalContext},
     qwen4exp::Qwen4ExpConfig,
     qwen4exp_runtime::{
         Qwen4ExpDecodeBatch, Qwen4ExpDecodeOptions, Qwen4ExpLoadedModel, Qwen4ExpSessionCapacity,
@@ -145,6 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let warm: usize = a.get(7).map_or(Ok(8), |s| s.parse())?;
     let load: usize = a.get(8).map_or(Ok(0), |s| s.parse())?;
     let qos: u32 = a.get(9).map_or(Ok(0), |s| s.parse())?;
+    let qos_on = qos != 0;
     let qos_class = match qos {
         1 => QOS_CLASS_USER_INTERACTIVE,
         2 => QOS_CLASS_USER_INITIATED,
@@ -256,6 +257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for s in samplers.iter_mut() {
         *s = Sampler::new(config).unwrap();
     }
+    let _batch_qos = GpuThreadQos::enter_if(qos_on);
     let batch_started = Instant::now();
     let batch_stats = {
         let mut members: Vec<_> = runners.iter_mut().collect();
@@ -273,6 +275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pipelined B=1.
     restore(&mut runners[..1], &snapshots[..1], &prefill_logits[..1]);
     let mut single_sampler = Sampler::new(config).unwrap();
+    let _single_qos = GpuThreadQos::enter_if(qos_on);
     let single_started = Instant::now();
     let single_stats = runners[0].generate_gpu_tokens(&mut single_sampler, steps, &[], |_| true)?;
     let single_wall = single_started.elapsed().as_secs_f64() * 1e3;

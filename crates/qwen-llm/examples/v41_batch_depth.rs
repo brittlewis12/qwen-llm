@@ -8,7 +8,7 @@ use qwen_llm::{
         gguf::{ResidentWeights, resident_storage_plan_with_target},
     },
     gguf::GgufFile,
-    metal::{self, MetalContext},
+    metal::{self, GpuThreadQos, MetalContext},
     tokenizer::NativeTokenizer,
 };
 use std::{
@@ -37,6 +37,35 @@ fn thermal_level() -> Result<u32> {
 }
 fn thermal() -> Result<()> {
     thermal_level().map(|_| ())
+}
+
+struct Load {
+    stop: Arc<AtomicBool>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+impl Load {
+    fn start(n: usize) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let threads = (0..n)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+        Self { stop, threads }
+    }
+}
+impl Drop for Load {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        while let Some(thread) = self.threads.pop() {
+            let _ = thread.join();
+        }
+    }
 }
 
 fn hashes(v: &[Vec<f32>]) -> Result<Vec<String>> {
@@ -201,6 +230,8 @@ fn main() -> Result<()> {
                 &entries,
                 &streams,
                 args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(16),
+                args.get(7).is_some_and(|v| v == "1"),
+                args.get(8).and_then(|v| v.parse().ok()).unwrap_or(0),
             );
         }
         if is_profile {
@@ -524,6 +555,8 @@ fn host_gap(
     entries: &[qwen_llm::deepseek_v41::forward::Snapshot],
     streams: &[Vec<u32>],
     n: usize,
+    probe_qos: bool,
+    probe_load: usize,
 ) -> Result<()> {
     ensure!((1..=64).contains(&n), "1..64 host-gap rounds");
     let width = states.len();
@@ -534,6 +567,8 @@ fn host_gap(
         let tokens: Vec<_> = (0..width).map(|i| streams[i][4300 + j]).collect();
         step(f, states, &tokens, width > 1)?;
     }
+    let _load = (probe_load > 0).then(|| Load::start(probe_load));
+    let _qos = GpuThreadQos::enter_if(probe_qos);
     let scope =
         qwen_llm::deepseek_v41::forward::profile::Scope::begin().map_err(anyhow::Error::msg)?;
     let start = Instant::now();
@@ -562,6 +597,7 @@ fn host_gap(
             "gap_ms_round": (wall - gpu) / n as f64,
             "encode_ms": report.operations.iter().find(|o| o.operation==name).map(|o| o.encode_ms),
             "commit_wait_ms": report.operations.iter().find(|o| o.operation==name).map(|o| o.commit_wait_ms),
+            "qos": probe_qos, "load": probe_load,
             "embedding_ms_round": report.operations.iter().find(|o| o.operation=="batch_embedding").map(|o| o.wall_ms / n as f64).unwrap_or(0.0),
             "engram_rows_ms_round": report.operations.iter().find(|o| o.operation=="decode_engram_rows").map(|o| o.wall_ms / n as f64).unwrap_or(0.0),
             "metal_encode_ms_round": report.operations.iter().find(|o| o.operation=="batch_metal_encode").map(|o| o.wall_ms / n as f64).unwrap_or(0.0),

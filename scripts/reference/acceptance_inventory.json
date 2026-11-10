@@ -5118,6 +5118,13 @@
   },
   {
     "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::sampled_batch_steps_match_serial_greedy_outputs",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed host-only planning, metadata, NSObject lifetime, pure arithmetic, fake-state lifecycle or loopback fixture; no Metal context or real model import."
+  },
+  {
+    "target": "qwen",
     "name": "serve::backend_v41::scheduler_tests::waiting_requests_start_in_order_and_admission_adds_in_flight_reserves",
     "class": "cpu",
     "ignored": false,

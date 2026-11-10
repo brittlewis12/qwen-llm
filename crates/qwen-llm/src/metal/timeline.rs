@@ -10,24 +10,48 @@ use objc2_metal::{MTLCommandBuffer, MTLCommandBufferStatus};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WaitMode {
+    Block,
+    Spin,
+    Yield,
+}
+
 /// Whether a probe asked the token loops to poll instead of blocking on the
 /// command buffer. A runnable thread is scheduled promptly even while the host
 /// CPU is saturated, where a blocked waiter can lose several milliseconds after
 /// the GPU has finished.
+fn wait_mode() -> WaitMode {
+    static MODE: OnceLock<WaitMode> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        if std::env::var_os("QWEN_GPU_LOOP_YIELD").is_some() {
+            WaitMode::Yield
+        } else if std::env::var_os("QWEN_GPU_LOOP_SPIN").is_some() {
+            WaitMode::Spin
+        } else {
+            WaitMode::Block
+        }
+    })
+}
+
 pub fn spin_wait_enabled() -> bool {
-    static SPIN: OnceLock<bool> = OnceLock::new();
-    *SPIN.get_or_init(|| std::env::var_os("QWEN_GPU_LOOP_SPIN").is_some())
+    wait_mode() != WaitMode::Block
 }
 
 /// Poll until the command completes (or fails), bounded so a lost command
 /// cannot spin forever. The caller still calls the ordinary wait to surface
 /// errors.
 pub fn spin_wait_until_completed(command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) {
+    let mode = wait_mode();
+    if mode == WaitMode::Block {
+        return;
+    }
     let started = Instant::now();
     loop {
         match command.status() {
             MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error => return,
             _ if started.elapsed() > Duration::from_millis(250) => return,
+            _ if mode == WaitMode::Yield => std::thread::yield_now(),
             _ => std::hint::spin_loop(),
         }
     }

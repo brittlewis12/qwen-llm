@@ -107,6 +107,103 @@ then the Flash-Next fewrow and GLM Q6 ports. The census says the remaining
 band is q_b/output_b/output_a near 620-690 GB/s and shared near 380, so the
 tensor tile must lift the medium-`n_out` shapes, not just the head.
 
+## 2026-11-10 - V4.1/GLM Batched Host Bubble: CPU Input Terms Are Small
+
+- **V4.1 B=3, 32K** (v41 lane `hostgap` + local `wave_native`): wall
+  **25.1-27.1 ms**, GPU **23.7-24.0 ms**, encode **4.5 ms**, commit-wait
+  **20.8 ms**, embedding **0.001 ms**, Engram row decode **0.30-0.41 ms**,
+  host sample **2.5 ms**. 64K: wall 26.1, encode 4.8, Engram 0.30. The 4.5 ms
+  encode is dispatch encoding (metal encode 0.2-0.5 ms); the CPU input decode
+  is sub-ms, so a device-inputs step would save <0.5 ms.
+- **GLM B=3, 32K**, production causal waves on: wall **27.9 ms**, GPU
+  **25.0 ms**, encode **2.1 ms**, commit+readback **0.8 ms**, host sample
+  **2.3 ms**. The host embedding gather is inside the 2.1 ms encode and is not
+  a multi-ms term.
+- **Conclusion: do not build the Flash-Next device-inputs step for V4.1/GLM.**
+  The 4.3 ms PLE gather is Flash-Next-specific. Both families' remaining host
+  bubble is dominated by **host sampling (~2.3-2.5 ms)** plus ~1 ms
+  commit/readback. The deferred GPU sampling loop is the relevant lever, but
+  the one-ahead stall must be resolved first; a cheaper/pooled host sampler is
+  the lower-risk intermediate. This conflicts with the instruction to build the
+  step for whichever is bigger; the measurement says neither is.
+- Caveat: the GLM 49152 cell and the V4.1 49152 cell did not complete in the
+  packet (V4.1's engine depth is 49152; the 64K hostgap is the available
+  long-context corroboration). Thermal start level 1, end level 1.
+- Raw: `~/qwen-runs/2026-11-10-v41-encodebd/` (v41 lane) and the local
+  `glm_batch_waves`/`v41_batch_depth` probe output.
+
+## 2026-11-10 - Flash-Next Device-Input Batch Step: +7.4-8.7% Default On
+
+- **Shipped default on.** `Qwen4ExpDecodeBatch::step` now uses
+  `step_gpu_inputs` for B>=2: the host samples as before, writes the one-token
+  device input, and the GPU input prefix gathers PLE rows, selects the
+  embedding and writes controls. `QWEN_FN_BATCH_GPU_INPUTS=0` restores the CPU
+  PLE gather. The one-ahead pipelined loop stays default off.
+- **Bitwise exact.** Paired alternating A/B, two independent restored state
+  sets, identical teacher-forced tokens, B=2/3/4 at 32K/48K, 64 rounds after 8
+  warm: `max_abs_logit_diff=0.0`, `nonbitwise_logit_vectors=0` in every cell.
+- **Round ms (CPU -> device, gain) and fit `F + m*B`:**
+
+  | Depth | B=2 | B=3 | B=4 | F CPU -> GPU | m CPU -> GPU |
+  | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 32K | 21.40 -> 19.92 (+7.4%) | 25.91 -> 23.95 (+8.2%) | 30.50 -> 28.08 (+8.6%) | 12.28 -> 11.74 | 4.55 -> 4.08 |
+  | 48K | 21.71 -> 20.22 (+7.4%) | 26.25 -> 24.22 (+8.4%) | 30.86 -> 28.40 (+8.7%) | 12.55 -> 12.01 | 4.57 -> 4.09 |
+
+- **Host breakdown after, B=3** (ms/round): 32K encode **3.10**, GPU busy
+  **19.75**, commit+readback **1.03**, host sample **1.01**; 48K 3.09 / 20.04 /
+  1.02 / 1.00. The CPU PLE gather is gone; the device prefix adds ~2 ms of
+  encode but removes ~3.5-3.8 ms of host work per round at B=3.
+- Thermal start level 1, end level 2 in the native packet; the paired
+  alternating order and identical tokens bound the comparison, but the
+  absolute ms is a hot-host number. Probe
+  `fn_batch_gpu_inputs_ab` built with `--profile iter`; raw
+  `~/qwen-runs/2026-11-10-batch-loop/gpu-inputs-ab.jsonl`.
+- **Serve A/B thermally aborted.** Two attempts (45 s and 30 s windows, three
+  real agents, iter binary) both aborted at thermal level 2 during the first
+  (CPU) arm, so the harness produced no accepted summary. The M5 is shared and
+  hot; the paired native A/B above is the throughput evidence. Serve host
+  ms/round is the native breakdown: 32K B=3 encode 3.10, GPU 19.75,
+  commit+readback 1.03, sample 1.01.
+
+## 2026-11-10 - Batched Serve Host Bubble Measured; Device-Feedback Loop Built
+
+- **Measured bubble first.** Direct B=3, M5 GSQ-RCO IQ3_S, released Flash-Next
+  preset, 64 rounds after 8 warm: host sampling **0.96/1.02 ms**, step wall
+  **26.60/26.71 ms**, encode **4.73/4.57 ms**, GPU busy **20.67/20.90 ms**,
+  round minus GPU **7.18/6.83 ms** (32K/48K medians; means 6.62/6.71). So the
+  host bubble is **~6.6-7.2 ms/round, 24-26% of wall**, not the ~2 ms working
+  estimate. Existing B=4 diagnostics show the same shape at 5.5-7.5 ms
+  (encode 4.2-5.8, commit+readback 1.3-1.6). Almost all encode is the CPU PLE
+  gather in `stage_ple_rows`. Probe `fn_batch_loop_price`; raw
+  `~/qwen-runs/2026-11-10-batch-loop/price.jsonl`.
+- **Built and exact, but not faster on this host.** Flash-Next gains
+  `decode_batch::encode_gpu` (per-member `GpuInputs`, device-owned encoder) and
+  `Qwen4ExpDecodeBatch::generate_gpu_tokens` (per-member `GpuTokenSampler`,
+  one command prepared ahead, tokens read back only for streaming/stop). Serve
+  gains an additive `Runtime::advance_group` whole-batch burst (8 tokens) via
+  `QWEN_SERVE_FN_BATCH_GPU_LOOP`; **default off**. Driver tests 17/17,
+  `check-contracts` pass; `docs/ENV.md` regenerated.
+- **Exactness passes.** Greedy 48 steps x 3 members at 32K/48K:
+  `nonbitwise_logit_vectors=0`, `max_abs_logit_diff=0.0`, no token mismatch.
+  The device-input forward is bitwise identical to the host-staged batch
+  forward. Released-preset tokens are identical over 144 tokens (0
+  mismatches). The first attempt exposed and fixed two real pipeline bugs: the
+  batch QSA encoder read the lagging CPU committed length, and the batch
+  post-PLE preflight compared the same lagging length. Both now use the
+  pipelined position / validate only the first frame.
+- **A/B is negative for throughput.** Final run: **32K 108.80 -> 96.07 tok/s
+  (-11.7%)**, **48K 102.01 -> 90.93 (-10.9%)**; an earlier 48K run was +2-3%.
+  The loop's GPU span is 20.6-21.2 ms/round but its command wall is 28-30 ms.
+  A direct `wait_completed` (no completion channel) and preallocated rotating
+  token tensors do not change it, so the ~8-10 ms gap is not callback or
+  allocation latency; it behaves like the driver stalling on the concurrently
+  encoded next command while the host CPU is loaded by other lanes' builds.
+  **Decision: keep the flag off**; capture a GPU timeline and retest on an
+  idle host before changing the design.
+- Raw: `~/qwen-runs/2026-11-10-batch-loop/{price,ab-summary}.json`.
+- Reproduce: `fn_batch_loop_price MODEL CODE PROSE 32768|48000 64 3`;
+  `fn_batch_loop_ab MODEL CODE PROSE 32768|48000 48 3` (greedy bitwise
+  exactness plus released-preset A/B), both under the Metal lease.
 
 ## 2026-11-09 - Flash-Next MTP Stage 1: Current Artifact Has No Head
 

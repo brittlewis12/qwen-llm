@@ -91,6 +91,66 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - **Hygiene.** Thermal 0-1 on every accepted arm; thermal-2 arms (one 32K
   default probe, one B1 loop per depth) were rerun or replaced by the clean
   replicate. `check-contracts.sh` passes.
+## 2026-11-11 - GLM Index Chain Batched; +0.80% B4; Final Width Ledger
+
+- Base **`8b3cabc8`**; branch **`perf/glm-width`**; M5 Ultra, stock
+  **UD-IQ3_XXS**, forked 32K, **`iter`** both arms. Bench-only probes; no merge.
+- **Ship default-on `QWEN_GLM53_BATCH_INDEX`**; `=0` restores the per-member
+  index chain. Token-axis Q8 `_lcpp` batch GEMV for the indexer
+  query/key/pool-gate (guarded by `QWEN_MATVEC_Q8_0_LCPP`), packed index
+  query/weights/scores, and member cache bindings for the latent scatter,
+  indexer append and lightning scores. Equal pooled geometry is preflighted;
+  unequal shapes keep the per-member route.
+- Paired 32K B=4, 8 arms x 24 steps, thermal max **1**: **31.494 -> 31.243 ms
+  (-0.251 ms, +0.80%)**; all four pairs positive (+0.22 to +0.30 ms). **256**
+  full teacher-forced vocabulary vectors, width/order/workspace changes and a
+  13-token append match **bitwise**; final state hashes equal; dNLL = KL = 0.
+- **Two witness-first fixes.** The append member kernel took a scalar
+  `threadgroup_position_in_grid` (now `uint3 tgpig` with `.x`), and the host
+  bound only slots 6-9 instead of all four pending/pooled pairs. Before these
+  fixes the index quality packet moved **249/256** vectors; after them
+  **0/256**. The model-free member tests (`scatter_members`,
+  `indexer_append_members`, `h32_scores_members`) caught both.
+- **Final 32K census (default).** B1 **1,060** dispatches, B4 **1,387** (down
+  from 1,717). Selected attention is now **22** calls at both widths (was 88),
+  index scores **22** (was 55), index cache **33** (was 132). B4-B1 delta by
+  family, sampled and non-additive:
+
+  | Family | delta ms/round | m ms/row |
+  | --- | ---: | ---: |
+  | routed experts (IQ gate/up + down) | 11.78 | 3.93 |
+  | Q6 projections | 7.62 | 2.54 |
+  | Q8 projections | 3.78 | 1.26 |
+  | matvec (mostly the batched router) | 1.87 | 0.62 |
+  | selected attention | 1.07 | 0.36 |
+  | index scores | 0.19 | 0.06 |
+  | HC / KDA / router / reduce | 0.18 / 0.16 / 0.05 / 0.05 | small |
+  | index cache | 0.04 | 0.01 |
+
+  The only 4x-scaling per-member kernel left is the grouped Q8 key-absorb/
+  value-expand (22 -> 88 calls, 1.25 ms sampled); its dispatch batch was
+  already measured **below the 0.5% gate** and deleted. Everything else that
+  remains is matrix/byte work, not per-member dispatch.
+- **Combined same-binary sweep** (control = attention+index off; default = both
+  on), 12-16 steps/arm, `[off,on,on,off]` per width, all stream hashes equal.
+  Both runs reached **thermal 2** under external serve packets, so they are
+  **indicative only**:
+
+  | Run | Config | B=1 | B=2 | B=3 | B=4 | F ms | m ms/row |
+  | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 32K A | control | 17.887 | 23.764 | 28.919 | 33.892 | 13.665 | 5.064 |
+  | 32K A | default | 17.796 | 23.478 | 28.474 | **33.132** | 13.880 | **4.827** |
+  | 32K B | control | 18.021 | 23.780 | 28.695 | 33.484 | 14.097 | 4.852 |
+  | 32K B | default | 17.949 | 23.582 | 28.013 | **32.493** | 14.663 | **4.456** |
+
+  B4 saves **2.24% / 2.96%**; B1 is +0.4-0.5% (noise, no member path). **m
+  falls 0.24-0.40 ms/row**. 48K was not rerun: the host stayed at thermal 2.
+- **Host bubble B=3, 32K:** wall **28.04 ms**, GPU **24.85**, encode **2.18**,
+  outside GPU **3.19**, readback/preflight **1.01**, host sample **2.74**
+  (thermal 1). This is context for the GPU-feeding/QoS lane, not a change here.
+- **Hygiene.** `scripts/check-contracts.sh` passes. Targeted model-free GPU
+  tests pass. No new ignored tests. No merge.
+
 ## 2026-11-11 - GLM Per-Member Width Census; Member-Axis Selected Attention +2.4% B4
 
 - Base main **`a7be41502`**; branch **`perf/glm-width`**; M5 Ultra, stock

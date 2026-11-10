@@ -6,6 +6,50 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-10 - Routed Expert Ragged Down: +2.0% Wall, Rejected On dNLL
+
+- **Question and base.** How much of the Flash-Next routed-down 62.5%
+  lane-utilization signature can the ragged-tail redistribution recover?
+  Branch `perf/routed-tail` off main **`4d5c813f5`**; M5 Ultra, **GSQ-RCO
+  IQ3_S** Flash-Next, `--profile iter`, thermal **1**, B=4/32K. No merge.
+- **Candidate mechanism.** One full 32-fragment pass, then the K=640 tail
+  (8 fragments x 4 channels) spread over all 32 lanes as one
+  (fragment, channel) dot each instead of a full four-channel pass on eight
+  active lanes. Isolated probe on the real 2560x640 top-10/4-row grid
+  (40 distinct experts, heated, 16 dispatches/command), incumbent ->
+  candidate: **IQ4_NL 712.6 -> 964-966 GB/s (+35.3%, 1.353x)**; **Q2_0
+  556-570 -> 717 GB/s (+25.8%, 1.258x)**. The Q2_0 isolated gain is below
+  the pre-registered 1.30x bar; IQ4_NL clears it. Synthetic outputs were
+  bytewise equal, but the real-artifact sums are not.
+- **Whole-round paired A/B.** Same binary, the flag forced per arm, 128
+  steps (120 retained): **25.0145 -> 24.5162 ms (+2.03%)**; mean paired
+  **0.498 ms** (median 0.528, stderr 0.051, 94/120 positive). This meets
+  the +2% / 0.5 ms wall gate.
+- **Numerics fail.** Member dNLL/KL was
+  `[(-2.6e-8, 2.6e-9), (4.7e-6, 2.2e-7), (2.1e-7, 2.0e-7),
+  (-7.010e-3, 2.589e-3)]`. The fourth member violates the unchanged
+  **|dNLL| <= 0.005** gate (KL 0.00259 is inside 0.01). A 64-step run had
+  passed with worst **1.485e-3**, so the reordered cross-lane F32 sum
+  accumulates divergence with depth; the 128-step gate is the decision.
+  **Not shipped.** A bitwise variant would have to keep each tail
+  fragment's 16-FMA chain on its original lane, which forfeits the tail
+  win, so there is no cheap repair. Candidate code lives at **`4f74cfe9e`**
+  on the branch; it is deleted from the tree.
+- **Also rejected on isolated gates (all bitwise or near-bitwise).**
+  V4.1 IQ2_XS K=2304 ragged down: **1.045x (4.5%)** on the real
+  5120x2304 top-6 grid; that kernel already reads ~800 GB/s, so the tail is
+  not the limiter. IQ2_XXS split-loop `unroll_count(2)`:
+  **0.98x**, the per-threadgroup grid/sign table prologue dominates, not
+  loop ILP. IQ2_S vector magnitude/sign decoder (64-bit grid word ->
+  float4, uint4 sign mask -> select): **1.000x** GLM gate/up (940 GB/s)
+  and **1.006x** Flash-Next gate/up (870 GB/s), so the scalar decoder is
+  not the isolated limiter.
+- **Retained:** `fn_batch_counterfactual` now prints the paired JSON
+  before the numerics assert, so a failing arm leaves evidence. Reproduce
+  the pair with
+  `fn_batch_counterfactual MODEL CODE PROSE 32768 128 4 pair-ragged`
+  (candidate branch only). `check-contracts.sh` passes.
+
 ## 2026-11-10 - Serve Standing: Morning Main vs Tonight Main, Three Agents
 
 - **Question:** how much faster is real three-agent serving on tonight's main

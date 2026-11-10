@@ -89,10 +89,6 @@ required-features = ["perf-ablations"]
 name = "fn_down_retile_rate"
 required-features = ["perf-ablations"]
 
-[[example]]
-name = "fn_down_tail_rate"
-required-features = ["perf-ablations"]
-
 [[bench]]
 name = "kernels"
 harness = false

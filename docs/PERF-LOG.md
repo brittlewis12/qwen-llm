@@ -46,6 +46,63 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - **Hygiene.** Thermal 0-1 on every accepted arm; thermal-2 arms (one 32K
   default probe, one B1 loop per depth) were rerun or replaced by the clean
   replicate. `check-contracts.sh` passes.
+## 2026-11-11 - GLM Per-Member Width Census; Member-Axis Selected Attention +2.4% B4
+
+- Base main **`a7be41502`**; branch **`perf/glm-width`**; M5 Ultra, stock
+  **UD-IQ3_XXS**, forked 32K prefixes, **`iter`** profile both arms. Bench-only
+  `glm_batch_member_census` and `glm_batch_attention_ab`; no merge.
+- **Census.** 32K B=1/B=4, one profiled step per width. B1 **1,060**
+  dispatches, B4 **1,717**. Sampled-encoder walls are perturbed (30.78 / 45.84
+  ms); use the deltas, not the sums. B4-B1 delta by family, m per extra row:
+  selected attention **3.55 ms / 1.18 ms/row** (split partial 3.16 + merge
+  0.39); grouped Q8 key-absorb/value-expand **1.46 / 0.49**; lightning index
+  scores **0.37 / 0.12**; index-latent scatter **0.34 / 0.11**; indexer append
+  **0.18 / 0.06**; index scale **0.11**; indexer Q8 GEMV **0.34**. Q6/Q8/IQ
+  projections and routed experts are already row-batched; their B4 time is
+  matrix/byte work, not a per-member chain.
+- **Host bubble B=3, 32K.** wall **27.94 ms**, GPU **24.71**, encode **2.23**,
+  outside GPU **3.23**, readback/preflight **1.00**, host sampling **2.46**.
+  Thermal 1 before and 0 after the packet.
+- **Ship default-on `QWEN_GLM53_BATCH_ATTENTION`**; `=0` restores per-member
+  selected attention. The split selected-attention partial kernel gains
+  member-cache bindings (buffers 10-12) with the incumbent per-query partition;
+  queries/output use the packed row buffers, and key-absorb/value-expand write
+  those rows with the existing grouped GEMV. Cache geometry is preflighted per
+  block; unequal member cache shapes keep the per-member route. Paired 32K B=4,
+  8 arms x 24 steps, thermal max **1**: **33.766 -> 32.962 ms (+0.805 ms,
+  +2.38%)**; all four pairs positive (+0.54 to +1.18 ms). **256** full
+  teacher-forced vocabulary vectors, width/order/workspace changes and a
+  13-token append match **bitwise**; final state hashes equal, dNLL = KL = 0.
+- **Grouped Q8 key-absorb/value-expand batch was built and deleted.** Two paired
+  32K B=4 packets measured **+0.48%** and **-0.31%**, below the 0.5% gate. No
+  shipped knob or code remains.
+- **GLM-KVGC not started.** The census finds no per-member Q6 chain: Q6 is
+  already row-batched (289 calls/round, 16.2 ms sampled) and its B4 cost is
+  matrix/byte work. Revisit only with a binding-aware Q6 dispatch-count probe
+  that isolates the claimed small-matrix subset.
+- **Same-binary width sweep** (control `QWEN_GLM53_BATCH_ATTENTION=0` vs default;
+  16 retained steps/arm, `[off,on,on,off]` per width, all stream hashes equal):
+
+  | Depth | Config | B=1 | B=2 | B=3 | B=4 | F ms | m ms/row |
+  | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 32K | control | 17.840 | 23.417 | 28.038 | 32.969 | 13.814 | 4.776 |
+  | 32K | default | 17.825 | 23.292 | 27.659 | **32.171** | 14.388 | **4.440** |
+  | 48K* | control | 18.040 | 23.833 | 28.321 | 33.160 | 14.447 | 4.664 |
+  | 48K* | default | 17.939 | 23.471 | 28.222 | **32.714** | 14.272 | **4.621** |
+
+  32K: B4 **-2.42%**, B3 -1.35%, B2 -0.54%, B1 -0.08%; **m falls 0.34
+  ms/row**. *48K reached thermal level 2 and is indicative only (external
+  shadps4/clang load); its B4 saves 1.35% but its m fit is flat. These are
+  `iter` timings on a thermally loaded shared host, not release standings.
+- **Left.** The per-member index chain remains: lightning scores (0.37
+  ms/round), index scatter (0.34), indexer append (0.18), indexer Q8 GEMV
+  (0.34). The score kernel would need per-member pooled-key bindings like the
+  attention change. The larger remaining gap is routed-expert bytes and the
+  row-batched Q6/Q8 projections, not per-member dispatches.
+- **Hygiene.** `scripts/check-contracts.sh` passes. Targeted model-free GPU
+  tests `selected_member_attention_matches_independent_dispatches_bitwise` and
+  `selected_member_attention_rejects_shared_and_windowed_shapes` pass. No new
+  ignored tests. No merge.
 
 ## 2026-11-10 - Flash-Next BF16 Mixer Batch; Down Retile Negative; Lane Done
 

@@ -148,11 +148,19 @@ fn main() -> Result<()> {
         let is_bounds = args.get(5).is_some_and(|s| s == "bounds");
         let is_waves = args.get(5).is_some_and(|s| s == "waves");
         let is_causal = args.get(5).is_some_and(|s| s == "causal");
+        let is_profile = args.get(5).is_some_and(|s| s == "profile");
+        let is_hostgap = args.get(5).is_some_and(|s| s == "hostgap");
         let screen_batch: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(3);
         let members = if is_bounds || is_waves {
             3
         } else if is_causal {
             ensure!((2..=4).contains(&screen_batch), "causal screen width 2..=4");
+            screen_batch
+        } else if is_profile || is_hostgap {
+            ensure!(
+                (1..=4).contains(&screen_batch),
+                "profile/hostgap width 1..4"
+            );
             screen_batch
         } else {
             4
@@ -185,6 +193,27 @@ fn main() -> Result<()> {
             );
             #[cfg(not(feature = "perf-ablations"))]
             anyhow::bail!("causal requires perf-ablations");
+        }
+        if is_hostgap {
+            return host_gap(
+                &f,
+                &mut states,
+                &entries,
+                &streams,
+                args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(16),
+            );
+        }
+        if is_profile {
+            #[cfg(feature = "perf-ablations")]
+            return dispatch_profile(
+                &f,
+                &mut states,
+                &entries,
+                &streams,
+                args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(8),
+            );
+            #[cfg(not(feature = "perf-ablations"))]
+            anyhow::bail!("profile requires perf-ablations");
         }
         if is_waves {
             #[cfg(feature = "perf-ablations")]
@@ -486,6 +515,131 @@ mod comparison_tests {
     }
 }
 
+/// Wall time minus the command GPU span per round: the host/encode/commit gap
+/// the counterfactual modes do not model. Uses a plain profile scope (command
+/// start/end, not per-dispatch), so timing is near-production.
+fn host_gap(
+    f: &Forward<'_>,
+    states: &mut [State],
+    entries: &[qwen_llm::deepseek_v41::forward::Snapshot],
+    streams: &[Vec<u32>],
+    n: usize,
+) -> Result<()> {
+    ensure!((1..=64).contains(&n), "1..64 host-gap rounds");
+    let width = states.len();
+    for (s, snap) in states.iter_mut().zip(entries) {
+        f.restore_snapshot(s, snap)?;
+    }
+    for j in 0..4 {
+        let tokens: Vec<_> = (0..width).map(|i| streams[i][4300 + j]).collect();
+        step(f, states, &tokens, width > 1)?;
+    }
+    let scope =
+        qwen_llm::deepseek_v41::forward::profile::Scope::begin().map_err(anyhow::Error::msg)?;
+    let start = Instant::now();
+    for j in 0..n {
+        let tokens: Vec<_> = (0..width).map(|i| streams[i][4310 + j]).collect();
+        step(f, states, &tokens, width > 1)?;
+    }
+    let wall = start.elapsed().as_secs_f64() * 1000.;
+    let report = scope.finish();
+    let name = if width > 1 {
+        "gpu_step_batch"
+    } else {
+        "gpu_step"
+    };
+    let gpu = report
+        .operations
+        .iter()
+        .find(|o| o.operation == name)
+        .and_then(|o| o.gpu_ms)
+        .unwrap_or(f64::NAN);
+    println!(
+        "{}",
+        serde_json::json!({"kind":"host_gap","width":width,"rounds":n,
+            "wall_ms_round": wall / n as f64,
+            "gpu_ms_round": gpu / n as f64,
+            "gap_ms_round": (wall - gpu) / n as f64,
+            "encode_ms": report.operations.iter().find(|o| o.operation==name).map(|o| o.encode_ms),
+            "commit_wait_ms": report.operations.iter().find(|o| o.operation==name).map(|o| o.commit_wait_ms),
+            "embedding_ms_round": report.operations.iter().find(|o| o.operation=="batch_embedding").map(|o| o.wall_ms / n as f64).unwrap_or(0.0),
+            "engram_rows_ms_round": report.operations.iter().find(|o| o.operation=="decode_engram_rows").map(|o| o.wall_ms / n as f64).unwrap_or(0.0),
+            "metal_encode_ms_round": report.operations.iter().find(|o| o.operation=="batch_metal_encode").map(|o| o.wall_ms / n as f64).unwrap_or(0.0),
+            "causal_finish_ms_round": report.operations.iter().find(|o| o.operation=="batch_causal_finish").map(|o| o.wall_ms / n as f64).unwrap_or(0.0),
+            "cmd_alloc_ms_round": report.operations.iter().find(|o| o.operation=="batch_cmd_alloc").map(|o| o.wall_ms / n as f64).unwrap_or(0.0),
+            "encoder_end_ms_round": report.operations.iter().find(|o| o.operation=="batch_encoder_end").map(|o| o.wall_ms / n as f64).unwrap_or(0.0),
+            "commit_ms_round": report.operations.iter().find(|o| o.operation=="batch_commit").map(|o| o.wall_ms / n as f64).unwrap_or(0.0)})
+    );
+    Ok(())
+}
+
+/// Per-dispatch isolated GPU service at the requested width. Each dispatch runs
+/// in its own sampled encoder (concurrency removed), so the aggregate is kernel
+/// service time by (label, kernel); compare with an unprofiled round for gaps
+/// and host time. Rows are per decoded round.
+#[cfg(feature = "perf-ablations")]
+fn dispatch_profile(
+    f: &Forward<'_>,
+    states: &mut [State],
+    entries: &[qwen_llm::deepseek_v41::forward::Snapshot],
+    streams: &[Vec<u32>],
+    n: usize,
+) -> Result<()> {
+    ensure!((1..=16).contains(&n), "1..16 profile rounds");
+    let width = states.len();
+    for (s, snap) in states.iter_mut().zip(entries) {
+        f.restore_snapshot(s, snap)?;
+    }
+    for j in 0..2 {
+        let tokens: Vec<_> = (0..width).map(|i| streams[i][4300 + j]).collect();
+        step(f, states, &tokens, width > 1)?;
+    }
+    let scope = qwen_llm::deepseek_v41::forward::profile::Scope::begin_dispatches()
+        .map_err(anyhow::Error::msg)?;
+    let start = Instant::now();
+    let mut heads = Vec::with_capacity(n);
+    for j in 0..n {
+        let tokens: Vec<_> = (0..width).map(|i| streams[i][4310 + j]).collect();
+        heads.push(step(f, states, &tokens, width > 1)?);
+    }
+    let wall = start.elapsed().as_secs_f64() * 1000.;
+    let report = scope.finish();
+    let mut digests: Vec<_> = (0..width).map(|_| blake3::Hasher::new()).collect();
+    for head in &heads {
+        for (h, d) in head.iter().zip(&mut digests) {
+            ensure!(h.iter().all(|v| v.is_finite()), "finite profile head");
+            d.update(bytemuck::cast_slice(h));
+        }
+    }
+    let mut counts = std::collections::BTreeMap::<(String, String), (usize, u64)>::new();
+    for row in &report.dispatches {
+        let key = (row.label.to_string(), row.kernel.clone());
+        let entry = counts.entry(key).or_default();
+        entry.0 += 1;
+        entry.1 += row.gpu_ns.unwrap_or(0);
+    }
+    let rows: Vec<_> = counts
+        .into_iter()
+        .map(|((label, kernel), (count, ns))| {
+            serde_json::json!({"label": label, "kernel": kernel, "count": count,
+                "ms_round": ns as f64 / 1e6 / n as f64,
+                "us_per_dispatch": ns as f64 / 1e3 / count as f64})
+        })
+        .collect();
+    let service: f64 = rows.iter().map(|r| r["ms_round"].as_f64().unwrap()).sum();
+    println!(
+        "{}",
+        serde_json::json!({"kind":"dispatch_profile","width":width,"rounds":n,
+            "wall_ms_round": wall / n as f64,
+            "token_wall_ms_total": report.token_wall_ms,
+            "overflow": report.dispatch_overflow,
+            "gpu_service_ms_round": service,
+            "hashes": digests.iter().map(|d| d.finalize().to_hex().to_string()).collect::<Vec<_>>(),
+            "rows": rows})
+    );
+    Ok(())
+}
+
 /// Same prepared B=3 trajectory for every counterfactual. Capture is excluded;
 /// the read control preserves real expert IDs, grids and exact normal outputs.
 #[cfg(feature = "perf-ablations")]
@@ -553,6 +707,10 @@ fn bounds(
         Mode::PostControls,
         Mode::RoutedRead,
         Mode::RoutedHold,
+        Mode::DenseHold,
+        Mode::AttentionCoreHold,
+        Mode::FlashPartialHold,
+        Mode::FlashCombineHold,
         Mode::Reference,
         Mode::AllHc,
     ] {

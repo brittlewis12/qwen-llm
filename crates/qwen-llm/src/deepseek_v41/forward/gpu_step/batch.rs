@@ -880,6 +880,7 @@ pub(in super::super) fn run_batch(
             .all(|ws| ws.attention.staged_decode_supported());
     let ctx = model.ctx;
     let end = model.layers.len();
+    let embedding_started = profile::start();
     for (ws, input) in workspaces.iter_mut().zip(inputs) {
         ws.commands = 0;
         ws.trace_copies = 0;
@@ -888,6 +889,12 @@ pub(in super::super) fn run_batch(
             &decode_rows(model.embedding, input.token, 1)?.repeat(4),
         )?;
     }
+    let embedding = profile::Wall(
+        "batch_embedding",
+        [inputs[0].position, workspaces.len(), end, 0],
+        embedding_started,
+    );
+    drop(embedding);
     let engram_layers: Vec<usize> = workspaces[0].engrams.iter().map(|s| s.layer).collect();
     let lead = engram_layers.iter().copied().min().unwrap_or(0).min(end);
     let middle = (lead + SPLIT_SUBMIT_MIDDLE_LAYERS).min(end);
@@ -939,6 +946,7 @@ pub(in super::super) fn run_batch(
             if range.is_empty() && !engram_projection && !head {
                 continue;
             }
+            let alloc = profile::Wall("batch_cmd_alloc", [0, 0, 0, 0], profile::start());
             let command = ctx
                 .queue
                 .commandBuffer()
@@ -952,7 +960,9 @@ pub(in super::super) fn run_batch(
             } else {
                 StageEncoder::begin(&command, None)
             };
+            drop(alloc);
             let segment = (|| -> Result<()> {
+                let _enc = profile::Wall("batch_metal_encode", [0, 0, 0, 0], profile::start());
                 if engram_projection {
                     match &scratch.engram {
                         Some(columns) => {
@@ -1013,14 +1023,22 @@ pub(in super::super) fn run_batch(
                 }
                 Ok(())
             })();
-            let segment =
-                segment.and_then(|_| stages.finish_causal(ctx).map_err(|e| e.to_string()));
+            let segment = segment.and_then(|_| {
+                let _fin = profile::Wall("batch_causal_finish", [0, 0, 0, 0], profile::start());
+                stages.finish_causal(ctx).map_err(|e| e.to_string())
+            });
             if segment.is_err() {
                 stages.cancel_causal();
             }
-            stages.end();
+            {
+                let _end = profile::Wall("batch_encoder_end", [0, 0, 0, 0], profile::start());
+                stages.end();
+            }
             segment?;
-            command.commit();
+            {
+                let _commit = profile::Wall("batch_commit", [0, 0, 0, 0], profile::start());
+                command.commit();
+            }
             committed.push(command);
         }
         Ok(())

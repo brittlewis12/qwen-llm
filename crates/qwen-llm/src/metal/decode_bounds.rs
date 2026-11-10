@@ -13,6 +13,14 @@ pub enum Mode {
     AllHc,
     RoutedRead,
     RoutedHold,
+    /// Skip the batched dense Q5_K/Q8_0 projections (weights and compute).
+    DenseHold,
+    /// Skip the fused decode attention core (flash partial + combine/RoPE).
+    AttentionCoreHold,
+    /// Skip the flash split partial (QK + split softmax + PV + KV reads).
+    FlashPartialHold,
+    /// Skip the flash split combine (and its inverse RoPE).
+    FlashCombineHold,
 }
 #[derive(Clone, Default, Debug, serde::Serialize)]
 pub struct Stats {
@@ -126,10 +134,23 @@ pub(crate) fn skip(name: &str) -> bool {
             "kernel_deepseek_v41_hc_post_controls" | "kernel_deepseek_v41_ffn_post_controls"
         );
         let pre = name.starts_with("kernel_deepseek_v41_hc_pre");
+        // Batched dense projections: the skinny MMA Q5_K/Q8_0 pair, plus the
+        // solo split equivalents so the same bound works at any width.
+        let dense = name.starts_with("kernel_dense_skinny_mma_q5_K")
+            || name.starts_with("kernel_dense_pair_skinny_mma_q8_0")
+            || name.starts_with("kernel_expert_native_q5_K_f32_split")
+            || name.starts_with("kernel_dense_pair_q8_0_f32_splitk");
+        let core = name.starts_with("kernel_deepseek_v41_attention_flash");
+        let combine = name.starts_with("kernel_deepseek_v41_attention_flash_combine");
+        let partial = core && !combine;
         let yes = match a.mode {
             Mode::AttentionIo => io || name == "kernel_deepseek_v41_attention_rank_norms",
             Mode::PostControls => post,
             Mode::AllHc => pre || post,
+            Mode::DenseHold => dense,
+            Mode::AttentionCoreHold => core,
+            Mode::FlashPartialHold => partial,
+            Mode::FlashCombineHold => combine,
             _ => false,
         };
         if yes {

@@ -268,3 +268,19 @@ Consequence: the one-ahead loop was rejected on a measurement taken while other
 lanes were compiling. Wrap `advance_group`'s `generate_gpu_tokens` in a
 user-initiated QoS set/restore and re-run the serve A/B before deciding. Raw:
 `~/qwen-runs/2026-11-10-batch-loop/timeline-{32k,48k,...}.json`.
+
+## 8. Shipped: loop default-on with GPU-thread QoS
+
+The loop is now default-on (`QWEN_SERVE_FN_BATCH_GPU_LOOP`), and the shared
+Driver wraps `decode` and `advance` in `GpuThreadQos`
+(`QWEN_GPU_THREAD_QOS`, default on). That covers the Flash-Next loop, the
+serial `step_tokens` path, the B=1 loops and the V4.1/GLM batched owner threads.
+
+Under 36-way host load the native A/B is **+11.5 to +12.7%** (B2..4,
+32K/48K) over `step_tokens`, bitwise and token exact. QoS alone is +17 to
++28% on the same arms. Cross-family: FN B=1 +27%, V4.1 B=1 -22% and B=3 -37%
+round wall, GLM B=1 +34.5% throughput and B=3 -13% round wall. Three-agent
+serve: gap p50 **22.1/21.8 -> 19.7/19.8 ms**, throughput **+16.2%** on the
+balanced order (the opposite order was +48.9% but its reference arm was
+compile-loaded; both directions positive, order spread 32.7%, thermal 1).
+Rollbacks are the two flags above.

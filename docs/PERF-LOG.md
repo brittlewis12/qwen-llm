@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-10 - Flash-Next Batch Loop Shipped; GPU-Thread QoS Is Cross-Family
+
+- **Shipped default-on:** `QWEN_SERVE_FN_BATCH_GPU_LOOP` now runs the whole
+  active Flash-Next batch through the device-feedback loop from `advance_group`;
+  `QWEN_GPU_THREAD_QOS` raises the decode thread to user-initiated QoS for the
+  forward/burst. Rollbacks: `QWEN_SERVE_FN_BATCH_GPU_LOOP=0` and
+  `QWEN_GPU_THREAD_QOS=0`. The QoS guard sits in the shared Driver `decode` and
+  `advance`, so it covers every family.
+- **Native A/B under 36-way host load, QoS on** (same binary, restored prefills,
+  released preset; serial is the shipped `step_tokens` path): 32K B2/B3/B4
+  **18.57 -> 16.65 / 21.44 -> 19.14 / 24.62 -> 21.86 ms** (**+11.5 / +12.0 /
+  +12.6%**); 48K **18.61 -> 16.69 / 21.64 -> 19.26 / 24.74 -> 21.95**
+  (**+11.5 / +12.4 / +12.7%**). Greedy logits are bitwise equal
+  (`nonbitwise=0`, `max_abs=0`); released preset selects identical tokens
+  (0 mismatches, 48 steps x width).
+- **QoS was the missing half.** Same load, QoS off -> on: serial **23.85 ->
+  18.57**, **29.72 -> 21.44**, **33.97 -> 24.62 ms** at B2/B3/B4 32K
+  (+22.1/+27.9/+27.5%); loop **20.05 -> 16.65**, **25.44 -> 19.14**,
+  **27.06 -> 21.86** (+17.0/+24.8/+19.2%). 48K is the same shape (+20.5 to
+  +24.7% serial, +14.2 to +19.4% loop).
+- **Cross-family, B=1 and B=3 under 36-way load.** FN B=1 loop **14.61 ->
+  11.48 ms** (+27.3%; GPU-end-to-wait 3.21 -> 0.09). V4.1 `hostgap` B=1
+  **17.84 -> 13.91 ms** (encode 5.67 -> 2.35), B=3 **41.26 -> 25.96 ms**
+  (encode 28.41 -> 4.82; -37%). GLM B=1 solo loop **42.7 -> 57.4 tok/s**
+  (+34.5%; first token 21.2 -> 1.2 ms), B=3 causal waves **31.7 -> 27.6
+  ms/round** (-13%). V4.1 B=1 now has no remaining >=2 ms host bubble beyond
+  the GPU round, so the deferred V4.1 solo loop stays unbuilt.
+- **Three-agent serve A/B, real agent sampling, 25 s windows** (FN GSQ-RCO,
+  same binary, ABBA): loop-off gap p50 **22.10 / 21.81 ms**, loop-on **19.66 /
+  19.80 ms**; throughput **125.76 -> 146.12 tps (+16.2%, AB)** and **93.92 ->
+  139.80 (+48.9%, BA)**. Both orders favor the loop, but the BA reference was
+  slowed by external compiles (order spread 32.7%); the robust numbers are the
+  AB pair and the ~2.2-2.3 ms lower gap p50. Thermal 1, compile overlapped on
+  every arm (flags retained). The GLM serve QoS pair aborted at thermal 2, so
+  GLM B=3 is the native waves measurement above.
+- **Exactness unchanged.** Greedy is bitwise against the host-staged forward;
+  released tokens match. Driver group-burst tests 20/20; `check-contracts`
+  passes. Reproduce: `fn_batch_loop_serve_ab MODEL CODE PROSE DEPTH 48 2,3,4 8
+  36 1`, `fn_batch_timeline ... 36 1`, `v41_batch_depth MODEL 32768 W 32 hostgap
+  prose QOS 36`, `glm_gpu_loop_check MODEL 32768 64 QOS 36`,
+  `glm_batch_waves MODEL 32768 0 timing distinct QOS 36`; serve plan/run as in
+  the standing entry, `serve_realistic_pair.py --flag QWEN_SERVE_FN_BATCH_GPU_LOOP`.
+  Raw: `~/qwen-runs/2026-11-10-batch-loop/{loop-ab-*,fn-b1-*,v41-b*,glm-b*}`,
+  `~/qwen-runs/2026-11-10-serve-loop/`.
+
 ## 2026-11-10 - Flash-Next Standing: Total Batch-Work Gain On The Serve Path
 
 - Base **main `8132edc97`**, M5 Ultra, GSQ-RCO IQ3_S, **release** profile, one

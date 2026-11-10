@@ -148,9 +148,32 @@ pub(crate) fn encode_gpu(
     unsafe {
         enc.delegate_session_owner(positions[0]);
     }
-    for (i, s) in members.iter_mut().enumerate() {
-        let history = s.zero_one.gpu_decode_history();
-        encode_zero_one_stage(ctx, enc, 0, positions[i], history, weights, s)?;
+    if b >= 2 && crate::qwen4exp_layers_zero_one::decode_batch::selected_for_batch() {
+        let histories: Vec<_> = members
+            .iter()
+            .map(|s| s.zero_one.gpu_decode_history())
+            .collect();
+        let tokens = vec![0u32; b];
+        let mut zero_one = Vec::with_capacity(b);
+        let mut destinations = Vec::with_capacity(b);
+        for s in members.iter_mut() {
+            zero_one.push(&mut s.zero_one);
+            destinations.push(&s.hyper_residual);
+        }
+        crate::qwen4exp_layers_zero_one::decode_batch::encode(
+            ctx,
+            enc,
+            &tokens,
+            &histories,
+            weights.zero_one,
+            &mut zero_one,
+            &destinations,
+        )?;
+    } else {
+        for (i, s) in members.iter_mut().enumerate() {
+            let history = s.zero_one.gpu_decode_history();
+            encode_zero_one_stage(ctx, enc, 0, positions[i], history, weights, s)?;
+        }
     }
     encode_post_zero_one(
         ctx, enc, weights, members, positions, inputs, logits, projection, validate,

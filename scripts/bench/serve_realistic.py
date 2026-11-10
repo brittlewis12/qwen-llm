@@ -48,7 +48,7 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def arm_environment(source, family, arm):
+def arm_environment(source, family, arm, overrides=()):
     env = dict(source, RUST_LOG='warn,qwen_diag=info', NO_COLOR='1')
     knobs = dict(v41='QWEN_SERVE_V41_MAX_ACTIVE', glm='QWEN_SERVE_GLM_MAX_ACTIVE',
                  fn='QWEN_SERVE_FN_MAX_ACTIVE')
@@ -56,7 +56,35 @@ def arm_environment(source, family, arm):
         env.pop(knob, None)
     if arm == 'serial':
         env[knobs[family]] = '1'
+    for item in overrides:
+        key, sep, value = item.partition('=')
+        if not sep or not key:
+            raise ValueError(f'--env wants KEY=VALUE, got {item!r}')
+        env[key] = value
     return env
+
+
+def sampling_fields(sampling, temperature=None, top_p=None, top_k=None, min_p=None):
+    """Request sampling fields, defaulting to what agents actually send.
+
+    Live agents omit every sampling field, so the model's released defaults
+    apply (GLM: temperature 1.0, top-p 0.95). Setting fields here would replace
+    those defaults and understate host sampling cost.
+    """
+    if sampling == 'agent':
+        return {}
+    if sampling == 'greedy':
+        return dict(temperature=0, top_p=1)
+    if sampling != 'custom':
+        raise ValueError(f'unknown sampling mode {sampling!r}')
+    fields = {}
+    for key, value in (('temperature', temperature), ('top_p', top_p),
+                       ('top_k', top_k), ('min_p', min_p)):
+        if value is not None:
+            fields[key] = value
+    if not fields:
+        raise ValueError('--sampling custom needs at least one sampling value')
+    return fields
 
 
 def percentile(values, fraction):
@@ -199,6 +227,8 @@ class Arm:
         self.plan = json.loads(args.plan.read_text())
         if self.plan.get('version') != 2:
             raise ValueError('regenerate a version-2 steady plan')
+        self.sampling = sampling_fields(args.sampling, args.temperature, args.top_p,
+                                        args.top_k, args.min_p)
         self.rows, self.samples, self.lines = [], [], []
         self.server = None
         self.abort = threading.Event()
@@ -257,7 +287,7 @@ class Arm:
 
     def body(self, history, count):
         body = dict(model=self.model_id, input=copy.deepcopy(history), instructions=INSTRUCTIONS,
-                    stream=True, temperature=0, top_p=1, max_output_tokens=count,
+                    stream=True, max_output_tokens=count, **self.sampling,
                     x_qwen=dict(stats=True, seed=self.plan['seed']),
                     tools=[dict(type='function', name='read_file', description='Read source',
                                 parameters=dict(type='object', properties=dict(path=dict(type='string')),
@@ -339,7 +369,7 @@ class Arm:
         occupied = subprocess.run(['lsof','-nP',f'-iTCP:{args.port}','-sTCP:LISTEN'],stdout=subprocess.DEVNULL)
         if occupied.returncode != 1:
             raise RuntimeError('port occupied or lsof failed')
-        env = arm_environment(os.environ, self.plan['family'], args.arm)
+        env = arm_environment(os.environ, self.plan['family'], args.arm, args.env)
         maximum = max(t['reply_tokens'] for t in self.plan['population'])
         command = [str(args.binary.resolve()),'serve','-m',str(args.model.resolve()),
                    '--addr',f'127.0.0.1:{args.port}','--max-context-tokens',str(args.context),
@@ -347,7 +377,10 @@ class Arm:
         dump(self.out/'launch.json', dict(commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
              command=command, harness_command=sys.argv, arm=args.arm,
              harness_commit=args.harness_commit,
-             cool_seconds=args.cool, ramp_seconds=args.ramp, context=args.context,
+             sampling=dict(mode=args.sampling, fields=self.sampling),
+             env_overrides=list(args.env),
+             cool_seconds=args.cool, warm_cool_seconds=args.warm_cool,
+             ramp_seconds=args.ramp, context=args.context,
              preflight_thermal=preflight,max_thermal_pressure=args.max_thermal_pressure, thermal_policy='retain flagged level1; abort above limit',
              runtime_env={k:v for k,v in env.items() if k.startswith('QWEN_')},
              corpus_sha256=digest(args.corpus), protocol='steady-own-history-v2'))
@@ -377,6 +410,9 @@ class Arm:
                 final=self.request(body,f'a{agent}-warm',warm=True)
                 if final is None:raise RuntimeError('warm-up failed')
                 histories.append(body['input']+history_items(final.get('output',[])))
+                if agent<2 and args.warm_cool:
+                    if self.finish.wait(args.warm_cool):
+                        raise RuntimeError('aborted during warm-up cooling')
             warmed=time.time()
             self.emit(event='warmed',startup_s=ready-started,warmup_s=warmed-ready)
             if thermal_exceeds_limit(pressure(),args.max_thermal_pressure):raise RuntimeError('thermal pressure exceeds arm limit after warm-up')
@@ -429,8 +465,9 @@ class Arm:
             except subprocess.TimeoutExpired:self.server.terminate();self.server.wait(timeout=10)
             self.monitor_done.set();watcher.join(timeout=5);reader.join(timeout=5)
             dump(self.out/'thermal.json',self.samples)
-            if self.args.keep_bulk:
-                dump(self.out/'native-lines.json',self.lines)
+            # Server phase lines are part of the evidence: they carry per-round
+            # transition and host time for every completed request.
+            dump(self.out/'native-lines.json',self.lines)
             if error or self.abort.is_set():
                 dump(self.out/'failed.json',dict(error=error,thermal_abort=self.abort.is_set()))
             self.emit(event='server_stopped',code=self.server.returncode)
@@ -440,6 +477,7 @@ class Arm:
                          lambda text:len(token_text(args.tokenizer,args.model,text=text)),self.lines)
         result.update(startup_s=ready-started,warmup_s=warmed-ready,arm=args.arm,
                       family=self.plan['family'],seed=self.plan['seed'],thermal_max=max(x['thermal'] for x in self.samples),
+                      sampling=dict(mode=args.sampling, fields=self.sampling),
                       metric='delivered text+reasoning tokens retokenized; excludes EOS/format control')
         result.update(timing_flags(self.samples,self.window_begin,self.window_end))
         result['max_thermal_pressure']=args.max_thermal_pressure
@@ -469,6 +507,117 @@ def window_tokens(events, begin, end, count):
             total+=count(through)-(count(before) if before else 0)
     return total
 
+
+def native_records(native_lines):
+    """Parse `serve native:` and `serve phases:` lines into per-call records.
+
+    A GLM `serve native:` line carries transition_ms and precedes its phases
+    line; V4.1's phases line already carries transition_ms. Times are kept so a
+    record can be matched to the call that finished at that moment.
+    """
+    records=[];pending=None
+    for entry in native_lines:
+        line=entry['line']
+        if 'serve native:' in line:
+            pending=kv(line);pending['_time']=entry['time']
+        elif 'serve phases:' in line:
+            rec=kv(line);rec['_time']=entry['time']
+            if pending is not None and pending.get('family')==rec.get('family'):
+                rec['_transition_ms']=pending.get('transition_ms')
+            records.append(rec);pending=None
+    return records
+
+
+def match_native(records,row):
+    "Nearest phases line with the same prompt length (completed call)."
+    if row.get('prompt') is None:return None
+    best=None
+    for rec in records:
+        try:prompt=int(float(rec.get('prefill_tokens',0)))+int(float(rec.get('reused_tokens',0)))
+        except (TypeError,ValueError):continue
+        if prompt!=row['prompt']:continue
+        delta=abs(rec['_time']-row['end'])
+        if delta>3:continue
+        if best is None or delta<best[0]:best=(delta,rec)
+    return best[1] if best else None
+
+
+def round_budget(cleaned,native_lines,begin,end,gap_p50_s=None):
+    """Owner-time budget from the server's own per-call phase lines.
+
+    Each completed call contributes its average native round wall
+    (`transition_ms / steps`) and its estimated prefill/capture span. The
+    cohort host per round is the median content gap minus that round wall:
+    stable and positive, and it leaves the long append stalls in the gap tail
+    rather than smearing them into every round. Prefill/capture are counted
+    only where their estimated span overlaps the window; partial calls emit no
+    phases line, so `coverage` states how much of the window was observed.
+    """
+    records=native_records(native_lines)
+    spans=[]
+    for r in cleaned:
+        ph=r.get('phases') or {}
+        batch=ph.get('batch') or {}
+        st=float(batch.get('stepped_transitions') or 0)
+        wm=float(batch.get('width_mean') or 0)
+        first=r['first']
+        if st<=0 or wm<=0 or first is None:continue
+        source=ph
+        trans=source.get('transition_ms')
+        pre=source.get('prefill_ms')
+        if trans is None or pre is None:
+            rec=match_native(records,r)
+            if rec is not None:source=rec
+        if trans is None:trans=source.get('_transition_ms',source.get('transition_ms'))
+        if pre is None:pre=source.get('prefill_ms')
+        trans=float(trans or 0);pre=float(pre or 0)
+        cap=sum(float(source.get(k) or 0) for k in
+                ('restore_ms','boundary_ms','snapshot_capture_ms',
+                 'ladder_tip_capture_ms','ladder_capture_ms','retention_ms'))
+        lead=(pre+cap)/1000
+        pre_start=first-lead
+        spans.append(dict(row=r,first=first,end=r['end'],steps=st,width=wm,
+                          transition=trans,prefill=pre,capture=cap,
+                          pre_start=pre_start))
+    def overlap(a_lo,a_hi,b_lo,b_hi):
+        return max(0.0,min(a_hi,b_hi)-max(a_lo,b_lo))
+    transition_ms=steps=wsum=0.0
+    prefill_s=capture_s=0.0
+    for s in spans:
+        decode_overlap=overlap(s['first'],s['end'],begin,end)
+        if decode_overlap<=0:continue
+        lead=s['first']-s['pre_start']
+        lead_overlap=overlap(s['pre_start'],s['first'],begin,end)
+        if lead>0:
+            prefill_s+=s['prefill']/1000*(lead_overlap/lead)
+            capture_s+=s['capture']/1000*(lead_overlap/lead)
+        decode_ms=s['row']['end']-s['first']
+        frac=decode_overlap/decode_ms if decode_ms>0 else 0.0
+        steps_in=frac*s['steps']
+        transition_ms+=frac*s['transition']
+        steps+=steps_in
+        wsum+=steps_in*s['width']
+    if steps<=0:
+        return dict(rounds_est=0.0,avg_width=0.0,coverage=0.0,transition_s=0.0,
+                    prefill_s=0.0,capture_s=0.0,host_s=0.0,
+                    transition_ms_per_round=None,host_ms_per_round=None,
+                    host_metric='median content gap minus native round wall')
+    avg_width=wsum/steps
+    rounds=steps/avg_width
+    transition_per_round=transition_ms/steps
+    host_per_round=None
+    if gap_p50_s is not None:
+        host_per_round=max(0.0,gap_p50_s*1000-transition_per_round)
+    total_tokens=sum(r['window_tokens'] for r in cleaned)
+    covered=sum((s['row']['window_tokens']) for s in spans)
+    return dict(rounds_est=rounds,avg_width=avg_width,
+                coverage=(covered/total_tokens) if total_tokens else 0.0,
+                transition_s=transition_per_round*rounds/1000,
+                prefill_s=prefill_s,capture_s=capture_s,
+                host_s=(host_per_round*rounds/1000) if host_per_round is not None else 0.0,
+                transition_ms_per_round=transition_per_round,
+                host_ms_per_round=host_per_round,
+                host_metric='median content gap minus native round wall')
 
 def summarize(rows, begin, end, count, native_lines=()):
     if begin is None or end<=begin:raise ValueError('invalid shared window')
@@ -524,16 +673,19 @@ def summarize(rows, begin, end, count, native_lines=()):
                            pending_at_cutoff=sum(r['pending_at_cutoff'] for r in rs),
                            queue_exposure_s=sum(r['queue_exposure_s'] for r in rs),
                            censored_ttft=sum(r['ttft_censored_s'] is not None for r in rs)))
+    budget=round_budget(cleaned,native_lines,begin,end,percentile(gaps,.5))
     return dict(window_begin=begin,window_end=end,window_seconds=end-begin,
                 window_tokens=sum(r['window_tokens'] for r in cleaned),
                 aggregate_tps=sum(r['window_tokens'] for r in cleaned)/(end-begin),
                 gap_p50_s=percentile(gaps,.5),gap_p95_s=percentile(gaps,.95),gap_max_s=max(gaps,default=None),
+                round_budget=budget,
                 agents=agents,trace_20s=trace,rows=cleaned)
 
 
 def compare(reference,candidate):
     a=json.loads((reference/'summary.json').read_text());b=json.loads((candidate/'summary.json').read_text())
-    if (a['family'],a['seed'],a['window_seconds'],a['metric'])!=(b['family'],b['seed'],b['window_seconds'],b['metric']):
+    if ((a['family'],a['seed'],a['window_seconds'],a['metric'],a.get('sampling'))
+            !=(b['family'],b['seed'],b['window_seconds'],b['metric'],b.get('sampling'))):
         raise ValueError('different rate protocols')
     ttft=[]
     for x,y in zip(a.get('agents',[]),b.get('agents',[])):
@@ -559,7 +711,15 @@ def main():
     for name in ('binary','tokenizer','model','corpus','plan','out'):p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--arm',choices=('serial','default'),required=True);p.add_argument('--ramp',type=float,default=15)
     p.add_argument('--warm-tokens',type=int,default=48000);p.add_argument('--context',type=int,default=196608)
+    p.add_argument('--warm-cool',type=float,default=0,
+                   help='seconds to idle between warm roots, to shed heat before a deep window')
     p.add_argument('--port',type=int,default=18737);p.add_argument('--cool',type=float,default=25)
+    p.add_argument('--sampling',choices=('agent','greedy','custom'),default='agent',
+                   help='agent (default) omits sampling fields as live agents do; greedy sets temperature 0/top-p 1; custom uses supplied values')
+    p.add_argument('--temperature',type=float);p.add_argument('--top-p',type=float,dest='top_p')
+    p.add_argument('--top-k',type=int,dest='top_k');p.add_argument('--min-p',type=float,dest='min_p')
+    p.add_argument('--env',action='append',default=[],metavar='KEY=VALUE',
+                   help='extra environment for this arm (repeatable), e.g. a rollback knob')
     p.add_argument('--timeout',type=float,default=900);p.add_argument('--keep-bulk',action='store_true')
     p.add_argument('--harness-commit',default='working-tree')
     p.add_argument('--max-thermal-pressure',type=int,choices=(0,1),default=1,

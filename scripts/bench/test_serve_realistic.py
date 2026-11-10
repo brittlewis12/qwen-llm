@@ -22,6 +22,29 @@ class SteadyTests(unittest.TestCase):
             self.assertTrue(all(k not in default for k in knobs.values()))
             self.assertEqual(default['QWEN_FN_BATCH_GDN'], '0')
 
+    def test_sampling_defaults_match_agents_and_env_overrides_reach_the_arm(self):
+        self.assertEqual(bench.sampling_fields('agent'), {})
+        self.assertEqual(bench.sampling_fields('greedy'), dict(temperature=0, top_p=1))
+        self.assertEqual(bench.sampling_fields('custom', temperature=1.0, top_p=0.95),
+                         dict(temperature=1.0, top_p=0.95))
+        with self.assertRaises(ValueError):
+            bench.sampling_fields('custom')
+        env = bench.arm_environment({}, 'glm', 'default',
+                                    ('QWEN_SERVE_GLM_SAMPLE_WORKERS=0',))
+        self.assertEqual(env['QWEN_SERVE_GLM_SAMPLE_WORKERS'], '0')
+        with self.assertRaises(ValueError):
+            bench.arm_environment({}, 'glm', 'default', ('broken',))
+
+    def test_compare_rejects_different_sampling(self):
+        with tempfile.TemporaryDirectory() as d:
+            a,b=Path(d)/'a',Path(d)/'b';a.mkdir();b.mkdir()
+            common=dict(family='glm',seed=42,window_seconds=90,metric='delivered',
+                        aggregate_tps=50,window_tokens=4500)
+            bench.dump(a/'summary.json',dict(common,sampling=dict(mode='agent',fields={})))
+            bench.dump(b/'summary.json',dict(common,sampling=dict(mode='greedy',
+                         fields=dict(temperature=0,top_p=1))))
+            with self.assertRaises(ValueError):bench.compare(a,b)
+
     def test_pressure1_is_flagged_and_pressure2_aborts_by_default(self):
         self.assertFalse(bench.thermal_exceeds_limit(0))
         self.assertFalse(bench.thermal_exceeds_limit(1))
@@ -112,6 +135,24 @@ class SteadyTests(unittest.TestCase):
             self.assertEqual(bench.compare(a,b)['throughput_ratio'],1.5)
             bench.dump(b/'summary.json',dict(common,window_seconds=90,aggregate_tps=75,window_tokens=6750))
             with self.assertRaises(ValueError):bench.compare(a,b)
+
+    def test_round_budget_matches_native_transition_and_reports_host(self):
+        row=dict(first=0.,end=10.,window_tokens=100,prompt=42,
+                 phases=dict(batch=dict(stepped_transitions=30,width_mean=2.0),
+                             prefill_ms=1000.0,decode_ms=3000.0))
+        lines=[dict(time=10.0,line='serve native: family=glm5_next transitions=30 transition_ms=200'),
+               dict(time=10.0,line='serve phases: family=glm5_next prefill_ms=1000.0 '
+                    'prefill_tokens=42 reused_tokens=0 boundary_ms=0.0 restore_ms=0.0 '
+                    'snapshot_capture_ms=0.0 ladder_tip_capture_ms=0.0')]
+        x=bench.round_budget([row],lines,0.,10.,0.1)
+        self.assertAlmostEqual(x['transition_s'],0.1)
+        self.assertAlmostEqual(x['prefill_s'],0.0)
+        self.assertEqual(x['rounds_est'],15)
+        self.assertAlmostEqual(x['transition_ms_per_round'],100/15)
+        self.assertAlmostEqual(x['host_ms_per_round'],100-100/15)
+        self.assertAlmostEqual(x['host_s'],(100-100/15)*15/1000)
+        self.assertEqual(x['coverage'],1.0)
+        self.assertEqual(bench.round_budget([],lines,0.,10.)['host_s'],0.0)
 
     def test_completed_empty_eos_is_not_a_request_pending_at_cutoff(self):
         k='response.output_text.delta'

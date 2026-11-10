@@ -246,11 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let (inc_v, new_v) = (read(&out_inc), read(&out_new));
     let bitwise = bytemuck::cast_slice::<f32, u8>(inc_v) == bytemuck::cast_slice::<f32, u8>(new_v);
-    let max_abs = inc_v
-        .iter()
-        .zip(new_v)
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0f32, f32::max);
+    let max_abs = qwen_llm::compare::report_max_abs_diff_f32(inc_v, new_v);
     let l2_ref = inc_v.iter().map(|v| v * v).sum::<f32>().sqrt();
     let l2_diff = inc_v
         .iter()

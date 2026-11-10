@@ -237,11 +237,12 @@ fn native_capabilities_match_actual_dispatch_and_abi() {
     assert_eq!(std::mem::offset_of!(NativeArgs, mode), 24);
     assert_eq!(std::mem::offset_of!(NativeArgs, clamp), 28);
     assert_eq!(ROUTE_STATUS_READY, 1);
-    // One-row instantiations plus the fused gate/up macro's one line and the
-    // two lines each of the two shape-specialized IQ2 macros.
+    // One-row instantiations plus the fused gate/up macro's one line, the two
+    // lines each of the two shape-specialized IQ2 macros, and the ragged down
+    // macro's one line.
     assert_eq!(
         SOURCE.matches("template [[host_name(").count(),
-        formats().len() + 1 + 4
+        formats().len() + 1 + 4 + 1
     );
     for dtype in formats() {
         if let Some(name) = fused_gate_up_name(dtype) {

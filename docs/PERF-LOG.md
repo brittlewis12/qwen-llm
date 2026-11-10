@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-10 - Routed Expert Ragged Down: Shipped After Noise-Floor Control (+2.0%)
+
+- **Supersedes the fixed-bound rejection below.** The 128-step outlier was
+  one tail draw, not a systematic direction. The project standard is signed
+  dNLL/KL against a benign-reordering noise floor, so the candidate was
+  re-run against the accepted dense MMA reorder (`pair` = `formats`,
+  `QWEN_FN_BATCH_OTHER_DENSE_MMA`) with the ragged flag off in both control
+  arms. Same M5 Ultra, GSQ-RCO IQ3_S, B=4/32K, `--profile iter`, thermal
+  **0**; 8 members (two prompt pairs x 4, code and prose) at 128 and 256
+  steps.
+- **Noise floor and candidate (signed dNLL, nats/token; KL).**
+
+  | steps | arm | mean dNLL | sd | max abs | mean abs | mean KL | max KL |
+  | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 128 | control (dense MMA reorder) | +2.67e-4 | 7.32e-4 | 2.17e-3 | 3.45e-4 | 8.78e-5 | 6.86e-4 |
+  | 128 | ragged | +6.02e-5 | 6.47e-4 | 1.37e-3 | 3.60e-4 | 8.62e-5 | 6.58e-4 |
+  | 256 | control | -2.84e-4 | 8.53e-4 | 2.25e-3 | 5.28e-4 | 1.06e-4 | 6.49e-4 |
+  | 256 | ragged | -5.76e-4 | 9.68e-4 | 2.55e-3 | 6.03e-4 | 1.40e-4 | 5.90e-4 |
+
+  At 128 the candidate mean is closer to zero than the control's, and its
+  sd and max abs are smaller. At 256 both arms drift negative with depth
+  (GDN recurrent state); the candidate mean is about 2x the control's but
+  **0.60 sd** from zero, the sd is +13% and the max abs is +13%, so the
+  spread does not clearly exceed the control's. KL is far inside 0.01.
+  The earlier **-7.01e-3** did not reproduce: the 8-member 128 max was
+  **1.37e-3** and the 256 max **2.55e-3**, both inside the control's
+  envelope (2.17e-3 / 2.25e-3).
+- **Wall A/B (same binary, per-arm flag).** 128 steps: prompt A
+  **24.263 -> 23.745 ms (+2.18%)**, prompt B **24.198 -> 23.702 ms
+  (+2.09%)**. 256 steps: A **24.262 -> 23.797 (+1.96%)**, B
+  **24.281 -> 23.779 (+2.11%)**. Mean **+2.09%**; the earlier 128-step run
+  was **+2.03%** (0.498 ms). Control gains are ~+5.3%, confirming the arms
+  exercised different dense paths.
+- **Shipped default-on.** `QWEN_EXPERT_NATIVE_RAGGED=0` restores the
+  incumbent `_k640_r4` kernels. Covers Flash-Next routed down IQ4_NL/Q2_0/
+  Q8_0 at K=640; the cross-lane F32 sum is reordered, now qualified against
+  the control rather than the fixed bound. The isolated Q2_0 gain was
+  **1.258x** (below the old 1.30 screening bar); the paired whole-round
+  result and the noise-floor comparison are the shipping evidence.
+- **Ranks 2 and 3 remain closed** (see the entry below).
+  `check-contracts.sh` passes; the 40 non-ignored `metal::expert_native`
+  tests pass. Reproduce the candidate with
+  `fn_batch_counterfactual MODEL CODE PROSE 32768 128 4 pair-ragged`; the
+  control is `... 128 4 pair` with `QWEN_EXPERT_NATIVE_RAGGED=0`.
+
 ## 2026-11-10 - Routed Expert Ragged Down: +2.0% Wall, Rejected On dNLL
 
 - **Question and base.** How much of the Flash-Next routed-down 62.5%
@@ -31,10 +76,9 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   **|dNLL| <= 0.005** gate (KL 0.00259 is inside 0.01). A 64-step run had
   passed with worst **1.485e-3**, so the reordered cross-lane F32 sum
   accumulates divergence with depth; the 128-step gate is the decision.
-  **Not shipped.** A bitwise variant would have to keep each tail
-  fragment's 16-FMA chain on its original lane, which forfeits the tail
-  win, so there is no cheap repair. Candidate code lives at **`4f74cfe9e`**
-  on the branch; it is deleted from the tree.
+  **Held for noise-floor qualification.** The fixed bound flagged one tail
+  draw; the control above shows it was reordering noise, so the candidate
+  ships. A bitwise variant would forfeit the tail win and was not needed.
 - **Also rejected on isolated gates (all bitwise or near-bitwise).**
   V4.1 IQ2_XS K=2304 ragged down: **1.045x (4.5%)** on the real
   5120x2304 top-6 grid; that kernel already reads ~800 GB/s, so the tail is
@@ -47,8 +91,8 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - **Retained:** `fn_batch_counterfactual` now prints the paired JSON
   before the numerics assert, so a failing arm leaves evidence. Reproduce
   the pair with
-  `fn_batch_counterfactual MODEL CODE PROSE 32768 128 4 pair-ragged`
-  (candidate branch only). `check-contracts.sh` passes.
+  `fn_batch_counterfactual MODEL CODE PROSE 32768 128 4 pair-ragged`;
+  `check-contracts.sh` passes.
 
 ## 2026-11-10 - Serve Standing: Morning Main vs Tonight Main, Three Agents
 

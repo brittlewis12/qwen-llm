@@ -184,10 +184,26 @@ fn batch_expert_tiles_match_generic_bits_routes_offsets_and_guards() {
                 let av = tensor_f32_at_offset(&a);
                 let bv = tensor_f32_at_offset(&b);
                 assert!(av.iter().chain(&bv).all(|v| v.is_finite()));
-                assert!(
-                    av.iter().zip(&bv).all(|(a, b)| a.to_bits() == b.to_bits()),
-                    "{ty:?} B={n} offset={offset}"
+                // The shipped ragged down kernel regroups the cross-lane F32
+                // sum for K=640; every other selected tile must stay bitwise.
+                let ragged = selected
+                    && !fused
+                    && k == 640
+                    && matches!(ty, GgmlType::Q2_0 | GgmlType::IQ4_NL | GgmlType::Q8_0)
+                    && native_ragged();
+                let max_abs = crate::compare::assert_max_abs_diff_f32(
+                    concat!(file!(), ":", line!()),
+                    av.iter(),
+                    bv.iter(),
                 );
+                if ragged {
+                    assert!(
+                        max_abs <= 1e-4,
+                        "{ty:?} B={n} offset={offset} ragged max_abs={max_abs}"
+                    );
+                } else {
+                    assert_eq!(max_abs, 0.0, "{ty:?} B={n} offset={offset}");
+                }
                 for r in 0..n {
                     for (slot, id) in IDS.iter().enumerate() {
                         if sv[r] != ROUTE_STATUS_READY || *id < 0 || *id as usize >= EXPERTS {

@@ -186,6 +186,38 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   shared stride path and the per-member path.
 - Raw: `~/qwen-runs/2026-11-10-glm-loop/{loop-ab-32k-final,loop-ab-48k-final,loop-smoke,loop-smoke2}.json*`;
   serve `~/qwen-runs/2026-11-10-serve-loop/glm-loop-{pair-25s,pair-light,smoke,smoke2}`.
+## 2026-11-10 - V4.1 Batched GPU Sampling Shipped: +7-9% Native, Serve Bubble Gone
+
+- **Shipped default-on.** Batches of width >= 2 in `qwen serve` now call
+  `Forward::step_batch_sampled`: one forward with a per-member logit-read mask,
+  then the fast Gumbel sampler in a follow-up command, and a token-only
+  readback. Fast-eligible members are T>0, top_k=0, top_p=1, min_p=0 with **no
+  explicit seed**; every other member stays on exact host sampling, so explicit
+  seeds are token-identical to the old path. Width 1 stays serial. No pipelined
+  loop.
+- **Native A/B, same binary, released preset, 32K, restored prefills**
+  (`v41_batch_gpu_sampling_ab`, warm 16, 32 steps): B=2 **22.55 -> 21.08 ms
+  (+6.98%)**, B=3 **27.62 -> 25.43 (+8.58%)**, B=4 **35.08 -> 32.26
+  (+8.73%)**. The gain is nearly the removed host-sampling term (1.46 / 2.03 /
+  3.19 ms). Exact GPU arm: **0 token mismatches** vs host at every width;
+  greedy exact is bitwise (0 mismatches). Fast mismatches are expected (it is
+  distribution-exact, not token-identical).
+- **The exact GPU sampler is not a throughput lever:** B=3 27.75 ms (-0.5%),
+  B=4 36.86 (-5%), because its ~0.74 ms/member replaces host sampling. Only the
+  fast sampler ships on the hot path; exact stays the correctness/seed arm.
+- **Three-agent serve ABBA (25 s, agent defaults, avg width 2.97):** AB
+  **95.80 -> 103.12 tps (+7.6%)**, `host_ms_per_round` **1.092 -> 0.000**,
+  transition **27.29 -> 26.96 ms**; BA **106.40 -> 100.56 (-5.5%)** but
+  reference ran thermal 0 and candidate thermal 1. Order spread 13.1%, opposite
+  directions: treat the serve wall win as inside thermal noise and the bubble
+  removal as the robust signal. Serve's sampling pool already overlaps most
+  host sampling, so the serve delta is ~0.3-0.6 ms, not the native ~2 ms.
+- **Rollbacks:** `QWEN_SERVE_V41_GPU_SAMPLE=0` restores the host batch path;
+  `QWEN_FAST_SAMPLER=0` / `QWEN_GPU_SAMPLER_EXACT=1` forces exact. Fast-sampler
+  pipelines are warmed at startup. Tests: fast-sampler 4/4 on M5; new scheduler
+  test drives the sampled path against serial greedy; V4.1 serve suite 91/91.
+- Full write-up: `docs/bench/2026-11-10-v41-batched-gpu-sampling.md`.
+
 ## 2026-11-10 - V4.1 Fast Gumbel Sampler: 0.016-0.020 ms/Member, Tests Pass
 
 - **New sampler; not yet wired into the V4.1 loop.** Branch `perf/v41-batch-loop`

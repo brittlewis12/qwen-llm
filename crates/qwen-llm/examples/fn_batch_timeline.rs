@@ -280,6 +280,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let single_stats = runners[0].generate_gpu_tokens(&mut single_sampler, steps, &[], |_| true)?;
     let single_wall = single_started.elapsed().as_secs_f64() * 1e3;
 
+    // Pipelined B=1 with the host CPU saturated.
+    let single_loaded = if load > 0 {
+        restore(&mut runners[..1], &snapshots[..1], &prefill_logits[..1]);
+        let mut sampler = Sampler::new(config).unwrap();
+        let stop = AtomicBool::new(false);
+        let (stats, wall) = std::thread::scope(|scope| {
+            let _guard = StopOnDrop(&stop);
+            for _ in 0..load {
+                let stop = &stop;
+                scope.spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                });
+            }
+            let _qos = GpuThreadQos::enter_if(qos_on);
+            let started = Instant::now();
+            let stats = runners[0]
+                .generate_gpu_tokens(&mut sampler, steps, &[], |_| true)
+                .unwrap();
+            let wall = started.elapsed().as_secs_f64() * 1e3;
+            stop.store(true, Ordering::Relaxed);
+            (stats, wall)
+        });
+        Some((stats, wall))
+    } else {
+        None
+    };
+
     // Pipelined B=3 with the host CPU saturated, reproducing the build-load
     // conditions under which the earlier A/B regressed.
     let loaded = if load > 0 {
@@ -381,6 +410,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "round_ms": single_wall / steps as f64,
                 "timeline": timeline_json(&single_stats.timeline),
             },
+            "single_pipelined_loaded": single_loaded.as_ref().map(|(stats, wall)| serde_json::json!({
+                "wall_ms": wall,
+                "gpu_ms_total": stats.gpu_ms,
+                "encode_ms_total": stats.encode_cpu_ms,
+                "completion_wait_ms_total": stats.completion_wait_ms,
+                "round_ms": wall / steps as f64,
+                "timeline": timeline_json(&stats.timeline),
+            })),
             "batch_pipelined_loaded": loaded_json,
         })
     );

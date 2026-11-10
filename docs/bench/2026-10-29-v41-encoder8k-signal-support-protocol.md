@@ -1,15 +1,14 @@
-# V41 library-test signal support: source-only component
+# V41 library-test signal support: test-only component
 
-Baseline: `1bef2bb3`. This component extracts only
-`crates/qwen-llm/src/metal/test_cancellation.rs` from reviewed source `2258eba6`,
-blob `867e5c6f9d4e7cb46c3ca51c30ccbd6efda9a7cd`, byte-for-byte. Historical CPU
-checks of that source are not fresh evidence for this composition. The base is
-not fully CPU-qualified, and this component has not been Rust-built or executed.
+Landed with the decoder unwind-ownership repair on current main. The component
+is `crates/qwen-llm/src/metal/test_cancellation.rs`, extracted from reviewed
+source `2258eba6`, blob `867e5c6f9d4e7cb46c3ca51c30ccbd6efda9a7cd`, byte-for-byte.
+It is Rust-built, and its two CPU controls pass in the landing qualification.
 
 The module is exposed only as `#[cfg(test)] pub(crate) mod test_cancellation`.
 There is no automatic handler installation, production CLI handler change,
-benchmark driver, or model/context call. Fixed-8K admission/execution policy,
-kernels, math, scheduling, and the existing unfrozen performance gate are unchanged.
+benchmark driver, or model/context call. No admission, execution policy, kernel,
+math, scheduling, or performance gate is changed.
 
 ## Helper contract
 
@@ -53,12 +52,12 @@ work. Source inspection, formatting, and Python checks do not execute them.
 
 ## Remaining gate
 
-Compose the separately reviewed base fixture correction before Rust qualification,
-then review/freeze this source and run the two CPU subprocess controls under the
-ordinary unleased runner. The inherited GPU-FD refusal, offline/locked Cargo,
-exact classifications, and exclusion of GPU tests remain unchanged.
+The two CPU subprocess controls ran under the ordinary unleased runner in the
+landing qualification; see the unwind-ownership note. The inherited GPU-FD
+refusal, offline/locked Cargo, exact classifications, and exclusion of GPU tests
+remain unchanged.
 
-No signal has been sent by this component's source checks. No model, device
-admission, GPU cancellation/drain, numerical, or performance qualification is
-claimed. A future GPU harness still needs its own signal/resource ownership and
-descriptor-safe checked-drain review and proof; none is added or queued here.
+No model, device admission, GPU cancellation/drain, numerical, or performance
+qualification is claimed. A future GPU harness still needs its own
+signal/resource ownership and descriptor-safe checked-drain review and proof;
+none is added or queued here.

@@ -1,20 +1,18 @@
 # Decoder submitted-command unwind ownership
 
-## Source-only scope
+## Landing scope
 
-Base: `444a32bccfe05fec951f9eb8cc53592724734092`, tree
-`4481a0bf2aa1defc907ca315e7e892498702dad5`.
+Landed on current main together with the test-only signal-support module
+(`metal::test_cancellation`). The production repair and its fixtures build, and
+the CPU controls below pass. The native fault selectors remain ignored; their
+execution is still owed.
 
-This repair is source-only and unbuilt. No Rust build, typecheck, test discovery,
-CPU Rust test, signal test, Metal context, GPU test, model run, lease, install,
-SSH, or publication is part of this change. Formatting, source review, inventory
-validation and Git whitespace/staged-diff checks are the available evidence.
-All actual fault execution and integration qualification remain owed.
-
-The privately composed fixed-request qualification is not evidence for this
-repair. No fixed-request semantics, defaults, math, admission, retention,
-dispatch order, group depth, status precedence, scheduling, shaders, FFN,
-Engram, prefetch, or pipeline selection are changed.
+The original source-only checkpoint was `3bd0e8d90`/`59d6d73a1` on base
+`444a32bcc`. This landing does not include the experimental fixed-8K CED request
+protocol: main's exact cold-serve CED design supersedes it. No fixed-request
+semantics, defaults, math, admission, retention, dispatch order, group depth,
+status precedence, scheduling, shaders, FFN, Engram, prefetch, or pipeline
+selection are changed.
 
 ## Ownership repair
 
@@ -137,13 +135,28 @@ The older batch fault checkpoint names live in the serial
 They are not claimed as pipeline coverage. Existing encoder ignored fixtures
 and their drain observations are retained; their rerun is still owed too.
 
+## Landing CPU qualification
+
+Qualified on the rebased landing tree on an M4 Max with the repo test profile
+(`cargo test`), no GPU lease and no model:
+
+- `release_trace_rejects_missing_duplicate_and_late_terminal_waits_cpu` passes.
+- `metal::test_cancellation::tests::{signals_wait_for_release_cpu,
+  unwind_restores_handlers_cpu}` pass.
+- The full qwen-llm library suite passes: 2,473 passed, 0 failed, 678 ignored.
+- `scripts/check-contracts.sh` passes, including the exact acceptance inventory,
+  which now classifies the new CPU and GPU selectors.
+
+The three `default_pipeline_*_gpu` selectors remain `#[ignore]`; native fault
+execution, checked signal restoration and healthy follow-ups were not run here.
+
 ## Integration still owed
 
-After source reviews and composition with the independent support/harness
-lanes: unleased builds/typechecks, exact inventory discovery, host-only
-acceptance, then separately authorized bounded GPU fault execution with debug
-validation, checked signal restoration and healthy follow-ups. No actual
-execution result is asserted by this protocol.
+The unleased build/typecheck, exact inventory discovery and host-only CPU
+acceptance above are done for this landing. Still owed: separately authorized
+bounded native GPU fault execution with debug validation, checked signal
+restoration and healthy follow-ups. No actual GPU fault-execution result is
+asserted here.
 
 Separate follow-up: production `gpu_step.rs::submit_split` has an analogous raw
 committed-vector unwind gap. It is unchanged and not covered by this repair;

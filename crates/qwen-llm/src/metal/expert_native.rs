@@ -95,6 +95,26 @@ fn iq2_spec() -> bool {
     *SPEC.get_or_init(|| std::env::var(EXPERT_NATIVE_IQ2_SPEC_ENV).as_deref() != Ok("0"))
 }
 
+crate::env_flag!(
+    /// Ragged-tail Flash-Next expert-down kernel (IQ4_NL/Q2_0/Q8_0 at K=640, where K/16=40 is not a multiple of 32). Runs one full 32-fragment pass, then spreads the 8-fragment tail over all 32 lanes as one (fragment, channel) dot each instead of a full four-channel pass on eight active lanes. Per-channel tails stay ascending, but the cross-lane F32 reduction regroups the sum, so this is not bitwise with the incumbent and is gated by dNLL/KL. Zero restores the incumbent `_k640_r4` kernels.
+    default_on native_ragged, "QWEN_EXPERT_NATIVE_RAGGED"
+);
+
+/// Ragged selection with the whole-round `pair-ragged` screen override, and an
+/// engagement counter the harness can assert on.
+fn native_ragged_selected() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    {
+        let selected = crate::metal::fn_batch_probe::axis("ragged", native_ragged());
+        if selected {
+            crate::metal::fn_batch_probe::observe("native_ragged", 1);
+        }
+        return selected;
+    }
+    #[cfg(not(feature = "perf-ablations"))]
+    native_ragged()
+}
+
 /// Output channels per simdgroup of the shape-specialized IQ2_XS / IQ2_S
 /// kernels (`kernel_expert_native_{,gate_up_}iq2_{xs,s}_f32_k*_r*`).
 const IQ2_SPEC_ROWS: usize = 4;
@@ -226,11 +246,30 @@ fn batch_tile_pipeline(
         (GgmlType::IQ4_XS, 2560, 640, true) => {
             Some(("kernel_expert_native_gate_up_iq4_xs_f32_k2560_r4", 8))
         }
-        (GgmlType::Q2_0, 640, 2560, false) => Some(("kernel_expert_native_q2_0_f32_k640_r4", 16)),
-        (GgmlType::IQ4_NL, 640, 2560, false) => {
-            Some(("kernel_expert_native_iq4_nl_f32_k640_r4", 16))
-        }
-        (GgmlType::Q8_0, 640, 2560, false) => Some(("kernel_expert_native_q8_0_f32_k640_r4", 16)),
+        (GgmlType::Q2_0, 640, 2560, false) => Some((
+            if native_ragged_selected() {
+                "kernel_expert_native_q2_0_f32_ragged_k640_r4"
+            } else {
+                "kernel_expert_native_q2_0_f32_k640_r4"
+            },
+            16,
+        )),
+        (GgmlType::IQ4_NL, 640, 2560, false) => Some((
+            if native_ragged_selected() {
+                "kernel_expert_native_iq4_nl_f32_ragged_k640_r4"
+            } else {
+                "kernel_expert_native_iq4_nl_f32_k640_r4"
+            },
+            16,
+        )),
+        (GgmlType::Q8_0, 640, 2560, false) => Some((
+            if native_ragged_selected() {
+                "kernel_expert_native_q8_0_f32_ragged_k640_r4"
+            } else {
+                "kernel_expert_native_q8_0_f32_k640_r4"
+            },
+            16,
+        )),
         _ => None,
     }
 }

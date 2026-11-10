@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-10 - Flash-Next Standing: Total Batch-Work Gain On The Serve Path
+
+- Base **main `8132edc97`**, M5 Ultra, GSQ-RCO IQ3_S, **release** profile, one
+  binary for both arms. Path is what serve runs: B=1 GPU token loop; B=2..4 the
+  device-input step plus batched GPU sampling (`step_tokens`, the batch-loop
+  lane's probe from `1cc4b5093`), released Qwen3.8 preset (T=1.0, top_k=20,
+  top_p=0.95). `FN_AB_RELEASED_ONLY=1` skips the probe's greedy phase.
+- Default = everything on. Off = all of today's batch work disabled:
+  `QWEN_FN_GDN_BATCH_MEMBERS=0 QWEN_FN_MOE_BATCH_TOPK=0
+  QWEN_FN_MOE_BATCH_PROJECTIONS=0 QWEN_FN_MOE_BATCH_SHARED=0
+  QWEN_FN_ZERO_ONE_HC_BATCH=0 QWEN_FN_BATCH_BF16_MIXER=0
+  QWEN_FN_BATCH_GPU_INPUTS=0 QWEN_SERVE_FN_BATCH_GPU_SAMPLE=0`, which selects
+  the old host-logits/host-sampling step. Arms and width order balanced; the
+  probe reports the GPU-sampling cell for default and the host-sampling cell
+  for off.
+- 32K, 48 samples (B=2..4):
+
+  | Arm | B=1 | B=2 | B=3 | B=4 | F ms | m ms/row |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | default | 12.419 / 80.5 | 19.570 / 102.2 | 22.720 / 132.0 | **26.036 / 153.6** | 13.076 | **3.233** |
+  | off | 12.700 / 78.7 | 22.660 / 88.3 | 28.596 / 104.9 | 33.880 / 118.1 | 11.549 | 5.610 |
+
+  B4 round time **-23.15%**, aggregate throughput **+30.13%**; B3 +25.86%,
+  B2 +15.79% throughput. **m 5.610 -> 3.233.**
+- 48K, 24 samples (B=2..4):
+
+  | Arm | B=1 | B=2 | B=3 | B=4 | F ms | m ms/row |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | default | 12.643 / 79.1 | 19.229 / 104.0 | 22.376 / 134.1 | **25.466 / 157.1** | 13.001 | **3.119** |
+  | off | 13.162 / 76.0 | 21.630 / 92.5 | 27.103 / 110.7 | 32.353 / 123.6 | 10.945 | 5.361 |
+
+  B4 round time **-21.29%**, throughput **+27.05%**; B3 +21.13%, B2 +12.49%.
+  **m 5.361 -> 3.119.**
+- B=1 is the same GPU token loop in both arms: 12.4-12.7 ms at 32K and
+  12.6-13.2 ms at 48K, i.e. unchanged within the loop's ~2-4% spread. The
+  gain is entirely B>=2. The F intercept rises because the win grows with
+  width; m is the right summary.
+- **Hygiene.** Thermal 0-1 on every accepted arm; thermal-2 arms (one 32K
+  default probe, one B1 loop per depth) were rerun or replaced by the clean
+  replicate. `check-contracts.sh` passes.
+
 ## 2026-11-10 - Flash-Next BF16 Mixer Batch; Down Retile Negative; Lane Done
 
 - Base **main `bb3fc874c`** (device-input batch step + Flash-Next batched GPU

@@ -6312,5 +6312,12 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Scripted fake token-returning batch step: the Driver consumes GPU-sampled tokens without host sampling and keeps the token/transition lifecycle; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "metal::token_feedback::tests::gpu_sampler_unbounded_matches_host_across_distributions_and_uniforms",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal unbounded top-k ordering, weights, block scan and sampling against the CPU sampler across flat, peaked, tied, signed-zero and sparse-infinity distributions and many uniforms; requires a Metal context."
   }
 ]

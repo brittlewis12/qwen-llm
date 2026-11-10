@@ -81,3 +81,198 @@ kernel void kernel_token_sample_sorted(
     for(uint i=0;i<limit;++i){float v=sorted[i].value;float w=positive_infinity?(as_type<uint>(v)==0x7f800000u?1.f:0.f):exp((v-maximum)/a.temperature);float y=w-correction,t=cumulative+y;correction=(t-cumulative)-y;cumulative=t;if(target<cumulative || i+1==limit){token[0]=int(sorted[i].id);return;}}
     token[0]=INT_MIN;
 }
+
+// Host-order radix path for unbounded top-k. `token_descending_bits` is the
+// host's `descending_logit_bits`; a stable ascending sort of the full 64-bit
+// key (bits, then token id) gives descending logit with ascending token ties.
+uint token_descending_bits(float v) {
+    uint b=as_type<uint>(v);
+    if ((b&0x7fffffffu)>0x7f800000u) return 0u;
+    uint ascending=(b&0x80000000u)?~b:(b|0x80000000u);
+    return ~ascending;
+}
+struct token_radix_args {
+    uint n; uint shift; uint buckets; uint mask; uint groups; uint pad0; uint pad1; uint pad2;
+};
+kernel void kernel_token_radix_build(
+    device const float *logits [[buffer(0)]],
+    device ulong *keys [[buffer(1)]],
+    constant token_radix_args &a [[buffer(2)]],
+    uint i [[thread_position_in_grid]]) {
+    if(i>=a.n)return;
+    keys[i]=(ulong(token_descending_bits(logits[i]))<<32)|ulong(i);
+}
+// One threadgroup per 256-element chunk: shared histogram, written to device.
+kernel void kernel_token_radix_chunk_hist(
+    device const ulong *keys [[buffer(0)]],
+    device uint *chunk_hist [[buffer(1)]],
+    constant token_radix_args &a [[buffer(2)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup atomic_uint hist[2048];
+    for(uint b=tid;b<a.buckets;b+=256)atomic_store_explicit(&hist[b],0u,memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint i=group*256+tid;
+    if(i<a.n){uint digit=uint((keys[i]>>a.shift)&ulong(a.mask));atomic_fetch_add_explicit(&hist[digit],1u,memory_order_relaxed);}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for(uint b=tid;b<a.buckets;b+=256)chunk_hist[group*a.buckets+b]=atomic_load_explicit(&hist[b],memory_order_relaxed);
+}
+// Per-bucket running base across chunks; totals feed the bucket prefix.
+kernel void kernel_token_radix_chunk_base(
+    device const uint *chunk_hist [[buffer(0)]],
+    device uint *chunk_base [[buffer(1)]],
+    device uint *bucket_totals [[buffer(2)]],
+    constant token_radix_args &a [[buffer(3)]],
+    uint b [[thread_position_in_grid]]) {
+    if(b>=a.buckets)return;
+    uint sum=0;
+    for(uint g=0;g<a.groups;++g){chunk_base[g*a.buckets+b]=sum;sum+=chunk_hist[g*a.buckets+b];}
+    bucket_totals[b]=sum;
+}
+kernel void kernel_token_radix_bucket_prefix(
+    device const uint *bucket_totals [[buffer(0)]],
+    device uint *bucket_offsets [[buffer(1)]],
+    constant token_radix_args &a [[buffer(2)]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    if(tid!=0)return;
+    uint sum=0;
+    for(uint b=0;b<a.buckets;++b){bucket_offsets[b]=sum;sum+=bucket_totals[b];}
+}
+// Stable scatter: thread 0 assigns each chunk element its in-bucket rank in
+// input order, so equal logits keep ascending token id across passes.
+kernel void kernel_token_radix_stable_scatter(
+    device const ulong *keys [[buffer(0)]],
+    device ulong *out [[buffer(1)]],
+    device const uint *chunk_base [[buffer(2)]],
+    device const uint *bucket_offsets [[buffer(3)]],
+    constant token_radix_args &a [[buffer(4)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup atomic_uint hist[2048];
+    threadgroup uint rank[256];
+    for(uint b=tid;b<a.buckets;b+=256)atomic_store_explicit(&hist[b],0u,memory_order_relaxed);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint base=group*256;
+    if(tid==0){
+        uint len=min(256u,a.n-base);
+        for(uint j=0;j<len;++j){uint digit=uint((keys[base+j]>>a.shift)&ulong(a.mask));rank[j]=atomic_fetch_add_explicit(&hist[digit],1u,memory_order_relaxed);}
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint i=base+tid;
+    if(i<a.n){uint digit=uint((keys[i]>>a.shift)&ulong(a.mask));uint pos=bucket_offsets[digit]+chunk_base[group*a.buckets+digit]+rank[tid];out[pos]=keys[i];}
+}
+kernel void kernel_token_radix_pairs(
+    device const ulong *keys [[buffer(0)]],
+    device token_pair *pairs [[buffer(1)]],
+    constant token_radix_args &a [[buffer(2)]],
+    uint i [[thread_position_in_grid]]) {
+    if(i>=a.n)return;
+    ulong k=keys[i];
+    uint d=uint(k>>32),ascending=~d;
+    uint bits=(ascending&0x80000000u)?(ascending&0x7fffffffu):~ascending;
+    pairs[i]=token_pair{as_type<float>(bits),uint(k)};
+}
+
+struct token_weight_args { uint n; float temperature; float min_p; uint pad; };
+// Parallel weight pass: the exp is the expensive part of sampler-v1's scan.
+// `raw` is the pre-temperature weight for the min-p filter, matching the host.
+kernel void kernel_token_weight_sorted(
+    constant token_weight_args &a [[buffer(0)]],
+    device const token_pair *sorted [[buffer(1)]],
+    device float *weights [[buffer(2)]],
+    uint i [[thread_position_in_grid]]) {
+    if(i>=a.n)return;
+    float v=sorted[i].value,maximum=sorted[0].value;
+    uint mb=as_type<uint>(maximum);
+    if((mb&0x7fffffffu)>0x7f800000u || mb==0xff800000u){weights[i]=0.f;return;}
+    bool pi=mb==0x7f800000u;
+    float raw=pi?(as_type<uint>(v)==0x7f800000u?1.f:0.f):exp(v-maximum);
+    if(a.min_p>0.f && raw<a.min_p){weights[i]=0.f;return;}
+    weights[i]=pi?raw:exp((v-maximum)/a.temperature);
+}
+// Same sequential compensated scan and tie order as kernel_token_sample_sorted,
+// but over precomputed weights, so the single thread only adds.
+kernel void kernel_token_sample_weighted(
+    constant token_sample_args &a [[buffer(0)]],
+    device const token_pair *sorted [[buffer(1)]],
+    device const float *weights [[buffer(2)]],
+    device int *token [[buffer(3)]],
+    uint tid [[thread_position_in_grid]]) {
+    if(tid!=0)return;
+    float maximum=sorted[0].value;
+    uint maximum_bits=as_type<uint>(maximum);
+    if((maximum_bits&0x7fffffffu)>0x7f800000u){token[0]=-int(sorted[0].id)-1;return;}
+    if(maximum_bits==0xff800000u){token[0]=INT_MIN;return;}
+    uint n=a.n;
+    float total=0.f,correction=0.f;
+    for(uint i=0;i<n;++i){float y=weights[i]-correction,t=total+y;correction=(t-total)-y;total=t;}
+    float retained=0.f;uint limit=n;correction=0.f;
+    if(a.top_p<1.f){for(uint i=0;i<n;++i){float y=weights[i]-correction,t=retained+y;correction=(t-retained)-y;retained=t;if(retained>=a.top_p*total){limit=i+1;break;}}}
+    else retained=total;
+    float target=a.uniform*retained,cumulative=0.f;correction=0.f;
+    for(uint i=0;i<limit;++i){float y=weights[i]-correction,t=cumulative+y;correction=(t-cumulative)-y;cumulative=t;if(target<cumulative || i+1==limit){token[0]=int(sorted[i].id);return;}}
+    token[0]=INT_MIN;
+}
+
+struct token_block_args { uint n; uint block; uint blocks; uint pad; };
+struct token_sample_block_args { uint n; float top_p; float uniform; uint block; uint blocks; uint pad; };
+// One thread per block; Kahan within the block preserves the sequential order
+// locally, and the block prefix below preserves it across blocks.
+kernel void kernel_token_block_sums(
+    constant token_block_args &a [[buffer(0)]],
+    device const float *weights [[buffer(1)]],
+    device float *block_sums [[buffer(2)]],
+    uint block [[thread_position_in_grid]]) {
+    if(block>=a.blocks)return;
+    uint start=block*a.block,end=min(start+a.block,a.n);
+    float sum=0.f,correction=0.f;
+    for(uint i=start;i<end;++i){float y=weights[i]-correction,t=sum+y;correction=(t-sum)-y;sum=t;}
+    block_sums[block]=sum;
+}
+kernel void kernel_token_block_prefix(
+    constant token_block_args &a [[buffer(0)]],
+    device const float *block_sums [[buffer(1)]],
+    device float *block_prefix [[buffer(2)]],
+    device float *total [[buffer(3)]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    if(tid!=0)return;
+    float sum=0.f,correction=0.f;
+    for(uint b=0;b<a.blocks;++b){block_prefix[b]=sum;float y=block_sums[b]-correction,t=sum+y;correction=(t-sum)-y;sum=t;}
+    total[0]=sum;
+}
+// Find the top-p limit and the categorical draw by binary-searching the block
+// prefix and scanning only the selected block.
+kernel void kernel_token_sample_blocks(
+    constant token_sample_block_args &a [[buffer(0)]],
+    device const token_pair *sorted [[buffer(1)]],
+    device const float *weights [[buffer(2)]],
+    device const float *block_sums [[buffer(3)]],
+    device const float *block_prefix [[buffer(4)]],
+    device const float *total [[buffer(5)]],
+    device int *token [[buffer(6)]],
+    uint tid [[thread_position_in_grid]]) {
+    if(tid!=0)return;
+    float maximum=sorted[0].value;
+    uint maximum_bits=as_type<uint>(maximum);
+    if((maximum_bits&0x7fffffffu)>0x7f800000u){token[0]=-int(sorted[0].id)-1;return;}
+    if(maximum_bits==0xff800000u){token[0]=INT_MIN;return;}
+    float tot=total[0];
+    if(!(tot>0.f) || !isfinite(tot)){token[0]=INT_MIN;return;}
+    float retained=tot;uint limit=a.n;
+    if(a.top_p<1.f){
+        float target=a.top_p*tot;
+        uint lo=0,hi=a.blocks;
+        while(lo+1<hi){uint mid=(lo+hi)/2;if(block_prefix[mid]<=target)lo=mid;else hi=mid;}
+        uint start=lo*a.block,end=min(start+a.block,a.n);
+        float cum=block_prefix[lo],correction=0.f;uint i=start;
+        for(;i<end;++i){float y=weights[i]-correction,t=cum+y;correction=(t-cum)-y;cum=t;if(cum>=target)break;}
+        limit=min(i+1,a.n);retained=cum;
+    }
+    float target=a.uniform*retained;
+    uint lo=0,hi=a.blocks;
+    while(lo+1<hi){uint mid=(lo+hi)/2;if(block_prefix[mid]<=target)lo=mid;else hi=mid;}
+    uint start=lo*a.block,end=min(start+a.block,a.n);
+    float cum=block_prefix[lo],correction=0.f;
+    for(uint i=start;i<end;++i){float y=weights[i]-correction,t=cum+y;correction=(t-cum)-y;cum=t;if(target<cum || i+1==limit){token[0]=int(sorted[i].id);return;}}
+    token[0]=INT_MIN;
+}

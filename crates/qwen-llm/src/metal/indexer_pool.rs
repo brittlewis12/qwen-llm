@@ -195,9 +195,10 @@ pub fn encode_indexer_append_members(
     enc.set_tensor(3, norm_weight);
     enc.set_tensor(4, norm_bias);
     enc.set_tensor(5, ape);
-    for (slot, i) in (6..=13).zip(0..4) {
+    for i in 0..4 {
         let (pending, pooled, _) = states[i.min(rows - 1)];
-        enc.set_tensor(slot, if slot % 2 == 0 { pending } else { pooled });
+        enc.set_tensor(6 + 2 * i, pending);
+        enc.set_tensor(7 + 2 * i, pooled);
     }
     enc.set_threadgroup_memory(0, 4 * std::mem::size_of::<f32>());
     enc.dispatch(

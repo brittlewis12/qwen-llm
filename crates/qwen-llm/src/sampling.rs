@@ -325,6 +325,17 @@ impl Sampler {
         (rng.next_unit_f64() as f32).min(f32::from_bits(0x3f7fffff))
     }
 
+    /// Peek a whole request-local draw as the seed of a fast GPU sampler.
+    /// Advances the same stream as [`Self::gpu_uniform`]; pair it with
+    /// [`Self::commit_gpu_draw`] so a discarded command consumes nothing.
+    pub fn gpu_seed(&self, ahead: usize) -> u64 {
+        let mut rng = self.rng.clone();
+        for _ in 0..ahead {
+            rng.next_u64();
+        }
+        rng.next_u64()
+    }
+
     pub(crate) fn commit_gpu_draw(&mut self) {
         if self.config.temperature > 0.0 {
             self.gpu_sampling_used = true;

@@ -831,6 +831,26 @@ impl State {
     }
 }
 
+/// Per-member sampling choice for [`Forward::step_batch_sampled`].
+pub enum BatchSampleMode<'a> {
+    /// Exact GPU sampler; its uniform comes from the member's host sampler.
+    Exact {
+        sampler: &'a crate::metal::GpuTokenSampler,
+    },
+    /// Fast Gumbel-max sampler for the unforced agent preset. The seed is one
+    /// raw draw from the member's host sampler stream, advancing it once.
+    Fast { temperature: f32 },
+    /// Leave this member's logits for the caller to sample on the host.
+    Host,
+}
+
+/// One member's result from [`Forward::step_batch_sampled`]: a device-sampled
+/// token, or the logits a [`BatchSampleMode::Host`] member deferred.
+pub enum BatchMemberOutput {
+    Token(u32),
+    Logits(Vec<f32>),
+}
+
 impl<'a> Forward<'a> {
     pub fn prefill_chunk_rows(&self) -> usize {
         self.prefill_rows
@@ -1009,6 +1029,101 @@ impl<'a> Forward<'a> {
         tokens: &[u32],
         cancel: Option<&AtomicBool>,
     ) -> Result<Vec<Vec<f32>>> {
+        let out = self.step_batch_with(states, tokens, cancel, None)?;
+        Ok(out
+            .into_iter()
+            .map(|logits| logits.expect("plain step reads every member's logits"))
+            .collect())
+    }
+
+    /// Forward without reading logits for device-sampled members, sample them
+    /// in a follow-up command, and return one result per member. Device-sampled
+    /// logits never leave the GPU; only tokens are read back. A `Host` member
+    /// keeps its logits and does not advance its sampler.
+    pub fn step_batch_sampled(
+        &self,
+        states: &mut [&mut State],
+        tokens: &[u32],
+        host: &mut [&mut crate::sampling::Sampler],
+        modes: &[BatchSampleMode<'_>],
+        cancel: Option<&AtomicBool>,
+    ) -> Result<Vec<BatchMemberOutput>> {
+        op::require(
+            !states.is_empty()
+                && states.len() == tokens.len()
+                && states.len() == host.len()
+                && states.len() == modes.len(),
+            "batched sampling needs one sampler per state",
+        )?;
+        let read: Vec<bool> = modes
+            .iter()
+            .map(|mode| matches!(mode, BatchSampleMode::Host))
+            .collect();
+        let seeds: Vec<u64> = host
+            .iter()
+            .zip(modes)
+            .map(|(sampler, mode)| match mode {
+                BatchSampleMode::Fast { .. } => sampler.gpu_seed(0),
+                _ => 0,
+            })
+            .collect();
+        let uniforms: Vec<f32> = host
+            .iter()
+            .zip(modes)
+            .map(|(sampler, mode)| match mode {
+                BatchSampleMode::Exact { .. } => sampler.gpu_uniform(0),
+                _ => 0.0,
+            })
+            .collect();
+        let logits = self.step_batch_with(states, tokens, cancel, Some(&read))?;
+        let mut workspaces: Vec<_> = states
+            .iter_mut()
+            .map(|state| state.gpu_step.as_mut().expect("checked GPU step state"))
+            .collect();
+        let sampled =
+            gpu_step::batch::sample_batch_tokens(self, &mut workspaces, modes, &seeds, &uniforms);
+        drop(workspaces);
+        // The forward already advanced every sequence; a sampling failure is a
+        // post-start failure, so poison them rather than let a caller re-forward.
+        let sampled = match sampled {
+            Ok(sampled) => sampled,
+            Err(error) => {
+                for state in states.iter_mut() {
+                    state.phase = StatePhase::Poisoned;
+                }
+                return Err(error);
+            }
+        };
+        for (sampler, mode) in host.iter_mut().zip(modes) {
+            if matches!(
+                mode,
+                BatchSampleMode::Fast { .. } | BatchSampleMode::Exact { .. }
+            ) {
+                sampler.commit_gpu_draw();
+            }
+        }
+        let mut out = Vec::with_capacity(modes.len());
+        for ((&read, sampled), logits) in read.iter().zip(sampled).zip(logits) {
+            if read {
+                out.push(BatchMemberOutput::Logits(
+                    logits.expect("host member read its logits"),
+                ));
+            } else {
+                out.push(BatchMemberOutput::Token(
+                    sampled.expect("device member sampled a token"),
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    fn step_batch_with(
+        &self,
+        states: &mut [&mut State],
+        tokens: &[u32],
+        cancel: Option<&AtomicBool>,
+        read_logits: Option<&[bool]>,
+    ) -> Result<Vec<Option<Vec<f32>>>> {
         op::require(
             !states.is_empty() && states.len() == tokens.len(),
             "batched decode needs one token per state",
@@ -1060,7 +1175,14 @@ impl<'a> Forward<'a> {
             .collect();
         // As in `execute_token`: completed commands must not outlive the step.
         let logits = objc2::rc::autoreleasepool(|_| {
-            gpu_step::batch::run_batch(self, &mut workspaces, &inputs, &scratch, cancel)
+            gpu_step::batch::run_batch(
+                self,
+                &mut workspaces,
+                &inputs,
+                &scratch,
+                cancel,
+                read_logits,
+            )
         })?;
         for (state, (_, _, _, next)) in states.iter_mut().zip(steps) {
             state.addresses = next;

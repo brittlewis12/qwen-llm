@@ -860,10 +860,12 @@ pub(in super::super) fn run_batch(
     inputs: &[BatchInput<'_>],
     scratch: &BatchScratch,
     cancel: Option<&AtomicBool>,
-) -> Result<Vec<Vec<f32>>> {
+    read_logits: Option<&[bool]>,
+) -> Result<Vec<Option<Vec<f32>>>> {
     op::require(
         !workspaces.is_empty()
             && workspaces.len() == inputs.len()
+            && read_logits.is_none_or(|read| read.len() == workspaces.len())
             && (scratch.sequences == workspaces.len()
                 || scratch.shared.is_none()
                     && scratch.attention.is_none()
@@ -1100,10 +1102,102 @@ pub(in super::super) fn run_batch(
     }
     workspaces
         .iter()
-        .map(|ws| {
+        .enumerate()
+        .map(|(index, ws)| {
+            if read_logits.is_some_and(|read| !read[index]) {
+                return Ok(None);
+            }
             let logits = f32_slice(&ws.logits)?;
             op::require(logits.iter().all(|v| v.is_finite()), "non-finite logits")?;
-            Ok(logits.to_vec())
+            Ok(Some(logits.to_vec()))
         })
         .collect()
+}
+
+/// Sample device members after a `run_batch(.., read_logits=Some(..))` round.
+/// Each member's logits stay on the device; only tokens are read back. Fast
+/// members get a single-member sampler each: their logits are separate
+/// tensors, so they cannot share one member-batched dispatch. `Host` members
+/// are skipped and yield `None`.
+pub(in super::super) fn sample_batch_tokens(
+    model: &Forward<'_>,
+    workspaces: &mut [&mut Workspace],
+    modes: &[super::super::BatchSampleMode<'_>],
+    seeds: &[u64],
+    uniforms: &[f32],
+) -> Result<Vec<Option<u32>>> {
+    if workspaces.len() != modes.len()
+        || workspaces.len() != seeds.len()
+        || workspaces.len() != uniforms.len()
+    {
+        return Err("batch sampler extents differ".into());
+    }
+    let ctx = model.ctx;
+    let vocab = model.config.vocab;
+    let mut outputs = Vec::with_capacity(modes.len());
+    for mode in modes {
+        match mode {
+            super::super::BatchSampleMode::Host => outputs.push(None),
+            super::super::BatchSampleMode::Exact { .. } => outputs.push(Some((
+                MetalTensor::zeros_i32(ctx, vec![1]).map_err(|e| e.to_string())?,
+                None,
+            ))),
+            super::super::BatchSampleMode::Fast { .. } => outputs.push(Some((
+                MetalTensor::zeros_i32(ctx, vec![1]).map_err(|e| e.to_string())?,
+                Some(crate::metal::FastGpuSampler::new(ctx, vocab, 1).map_err(|e| e.to_string())?),
+            ))),
+        }
+    }
+    let command = ctx
+        .queue
+        .commandBuffer()
+        .ok_or("Metal command buffer allocation")?;
+    let enc = metal::KernelEncoder::begin(&command);
+    for i in 0..workspaces.len() {
+        let Some((token, fast)) = &outputs[i] else {
+            continue;
+        };
+        match &modes[i] {
+            super::super::BatchSampleMode::Host => unreachable!("host members have no output"),
+            super::super::BatchSampleMode::Exact { sampler } => sampler
+                .encode(ctx, &enc, &workspaces[i].logits, token, uniforms[i])
+                .map_err(|e| e.to_string())?,
+            super::super::BatchSampleMode::Fast { temperature } => fast
+                .as_ref()
+                .expect("fast member has a sampler")
+                .encode(
+                    ctx,
+                    &enc,
+                    &workspaces[i].logits,
+                    token,
+                    seeds[i],
+                    *temperature,
+                )
+                .map_err(|e| e.to_string())?,
+        }
+    }
+    enc.end();
+    command.commit();
+    metal::wait_completed(&command).map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(modes.len());
+    for entry in outputs {
+        let Some((token, _)) = entry else {
+            out.push(None);
+            continue;
+        };
+        let value = unsafe {
+            *token
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(token.offset as usize)
+                .cast::<i32>()
+        };
+        if value < 0 || value as usize >= vocab {
+            return Err(format!("GPU sampler selected invalid token {value}").into());
+        }
+        out.push(Some(value as u32));
+    }
+    Ok(out)
 }

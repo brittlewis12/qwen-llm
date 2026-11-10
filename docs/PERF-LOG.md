@@ -6,6 +6,75 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-10 - V4.1 Batched Dense: Census, Split Floor; Shared Pair Rejected
+
+M5 Ultra, GSQ-RCO IQ2_XS, base `98ddc18af`, thin-LTO `iter` in both arms.
+New `examples/dense_band_census` (`perf-ablations`) times each V4.1 dense
+shape at B=2/3/4 from rotating weight copies totalling >= 384 MiB: the
+per-column GEMV path, the production skinny dispatch, and an explicit split
+sweep. Raw: `metagross:~/qwen-runs/2026-11-10-dense-census/`.
+
+### Census (isolated, B=3, GB/s)
+
+| projection | bytes/round | auto split | auto | best split | best |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| q_b 1280->32768 | 1.153 GB | 5 | 646 | 5 (1 only at B=2) | 653 |
+| output_b 8192->5120 | 1.153 GB | 8 | 686 | 4 | 694 |
+| output_a 8x(4096->1024) | 0.923 GB | 8 | 558 | 2 | 638 |
+| shared gate/up 5120->2304 | 0.649 GB | 5 | 390 | 5 | 390 |
+| shared down 2304->5120 | 0.324 GB | 3 | 382 | 3 | 382 |
+| Engram 6144->25600 | 0.216 GB | 2 | 770 | 3 | 815 |
+
+- The review's inferred rates hold except **q_b**: 646 GB/s, not 800-900.
+  Its grid already has 2,048 threadgroups, so split 5 vs 1 is neutral at
+  B=3/4 (646 vs 653) and split 1 only helps 8% at B=2. Forcing q_b to one
+  slice is not the free 0.5-0.8 ms the review hoped for.
+- **shared_down split 1 is 1.76x slower** than split 3 (217 vs 382 GB/s).
+- **output_a split 8 is the outlier**: 558 GB/s at B=3 and only 269 at B=2,
+  versus 622 (split 4) and 590/638 (split 2) -- the grouped bank's 8-way
+  split underfills at small B.
+- Engram split 3 is +6% (815 vs 770). The Q8 rank pair is the separate
+  production split-K kernel (~695 GB/s from the reachable-limit packet); the
+  census's skinny pair (292 GB/s) is not on the path.
+- Re-derived band budget with these rates (5.26 GB) is ~8.9 ms, within 4%
+  of the measured 8.51 ms `DenseHold`, so the census is consistent.
+
+### Shipped: split floor (grouped output_a only)
+
+`skinny_k_split` narrows the split only when a twofold subdivision remains
+under `DENSE_SKINNY_MIN_BLOCKS` (3). At the V4.1 shapes this changes exactly
+the grouped output_a bank, 16 blocks split 8 -> 4; q_b (5 blocks), shared
+down (9), shared gate/up (20), output_b (32) and Engram (24) keep their
+splits. `QWEN_V41_DENSE_SPLIT_MIN_BLOCKS=1` restores the old heuristic.
+
+Thermal-0 ABBA, B=3, 64 rounds: 32K off 26.340/26.584 ms, on
+26.005/26.396; **64K off 26.594/26.715, on 26.355/26.410**. Saving
+**0.26 ms at 32K and 0.27 ms at 64K**. 32K B=2..4 single pairs: -0.245,
+-0.289, -0.278 ms. Least-squares over 32K B=2..4: **F 14.028 -> 13.806
+(-0.22 ms), m 4.222 -> 4.206 (-0.02 ms/row, unchanged within noise)**.
+Numerics (on vs rollback): signed dNLL **-2.5e-7**, mean KL **2.3e-10**,
+192/192 argmax, qualified.
+
+### Rejected: shared gate+up fused pair
+
+A Q5_K twin of the Q8 pair kernel (`kernel_dense_pair_skinny_mma_q5_K_f32`)
+is bitwise equal to the two skinny dispatches (identical full-vocabulary
+hashes) and **1.27x faster in isolation** (56.5 vs 72.4 us per shared
+layer). But a thermal-0 ABBA at B=3 32K measured **26.428 off vs
+26.502/26.502 fused**: the causal executor already overlaps the two
+dispatches, so the isolated win does not reach the wall. Deleted; the
+isolated number is the reference if Flash-Next's shared-expert schedule
+differs.
+
+### Next
+
+Design D: small-M Metal 4 tensor Q5_K tile (`MT=16`, `NT=16/32`, F32
+cooperative accumulator, weights dequantized to half in threadgroup memory),
+then the Flash-Next fewrow and GLM Q6 ports. The census says the remaining
+band is q_b/output_b/output_a near 620-690 GB/s and shared near 380, so the
+tensor tile must lift the medium-`n_out` shapes, not just the head.
+
+
 ## 2026-11-09 - Flash-Next MTP Stage 1: Current Artifact Has No Head
 
 - Read-only, base **`7613394d9`**, no build/GPU. The GSQ-RCO IQ3_S artifact on

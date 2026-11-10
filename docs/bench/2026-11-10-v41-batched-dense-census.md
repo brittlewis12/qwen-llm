@@ -96,6 +96,27 @@ hashes in the wall A/B). But at B=3 32K, thermal 0, ABBA:
 No wall gain: the causal executor already overlaps the two dispatches. The
 kernel, host entry, call site and knob were removed.
 
+## Design D probe (negative)
+
+A standalone 16-row x 16-channel Metal 4 tensor tile (NSG simdgroups split
+K, Q5_K dequantized to half in threadgroup slabs, F32 cooperative
+accumulator) was built and witnessed against the per-column GEMV at the
+half-operand bound, then priced in isolation:
+
+| projection | incumbent GB/s | tensor best GB/s | best NSG |
+| --- | ---: | ---: | ---: |
+| q_b | 658 | 273 | 2 |
+| output_b | 693 | 262 | 8 |
+| output_a | 630 | 271 | 8 |
+| shared gate/up | 452 | 149 | 8 |
+| shared down | 495 | 204 | 8 |
+| Engram | 784 | 317 | 8 |
+
+B=2/4 agree. The tensor path is 2-3x slower, and its rate still scales with
+NSG at 8, so it does not reach the 800 GB/s integration gate even
+extrapolated. It was removed; the threadgroup round trip is the cost the
+register-resident simdgroup kernel avoids.
+
 ## Limits
 
 - Isolated rates are service-like and do not include the causal executor's
@@ -104,6 +125,6 @@ kernel, host entry, call site and knob were removed.
   B=3 rows are thermal-0 ABBA and the more reliable deltas.
 - The Q8 rank pair rate is not re-measured here; the production path uses the
   split-K pair kernel, not the skinny pair.
-- Design D (small-M tensor Q5_K tile) is not built yet. The census says the
-  remaining band is q_b/output_b/output_a at 620-690 GB/s and shared at 380,
-  so lifting the medium shapes is the tensor tile's job.
+- The medium shapes stay at 620-690 GB/s and shared at ~380. The 800 GB/s
+  tensor gate failed, so the next lever is not another MMA tile; the host
+  bubble and overlap are the remaining candidates.

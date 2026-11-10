@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-10 - V4.1 Design D Probe: Small-M Tensor Tile Is 2-3x Slower
+
+M5 Ultra, GSQ-RCO IQ2_XS, base `98ddc18af`, thin-LTO `iter`. Standalone
+isolated probe only; nothing integrated.
+
+Built `kernels/tensor/dense_skinny_q5_k_tensor.metal`: a 16-row (padded) x
+16-channel Metal 4 tile whose NSG simdgroups split the K blocks, dequantize
+Q5_K to half in threadgroup slabs, narrow the F32 activations, and keep F32
+cooperative accumulators reduced once in threadgroup memory. The GPU witness
+against the per-column GEMV passed at the half-operand bound (5e-3 of scale).
+
+Isolated rates, B=3, GB/s, incumbent auto vs best tensor NSG:
+
+| projection | incumbent | tensor best | best NSG |
+| --- | ---: | ---: | ---: |
+| q_b | 658 | 273 | 2 |
+| output_b | 693 | 262 | 8 |
+| output_a | 630 | 271 | 8 |
+| shared gate/up | 452 | 149 | 8 |
+| shared down | 495 | 204 | 8 |
+| Engram | 784 | 317 | 8 |
+
+B=2 and B=4 agree (tensor best 136-324 GB/s against 400-790). The tensor
+rates scale nearly linearly with NSG (e.g. output_b 52/104/199/262 at
+NSG 1/2/4/8) and are still far from the 800 GB/s integration gate even
+extrapolated. The cost is the threadgroup round trip and per-step staging
+that the register-resident simdgroup kernel does not pay; the tensor unit
+itself is not the limit.
+
+**Stopped at the predeclared gate; kernel, probe, test and census arm
+removed.** Design D is not a path to the medium shapes on this schedule.
+Raw: `metagross:~/qwen-runs/2026-11-10-dense-census/census_tensor.jsonl`.
+
 ## 2026-11-10 - V4.1 Batched Dense: Census, Split Floor; Shared Pair Rejected
 
 M5 Ultra, GSQ-RCO IQ2_XS, base `98ddc18af`, thin-LTO `iter` in both arms.

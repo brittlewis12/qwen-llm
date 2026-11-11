@@ -101,6 +101,47 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `experts` arm when QSA status was 0/count 0 instead of 512. The targeted
   `hc-band` pair avoids that invalid late hold. Raw B=1 graph/profile and
   probe output: `metagross:~/qwen-runs/2026-11-11-hc-fuse/`.
+## 2026-11-11 - Artifact Choice: Keep V4.1 Maya-S And GLM Stock IQ3
+
+- Clean M5 Ultra `qwen-bench` iter build **`a2a1965fe`**. DeepSeek V4.1
+  Flash 1017 A/B/C share the same complete tokenizer fingerprint; GLM D/E
+  share theirs. D/E's GGUF architecture labels differ (`glm5next` /
+  `glm5-next`), while the full tokenizer fields and IDs match. No model files
+  were moved or deleted.
+- Four full-source prompts, three code plus a prose control; each candidate
+  used a 49,152-token prefix and **1,024 real teacher-forced targets** per
+  prompt. Per-position NLL and top-1 rows retained; equal-prompt bootstrap over
+  20,000 prompt-cluster resamples (central 90% CI; code-only also reported).
+  Candidate-minus-reference dNLL is negative when the candidate is better.
+- V4.1: B−A **−0.02001** (90% CI [−0.04013, −0.00460]); C−A **−0.01789**
+  ([−0.03392, −0.00356]); both separate from A on all prompts and code-only.
+  B−C **−0.00212** ([−0.00621, +0.00204]); code-only **−0.000073**
+  ([−0.00293, +0.00278]); top-1 agreement **95.95%**. B and C are
+  indistinguishable on this instrument; keep **C, Maya-S IQ2_XXS**, which
+  decodes at **17.11 ms/token** versus B's **57.07** at depth 32K. Delete A
+  GSQ-RCO IQ2_XS + IQ4_NL and B Unsloth UD-IQ3_XXS.
+- GLM: E−D **−0.00615** (90% CI [−0.01151, +0.00011]); code-only
+  **−0.00466** ([−0.00946, +0.00014]); top-1 agreement **95.39%**. The
+  artifacts remain indistinguishable on this instrument. D decodes at
+  **17.71 ms/token** versus E's **18.22** at depth 32K; keep **D, stock
+  UD-IQ3_XXS** and delete E Maya-M IQ2_S.
+- All five loaded and passed three live 48K sessions plus three actual 48K
+  code prefills with sessions retained. V4.1 A/B/C use disk Engram readers
+  (110.60 / 161.28 / 161.28 GB); GLM has no separate Engram. B's measured
+  post-session allocation is **234.46 GB**, with **40.42 GB** host headroom.
+- Historical conflicts: Maya-S already had a six-document/384-target NLL
+  comparison against IQ3 in `docs/bench/2026-10-22-maya-s-eval.md`; GLM D/E
+  had an eight-case blinded generated-answer comparison in the 2026-10-17
+  entry below. Those smaller/different-instrument results are not treated as
+  nonexistent; this packet adds long code-at-depth NLL evidence.
+- B=3 decode timing was not run; the maintained suite provides only B=1. The
+  fit packet does not claim concurrent decode throughput. Thermal pressure is
+  recorded at packet endpoints, not continuously. The M5 run directory showed
+  1.8 TiB free rather than the stated ~28 GiB. Aven V41-HFAB could not be
+  annotated from this session because no Aven connector is available.
+- Full method, decisions, shard identities, token hashes, per-prompt means and
+  all pairwise CIs: `docs/bench/2026-11-11-artifact-choice/RESULTS.md` and
+  `metagross:~/qwen-runs/2026-11-11-artifact-choice/`.
 
 ## 2026-11-11 - GLM Selective Layer Slicing Becomes The Default
 

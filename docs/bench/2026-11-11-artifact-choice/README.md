@@ -1,7 +1,7 @@
 # V4.1 / GLM artifact choice on M5 Ultra
 
-Status: measurement packet for DeepSeek V4.1 Flash 1017 and GLM-5.3 Flash
-third-party GGUF choices. No model files are modified. The `qwen-bench
+Status: complete measurement packet for DeepSeek V4.1 Flash 1017 and GLM-5.3
+Flash third-party GGUF choices. No model files are modified. The `qwen-bench
 artifact-choice` subcommand fingerprints tokenizer metadata, emits per-position
 teacher-forced NLL/top-1 observations, and tries three live 48K sessions with
 the selected production prefill workspace. `qwen-bench suite` supplies the
@@ -76,6 +76,6 @@ measure the new 1017 UD-IQ3_XXS candidate in a deeper code-at-depth cohort.
 
 ## Analysis and decision
 
-Run `scripts/bench/analyze_artifact_choice.py` on the raw quality JSON files.
-This directory's `RESULTS.md` is filled in after the M5 packets complete and
-names the recommendation and deletable artifact trees.
+`scripts/bench/analyze_artifact_choice.py` analyzed the raw quality JSON files.
+`RESULTS.md` records the recommendations, fit results and exact deletable
+artifact trees.

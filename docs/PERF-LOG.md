@@ -54,10 +54,14 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   16.6062 (0.5117 ms, 2.99%)**. Every candidate arm beat every control at
   both depths. Mask prices at 32K, thermal 0: `1f` 0.4966, `3f` 0.5183,
   `5f` 0.5148; the shipped set is `3f`.
-- **Exactness:** 32 teacher-forced full-vocabulary targets, same process.
-  Mean signed dNLL **-9.39e-9**, mean |dNLL| **1.19e-8**, max |dNLL| 1.11e-7,
-  mean KL **1.32e-11**, max KL 2.42e-10, argmax 32/32, finite 32/32. F32
-  reassociation only; non-inferior.
+- **Exactness:** 32 teacher-forced full-vocabulary targets, same process,
+  promoted product kernels. Mean signed dNLL **8.82e-9**, mean |dNLL|
+  **1.68e-8**, max |dNLL| 1.48e-7, mean KL **1.10e-10**, max KL 2.78e-9,
+  argmax 32/32, finite 32/32. F32 reassociation only; non-inferior.
+- **Post-promotion re-run** (product kernels, thermal 1): 32K 17.0666 ->
+  16.5792 ms/token (**0.4874 ms**), six candidate arms below six controls.
+  The `=0` rollback path was exercised; its single run reached thermal 2 and
+  is not a timing claim.
 - **Scope:** serial B=1 only. The packed batched path keeps its own Q6 tile
   selection, so B=3 is unchanged. Product kernels are in
   `kernels/mat_vec_q6_k_solo.metal`; the research mask and

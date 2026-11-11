@@ -1302,6 +1302,25 @@ impl<'w> Glm5NextSession<'w> {
             .perf_route_ids(rows)
     }
 
+    /// Diagnostic-only packed precision switch for comparing suffixes from one
+    /// restored activation state. Production callers must use
+    /// [`Self::set_fast_precision`] before advancing the session.
+    #[cfg(feature = "perf-ablations")]
+    pub fn perf_override_fast_precision(&mut self, precision: FastPrecision) -> Result<()> {
+        if self.poisoned {
+            return Err(Glm5NextMetalError::Poisoned);
+        }
+        self.prefill_config
+            .as_mut()
+            .ok_or_else(|| Glm5NextMetalError::Invalid("packed policy is absent".into()))?
+            .arith
+            .precision = precision;
+        if let Some(packed) = &mut self.packed {
+            packed.precision = precision;
+        }
+        Ok(())
+    }
+
     /// Whether a failed token left the session unusable.
     pub fn is_poisoned(&self) -> bool {
         self.poisoned

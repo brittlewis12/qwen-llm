@@ -15,7 +15,8 @@
 //! Usage: `glm_append_audit [--layers|--layers-f32] <depth> <prompt> [prompt ...]`
 //! `--layers` compares every post-block activation for sequential decode,
 //! one-row packed control, and the 8-row packed schedule. `--layers-f32`
-//! repeats that diagnostic with F32 packed operands.
+//! compares an F32 packed suffix against the same Fast/Half prefix and
+//! sequential reference.
 
 #[cfg(not(feature = "perf-ablations"))]
 fn main() {
@@ -301,7 +302,7 @@ mod probe {
         text: &str,
         depth: usize,
         layer_audit: bool,
-        precision: FastPrecision,
+        f32_suffix: bool,
     ) -> anyhow::Result<()> {
         let escaped = text.replace("<|", "‹|").replace("<｜", "‹｜");
         let mut ids: Vec<u32> = tokenizer
@@ -325,7 +326,6 @@ mod probe {
         }));
 
         let mut session = Glm5NextSession::with_prefill_rows(ctx, weights, CAPACITY, PREFILL_ROWS)?;
-        session.set_fast_precision(precision)?;
         for part in ids[..depth].chunks(PREFILL_ROWS) {
             gate();
             session.prefill_packed(ctx, part)?;
@@ -438,6 +438,9 @@ mod probe {
                 gate();
                 set_expert_packet_max_rows(max_rows);
                 session.restore_snapshot(&snapshot)?;
+                if f32_suffix {
+                    session.perf_override_fast_precision(FastPrecision::F32)?;
+                }
                 let started = Instant::now();
                 let captured = session.verify_packed_with_captures(ctx, append, &mut bank)?;
                 let logits = captured.logits().expect("all-row logits");
@@ -466,6 +469,9 @@ mod probe {
                 let path_logits: Vec<Vec<f32>> = (0..width)
                     .map(|r| flat[r * vocab..(r + 1) * vocab].to_vec())
                     .collect();
+                if f32_suffix {
+                    session.perf_override_fast_precision(FastPrecision::Half)?;
+                }
                 let path_state = if layer_audit {
                     let captured = session.forward_with_captures(ctx, next, &mut bank)?;
                     capture_logits(&captured)
@@ -532,11 +538,7 @@ mod probe {
         let args: Vec<String> = std::env::args().collect();
         let mode = args.get(1).map(String::as_str).unwrap_or_default();
         let layer_audit = matches!(mode, "--layers" | "--layers-f32");
-        let precision = if mode == "--layers-f32" {
-            FastPrecision::F32
-        } else {
-            FastPrecision::Half
-        };
+        let f32_suffix = mode == "--layers-f32";
         let base = if layer_audit { 2 } else { 1 };
         anyhow::ensure!(
             args.len() >= base + 2,
@@ -552,7 +554,9 @@ mod probe {
         let weights = Glm5NextWeights::load(&ctx, &gguf)?;
         emit(json!({
             "kind": "header", "depth": depth, "widths": WIDTHS,
-            "layer_audit": layer_audit, "precision": format!("{precision:?}"),
+            "layer_audit": layer_audit,
+            "prefix_precision": "Half",
+            "packed_suffix_precision": if f32_suffix { "F32" } else { "Half" },
             "capacity": CAPACITY, "prefill_rows": PREFILL_ROWS,
             "device": ctx.device_facts(), "pressure": pressure(), "loadavg": loadavg(),
         }));
@@ -566,7 +570,7 @@ mod probe {
                 &text,
                 depth,
                 layer_audit,
-                precision,
+                f32_suffix,
             )?;
         }
         emit(json!({

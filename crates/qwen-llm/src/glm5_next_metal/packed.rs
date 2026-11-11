@@ -1879,6 +1879,86 @@ impl Glm5NextSession<'_> {
         output: Option<&capture::RowOutput<'_>>,
         #[cfg(feature = "perf-ablations")] probe: Option<&mut LayerSliceProbe<'_>>,
     ) -> Result<Option<Vec<f32>>> {
+        self.prepare_packed_chunk(ctx, tokens)?;
+        self.poisoned = true;
+        self.encode_chunk(
+            ctx,
+            tokens,
+            want_logits,
+            output,
+            0..self.weights.blocks.len(),
+            #[cfg(feature = "perf-ablations")]
+            probe,
+        )?;
+        self.finish_packed_chunk(tokens.len(), want_logits)
+    }
+
+    /// Begin one original packed row chunk. Until final resume completes,
+    /// ordinary decode, snapshot, reset and workspace release are refused.
+    /// Cancellation discards this session; its old position is not a rollback
+    /// of recurrent state already updated by completed layers.
+    pub fn begin_prefill_chunk(
+        &mut self,
+        ctx: &MetalContext,
+        tokens: &[u32],
+        target_ms: f64,
+    ) -> Result<()> {
+        if !target_ms.is_finite() || target_ms <= 0.0 {
+            return invalid("prefill slice target must be positive and finite");
+        }
+        self.prepare_packed_chunk(ctx, tokens)?;
+        self.prefill_cursor = Some(super::prefill_slice::Cursor {
+            tokens: tokens.to_vec(),
+            plan: super::prefill_slice::LayerPlan::new(
+                self.weights.blocks.len(),
+                tokens.len(),
+                target_ms,
+            ),
+        });
+        self.poisoned = true;
+        Ok(())
+    }
+
+    pub fn prefill_chunk_pending(&self) -> bool {
+        self.prefill_cursor.is_some()
+    }
+
+    /// Submit and complete one layer quantum. With no ready peers, drain the
+    /// remaining layers in one command. No command remains in flight on return.
+    pub fn resume_prefill_chunk(
+        &mut self,
+        ctx: &MetalContext,
+        peers: bool,
+    ) -> Result<super::Glm5NextPrefillSlice> {
+        let Some(mut cursor) = self.prefill_cursor.take() else {
+            return invalid("no pending packed prefill chunk");
+        };
+        let start = cursor.plan.next();
+        let end = cursor.plan.end(peers);
+        let gpu_ms = self.encode_chunk(
+            ctx,
+            &cursor.tokens,
+            true,
+            None,
+            start..end,
+            #[cfg(feature = "perf-ablations")]
+            None,
+        )?;
+        cursor.plan.complete(end, gpu_ms);
+        let logits = if cursor.plan.finished() {
+            self.finish_packed_chunk(cursor.tokens.len(), true)?
+        } else {
+            self.prefill_cursor = Some(cursor);
+            None
+        };
+        Ok(super::Glm5NextPrefillSlice {
+            layers: end - start,
+            gpu_ms,
+            logits,
+        })
+    }
+
+    fn prepare_packed_chunk(&mut self, ctx: &MetalContext, tokens: &[u32]) -> Result<()> {
         self.validate_request(tokens)?;
         let rows = self.prefill_rows();
         if tokens.len() > rows {
@@ -1912,19 +1992,16 @@ impl Glm5NextSession<'_> {
             // Unwritten slots fail the check below.
             write_i32(&sp.select_status, &vec![-1; mla * sp.rows])?;
         }
-        self.poisoned = true;
-        self.encode_chunk(
-            ctx,
-            tokens,
-            want_logits,
-            output,
-            #[cfg(feature = "perf-ablations")]
-            probe,
-        )?;
+        Ok(())
+    }
+
+    fn finish_packed_chunk(&mut self, rows: usize, want_logits: bool) -> Result<Option<Vec<f32>>> {
+        let dense = self.dense_rows_remaining().min(rows);
+        let mla = self.weights.config.block_count(MixerKind::Mla);
         let packed = self.packed.as_ref().expect("packed scratch");
         for (layer, route) in packed.routes.iter().enumerate() {
             if let Some(route) = route {
-                let status = read_i32(&rows_view(&route.status, tokens.len()))?;
+                let status = read_i32(&rows_view(&route.status, rows))?;
                 if let Some((row, &bad)) = status
                     .iter()
                     .enumerate()
@@ -1939,11 +2016,11 @@ impl Glm5NextSession<'_> {
                 }
             }
         }
-        if dense < tokens.len() {
+        if dense < rows {
             let sp = packed.sparse.as_ref().expect("checked before encoding");
             let status = read_i32(&sp.select_status)?;
             for block in 0..mla {
-                for row in dense..tokens.len() {
+                for row in dense..rows {
                     let code = status[block * sp.rows + row];
                     if code != crate::metal::SELECT_STATUS_OK {
                         return Err(Glm5NextMetalError::KernelValidation {
@@ -1957,7 +2034,7 @@ impl Glm5NextSession<'_> {
             }
         }
         let logits = want_logits.then(|| read_f32(&self.s.logits)).transpose()?;
-        self.position += tokens.len();
+        self.position += rows;
         self.poisoned = false;
         Ok(logits)
     }
@@ -1968,8 +2045,9 @@ impl Glm5NextSession<'_> {
         tokens: &[u32],
         want_logits: bool,
         output: Option<&capture::RowOutput<'_>>,
+        range: std::ops::Range<usize>,
         #[cfg(feature = "perf-ablations")] probe: Option<&mut LayerSliceProbe<'_>>,
-    ) -> Result<()> {
+    ) -> Result<f64> {
         // Completed autoreleased commands/encoders can still retain every
         // bound prompt buffer. Drain their references before decode drops
         // the workspace. Supported independent batches keep their old path.
@@ -1980,6 +2058,7 @@ impl Glm5NextSession<'_> {
                     tokens,
                     want_logits,
                     output,
+                    range,
                     #[cfg(feature = "perf-ablations")]
                     probe,
                 )
@@ -1990,6 +2069,7 @@ impl Glm5NextSession<'_> {
                 tokens,
                 want_logits,
                 output,
+                range,
                 #[cfg(feature = "perf-ablations")]
                 probe,
             )
@@ -2002,27 +2082,30 @@ impl Glm5NextSession<'_> {
         tokens: &[u32],
         want_logits: bool,
         output: Option<&capture::RowOutput<'_>>,
+        range: std::ops::Range<usize>,
         #[cfg(feature = "perf-ablations")] mut probe: Option<&mut LayerSliceProbe<'_>>,
-    ) -> Result<()> {
+    ) -> Result<f64> {
         let w = self.weights;
         let c = &w.config;
         let p = self.packed.as_ref().expect("packed scratch");
         let rows = tokens.len();
         let h = c.hidden_size as usize;
-        let ids: Vec<i32> = tokens.iter().map(|&t| t as i32).collect();
-        // SAFETY: shared-storage I32 [max rows]; no command is in flight.
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                ids.as_ptr(),
-                p.token
-                    .buffer
-                    .contents()
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(p.token.offset as usize)
-                    .cast::<i32>(),
-                rows,
-            );
+        if range.start == 0 {
+            let ids: Vec<i32> = tokens.iter().map(|&t| t as i32).collect();
+            // SAFETY: shared-storage I32 [max rows]; no command is in flight.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    ids.as_ptr(),
+                    p.token
+                        .buffer
+                        .contents()
+                        .as_ptr()
+                        .cast::<u8>()
+                        .add(p.token.offset as usize)
+                        .cast::<i32>(),
+                    rows,
+                );
+            }
         }
         let v = |t: &MetalTensor| rows_view(t, rows);
         #[allow(unused_mut)]
@@ -2031,19 +2114,30 @@ impl Glm5NextSession<'_> {
             .commandBuffer()
             .ok_or_else(|| Glm5NextMetalError::Invalid("no command buffer".into()))?;
         let mut enc = KernelEncoder::begin(&command);
-        self.stage(&mut enc, Glm5NextStage::Embed, None)?;
-        encode_get_rows_f32(
-            ctx,
-            &enc,
-            &w.embedding,
-            &v(&p.token),
-            &v(&p.embedding),
-            rows,
-            h,
-        )?;
-        encode_mhc4_repeat_rows(ctx, &enc, h, rows, &v(&p.embedding), &v(&p.residual[0]))?;
-        let mut mla_index = 0;
-        for (index, block) in w.blocks.iter().enumerate() {
+        if range.start == 0 {
+            self.stage(&mut enc, Glm5NextStage::Embed, None)?;
+            encode_get_rows_f32(
+                ctx,
+                &enc,
+                &w.embedding,
+                &v(&p.token),
+                &v(&p.embedding),
+                rows,
+                h,
+            )?;
+            encode_mhc4_repeat_rows(ctx, &enc, h, rows, &v(&p.embedding), &v(&p.residual[0]))?;
+        }
+        let mut mla_index = w.blocks[..range.start]
+            .iter()
+            .filter(|b| matches!(&b.mixer, MixerTensors::Mla(_)))
+            .count();
+        for (index, block) in w
+            .blocks
+            .iter()
+            .enumerate()
+            .take(range.end)
+            .skip(range.start)
+        {
             let (a, b) = (v(&p.residual[0]), v(&p.residual[1]));
             self.stage(&mut enc, Glm5NextStage::AttentionPre, Some(index))?;
             self.encode_hc_pre_rows(
@@ -2341,7 +2435,7 @@ impl Glm5NextSession<'_> {
                 enc = KernelEncoder::begin(&command);
             }
         }
-        if want_logits {
+        if want_logits && range.end == w.blocks.len() {
             self.stage(&mut enc, Glm5NextStage::Head, None)?;
             // Head on the last row only.
             let s = &self.s;
@@ -2379,7 +2473,7 @@ impl Glm5NextSession<'_> {
         expert_down::record_completed_command(|| (command.GPUStartTime(), command.GPUEndTime()));
         #[cfg(test)]
         mla_tail::record_completed_command(|| (command.GPUStartTime(), command.GPUEndTime()));
-        Ok(())
+        Ok((command.GPUEndTime() - command.GPUStartTime()) * 1e3)
     }
 
     /// Fused Q8 or one generic call over the active chunk prefix. Generic HC

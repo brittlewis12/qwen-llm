@@ -59,11 +59,15 @@ struct Run {
     prompt: usize,
     maximum: usize,
     sampler: Sampler,
+    slice_left: usize,
+    marker: Rc<()>,
 }
 #[derive(Default)]
 struct Fake {
     feedback_bursts: bool,
     group_bursts: bool,
+    slice_quanta: usize,
+    quanta: Vec<usize>,
     token_batch: bool,
     token_batches: usize,
     bursts: usize,
@@ -104,6 +108,8 @@ impl Runtime for Fake {
         let n = p.prompt.parse::<usize>().unwrap();
         Ok(Begun::Run(Box::new(Run {
             state: State::default(),
+            slice_left: 0,
+            marker: Rc::new(()),
             left: n,
             prompt: n,
             maximum: p.request().max_output_tokens.unwrap_or(8),
@@ -146,6 +152,35 @@ impl Runtime for Fake {
             vocab_size: 256,
         })
         .map(Some)
+    }
+    fn prefill_sliced(
+        &mut self,
+        r: &mut Run,
+        rows: usize,
+        sink: &mut dyn GenerationSink,
+        reserve: u64,
+        peers: bool,
+    ) -> Option<Result<Option<DecodeCursor>, BackendFailure>> {
+        if self.slice_quanta == 0 || (!peers && r.slice_left == 0) {
+            return None;
+        }
+        if r.slice_left == 0 {
+            r.slice_left = self.slice_quanta;
+        }
+        if !peers {
+            r.slice_left = 1;
+        }
+        self.quanta.push(r.prompt);
+        r.slice_left -= 1;
+        r.state.poisoned = r.slice_left > 0;
+        if r.slice_left > 0 {
+            if let Some(c) = &mut self.clock {
+                *c += self.prefill_service;
+            }
+            Some(Ok(None))
+        } else {
+            Some(self.prefill(r, rows, sink, reserve))
+        }
     }
     fn advance(
         &mut self,
@@ -848,4 +883,131 @@ fn feedback_burst_backpressure_parks_before_any_forward() {
     a.0.borrow_mut().credit = true;
     finish(&mut d, &mut e);
     terminal_ok(&a.0);
+}
+
+#[test]
+fn sliced_prefill_runs_exactly_one_peer_round_and_then_rejoins_group_feedback() {
+    let mut d = Driver::new(3).with_prefill_policy(true, 90);
+    let mut e = Fake {
+        group_bursts: true,
+        slice_quanta: 3,
+        clock: Some(Instant::now()),
+        prefill_service: Duration::from_millis(100),
+        decode_service: Duration::from_millis(1),
+        ..Fake::default()
+    };
+    let a = submit(&mut d, 5, true, 100);
+    d.pump(&mut e);
+    let b = submit(&mut d, 5, true, 100);
+    finish_prefill_for_test(&mut d, &mut e, 2);
+    let app = submit(&mut d, 1509, true, 100);
+    d.pump(&mut e);
+    assert_eq!(d.active[2].run.as_ref().unwrap().state.pos, 0);
+    assert!(d.active[2].run.as_ref().unwrap().state.poisoned);
+    let groups = e.groups;
+    for _ in 0..2 {
+        let before: Vec<_> = d.active[..2]
+            .iter()
+            .map(|a| a.run.as_ref().unwrap().state.pos)
+            .collect();
+        let quanta = e.quanta.len();
+        d.pump(&mut e);
+        assert_eq!(e.quanta.len(), quanta);
+        for (a, before) in d.active[..2].iter().zip(before) {
+            assert_eq!(a.run.as_ref().unwrap().state.pos, before + 1);
+        }
+        assert_eq!(e.groups, groups, "a parked appender forbids group bursts");
+        assert!(d.decode_budget.is_zero(), "no second percentage credit");
+        d.pump(&mut e);
+        assert_eq!(e.quanta.len(), quanta + 1);
+    }
+    assert!(d.active[2].cursor.is_some());
+    d.pump(&mut e);
+    assert_eq!(
+        e.groups,
+        groups + 1,
+        "normal group loop resumes after final validation"
+    );
+    finish(&mut d, &mut e);
+    for s in [&a.0, &b.0, &app.0] {
+        terminal_ok(s);
+    }
+}
+
+fn finish_prefill_for_test(d: &mut Driver<Run>, e: &mut Fake, count: usize) {
+    for _ in 0..30 {
+        if d.active.len() == count && d.active.iter().all(|a| a.cursor.is_some()) {
+            return;
+        }
+        d.pump(e);
+    }
+    panic!("prefill did not finish");
+}
+
+#[test]
+fn sliced_prefill_cancellation_drops_partial_state_and_keeps_peer_group_loop() {
+    let mut d = Driver::new(3);
+    let mut e = Fake {
+        group_bursts: true,
+        slice_quanta: 4,
+        ..Fake::default()
+    };
+    let a = submit(&mut d, 5, true, 100);
+    d.pump(&mut e);
+    let b = submit(&mut d, 5, true, 100);
+    finish_prefill_for_test(&mut d, &mut e, 2);
+    let app = submit(&mut d, 1509, true, 100);
+    d.pump(&mut e);
+    let partial = Rc::downgrade(&d.active[2].run.as_ref().unwrap().marker);
+    assert_eq!(d.active[2].run.as_ref().unwrap().state.pos, 0);
+    app.1.store(true, Ordering::Release);
+    let quanta = e.quanta.len();
+    let groups = e.groups;
+    d.pump(&mut e);
+    assert!(
+        partial.upgrade().is_none(),
+        "partial state cannot enter any reuse pool"
+    );
+    assert_eq!(e.quanta.len(), quanta);
+    assert_eq!(e.groups, groups + 1);
+    assert!(!d.decode_once);
+    finish(&mut d, &mut e);
+    assert_eq!(e.commits.len(), 2);
+    terminal_ok(&a.0);
+    terminal_ok(&b.0);
+}
+
+#[test]
+fn sliced_prefill_peer_geometry_refusal_falls_back_once_without_touching_appender() {
+    let mut d = Driver::new(3);
+    let mut e = Fake {
+        slice_quanta: 3,
+        ..Fake::default()
+    };
+    let a = submit(&mut d, 5, true, 100);
+    d.pump(&mut e);
+    let b = submit(&mut d, 5, true, 100);
+    finish_prefill_for_test(&mut d, &mut e, 2);
+    let app = submit(&mut d, 1509, true, 100);
+    d.pump(&mut e);
+    let before: Vec<_> = d.active[..2]
+        .iter()
+        .map(|a| a.run.as_ref().unwrap().state.pos)
+        .collect();
+    e.refuse = 1;
+    d.pump(&mut e);
+    for (a, before) in d.active[..2].iter().zip(before) {
+        assert_eq!(a.run.as_ref().unwrap().state.pos, before + 1);
+    }
+    assert_eq!(d.active[2].run.as_ref().unwrap().state.pos, 0);
+    assert!(!d.take_native_failure());
+    // No ready peers: drain the same row chunk, do not restart it.
+    a.1.store(true, Ordering::Release);
+    b.1.store(true, Ordering::Release);
+    d.pump(&mut e);
+    assert_eq!(d.active.len(), 1);
+    assert_eq!(d.active[0].run.as_ref().unwrap().state.pos, 1509);
+    assert!(d.active[0].cursor.is_some());
+    finish(&mut d, &mut e);
+    terminal_ok(&app.0);
 }

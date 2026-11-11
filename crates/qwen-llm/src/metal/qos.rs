@@ -70,3 +70,34 @@ impl Drop for GpuThreadQos {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn current() -> (u32, i32) {
+        let (mut class, mut relative) = (0, 0);
+        assert_eq!(
+            unsafe { pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut relative) },
+            0
+        );
+        (class, relative)
+    }
+    #[test]
+    fn qos_scope_nesting_and_early_return_restore_the_feeding_thread() {
+        let before = current();
+        let early = || -> Result<(), ()> {
+            let _slice = GpuThreadQos::enter_if(true);
+            assert!(current().0 >= QOS_CLASS_USER_INITIATED);
+            {
+                let nested = GpuThreadQos::enter_if(true);
+                assert!(nested.previous.is_none());
+            }
+            Err(())
+        };
+        assert!(early().is_err());
+        assert_eq!(current(), before);
+        let disabled = GpuThreadQos::enter_if(false);
+        assert!(disabled.previous.is_none());
+        assert_eq!(current(), before);
+    }
+}

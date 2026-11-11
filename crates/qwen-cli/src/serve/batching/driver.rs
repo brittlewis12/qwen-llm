@@ -45,6 +45,18 @@ pub(crate) trait Runtime {
         sink: &mut dyn GenerationSink,
         reserve: u64,
     ) -> Result<Option<DecodeCursor>, BackendFailure>;
+    /// Optional row-preserving layer quantum. Some means that this call used
+    /// bounded layer work; None retains the original prefill/credit policy.
+    fn prefill_sliced(
+        &mut self,
+        _run: &mut Self::Run,
+        _rows: usize,
+        _sink: &mut dyn GenerationSink,
+        _reserve: u64,
+        _peers: bool,
+    ) -> Option<Result<Option<DecodeCursor>, BackendFailure>> {
+        None
+    }
     fn advance(
         &mut self,
         run: &mut Self::Run,
@@ -164,6 +176,7 @@ pub(crate) struct Driver<R> {
     prefill_fair: bool,
     decode_percent: usize,
     decode_budget: Duration,
+    decode_once: bool,
     native_failed: bool,
     park_timeout: Duration,
     sample_pool: Option<SamplePool>,
@@ -178,6 +191,7 @@ impl<R> Driver<R> {
             prefill_fair: true,
             decode_percent: 10,
             decode_budget: Duration::ZERO,
+            decode_once: false,
             native_failed: false,
             park_timeout: Duration::from_secs(30),
             sample_pool: None,
@@ -718,13 +732,15 @@ impl<R> Driver<R> {
         let mixed = prefill.is_some() && !members.is_empty();
         if !mixed {
             self.decode_budget = Duration::ZERO;
+            self.decode_once = false;
         }
         let prefill_turn = members.is_empty()
-            || if self.prefill_fair {
-                self.decode_budget.is_zero()
-            } else {
-                self.prefer_prefill
-            };
+            || !self.decode_once
+                && if self.prefill_fair {
+                    self.decode_budget.is_zero()
+                } else {
+                    self.prefer_prefill
+                };
         let started = runtime.now();
         if let Some(i) = prefill.filter(|_| prefill_turn) {
             let Some(reserve) = self.total_reserve(runtime) else {
@@ -742,7 +758,7 @@ impl<R> Driver<R> {
             } else {
                 runtime.rows(run).max(1)
             };
-            match runtime.prefill(
+            let quantum = runtime.prefill_sliced(
                 run,
                 rows,
                 &mut Publish {
@@ -750,7 +766,22 @@ impl<R> Driver<R> {
                     reserve,
                 },
                 reserve,
-            ) {
+                loaded,
+            );
+            let sliced = quantum.is_some();
+            let outcome = quantum.unwrap_or_else(|| {
+                runtime.prefill(
+                    run,
+                    rows,
+                    &mut Publish {
+                        sink: a.sink.as_mut(),
+                        reserve,
+                    },
+                    reserve,
+                )
+            });
+            let unfinished_slice = sliced && matches!(&outcome, Ok(None));
+            match outcome {
                 Err(e) => self.fail(i, e),
                 Ok(cursor) => {
                     if loaded {
@@ -762,7 +793,13 @@ impl<R> Driver<R> {
                     }
                 }
             }
-            if self.prefill_fair && mixed {
+            if sliced {
+                // The intervening round IS the service for this quantum.
+                // Never add a second post-chunk percentage budget. The final
+                // request slice rejoins ordinary all-member decoding directly.
+                self.decode_budget = Duration::ZERO;
+                self.decode_once = mixed && unfinished_slice;
+            } else if self.prefill_fair && mixed {
                 self.decode_budget = runtime
                     .now()
                     .saturating_duration_since(started)
@@ -774,6 +811,7 @@ impl<R> Driver<R> {
         }
         if !members.is_empty() {
             self.decode(members, runtime);
+            self.decode_once = false;
             self.decode_budget = self
                 .decode_budget
                 .saturating_sub(runtime.now().saturating_duration_since(started));

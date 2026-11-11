@@ -18,6 +18,11 @@ const LIVE_STATES: &str = "QWEN_SERVE_GLM_LIVE_STATES";
 const PREFILL_FAIR: &str = "QWEN_SERVE_GLM_PREFILL_FAIR";
 /// Target decode service percentage under mixed load (1..=90, default 10).
 const DECODE_PERCENT: &str = "QWEN_SERVE_GLM_DECODE_PERCENT";
+/// Nominal GPU milliseconds per row-preserving layer slice under mixed load;
+/// 0 restores whole-row chunks and the original decode-percentage policy.
+const LAYER_SLICE_MS: &str = "QWEN_SERVE_GLM_LAYER_SLICE_MS";
+// Default stays off until the served A/B gate has been evaluated.
+const DEFAULT_LAYER_SLICE_MS: usize = 0;
 /// Persistent threads that sample a multi-member step beside the owner; 0
 /// samples serially on the owner (rollback). Default: max_active - 1.
 const SAMPLE_WORKERS: &str = "QWEN_SERVE_GLM_SAMPLE_WORKERS";
@@ -32,6 +37,7 @@ pub(super) struct Config {
     pub live: usize,
     pub fair: bool,
     pub decode_percent: usize,
+    pub layer_slice_ms: usize,
     pub sample_workers: usize,
 }
 fn parse(key: &str, value: Option<&str>) -> Result<usize> {
@@ -57,6 +63,16 @@ fn parse_percent(value: Option<&str>) -> Result<usize> {
     );
     Ok(n)
 }
+fn parse_slice_ms(value: Option<&str>) -> Result<usize> {
+    let ms = value
+        .map_or(Ok(DEFAULT_LAYER_SLICE_MS), str::parse::<usize>)
+        .context("QWEN_SERVE_GLM_LAYER_SLICE_MS must be 0..=10000")?;
+    anyhow::ensure!(
+        ms <= 10000,
+        "QWEN_SERVE_GLM_LAYER_SLICE_MS must be 0..=10000"
+    );
+    Ok(ms)
+}
 fn parse_workers(key: &str, value: Option<&str>) -> Result<usize> {
     let n = match value {
         None => return Ok(usize::MAX), // resolved to max_active - 1 by the caller
@@ -72,6 +88,7 @@ impl Config {
         Ok(Self {
             fair: qwen_llm::env_flag::read_default_on(PREFILL_FAIR),
             decode_percent: parse_percent(std::env::var(DECODE_PERCENT).ok().as_deref())?,
+            layer_slice_ms: parse_slice_ms(std::env::var(LAYER_SLICE_MS).ok().as_deref())?,
             active: parse(MAX_ACTIVE, std::env::var(MAX_ACTIVE).ok().as_deref())?,
             live: parse(LIVE_STATES, std::env::var(LIVE_STATES).ok().as_deref())?,
             sample_workers: parse_workers(
@@ -264,7 +281,15 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
         }
         self.0.attach(run);
         let result = (|| {
-            if !self.0.prefill_run(run, rows, sink)? {
+            let start = Instant::now();
+            let before = run.capture_ms + run.chunk_capture.as_ref().map_or(0.0, |c| c.elapsed_ms);
+            let result = self.0.prefill_run(run, rows, sink);
+            let after = run.capture_ms + run.chunk_capture.as_ref().map_or(0.0, |c| c.elapsed_ms);
+            if self.0.prepared.batching.layer_slice_ms > 0 {
+                run.layer_work
+                    .note(start.elapsed().as_secs_f64() * 1e3 - (after - before));
+            }
+            if !result? {
                 return Ok(None);
             }
             self.0.finish_prefill(run, sink)?;
@@ -279,6 +304,55 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
         })();
         self.0.detach(run);
         result
+    }
+    fn prefill_sliced(
+        &mut self,
+        run: &mut Self::Run,
+        rows: usize,
+        sink: &mut dyn GenerationSink,
+        reserve: u64,
+        peers: bool,
+    ) -> Option<Result<Option<DecodeCursor>, BackendFailure>> {
+        let ms = self.0.prepared.batching.layer_slice_ms;
+        if ms == 0 || (!peers && !run.layer_work.armed) {
+            return None;
+        }
+        // Batching already requires M5 Fast/Half; a serial/unequal workspace
+        // that cannot hold the original row quantum keeps the legacy path.
+        if !run.layer_work.armed
+            && run.session.as_ref().is_none_or(|s| {
+                s.prefill_rows() == 0
+                    || s.packed_lineage() != Some(PackedLineage::Fast)
+                    || s.fast_precision() != Some(FastPrecision::Half)
+            })
+        {
+            return None;
+        }
+        let _qos = qwen_llm::metal::GpuThreadQos::enter();
+        run.reserve = reserve;
+        if let Some(c) = &mut run.chunk_capture {
+            c.reserve = reserve;
+        }
+        self.0.attach(run);
+        let result = (|| {
+            if !self
+                .0
+                .prefill_slice_run(run, rows, sink, ms as f64, peers)?
+            {
+                return Ok(None);
+            }
+            self.0.finish_prefill(run, sink)?;
+            DecodeCursor::new(decode_loop::DecodeRequest {
+                family: FAMILY,
+                logits: std::mem::take(&mut run.logits),
+                max_tokens: run.maximum,
+                stop_tokens: &CHAT_STOPS,
+                vocab_size: run.vocab_size,
+            })
+            .map(Some)
+        })();
+        self.0.detach(run);
+        Some(result)
     }
     fn advance(
         &mut self,
@@ -499,7 +573,7 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
         batch: serde_json::Value,
     ) -> Result<GenerationOutcome, BackendFailure> {
         self.0.attach(&mut run);
-        let phases = serde_json::json!({"prefill_ms":run.prefill_ms,"decode_ms":generation.wall_ms,"reused_tokens":run.matched,"prefill_tokens":run.tokens.len()-run.matched,"restore_ms":run.restore_ms,"reuse_source":run.reuse_source,"restore_origin":run.restore_origin,"lineage":lineage_name(run.lineage),"batch":batch});
+        let phases = serde_json::json!({"prefill_ms":run.prefill_ms,"decode_ms":generation.wall_ms,"reused_tokens":run.matched,"prefill_tokens":run.tokens.len()-run.matched,"restore_ms":run.restore_ms,"reuse_source":run.reuse_source,"restore_origin":run.restore_origin,"lineage":lineage_name(run.lineage),"layer_slices":run.layer_work.commands,"layer_gpu_ms":run.layer_work.gpu_ms,"batch":batch});
         let result = self.0.finish_run(run, generation);
         if result.is_ok() {
             self.0.keep_idle();
@@ -552,6 +626,16 @@ pub(super) fn with_transport_relief<'w, T, V>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn layer_slice_ms_has_an_exact_zero_rollback_and_bounded_input() {
+        assert_eq!(parse_slice_ms(None).unwrap(), DEFAULT_LAYER_SLICE_MS);
+        for n in ["0", "1", "100", "10000"] {
+            assert!(parse_slice_ms(Some(n)).is_ok());
+        }
+        for n in ["10001", "-1", "x", "1.5", ""] {
+            assert!(parse_slice_ms(Some(n)).is_err());
+        }
+    }
     #[test]
     fn glm_batch_limits_are_bounded_and_have_an_explicit_serial_rollback() {
         assert_eq!(parse_percent(None).unwrap(), 10);

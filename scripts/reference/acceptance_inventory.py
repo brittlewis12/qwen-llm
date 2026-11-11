@@ -32,6 +32,8 @@ TARGETS = {
 SCOPES = {
     "lib": [
         "metal::causal::tests::",
+        "metal::qos::tests::",
+        "glm5_next_metal::prefill_slice::tests::",
         "metal::token_feedback::tests::",
         "metal::token_loop::tests::",
         "deepseek_v41::",
@@ -72,6 +74,7 @@ SCOPES = {
         "serve::backend_v41::",
         "serve::batching::driver::tests::",
         "serve::backend_glm5_next::scheduler::tests::",
+        "serve::backend_glm5_next::layer_prefill::tests::",
         "serve::backend_qwen4exp::concurrent::tests::",
         "serve::checkpoint_ladder::",
         "serve::snapshot_cache::tests::ladder_",

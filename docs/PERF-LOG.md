@@ -130,6 +130,35 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Fast packet pressure peaked at 2 for Metal/prose and yielded until 1; Rust
   observed 0, Python 1, and the packet finished at 1.
   Branch `research/glm-prefill-numerics`; no merge; M5 worktree removed.
+## 2026-11-11 - GLM Production Layer Cursor: Integration Gate
+
+- Branch `perf/glm-layer-sliced-prefill` adds the production row-preserving
+  begin/resume cursor, a nominal GPU-time layer plan, and one peer decode
+  round between quanta. `QWEN_SERVE_GLM_LAYER_SLICE_MS=0` retains the original
+  whole-row-chunk/percentage-credit path; the default remains off pending
+  the served A/B. No extra Metal activation allocation.
+- Partial appends keep their session exclusive/poisoned through final normal
+  route/selector validation. Cancellation drops that session; snapshots and
+  decode cannot observe a partial layer state. Completed original row chunks
+  invoke the existing checkpoint/ladder observer. Request-scoped accounting
+  records only active prefill work, including cancellation between callbacks.
+- Driver group-feedback bursts stay on for all-decoding batches; parked
+  appenders force ordinary one-round peer batching. Tests cover feedback
+  re-entry, exact one-round service without duplicate percentage credit,
+  cancellation, refusal fallback, layer coverage, cold GPU feedback and QoS.
+  CPU: 23 Driver tests, 688 serve tests (42 existing ignored), 3 layer-plan
+  tests, 1 QoS test, 15 harness tests; acceptance inventory passes all CPU
+  classifications. No ignored tests added.
+- Initial production API gate on M5: 24/24 exact warm/fresh-prefix cases,
+  including a 15s idle case, all logits/cache bytes/post-append decode and
+  peer results bitwise; cancellation disposal and unequal-geometry refusal
+  also pass. Thermal 0–1. Warm max gaps ~103/110/150ms at 32/342/1509 rows.
+  The idle case's first gap is 795ms (TTFT 1074ms, command GPU total 306ms):
+  cold cost outside command timestamps is still a separate limit. Reported
+  before any workaround; the slice mechanism is unchanged.
+- Raw evidence: `metagross:~/qwen-runs/2026-11-11-layer-slice-production/`.
+  Real-sampling 30s ABBA is in progress; the final ship decision follows.
+
 ## 2026-11-11 - GLM Layer-Sliced Append: Exact, Neutral GPU Cost, ~150ms Gaps
 
 - **Build recommendation; probe/design only, no serve change.** New

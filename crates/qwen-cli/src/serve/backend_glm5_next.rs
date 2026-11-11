@@ -56,6 +56,7 @@ mod chunk_checkpoint;
 mod dflash;
 mod execution;
 mod gpu;
+mod layer_prefill;
 mod prefill_plan;
 mod scheduler;
 
@@ -1363,6 +1364,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             .chain([tokens.len()])
             .collect();
 
+        let prompt_len = tokens.len();
         Ok(execution::Begun::Run(Box::new(execution::Run {
             session: None,
             tokens,
@@ -1399,6 +1401,12 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             prefill_ms: 0.0,
             chunk_capture_ms: 0.0,
             ready: false,
+            layer_work: layer_prefill::Work {
+                matched,
+                prompt: prompt_len,
+                reuse_source,
+                ..Default::default()
+            },
         })))
     }
 
@@ -1428,14 +1436,12 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         let tokens = &run.tokens;
         crate::glm5_next::residency::sample(ctx, self.prepared.source, "before_model_use");
         let lineage = run.lineage;
-        let namespace = run.namespace;
-        let reserve = run.reserve;
         let mut canonical = run.canonical;
         let mut chunk_capture = run.chunk_capture.take();
-        let mut protect = run.protect;
-        let mut capture_ms = run.capture_ms;
-        let mut captures = std::mem::take(&mut run.captures);
-        let mut position = run.position;
+        let protect = run.protect;
+        let capture_ms = run.capture_ms;
+        let captures = std::mem::take(&mut run.captures);
+        let position = run.position;
         let rows = run.selected_rows.max(1);
         let planned_end = run.ends[run.segment];
         let end = planned_end.min(position.saturating_add(maximum_rows.max(1)));
@@ -1495,18 +1501,123 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 return Err(ServeError::server_error(format!("{FAMILY} prefill: {error}")).into());
             }
         };
-        position = end;
+        run.canonical = canonical;
+        run.chunk_capture = chunk_capture;
+        run.protect = protect;
+        run.capture_ms = capture_ms;
+        run.captures = captures;
+        run.logits = logits;
+        self.commit_prefill_chunk(run, end)
+    }
 
+    fn prefill_slice_run(
+        &mut self,
+        run: &mut execution::Run<'w>,
+        maximum_rows: usize,
+        sink: &mut dyn GenerationSink,
+        target_ms: f64,
+        peers: bool,
+    ) -> Result<bool, BackendFailure> {
+        if run.position == run.tokens.len() {
+            return Ok(true);
+        }
+        if let Err(abort) = sink.tick() {
+            // The request's Drop accounting reports work even when Driver
+            // cancels it before this callback. Partial recurrent state is never
+            // returned to the live-session pool.
+            self.session = None;
+            return Err(BackendFailure::Aborted(abort));
+        }
+        crate::shutdown::checkpoint().map_err(|e| ServeError::server_error(e.to_string()))?;
+        let ctx = self.ctx;
+        run.layer_work.armed = true;
+        let start = Instant::now();
+        let pending = self
+            .session
+            .as_ref()
+            .expect("session")
+            .prefill_chunk_pending();
+        let end = run.layer_work.chunk_end.unwrap_or_else(|| {
+            run.ends[run.segment].min(
+                run.position
+                    .saturating_add(maximum_rows.max(1).min(run.selected_rows.max(1))),
+            )
+        });
+        let outcome = (|| {
+            if !pending {
+                let session = self.session.as_mut().expect("session");
+                scheduler::with_session_relief(
+                    &mut self.cache,
+                    &mut self.idle_sessions,
+                    run.protect,
+                    || session.prepare_prefill(ctx, run.reserve),
+                )?;
+                run.canonical &= run.position % run.selected_rows.max(1) == 0;
+                if let Some(c) = &mut run.chunk_capture {
+                    c.trajectory_valid &= session.position() == run.position;
+                }
+                crate::glm5_next::residency::sample(
+                    ctx,
+                    self.prepared.source,
+                    "prefill_chunk_begin",
+                );
+                session.begin_prefill_chunk(ctx, &run.tokens[run.position..end], target_ms)?;
+                run.layer_work.chunk_end = Some(end);
+            }
+            self.session
+                .as_mut()
+                .expect("session")
+                .resume_prefill_chunk(ctx, peers)
+        })();
+        run.layer_work.note(start.elapsed().as_secs_f64() * 1e3);
+        let slice = match outcome {
+            Ok(slice) => slice,
+            Err(error) => {
+                self.session = None;
+                return Err(session_error(error).into());
+            }
+        };
+        run.layer_work.gpu_ms += slice.gpu_ms;
+        run.layer_work.commands += 1;
+        tracing::debug!(target:"qwen_diag", "serve layer: rows={} layers={} gpu_ms={:.3} final={}",
+            end-run.position, slice.layers, slice.gpu_ms, slice.logits.is_some());
+        let Some(logits) = slice.logits else {
+            return Ok(false);
+        };
+        run.layer_work.chunk_end = None;
+        if let Some(capture) = &mut run.chunk_capture {
+            capture.committed_chunk(
+                self.session.as_ref().expect("validated session"),
+                ctx,
+                &mut self.cache,
+                &run.tokens,
+                run.position,
+                end - run.position,
+            );
+        }
+        run.logits = logits;
+        self.commit_prefill_chunk(run, end)
+    }
+
+    fn commit_prefill_chunk(
+        &mut self,
+        run: &mut execution::Run<'w>,
+        end: usize,
+    ) -> Result<bool, BackendFailure> {
+        let ctx = self.ctx;
+        let planned_end = run.ends[run.segment];
+        run.position = end;
         if end == planned_end {
-            if let Some(capture) = &mut chunk_capture {
-                capture.reached_segment_end(position, canonical);
+            if let Some(capture) = &mut run.chunk_capture {
+                capture.reached_segment_end(run.position, run.canonical);
             }
             run.segment += 1;
-            if end < tokens.len() {
-                let namespace = namespace.expect("cuts come from a snapshot schedule");
+            if end < run.tokens.len() {
+                let namespace = run.namespace.expect("cuts come from a snapshot schedule");
                 let capture_t0 = Instant::now();
-                let pinned = protect.filter(|&id| self.cache.pin(id));
-                let outcome = if namespace.schedule == Schedule::FastSharedSplitV1 && !canonical {
+                let pinned = run.protect.filter(|&id| self.cache.pin(id));
+                let outcome = if namespace.schedule == Schedule::FastSharedSplitV1 && !run.canonical
+                {
                     // Live history segmented differently (an earlier cut, a
                     // cancellation off the chunk grid, decoded tokens): this
                     // state is not the one a miss would publish.
@@ -1519,30 +1630,23 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                         self.session.as_ref().expect("session present"),
                         ctx,
                         namespace,
-                        &tokens[..end],
+                        &run.tokens[..end],
                         snapshot_bytes(&self.weights.config, end as u64),
-                        reserve,
+                        run.reserve,
                     )
                 };
                 if let Some(id) = pinned {
                     self.cache.unpin(id);
                 }
-                capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
-                protect = self
+                run.capture_ms += capture_t0.elapsed().as_secs_f64() * 1e3;
+                run.protect = self
                     .cache
-                    .entry_for_in(&namespace, &tokens[..end])
-                    .or(protect);
-                captures.push(format!("{end}:{}", outcome.name()));
+                    .entry_for_in(&namespace, &run.tokens[..end])
+                    .or(run.protect);
+                run.captures.push(format!("{end}:{}", outcome.name()));
             }
         }
-        run.canonical = canonical;
-        run.chunk_capture = chunk_capture;
-        run.protect = protect;
-        run.capture_ms = capture_ms;
-        run.captures = captures;
-        run.position = position;
-        run.logits = logits;
-        Ok(position == tokens.len())
+        Ok(end == run.tokens.len())
     }
 
     fn finish_prefill(
@@ -1560,7 +1664,12 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         if let Err(abort) = sink.tick() {
             // Measurement fix: prefill completed but the turn was cancelled
             // before decode, so no phases line will be emitted by `finish_run`.
-            let prefill_ms = run.prefill_t0.elapsed().as_secs_f64() * 1e3 - run.capture_ms;
+            let prefill_ms = if run.layer_work.armed {
+                run.layer_work.elapsed_ms
+            } else {
+                run.prefill_t0.elapsed().as_secs_f64() * 1e3 - run.capture_ms
+            };
+            run.layer_work.finished = true;
             tracing::info!(
                 target: "qwen_diag",
                 "serve prefill: family=glm5_next complete=false cancelled=true phase=finish prefill_ms={prefill_ms:.1} reused_tokens={} prefill_tokens={} reused_source={}",
@@ -1579,7 +1688,12 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         crate::glm5_next::residency::sample(self.ctx, self.prepared.source, "after_prefill");
         run.chunk_capture_ms = run.chunk_capture.as_ref().map_or(0.0, |c| c.elapsed_ms);
         run.capture_ms += run.chunk_capture_ms;
-        run.prefill_ms = run.prefill_t0.elapsed().as_secs_f64() * 1e3 - run.capture_ms;
+        run.prefill_ms = if run.layer_work.armed {
+            run.layer_work.elapsed_ms
+        } else {
+            run.prefill_t0.elapsed().as_secs_f64() * 1e3 - run.capture_ms
+        };
+        run.layer_work.finished = true;
         // A turn cancelled during decode never reaches `finish_run`; emit the
         // prefill record now so partial turns are represented in the budget.
         tracing::info!(

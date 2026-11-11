@@ -1,5 +1,5 @@
 //! Layer-boundary append probe, not a serving policy. Requires perf-ablations.
-//! layer_slice_probe <corpus> [reps=8] [decoders=3] [slices=1,2,4,8]
+//! layer_slice_probe <corpus> [reps=8] [decoders=3] [slices=1,2,4,8] [runtime] [idle_ms=0]
 //! Paired orders alternate. Teacher-forced decoder inputs keep GPU work equal.
 use qwen_llm::{
     gguf::GgufFile,
@@ -214,6 +214,20 @@ fn main() -> anyhow::Result<()> {
         &mut members.iter_mut().collect::<Vec<_>>(),
         &vec![ids[DEPTH]; width],
     )?;
+    if args.get(5).map(String::as_str) == Some("runtime") {
+        let idle_ms: u64 = args.get(6).map_or(Ok(0), |s| s.parse())?;
+        return runtime_gate(
+            &ctx,
+            &weights,
+            &ids,
+            &mut app,
+            &mut members,
+            &mut batch,
+            &root,
+            reps,
+            idle_ms,
+        );
+    }
     // Independent ordinary one-command reference for the instrumented s=1.
     for n in [32, 342, 1509] {
         app.restore_snapshot(&root)?;
@@ -321,5 +335,207 @@ fn main() -> anyhow::Result<()> {
         }
     }
     emit(serde_json::json!({"kind":"done","pressure":pressure()}));
+    Ok(())
+}
+
+/// Regression gate for the actual resumable production API, including fresh
+/// prefixes, idle residency, all persistent bytes, exclusivity and disposal.
+#[allow(clippy::too_many_arguments)]
+fn runtime_gate<'w>(
+    ctx: &MetalContext,
+    weights: &'w Glm5NextWeights,
+    ids: &[u32],
+    app: &mut Glm5NextSession<'w>,
+    members: &mut [Glm5NextSession<'w>],
+    batch: &mut Glm5NextBatch,
+    root: &Glm5NextSnapshot,
+    reps: usize,
+    idle_ms: u64,
+) -> anyhow::Result<()> {
+    app.reset()?;
+    let empty = app.capture_snapshot()?;
+    for (base, snap) in [(DEPTH, root), (0, &empty)] {
+        for n in [32, 342, 1509] {
+            app.restore_snapshot(snap)?;
+            let reference = app.prefill_packed(ctx, &ids[base..base + n])?;
+            let state = app.capture_snapshot()?;
+            let next = app.forward(ctx, ids[base + n])?;
+            for rep in 0..reps {
+                app.restore_snapshot(snap)?;
+                for member in members.iter_mut() {
+                    member.restore_snapshot(snap)?;
+                }
+                let mut rounds = Rounds {
+                    ctx,
+                    batch,
+                    members,
+                    ids,
+                    count: 0,
+                    last: Instant::now(),
+                    gaps: Vec::new(),
+                    gpu: Vec::new(),
+                    logits: Vec::new(),
+                };
+                rounds.step()?;
+                rounds.gaps.clear();
+                rounds.gpu.clear();
+                if idle_ms > 0 && base == DEPTH && n == 32 && rep == 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(idle_ms));
+                    // Idle itself is not an inter-token gap during append.
+                    rounds.last = Instant::now();
+                }
+                let start = Instant::now();
+                app.begin_prefill_chunk(ctx, &ids[base..base + n], 100.0)?;
+                let mut gpu_ms = 0.0;
+                let mut commands = 0;
+                let logits = loop {
+                    let _qos = qwen_llm::metal::GpuThreadQos::enter();
+                    let slice = app.resume_prefill_chunk(ctx, true)?;
+                    gpu_ms += slice.gpu_ms;
+                    commands += 1;
+                    if let Some(logits) = slice.logits {
+                        break logits;
+                    }
+                    anyhow::ensure!(
+                        app.is_poisoned() && app.position() == base,
+                        "partial position published"
+                    );
+                    anyhow::ensure!(
+                        app.capture_snapshot().is_err()
+                            && app.prepare_decode(ctx).is_err()
+                            && app.reset().is_err()
+                            && app.forward(ctx, ids[base]).is_err(),
+                        "partial state escaped"
+                    );
+                    rounds.step()?;
+                };
+                let ttft_ms = ms(start);
+                rounds.step()?;
+                let total_rounds = rounds.count;
+                let gaps = rounds.gaps;
+                let decoder_logits = rounds.logits;
+                let decoder_states = members
+                    .iter()
+                    .map(|s| s.capture_snapshot())
+                    .collect::<Result<Vec<_>, _>>()?;
+                let bitwise_logits = same(&logits, &reference);
+                let bitwise_state = app.capture_snapshot()?.same_state(&state);
+                let bitwise_next = same(&app.forward(ctx, ids[base + n])?, &next);
+                for member in members.iter_mut() {
+                    member.restore_snapshot(snap)?;
+                }
+                let mut reference_rounds = Rounds {
+                    ctx,
+                    batch,
+                    members,
+                    ids,
+                    count: 0,
+                    last: Instant::now(),
+                    gaps: Vec::new(),
+                    gpu: Vec::new(),
+                    logits: Vec::new(),
+                };
+                for _ in 0..total_rounds {
+                    reference_rounds.step()?;
+                }
+                let bitwise_decoders = reference_rounds
+                    .logits
+                    .iter()
+                    .zip(&decoder_logits)
+                    .all(|(a, b)| a.iter().zip(b).all(|(a, b)| same(a, b)))
+                    && members
+                        .iter()
+                        .zip(&decoder_states)
+                        .all(|(s, b)| s.capture_snapshot().unwrap().same_state(b));
+                emit(
+                    serde_json::json!({"kind":"runtime_gate","base":base,"n":n,"rep":rep,
+                    "idle_ms":if base==DEPTH&&n==32&&rep==0 {idle_ms}else{0},
+                    "commands":commands,"gpu_ms":gpu_ms,"ttft_ms":ttft_ms,"gaps_ms":gaps,
+                    "bitwise_logits":bitwise_logits,"bitwise_state":bitwise_state,
+                    "bitwise_next":bitwise_next,"bitwise_decoders":bitwise_decoders,"pressure":pressure()}),
+                );
+                anyhow::ensure!(
+                    bitwise_logits && bitwise_state && bitwise_next && bitwise_decoders,
+                    "runtime exactness failed base={base} n={n} rep={rep}"
+                );
+            }
+        }
+    }
+    // Cross the dense/sparse frontier inside the original row chunk, with
+    // peers at unequal depths. Layer resumes must retain the MLA ordinal and
+    // original per-row visibility, including the three dense rows at 2048.
+    app.restore_snapshot(&empty)?;
+    app.prefill_packed(ctx, &ids[..2048])?;
+    let frontier = app.capture_snapshot()?;
+    let reference = app.prefill_packed(ctx, &ids[2048..2390])?;
+    let state = app.capture_snapshot()?;
+    let next = app.forward(ctx, ids[2390])?;
+    app.restore_snapshot(&frontier)?;
+    members[0].restore_snapshot(root)?;
+    for member in &mut members[1..] {
+        member.restore_snapshot(&empty)?;
+    }
+    app.begin_prefill_chunk(ctx, &ids[2048..2390], 100.0)?;
+    let logits = loop {
+        let slice = app.resume_prefill_chunk(ctx, true)?;
+        if let Some(logits) = slice.logits {
+            break logits;
+        }
+        let tokens = vec![ids[DEPTH]; members.len()];
+        batch.step(ctx, &mut members.iter_mut().collect::<Vec<_>>(), &tokens)?;
+    };
+    anyhow::ensure!(
+        same(&logits, &reference)
+            && app.capture_snapshot()?.same_state(&state)
+            && same(&app.forward(ctx, ids[2390])?, &next),
+        "dense/sparse frontier changed state"
+    );
+    // An explicit full snapshot restore may replace a partial cursor. It must
+    // clear the cursor as well as restore every recurrent/cache region.
+    app.restore_snapshot(&frontier)?;
+    app.begin_prefill_chunk(ctx, &ids[2048..2390], 100.0)?;
+    app.resume_prefill_chunk(ctx, true)?;
+    app.restore_snapshot(&frontier)?;
+    anyhow::ensure!(
+        !app.prefill_chunk_pending() && !app.is_poisoned(),
+        "snapshot kept a stale cursor"
+    );
+    anyhow::ensure!(
+        same(&app.prefill_packed(ctx, &ids[2048..2390])?, &reference),
+        "partial restore changed append"
+    );
+    emit(
+        serde_json::json!({"kind":"runtime_frontier","bitwise":true,"partial_snapshot_restore":true}),
+    );
+    let mut cancelled = Glm5NextSession::with_prefill_rows(ctx, weights, CAPACITY, ROWS)?;
+    cancelled.restore_snapshot(root)?;
+    cancelled.begin_prefill_chunk(ctx, &ids[DEPTH..DEPTH + 32], 100.0)?;
+    anyhow::ensure!(
+        cancelled.resume_prefill_chunk(ctx, true)?.logits.is_none(),
+        "expected partial slice"
+    );
+    anyhow::ensure!(
+        cancelled.is_poisoned() && cancelled.capture_snapshot().is_err(),
+        "partial cancellation state escaped"
+    );
+    drop(cancelled); // Every submitted command has completed; no reusable state escapes.
+    let mut tiny = Glm5NextSession::with_prefill_rows(ctx, weights, CAPACITY, 1)?;
+    tiny.restore_snapshot(root)?;
+    members[0].restore_snapshot(root)?;
+    anyhow::ensure!(
+        batch
+            .step(ctx, &mut [&mut tiny, &mut members[0]], &[ids[DEPTH]; 2])
+            .is_err(),
+        "unequal geometry must decline"
+    );
+    anyhow::ensure!(
+        !tiny.is_poisoned() && !members[0].is_poisoned(),
+        "refusal mutated a member"
+    );
+    tiny.forward(ctx, ids[DEPTH])?;
+    members[0].forward(ctx, ids[DEPTH])?;
+    emit(
+        serde_json::json!({"kind":"runtime_done","cancellation_discard":true,"unequal_geometry_fallback":true,"pressure":pressure()}),
+    );
     Ok(())
 }

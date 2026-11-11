@@ -249,67 +249,78 @@ impl Capture {
         self.trajectory_valid &= session.position() == range.start;
         let mut start = range.start;
         session.prefill_packed_with_observer(ctx, &tokens[range], before, &mut |session, len| {
-            let committed = session.position();
-            let valid = committed.checked_sub(start) == Some(len);
-            if !valid {
-                self.origin = None;
-                self.trajectory_valid = false;
-            }
-            ChunkOrigin::advance(&mut self.origin, start, committed);
-            start = committed;
-            // A live trajectory is published only after a successful committed
-            // callback. It is never promoted into the canonical namespace.
-            if self.trajectory_valid
-                && valid
-                && !(Some(committed) == self.target && self.origin.is_some())
-            {
-                if let Some(trajectory) = self.trajectory.as_mut().filter(|t| t.target == committed)
-                {
-                    let started = Instant::now();
-                    trajectory.outcome = Some(with_pins(cache, [None, self.restored], |cache| {
-                        if self.denied {
-                            CaptureOutcome::Denied
-                        } else {
-                            capture_checkpoint(
-                                cache,
-                                session,
-                                ctx,
-                                trajectory.namespace,
-                                &tokens[..committed],
-                                trajectory.estimate,
-                                self.reserve,
-                                Some(trajectory.conversation),
-                            )
-                        }
-                    }));
-                    self.elapsed_ms += started.elapsed().as_secs_f64() * 1e3;
-                }
-            }
-            if Some(committed) != self.target || self.origin.is_none() {
-                return;
-            }
-            let started = Instant::now();
-            let Schedule::FastChunkCheckpointV1 { shared_cut, .. } = self.namespace.schedule else {
-                unreachable!("capture namespace is an existing chunk origin")
-            };
-            let shared = cache.entry_for_in(&self.shared, &tokens[..shared_cut]);
-            self.outcome = Some(with_pins(cache, [shared, self.restored], |cache| {
-                if self.denied {
-                    CaptureOutcome::Denied
-                } else {
-                    capture_into(
-                        cache,
-                        session,
-                        ctx,
-                        self.namespace,
-                        &tokens[..committed],
-                        self.estimate,
-                        self.reserve,
-                    )
-                }
-            }));
-            self.elapsed_ms += started.elapsed().as_secs_f64() * 1e3;
+            self.committed_chunk(session, ctx, cache, tokens, start, len);
+            start = session.position();
         })
+    }
+
+    pub(super) fn committed_chunk(
+        &mut self,
+        session: &Glm5NextSession<'_>,
+        ctx: &MetalContext,
+        cache: &mut SnapshotCache<Glm5NextSnapshot, CacheNamespace>,
+        tokens: &[u32],
+        start: usize,
+        len: usize,
+    ) {
+        let committed = session.position();
+        let valid = committed.checked_sub(start) == Some(len);
+        if !valid {
+            self.origin = None;
+            self.trajectory_valid = false;
+        }
+        ChunkOrigin::advance(&mut self.origin, start, committed);
+        // A live trajectory is published only after a successful committed
+        // callback. It is never promoted into the canonical namespace.
+        if self.trajectory_valid
+            && valid
+            && !(Some(committed) == self.target && self.origin.is_some())
+        {
+            if let Some(trajectory) = self.trajectory.as_mut().filter(|t| t.target == committed) {
+                let started = Instant::now();
+                trajectory.outcome = Some(with_pins(cache, [None, self.restored], |cache| {
+                    if self.denied {
+                        CaptureOutcome::Denied
+                    } else {
+                        capture_checkpoint(
+                            cache,
+                            session,
+                            ctx,
+                            trajectory.namespace,
+                            &tokens[..committed],
+                            trajectory.estimate,
+                            self.reserve,
+                            Some(trajectory.conversation),
+                        )
+                    }
+                }));
+                self.elapsed_ms += started.elapsed().as_secs_f64() * 1e3;
+            }
+        }
+        if Some(committed) != self.target || self.origin.is_none() {
+            return;
+        }
+        let started = Instant::now();
+        let Schedule::FastChunkCheckpointV1 { shared_cut, .. } = self.namespace.schedule else {
+            unreachable!("capture namespace is an existing chunk origin")
+        };
+        let shared = cache.entry_for_in(&self.shared, &tokens[..shared_cut]);
+        self.outcome = Some(with_pins(cache, [shared, self.restored], |cache| {
+            if self.denied {
+                CaptureOutcome::Denied
+            } else {
+                capture_into(
+                    cache,
+                    session,
+                    ctx,
+                    self.namespace,
+                    &tokens[..committed],
+                    self.estimate,
+                    self.reserve,
+                )
+            }
+        }));
+        self.elapsed_ms += started.elapsed().as_secs_f64() * 1e3;
     }
 
     pub(super) fn reached_segment_end(&mut self, position: usize, canonical: bool) {

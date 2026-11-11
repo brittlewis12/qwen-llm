@@ -1066,6 +1066,7 @@ pub struct Glm5NextSession<'w> {
     /// Present when `capacity` reaches the sparse frontier.
     sparse: Option<SparseScratch>,
     packed: Option<packed::PackedScratch>,
+    prefill_cursor: Option<prefill_slice::Cursor>,
     prefill_config: Option<workspace::PrefillConfig>,
     release_prefill_for_decode: bool,
     ledger: Glm5NextMemoryLedger,
@@ -1198,6 +1199,7 @@ impl<'w> Glm5NextSession<'w> {
             }),
             release_prefill_for_decode: workspace::release_policy(ctx, weights, &ledger),
             packed,
+            prefill_cursor: None,
             ledger,
             observed_allocation_delta,
             stage_recorder: std::cell::RefCell::new(None),
@@ -1213,6 +1215,9 @@ impl<'w> Glm5NextSession<'w> {
     /// without mutation, so the state (and any snapshot of it) never carries
     /// one lineage's arithmetic under the other's label.
     pub fn set_packed_lineage(&mut self, lineage: PackedLineage) -> Result<()> {
+        if self.poisoned {
+            return Err(Glm5NextMetalError::Poisoned);
+        }
         let Some(arith) = self.prefill_arith() else {
             return Ok(());
         };
@@ -1244,6 +1249,9 @@ impl<'w> Glm5NextSession<'w> {
     /// Select Fast operand precision before work commits. Releasing prompt
     /// buffers never unlocks this policy or changes snapshot compatibility.
     pub fn set_fast_precision(&mut self, precision: FastPrecision) -> Result<()> {
+        if self.poisoned {
+            return Err(Glm5NextMetalError::Poisoned);
+        }
         let Some(arith) = self.prefill_arith() else {
             return Ok(());
         };
@@ -2679,6 +2687,8 @@ mod kda_value4;
 mod lens;
 mod packed;
 mod prefill_attention;
+mod prefill_slice;
+pub use prefill_slice::Glm5NextPrefillSlice;
 pub mod prefill_plan;
 pub(crate) mod row_policy;
 mod short_prefill;

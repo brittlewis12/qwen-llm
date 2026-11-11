@@ -6354,5 +6354,75 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Scripted fake group burst with one member backpressured: the burst yields without losing the other member, and both keep a forwardable token once credit returns; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "glm5_next_metal::prefill_slice::tests::cold_slice_reduces_future_layers_and_no_peers_drains_the_same_chunk",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed model-free layer scheduling, cancellation/accounting or nested host QoS; no Metal context or model import."
+  },
+  {
+    "target": "lib",
+    "name": "glm5_next_metal::prefill_slice::tests::layer_quanta_keep_the_row_grid_and_cover_each_layer_once",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed model-free layer scheduling, cancellation/accounting or nested host QoS; no Metal context or model import."
+  },
+  {
+    "target": "lib",
+    "name": "glm5_next_metal::prefill_slice::tests::tiny_targets_still_make_progress_and_large_targets_do_not_split",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed model-free layer scheduling, cancellation/accounting or nested host QoS; no Metal context or model import."
+  },
+  {
+    "target": "lib",
+    "name": "metal::qos::tests::qos_scope_nesting_and_early_return_restore_the_feeding_thread",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed model-free layer scheduling, cancellation/accounting or nested host QoS; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_glm5_next::layer_prefill::tests::partial_layer_cancellation_accounts_only_work_and_never_claims_completion",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed model-free layer scheduling, cancellation/accounting or nested host QoS; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_glm5_next::layer_prefill::tests::rollback_and_cancel_before_execution_do_not_emit_duplicate_prefill_records",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed model-free layer scheduling, cancellation/accounting or nested host QoS; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_glm5_next::scheduler::tests::layer_slice_ms_has_an_exact_zero_rollback_and_bounded_input",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed model-free layer scheduling, cancellation/accounting or nested host QoS; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::sliced_prefill_cancellation_drops_partial_state_and_keeps_peer_group_loop",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed model-free layer scheduling, cancellation/accounting or nested host QoS; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::sliced_prefill_peer_geometry_refusal_falls_back_once_without_touching_appender",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed model-free layer scheduling, cancellation/accounting or nested host QoS; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::sliced_prefill_runs_exactly_one_peer_round_and_then_rejoins_group_feedback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed model-free layer scheduling, cancellation/accounting or nested host QoS; no Metal context or model import."
   }
 ]

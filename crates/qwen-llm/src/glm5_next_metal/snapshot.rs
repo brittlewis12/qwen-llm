@@ -333,6 +333,7 @@ impl Glm5NextSession<'_> {
                 _ => unreachable!("validated above"),
             }
         }
+        self.prefill_cursor = None;
         self.position = snapshot.position;
         self.poisoned = false;
         Ok(())

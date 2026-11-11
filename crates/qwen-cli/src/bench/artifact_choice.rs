@@ -11,7 +11,7 @@ use qwen_llm::{
     gguf::GgufFile,
     glm5_next_metal::{Glm5NextSession, Glm5NextWeights, prefill_plan},
     metal::MetalContext,
-    tokenizer::{NativeTokenizer, bpe_tokenizer_identity_sha256, token_ids_sha256_i32le},
+    tokenizer::{NativeTokenizer, token_ids_sha256_i32le},
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -73,10 +73,7 @@ pub(crate) fn run(args: ArtifactChoiceArgs) -> Result<()> {
         GgufFile::open(&args.model).with_context(|| format!("open {}", args.model.display()))?,
     );
     args.family.check_architecture(&gguf)?;
-    let tokenizer_sha256 = hex(&bpe_tokenizer_identity_sha256(
-        &gguf,
-        b"artifact-choice-tokenizer-v1\0",
-    )?);
+    let tokenizer_sha256 = tokenizer_identity_sha256(&gguf)?;
 
     let report = match args.mode {
         ArtifactChoiceMode::Identity => identity_report(&args, &gguf, tokenizer_sha256),
@@ -622,6 +619,75 @@ fn write_report(path: Option<&Path>, report: &Value) -> Result<()> {
 
 fn sha256(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
+}
+
+fn tokenizer_identity_sha256(gguf: &GgufFile) -> Result<String> {
+    let mut digest = Sha256::new();
+    digest.update(b"artifact-choice-tokenizer-v2\0");
+    // Report the source architecture separately: GLM releases use both
+    // `glm5next` and `glm5-next`, which dispatch to identical GLM4 tokenization.
+    for key in ["tokenizer.ggml.model", "tokenizer.ggml.pre"] {
+        let value = gguf
+            .get_str(key)
+            .with_context(|| format!("missing {key}"))?;
+        hash_identity_field(&mut digest, key, value.as_bytes());
+    }
+    let tokens = gguf
+        .get_string_array_full("tokenizer.ggml.tokens")?
+        .context("missing tokenizer.ggml.tokens")?;
+    hash_identity_field(
+        &mut digest,
+        "tokenizer.ggml.tokens.count",
+        &(tokens.len() as u64).to_le_bytes(),
+    );
+    for token in tokens {
+        hash_identity_field(&mut digest, "tokenizer.ggml.tokens.item", token.as_bytes());
+    }
+    let token_types = gguf
+        .get_i64_array("tokenizer.ggml.token_type")?
+        .context("missing tokenizer.ggml.token_type")?;
+    hash_identity_field(
+        &mut digest,
+        "tokenizer.ggml.token_type.count",
+        &(token_types.len() as u64).to_le_bytes(),
+    );
+    for token_type in token_types {
+        digest.update(token_type.to_le_bytes());
+    }
+    let merges = gguf
+        .get_string_array_full("tokenizer.ggml.merges")?
+        .context("missing tokenizer.ggml.merges")?;
+    hash_identity_field(
+        &mut digest,
+        "tokenizer.ggml.merges.count",
+        &(merges.len() as u64).to_le_bytes(),
+    );
+    for merge in merges {
+        hash_identity_field(&mut digest, "tokenizer.ggml.merges.item", merge.as_bytes());
+    }
+    for key in ["tokenizer.ggml.bos_token_id", "tokenizer.ggml.eos_token_id"] {
+        let mut value = vec![0];
+        if let Some(token_id) = gguf.get_u64(key) {
+            value[0] = 1;
+            value.extend_from_slice(&token_id.to_le_bytes());
+        }
+        hash_identity_field(&mut digest, key, &value);
+    }
+    for key in [
+        "tokenizer.ggml.add_bos_token",
+        "tokenizer.ggml.add_eos_token",
+    ] {
+        let value = gguf.get_bool(key)?.unwrap_or(false);
+        hash_identity_field(&mut digest, key, &[u8::from(value)]);
+    }
+    Ok(hex(&digest.finalize()))
+}
+
+fn hash_identity_field(digest: &mut Sha256, name: &str, bytes: &[u8]) {
+    digest.update((name.len() as u64).to_le_bytes());
+    digest.update(name.as_bytes());
+    digest.update((bytes.len() as u64).to_le_bytes());
+    digest.update(bytes);
 }
 
 fn hex(bytes: &[u8]) -> String {

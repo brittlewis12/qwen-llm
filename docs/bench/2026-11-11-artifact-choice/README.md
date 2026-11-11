@@ -18,9 +18,11 @@ ordinary solo decode timing.
 
 The scorer tokenizes each entire source with the artifact's native GGUF
 tokenizer, starts from the first 49,152 tokens, then records 1,024 real next
-tokens. It fingerprints architecture, tokenizer model/pretokenizer, complete
-tokens/types/merges and special-token settings before any comparison. All
-quality invocations require that preverified identity hash. Candidate minus
+tokens. It fingerprints tokenizer model/pretokenizer, complete tokens,
+types/merges and special-token settings before any comparison; the GGUF
+architecture label is recorded separately because GLM uses both `glm5next`
+and `glm5-next` spellings. All quality invocations require that preverified
+identity hash. Candidate minus
 reference dNLL is analyzed as paired per-position NLL differences. Confidence
 intervals bootstrap prompt clusters (20,000 resamples, central 90% and
 one-sided 95% upper bound); the code-only interval is also reported. Top-1

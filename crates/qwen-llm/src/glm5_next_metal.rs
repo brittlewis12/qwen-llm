@@ -2734,6 +2734,8 @@ const Q6_RESEARCH_SHARED_PAIR: u8 = 2;
 const Q6_RESEARCH_DENSE_PAIR: u8 = 4;
 #[cfg(feature = "perf-ablations")]
 const Q6_RESEARCH_TRIPLE: u8 = 8;
+#[cfg(feature = "perf-ablations")]
+const Q6_RESEARCH_HEAD: u8 = 16;
 
 #[cfg(feature = "perf-ablations")]
 static Q6_RESEARCH_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -2744,7 +2746,7 @@ static Q6_RESEARCH_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::At
 #[cfg(feature = "perf-ablations")]
 pub fn diagnostic_q6_research(mask: u8) -> impl Drop {
     use std::sync::atomic::Ordering;
-    assert!(mask <= 15);
+    assert!(mask <= 31);
     struct Guard;
     impl Drop for Guard {
         fn drop(&mut self) {
@@ -2789,6 +2791,15 @@ fn matvec(
         && (4096..=16_384).contains(&n_out)
     {
         // The probe prices 8 simdgroups best at K >= 4096.
+        crate::metal::encode_glm_q6_splitk_f32(ctx, enc, weight, x, y, n_in, n_out, 8)?;
+        return Ok(());
+    }
+    #[cfg(feature = "perf-ablations")]
+    if q6_research_bit(Q6_RESEARCH_HEAD)
+        && weight.dtype == GgmlType::Q6_K
+        && n_in >= 4096
+        && n_out > 16_384
+    {
         crate::metal::encode_glm_q6_splitk_f32(ctx, enc, weight, x, y, n_in, n_out, 8)?;
         return Ok(());
     }

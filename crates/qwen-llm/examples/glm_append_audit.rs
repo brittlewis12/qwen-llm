@@ -12,7 +12,9 @@
 //! one common token through ordinary decode to compare the resulting state.
 //! Output is JSON lines. No production change.
 //!
-//! Usage: `glm_append_audit <depth> <prompt> [prompt ...]`
+//! Usage: `glm_append_audit [--layers] <depth> <prompt> [prompt ...]`
+//! `--layers` compares every post-block activation for sequential decode,
+//! one-row packed control, and the 8-row packed schedule.
 
 #[cfg(not(feature = "perf-ablations"))]
 fn main() {
@@ -25,8 +27,8 @@ mod probe {
     use qwen_llm::{
         gguf::GgufFile,
         glm5_next_metal::{
-            Glm5NextRowBank, Glm5NextRowBankPlan, Glm5NextSession, Glm5NextWeights,
-            set_expert_packet_max_rows,
+            Glm5NextCapturedRows, Glm5NextRowBank, Glm5NextRowBankPlan, Glm5NextSession,
+            Glm5NextWeights, set_expert_packet_max_rows,
         },
         metal::*,
         tokenizer::Tokenizer,
@@ -168,6 +170,63 @@ mod probe {
         )
     }
 
+    fn capture_logits(rows: &Glm5NextCapturedRows<'_>) -> Vec<f32> {
+        read_f32(rows.logits().expect("captured logits"))
+    }
+
+    fn capture_features(rows: &Glm5NextCapturedRows<'_>) -> Vec<f32> {
+        read_f32(rows.features().expect("captured features"))
+    }
+
+    fn layer_deltas(
+        reference: &[f32],
+        path: &[f32],
+        rows: usize,
+        taps: &[u32],
+        hidden: usize,
+        config: &qwen_llm::glm5_next::Glm5NextConfig,
+    ) -> Vec<Value> {
+        let stride = taps.len() * hidden;
+        assert_eq!(reference.len(), rows * stride);
+        assert_eq!(path.len(), rows * stride);
+        taps.iter()
+            .enumerate()
+            .map(|(tap_index, &layer)| {
+                let mut sum_sq = 0.0f64;
+                let mut ref_sq = 0.0f64;
+                let mut max_abs = 0.0f32;
+                let mut differing = 0usize;
+                let mut values = 0usize;
+                for row in 0..rows {
+                    let base = row * stride + tap_index * hidden;
+                    for i in 0..hidden {
+                        let a = reference[base + i];
+                        let b = path[base + i];
+                        let delta = (b - a).abs();
+                        max_abs = max_abs.max(delta);
+                        sum_sq += (delta as f64) * (delta as f64);
+                        ref_sq += (a as f64) * (a as f64);
+                        differing += usize::from(a.to_bits() != b.to_bits());
+                        values += 1;
+                    }
+                }
+                let rms = (sum_sq / values as f64).sqrt();
+                let relative_rms = (sum_sq / ref_sq.max(f64::MIN_POSITIVE)).sqrt();
+                let block = config.blocks[layer as usize];
+                json!({
+                    "layer": layer,
+                    "mixer": format!("{:?}", block.mixer),
+                    "ffn": format!("{:?}", block.ffn),
+                    "different_values": differing,
+                    "values": values,
+                    "max_abs": max_abs,
+                    "rms": rms,
+                    "relative_rms": relative_rms,
+                })
+            })
+            .collect()
+    }
+
     fn audit_prompt(
         ctx: &MetalContext,
         weights: &Glm5NextWeights,
@@ -175,6 +234,7 @@ mod probe {
         path: &str,
         text: &str,
         depth: usize,
+        layer_audit: bool,
     ) -> anyhow::Result<()> {
         let escaped = text.replace("<|", "‹|").replace("<｜", "‹｜");
         let mut ids: Vec<u32> = tokenizer
@@ -204,11 +264,18 @@ mod probe {
         }
         anyhow::ensure!(session.position() == depth, "prefix position");
         let snapshot = session.capture_snapshot()?;
-        let plan = Glm5NextRowBankPlan::new(&weights.config, &[], 0, MAX_WIDTH)?;
+        let taps: Vec<u32> = if layer_audit {
+            (0..weights.config.blocks.len() as u32).collect()
+        } else {
+            Vec::new()
+        };
+        let feature_capacity = if layer_audit { 8 } else { 0 };
+        let plan = Glm5NextRowBankPlan::new(&weights.config, &taps, feature_capacity, MAX_WIDTH)?;
         let mut bank = Glm5NextRowBank::new(ctx, weights, plan)?;
         let vocab = weights.config.vocab_size as usize;
 
-        for width in WIDTHS {
+        let widths: &[usize] = if layer_audit { &[8] } else { &WIDTHS };
+        for &width in widths {
             let append = &ids[depth..depth + width];
             let actual: Vec<u32> = ids[depth + 1..depth + width + 1].to_vec();
             let next = ids[depth + width];
@@ -220,15 +287,65 @@ mod probe {
             session.restore_snapshot(&snapshot)?;
             let started = Instant::now();
             let mut reference = Vec::with_capacity(width);
+            let mut reference_features = Vec::new();
             for &token in append {
-                reference.push(session.forward(ctx, token)?);
+                if layer_audit {
+                    let captured = session.forward_with_captures(ctx, token, &mut bank)?;
+                    reference.push(capture_logits(&captured));
+                    reference_features.extend(capture_features(&captured));
+                } else {
+                    reference.push(session.forward(ctx, token)?);
+                }
             }
-            let reference_state = session.forward(ctx, next)?;
+            let reference_state = if layer_audit {
+                let captured = session.forward_with_captures(ctx, next, &mut bank)?;
+                capture_logits(&captured)
+            } else {
+                session.forward(ctx, next)?
+            };
             let reference_ms = started.elapsed().as_secs_f64() * 1e3;
             emit(json!({
                 "kind": "reference", "path": path, "width": width,
                 "wall_ms": reference_ms, "pressure": pressure(),
             }));
+
+            let mut control_logits = Vec::new();
+            let mut control_features = Vec::new();
+            if layer_audit {
+                // Same-lineage one-row packed calls are a legal alternative
+                // schedule to ordinary one-token decode. This control
+                // measures the schedule floor before comparing an 8-row
+                // packed call with the sequential reference.
+                gate();
+                set_expert_packet_max_rows(PACKET_MAX_ROWS);
+                session.restore_snapshot(&snapshot)?;
+                for &token in append {
+                    let captured = session.verify_packed_with_captures(ctx, &[token], &mut bank)?;
+                    control_logits.extend(capture_logits(&captured));
+                    control_features.extend(capture_features(&captured));
+                }
+                let control_rows: Vec<Vec<f32>> =
+                    control_logits.chunks(vocab).map(<[f32]>::to_vec).collect();
+                let m = position_metrics(&reference, &control_rows, &actual);
+                let abs_dnll: Vec<f64> = m.dnll.iter().map(|x| x.abs()).collect();
+                let (mean_abs_dnll, max_abs_dnll, _) = aggregates(&abs_dnll);
+                let (mean_kl, max_kl, _) = aggregates(&m.kl_path_ref);
+                emit(json!({
+                    "kind": "serial_control", "prompt": path, "width": width,
+                    "schedule": "one_row_packed_vs_forward_decode",
+                    "mean_abs_dnll": mean_abs_dnll, "max_abs_dnll": max_abs_dnll,
+                    "mean_kl_path_ref": mean_kl, "max_kl_path_ref": max_kl,
+                    "layer_deltas": layer_deltas(
+                        &reference_features,
+                        &control_features,
+                        width,
+                        &taps,
+                        weights.config.hidden_size as usize,
+                        &weights.config,
+                    ),
+                    "pressure": pressure(),
+                }));
+            }
 
             for (label, max_rows) in [("grouped", GROUPED_MAX_ROWS), ("packet", PACKET_MAX_ROWS)] {
                 gate();
@@ -244,11 +361,21 @@ mod probe {
                     flat.len(),
                     width * vocab
                 );
+                let packed_features = if layer_audit {
+                    Some(capture_features(&captured))
+                } else {
+                    None
+                };
                 drop(captured);
                 let path_logits: Vec<Vec<f32>> = (0..width)
                     .map(|r| flat[r * vocab..(r + 1) * vocab].to_vec())
                     .collect();
-                let path_state = session.forward(ctx, next)?;
+                let path_state = if layer_audit {
+                    let captured = session.forward_with_captures(ctx, next, &mut bank)?;
+                    capture_logits(&captured)
+                } else {
+                    session.forward(ctx, next)?
+                };
                 let wall_ms = started.elapsed().as_secs_f64() * 1e3;
 
                 let m = position_metrics(&reference, &path_logits, &actual);
@@ -278,6 +405,18 @@ mod probe {
                     "final_kl_ref_path": final_kl_rp, "final_top1_agree": final_top1,
                     "state_dnll": state_dnll, "state_kl_path_ref": state_kl_pr,
                     "state_kl_ref_path": state_kl_rp, "state_top1_agree": state_top1,
+                    "layer_deltas": if let Some(features) = packed_features {
+                        json!(layer_deltas(
+                            &reference_features,
+                            &features,
+                            width,
+                            &taps,
+                            weights.config.hidden_size as usize,
+                            &weights.config,
+                        ))
+                    } else {
+                        Value::Null
+                    },
                     "next_token": next, "next2_token": next2,
                     "pressure": pressure(), "loadavg": loadavg(),
                 }));
@@ -292,11 +431,13 @@ mod probe {
             "canonical lease required"
         );
         let args: Vec<String> = std::env::args().collect();
+        let layer_audit = args.get(1).is_some_and(|arg| arg == "--layers");
+        let base = if layer_audit { 2 } else { 1 };
         anyhow::ensure!(
-            args.len() >= 3,
-            "usage: glm_append_audit <depth> <prompt> [prompt ...]"
+            args.len() >= base + 2,
+            "usage: glm_append_audit [--layers] <depth> <prompt> [prompt ...]"
         );
-        let depth: usize = args[1].parse()?;
+        let depth: usize = args[base].parse()?;
         let ctx = MetalContext::new()?;
         let model = qwen_llm::test_fixtures::GLM53_FLASH_UD_IQ3_XXS
             .path_or_skip()
@@ -306,12 +447,13 @@ mod probe {
         let weights = Glm5NextWeights::load(&ctx, &gguf)?;
         emit(json!({
             "kind": "header", "depth": depth, "widths": WIDTHS,
+            "layer_audit": layer_audit,
             "capacity": CAPACITY, "prefill_rows": PREFILL_ROWS,
             "device": ctx.device_facts(), "pressure": pressure(), "loadavg": loadavg(),
         }));
-        for path in &args[2..] {
+        for path in &args[base + 1..] {
             let text = std::fs::read_to_string(path)?;
-            audit_prompt(&ctx, &weights, &tokenizer, path, &text, depth)?;
+            audit_prompt(&ctx, &weights, &tokenizer, path, &text, depth, layer_audit)?;
         }
         emit(json!({
             "kind": "done", "pressure": pressure(), "loadavg": loadavg(),

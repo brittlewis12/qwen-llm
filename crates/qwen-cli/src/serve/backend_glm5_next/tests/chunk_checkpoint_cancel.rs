@@ -223,6 +223,71 @@ fn gpu_chunk_checkpoint_cancel_resume() {
     );
     drop(backend);
 
+    // Production layer quanta commit through the same observer. Cancel while
+    // the second full row chunk has only some layers complete: the shared
+    // checkpoint must remain reusable, and no partial state may be published.
+    let mut sliced = Glm5NextBackend::new(
+        &ctx,
+        &weights,
+        Prepared::new(&source, &invocation).unwrap(),
+        "glm".into(),
+        std::time::Duration::ZERO,
+        cache_plan,
+    );
+    let mut sink = Sink::default();
+    let execution::Begun::Run(mut phase) = sliced
+        .begin_generation(
+            prompt.request(),
+            &prompt.prompt,
+            prompt.boundaries,
+            prompt.tokens.as_deref(),
+            &mut sink,
+        )
+        .unwrap()
+    else {
+        panic!("expected prefill run");
+    };
+    while phase.position < committed {
+        assert!(
+            !sliced
+                .prefill_slice_run(&mut phase, 2048, &mut sink, 100.0, true)
+                .unwrap()
+        );
+    }
+    assert_eq!(phase.position, committed);
+    assert_eq!(sliced.session.as_ref().unwrap().position(), committed);
+    let entries = sliced.cache.len();
+    assert!(
+        !sliced
+            .prefill_slice_run(&mut phase, 2048, &mut sink, 100.0, true)
+            .unwrap()
+    );
+    assert_eq!(phase.position, committed);
+    assert!(sliced.session.as_ref().unwrap().is_poisoned());
+    assert!(sliced.session.as_ref().unwrap().capture_snapshot().is_err());
+    assert_eq!(sliced.cache.len(), entries, "partial layers cannot capture");
+    let mut disconnect = Sink {
+        abort_tick: Some(1),
+        ..Sink::default()
+    };
+    assert!(matches!(
+        sliced.prefill_slice_run(&mut phase, 2048, &mut disconnect, 100.0, true),
+        Err(BackendFailure::Aborted(_))
+    ));
+    assert!(sliced.session.is_none());
+    assert!(sliced.idle_sessions.is_empty());
+    assert_eq!(sliced.cache.len(), entries);
+    assert_eq!(sliced.cache.pinned_bytes(), 0);
+    assert!(phase.layer_work.partial().is_some());
+    drop(phase);
+    let resumed = run(&mut sliced, &prompt);
+    equal(&reference, &resumed);
+    assert_eq!(resumed.0.usage.cached_tokens, shared_cut);
+    eprintln!(
+        "layer_chunk_checkpoint_cancel_resume: partial layers discarded; shared snapshot restore, full logits and greedy output exact"
+    );
+    drop(sliced);
+
     // Cheap actual-backend denial coverage, separately labelled: cap this tiny
     // fixture's workspace at 8 rows rather than replay another 4K prompt. The
     // policy is still unforced and the planner must not shrink/change the width

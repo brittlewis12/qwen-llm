@@ -130,6 +130,17 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Fast packet pressure peaked at 2 for Metal/prose and yielded until 1; Rust
   observed 0, Python 1, and the packet finished at 1.
   Branch `research/glm-prefill-numerics`; no merge; M5 worktree removed.
+## 2026-11-11 - GLM Layer Cancellation: Checkpoint Restore Regression
+
+- Extended the existing leased `gpu_chunk_checkpoint_cancel_resume` model
+  regression to drive the production layer API through a shared cut and one
+  full row chunk, cancel inside the next row chunk, and restore the retained
+  shared snapshot. It checks that partial layers create no cache entry, leave
+  no pinned bytes or reusable partial session, and reproduce all full prefill
+  logits and greedy output after retry. No new ignored test was introduced.
+- The test binary compiles in the test profile. Model execution is queued on
+  the M5 alongside the final serve evidence; results follow in the landing log.
+
 ## 2026-11-11 - Serve Thermal Preparation: Separate Warm-Up from Timing
 
 - Two layer-slice baseline attempts aborted before measurement when shared

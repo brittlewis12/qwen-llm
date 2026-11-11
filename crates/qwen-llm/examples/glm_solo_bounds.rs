@@ -116,7 +116,8 @@ fn main() -> anyhow::Result<()> {
             let _override = diagnostic_q6_research(arm);
             s.generate_gpu_tokens(&ctx, &head, &mut greedy(), 2, &[], |_| true)?;
         }
-        for rep in 0..2 {
+        let reps: usize = args.get(6).and_then(|v| v.parse().ok()).unwrap_or(2);
+        for rep in 0..reps {
             for arm in [0u8, mask, mask, 0] {
                 s.restore_snapshot(&entry)?;
                 let _override = diagnostic_q6_research(arm);

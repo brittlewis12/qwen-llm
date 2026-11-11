@@ -2736,6 +2736,10 @@ const Q6_RESEARCH_DENSE_PAIR: u8 = 4;
 const Q6_RESEARCH_TRIPLE: u8 = 8;
 #[cfg(feature = "perf-ablations")]
 const Q6_RESEARCH_HEAD: u8 = 16;
+#[cfg(feature = "perf-ablations")]
+const Q6_RESEARCH_Q_A: u8 = 32;
+#[cfg(feature = "perf-ablations")]
+const Q6_RESEARCH_SHARED_DOWN: u8 = 64;
 
 #[cfg(feature = "perf-ablations")]
 static Q6_RESEARCH_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -2746,7 +2750,7 @@ static Q6_RESEARCH_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::At
 #[cfg(feature = "perf-ablations")]
 pub fn diagnostic_q6_research(mask: u8) -> impl Drop {
     use std::sync::atomic::Ordering;
-    assert!(mask <= 31);
+    assert!(mask <= 127);
     struct Guard;
     impl Drop for Guard {
         fn drop(&mut self) {
@@ -2801,6 +2805,24 @@ fn matvec(
         && n_out > 16_384
     {
         crate::metal::encode_glm_q6_splitk_f32(ctx, enc, weight, x, y, n_in, n_out, 8)?;
+        return Ok(());
+    }
+    #[cfg(feature = "perf-ablations")]
+    if q6_research_bit(Q6_RESEARCH_Q_A)
+        && weight.dtype == GgmlType::Q6_K
+        && n_in >= 4096
+        && (1..=2048).contains(&n_out)
+    {
+        crate::metal::encode_glm_q6_splitk_f32(ctx, enc, weight, x, y, n_in, n_out, 4)?;
+        return Ok(());
+    }
+    #[cfg(feature = "perf-ablations")]
+    if q6_research_bit(Q6_RESEARCH_SHARED_DOWN)
+        && weight.dtype == GgmlType::Q6_K
+        && n_in == 2048
+        && n_out >= 4096
+    {
+        crate::metal::encode_glm_q6_splitk_f32(ctx, enc, weight, x, y, n_in, n_out, 4)?;
         return Ok(());
     }
     crate::metal_forward::encode_mat_vec_dispatch(ctx, enc, weight, x, y, n_in, n_out)?;

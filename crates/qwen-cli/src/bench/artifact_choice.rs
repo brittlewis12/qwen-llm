@@ -450,10 +450,32 @@ fn fit_report(
     let start = Instant::now();
     let capacity = args.depth;
     ensure!(capacity > 0, "fit depth must be positive");
+    let tokenizer = NativeTokenizer::from_gguf(&gguf).context("open fit tokenizer")?;
+    let mut prompts = load_prompts(
+        args.cohort_dir
+            .as_deref()
+            .context("fit mode requires --cohort-dir")?,
+        &tokenizer,
+        capacity,
+        1,
+    )?;
+    let streams: Vec<Vec<u32>> = prompts
+        .iter_mut()
+        .take(3)
+        .map(|item| {
+            item.prompt.ids[..capacity]
+                .iter()
+                .map(|&id| u32::try_from(id).context("negative token id"))
+                .collect::<Result<_>>()
+        })
+        .collect::<Result<_>>()?;
     let (agents_admitted, per_agent_plan, load_summary, selected) = match args.family {
-        ArtifactFamily::V41 => fit_v41(&gguf, &ctx, capacity)?,
-        ArtifactFamily::Glm53 => fit_glm53(&gguf, &ctx, capacity)?,
+        ArtifactFamily::V41 => fit_v41(&gguf, &ctx, capacity, &streams)?,
+        ArtifactFamily::Glm53 => fit_glm53(&gguf, &ctx, capacity, &streams)?,
     };
+    let prefill_workspace_agents = load_summary["prefill_workspace_agents"]
+        .as_u64()
+        .unwrap_or(0) as usize;
     Ok(json!({
         "schema_version": 1,
         "kind": "artifact_fit",
@@ -464,7 +486,7 @@ fn fit_report(
         "capacity": capacity,
         "requested_agents": 3,
         "agents_admitted": agents_admitted,
-        "fits_three_agent_48k": agents_admitted == 3,
+        "fits_three_agent_48k": agents_admitted == 3 && prefill_workspace_agents == 3,
         "selected_prefill_geometry": selected,
         "per_agent_memory_plan": per_agent_plan,
         "load": load_summary,
@@ -480,6 +502,7 @@ fn fit_v41(
     gguf: &Arc<GgufFile>,
     ctx: &MetalContext,
     capacity: usize,
+    streams: &[Vec<u32>],
 ) -> Result<(usize, Value, Value, Value)> {
     let execution = crate::family_options::v41_prefill_execution_from_env()?;
     let cold = qwen_llm::deepseek_v41::forward::plan_cold_prefill_with_target(
@@ -511,9 +534,13 @@ fn fit_v41(
     let mut per_agent_plan = Value::Null;
     let mut failure = None;
     for _ in 0..3 {
-        let plan = forward
-            .plan_request_from_cold(&cold)
-            .context("re-admit V4.1 48K serving request")?;
+        let plan = match forward.plan_request_from_cold(&cold) {
+            Ok(plan) => plan,
+            Err(error) => {
+                failure = Some(format!("request plan: {error:#}"));
+                break;
+            }
+        };
         per_agent_plan = json!({
             "selected_prefill_rows": plan.prefill().selected_rows,
             "request_memory": format!("{:?}", plan.memory()),
@@ -526,6 +553,23 @@ fn fit_v41(
             }
         }
     }
+    let mut workspace_times = Vec::new();
+    let mut prefill_reports = Vec::new();
+    if states.len() == 3 {
+        for (index, state) in states.iter_mut().enumerate() {
+            let prefill_start = Instant::now();
+            match forward.prefill_with_execution(state, &streams[index], None, execution) {
+                Ok((_, report)) => {
+                    workspace_times.push(prefill_start.elapsed().as_secs_f64());
+                    prefill_reports.push(format!("{report:?}"));
+                }
+                Err(error) => {
+                    failure = Some(format!("48K prefill workspace for agent {index}: {error}"));
+                    break;
+                }
+            }
+        }
+    }
     let selected =
         json!({"prefill_execution":format!("{execution:?}"),"prefill_rows":cold.full_chunk_rows});
     let load = json!({
@@ -534,6 +578,9 @@ fn fit_v41(
         "engram_streamed_from_disk": weights.bytes.disk_engram > 0,
         "retained_weight_resources": format!("{:?}", weights.retained_resources),
         "allocation_failure": failure,
+        "prefill_workspace_agents": workspace_times.len(),
+        "prefill_seconds": workspace_times,
+        "prefill_reports": prefill_reports,
         "memory_signals_after_sessions": memory_signals(ctx),
     });
     Ok((states.len(), per_agent_plan, load, selected))
@@ -543,6 +590,7 @@ fn fit_glm53(
     gguf: &Arc<GgufFile>,
     ctx: &MetalContext,
     capacity: usize,
+    streams: &[Vec<u32>],
 ) -> Result<(usize, Value, Value, Value)> {
     let layout = qwen_llm::glm5_next::Glm5NextArtifactLayout::inspect(gguf)
         .context("inspect GLM-5.3 fit artifact")?;
@@ -573,9 +621,27 @@ fn fit_glm53(
             }
         }
     }
+    let mut prefill_times = Vec::new();
+    let mut prefill_failure = None;
+    if sessions.len() == 3 {
+        for (index, session) in sessions.iter_mut().enumerate() {
+            let prefill_start = Instant::now();
+            match session.prefill_packed(ctx, &streams[index]) {
+                Ok(_) => prefill_times.push(prefill_start.elapsed().as_secs_f64()),
+                Err(error) => {
+                    prefill_failure =
+                        Some(format!("48K prefill workspace for agent {index}: {error}"));
+                    break;
+                }
+            }
+        }
+    }
     let load = json!({
         "retained_weight_bytes": weights.retained_bytes,
         "allocation_failure": failure,
+        "prefill_workspace_agents": prefill_times.len(),
+        "prefill_seconds": prefill_times,
+        "prefill_failure": prefill_failure,
         "memory_signals_after_sessions": memory_signals(ctx),
     });
     Ok((

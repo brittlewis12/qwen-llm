@@ -46,10 +46,11 @@ three retained repetitions. B=3 is optional and is omitted if the serial
 three-agent memory proof or lease budget is tight.
 
 Fit uses the production model loader and a 49,152-token capacity. It attempts
-three live per-agent KV states and the default prefill workspace, recording
-per-agent admission geometry, estimated bytes, retained weight bytes, actual
-Metal allocation signals, Engram backing and thermal-pressure readings. An
-admission or load error is retained as a failed candidate result.
+three live per-agent KV states, then prefills each with a distinct real 48K
+code prompt while keeping all three states alive. It records per-agent
+admission geometry, estimated bytes, retained weight bytes, actual Metal
+allocation signals, Engram backing and thermal-pressure readings. An
+admission, load or workspace error is retained as a failed candidate result.
 
 ## Prior evidence to reconcile
 

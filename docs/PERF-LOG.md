@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-11 - Resource-Scoped Barriers Do Not Release The Wave Floor
+
+- **Probe 3a closes the direct barrier replacement class.** A single
+  concurrent encoder runs an independent ~400 us kernel beside a 20-link
+  dependent chain. M5 Ultra GPU time is **545.83 us full barriers / 545.75 us
+  chain-resource barriers**; M4 Max is **549.75 / 549.75 us**. Paired resource
+  improvement is **-0.023% / +0.008%**, far below 3%; 350/450 us sweeps agree.
+- **Overlap exists, but needs a different execution arrangement.** No barriers
+  reach **388.00 / 395.87 us** (M5/M4) with **0/121 correct chains**. Two
+  command queues with a serial chain reach **388.50 / 400.88 us**, bitwise in
+  **121/121** repetitions. GPU timestamp intervals show **149.88 / 148.37 us**
+  of overlap. This is a synthetic GPU-time result, not a model wall-time win.
+- Extended `dispatch_deadtime --resource-barriers` (`perf-ablations`) with
+  exact integer oracles, sustained warmup, calibrated loop lengths, six
+  interleaved controls and command-buffer GPU timestamps. No profiler encoder
+  splits; no model loaded. Per-node resource barriers still wait for prior
+  dispatches, so no executor flag or conditional Flash-Next A/B was added.
+  A real multi-queue executor would need exact RAW/WAR/WAW ordering and a new
+  wall-time price; current reachable limits remain execution-model conditional.
+- Evidence and reproduction:
+  `docs/bench/2026-11-11-resource-barriers.md`; raw
+  `metagross:~/qwen-runs/2026-11-11-resource-barriers/`. `iter`, nice 10,
+  121 repetitions/mode at each of three targets, queued five-minute leases.
+  Landed on `main`; branch `research/resource-barriers` kept at
+  `b3c1d0628`. Lane build output and worktrees removed after verification.
+
 ## 2026-11-11 - GLM Selective Layer Slicing Becomes The Default
 
 - **Decision: ship the selective 500ms/200ms layer policy on by default.**

@@ -4,8 +4,8 @@
 //! The no-barrier arm deliberately races and is only an overlap ceiling.
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
-    MTLBarrierScope, MTLCommandBuffer, MTLCommandQueue, MTLComputeCommandEncoder, MTLDispatchType,
-    MTLResource, MTLSize,
+    MTLBarrierScope, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
+    MTLComputeCommandEncoder, MTLDispatchType, MTLResource, MTLSize,
 };
 use qwen_llm::metal::{Buffer, MetalContext, Pipeline, commit_and_wait};
 use std::ptr::NonNull;
@@ -54,6 +54,18 @@ struct Probe {
     chain: [Buffer; 2],
     long_iterations: u32,
     short_iterations: u32,
+    long_expected: [u32; THREADS],
+    chain_expected: [u32; THREADS],
+}
+
+struct Sample {
+    gpu_us: f64,
+    long_bitwise: bool,
+    chain_bitwise: bool,
+    queue_start_skew_us: f64,
+    main_command_us: f64,
+    chain_command_us: Option<f64>,
+    queue_overlap_us: Option<f64>,
 }
 
 fn mix(mut x: u32, iterations: u32) -> u32 {
@@ -95,7 +107,40 @@ fn dispatch(
 }
 
 impl Probe {
-    fn sample(&self, mode: Mode) -> Result<(f64, bool, bool, f64), Error> {
+    fn update_oracles(&mut self) {
+        self.long_expected = std::array::from_fn(|i| mix(i as u32 + 1, self.long_iterations));
+        self.chain_expected =
+            std::array::from_fn(|i| mix(i as u32 + 1, self.short_iterations * LINKS as u32));
+    }
+
+    fn warm_gpu(&self) -> Result<(), Error> {
+        // Sustained work brings the device to its active clock before loop
+        // calibration. Per-sample CPU oracle computation otherwise lets clocks
+        // drift on M5; the measured repetitions only compare cached oracle bits.
+        let start = std::time::Instant::now();
+        while start.elapsed().as_millis() < 500 {
+            let command = self
+                .ctx
+                .queue
+                .commandBuffer()
+                .ok_or("no warmup command buffer")?;
+            let enc = command.computeCommandEncoder().ok_or("no warmup encoder")?;
+            for _ in 0..64 {
+                dispatch(
+                    &enc,
+                    &self.long,
+                    &self.long_in,
+                    &self.long_out,
+                    self.long_iterations,
+                );
+            }
+            enc.endEncoding();
+            commit_and_wait(&command)?;
+        }
+        Ok(())
+    }
+
+    fn sample(&self, mode: Mode) -> Result<Sample, Error> {
         // Every previous command was waited for; CPU initialization is outside
         // the GPU timestamp window and cannot race a previous repetition.
         unsafe {
@@ -191,14 +236,21 @@ impl Probe {
         };
         let start = command.GPUStartTime();
         let end = command.GPUEndTime();
-        let (start, end, skew_us) = if let Some(other) = separate {
+        let main_command_us = (end - start) * 1e6;
+        let (start, end, skew_us, chain_command_us, queue_overlap_us) = if let Some(other) =
+            separate
+        {
             (
                 start.min(other.GPUStartTime()),
                 end.max(other.GPUEndTime()),
                 (start - other.GPUStartTime()).abs() * 1e6,
+                Some((other.GPUEndTime() - other.GPUStartTime()) * 1e6),
+                Some(
+                    (end.min(other.GPUEndTime()) - start.max(other.GPUStartTime())).max(0.0) * 1e6,
+                ),
             )
         } else {
-            (start, end, 0.0)
+            (start, end, 0.0, None, None)
         };
         if !start.is_finite() || end <= start {
             return Err("invalid GPU timestamps".into());
@@ -207,19 +259,14 @@ impl Probe {
         let long_ok = !has_long
             || unsafe {
                 std::slice::from_raw_parts(self.long_out.contents().as_ptr().cast::<u32>(), THREADS)
-                    .iter()
-                    .enumerate()
-                    .all(|(i, &x)| x == mix(i as u32 + 1, self.long_iterations))
+                    == self.long_expected
             };
         let chain_ok = !has_chain
             || unsafe {
                 std::slice::from_raw_parts(
                     self.chain[LINKS % 2].contents().as_ptr().cast::<u32>(),
                     THREADS,
-                )
-                .iter()
-                .enumerate()
-                .all(|(i, &x)| x == mix(i as u32 + 1, self.short_iterations * LINKS as u32))
+                ) == self.chain_expected
             };
         if !long_ok || (!chain_ok && !matches!(mode, Mode::None)) {
             return Err(format!(
@@ -228,7 +275,15 @@ impl Probe {
             )
             .into());
         }
-        Ok(((end - start) * 1e6, long_ok, chain_ok, skew_us))
+        Ok(Sample {
+            gpu_us: (end - start) * 1e6,
+            long_bitwise: long_ok,
+            chain_bitwise: chain_ok,
+            queue_start_skew_us: skew_us,
+            main_command_us,
+            chain_command_us,
+            queue_overlap_us,
+        })
     }
 
     fn calibrate(&mut self, long_target: f64) -> Result<(), Error> {
@@ -237,7 +292,7 @@ impl Probe {
                 let mut times = Vec::new();
                 self.sample(mode)?; // warm the current loop count
                 for _ in 0..3 {
-                    times.push(self.sample(mode)?.0);
+                    times.push(self.sample(mode)?.gpu_us);
                 }
                 let us = super::median(&mut times);
                 let iterations = if matches!(mode, Mode::Long) {
@@ -254,6 +309,7 @@ impl Probe {
                 }
                 *iterations =
                     ((*iterations as f64 * target / us).round() as u32).clamp(1, 1_000_000);
+                self.update_oracles();
             }
         }
         Ok(())
@@ -302,7 +358,11 @@ pub(super) fn run() -> Result<(), Error> {
         ctx,
         long_iterations: 10000,
         short_iterations: 128,
+        long_expected: [0; THREADS],
+        chain_expected: [0; THREADS],
     };
+    probe.update_oracles();
+    probe.warm_gpu()?;
     probe.calibrate(target)?;
     // Warm every mode. Rotate a forward/reverse sweep so no arm consistently
     // pays clock ramp or comes directly after the same control.
@@ -319,12 +379,12 @@ pub(super) fn run() -> Result<(), Error> {
                 (rep + MODES.len() - step) % MODES.len()
             };
             let mode = MODES[index];
-            let (gpu_us, long_bitwise, chain_bitwise, start_skew_us) = probe.sample(mode)?;
-            samples[index].push(gpu_us);
-            correct[index] += usize::from(chain_bitwise && long_bitwise);
+            let sample = probe.sample(mode)?;
+            samples[index].push(sample.gpu_us);
+            correct[index] += usize::from(sample.chain_bitwise && sample.long_bitwise);
             println!(
                 "{}",
-                serde_json::json!({"kind":"resource_barrier_sample", "rep":rep, "mode":mode.name(), "gpu_us":gpu_us, "long_bitwise":long_bitwise, "chain_bitwise":chain_bitwise, "queue_start_skew_us":start_skew_us})
+                serde_json::json!({"kind":"resource_barrier_sample", "rep":rep, "mode":mode.name(), "gpu_us":sample.gpu_us, "long_bitwise":sample.long_bitwise, "chain_bitwise":sample.chain_bitwise, "queue_start_skew_us":sample.queue_start_skew_us, "main_command_us":sample.main_command_us, "chain_command_us":sample.chain_command_us, "queue_overlap_us":sample.queue_overlap_us})
             );
         }
     }
@@ -334,8 +394,15 @@ pub(super) fn run() -> Result<(), Error> {
     for (i, mode) in MODES.iter().enumerate() {
         println!(
             "{}",
-            serde_json::json!({"kind":"resource_barrier_summary", "mode":mode.name(), "gpu_us_p50":medians[i], "gpu_us_p10":samples[i][reps / 10], "gpu_us_p90":samples[i][reps * 9 / 10], "correct_reps":correct[i], "reps":reps, "long_iterations":probe.long_iterations, "short_iterations":probe.short_iterations, "isolated_sum_us":serial, "ideal_overlap_us":ceiling, "hidden_chain_fraction":(serial - medians[i]) / (serial - ceiling), "ratio_to_full":medians[i]/medians[2]})
+            serde_json::json!({"kind":"resource_barrier_summary", "mode":mode.name(), "gpu_us_p50":medians[i], "gpu_us_p10":samples[i][reps / 10], "gpu_us_p90":samples[i][reps * 9 / 10], "correct_reps":correct[i], "reps":reps, "long_iterations":probe.long_iterations, "short_iterations":probe.short_iterations, "isolated_sum_us":serial, "ideal_overlap_us":ceiling, "hidden_chain_fraction":(i >= 2).then_some((serial - medians[i]) / (serial - ceiling)), "ratio_to_full":medians[i]/medians[2]})
         );
+    }
+    if !(300.0..=500.0).contains(&medians[0]) {
+        return Err(format!(
+            "long-kernel median {} us is outside 300..500; rerun after checking clocks",
+            medians[0]
+        )
+        .into());
     }
     Ok(())
 }

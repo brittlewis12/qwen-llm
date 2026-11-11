@@ -52,6 +52,24 @@ class SteadyTests(unittest.TestCase):
         self.assertTrue(bench.thermal_exceeds_limit(1,0))
         self.assertTrue(bench.thermal_exceeds_limit(-1))
 
+    def test_warmup_exception_cannot_relax_ramp_or_window_limit(self):
+        self.assertEqual(bench.thermal_phase_limit(1, None, False),1)
+        self.assertEqual(bench.thermal_phase_limit(1, 2, False),2)
+        self.assertEqual(bench.thermal_phase_limit(1, 2, True),1)
+        self.assertTrue(bench.thermal_exceeds_limit(2,bench.thermal_phase_limit(1,2,True)))
+        self.assertEqual(bench.thermal_phase_limit(0, 2, True),0)
+
+    def test_thermal_settling_requires_continuous_low_pressure_and_resets(self):
+        settle=bench.ThermalSettle(15,1)
+        self.assertFalse(settle.ready(2,0))
+        self.assertFalse(settle.ready(1,1))
+        self.assertFalse(settle.ready(0,15))
+        self.assertFalse(settle.ready(2,16))
+        self.assertFalse(settle.ready(0,17))
+        self.assertFalse(settle.ready(-1,30))
+        self.assertFalse(settle.ready(1,31))
+        self.assertTrue(settle.ready(1,46))
+
     def test_compile_and_pressure_flags_distinguish_warmup_from_window(self):
         rows=[dict(time=1,thermal=1,compilers=[dict(pid=7)]),
               dict(time=11,thermal=0,compilers=[]),dict(time=21,thermal=0,compilers=[])]

@@ -150,6 +150,25 @@ def thermal_exceeds_limit(level, maximum=1):
     return level < 0 or level > maximum
 
 
+def thermal_phase_limit(maximum, warmup_maximum, timing_started):
+    # The ramp starts when window_begin is assigned. A warm-up exception can
+    # never relax the measured-window (or ramp) limit.
+    return maximum if timing_started or warmup_maximum is None else warmup_maximum
+
+
+class ThermalSettle:
+    def __init__(self, seconds, maximum):
+        self.seconds, self.maximum, self.since = seconds, maximum, None
+
+    def ready(self, level, now):
+        if thermal_exceeds_limit(level, self.maximum):
+            self.since = None
+            return False
+        if self.since is None:
+            self.since = now
+        return now-self.since >= self.seconds
+
+
 def parse_compilers(output):
     # Conservative build/compiler presence, including waiting cargo processes.
     names = {'cargo','rustc','clang','clang++','metal','metalfe','metallib','air-lld','ld','ld64.lld'}
@@ -236,6 +255,7 @@ class Arm:
         self.monitor_done = threading.Event()
         self.lock = threading.Lock()
         self.window_begin = self.window_end = None
+        self.warm_settle_s = 0.0
         self.deadline = time.monotonic() + args.timeout
 
     def emit(self, **row):
@@ -253,7 +273,9 @@ class Arm:
             while not self.monitor_done.is_set():
                 p = pressure()
                 self.samples.append(dict(time=time.time(), thermal=p, compilers=compiler_snapshot()))
-                if thermal_exceeds_limit(p,self.args.max_thermal_pressure) or time.monotonic() > self.deadline:
+                limit = thermal_phase_limit(self.args.max_thermal_pressure,
+                    getattr(self.args, 'warmup_max_thermal_pressure', None), self.window_begin is not None)
+                if thermal_exceeds_limit(p,limit) or time.monotonic() > self.deadline:
                     self.abort.set()
                     self.finish.set()
                     self.emit(event='abort', thermal=p)
@@ -267,6 +289,22 @@ class Arm:
             self.emit(event='monitor_error', error=str(error))
             if self.server.poll() is None:
                 self.server.send_signal(signal.SIGINT)
+
+    def settle_after_warm(self):
+        seconds = getattr(self.args, 'settle_thermal_seconds', 0)
+        if seconds <= 0:
+            return
+        started = time.monotonic()
+        settle = ThermalSettle(seconds, self.args.max_thermal_pressure)
+        self.emit(event='thermal_settle_begin', seconds=seconds,
+                  maximum=self.args.max_thermal_pressure)
+        while True:
+            self.check()
+            if settle.ready(pressure(), time.monotonic()):
+                break
+            self.finish.wait(1)
+        self.warm_settle_s = time.monotonic()-started
+        self.emit(event='thermal_settle_done', waited_s=self.warm_settle_s, thermal=pressure())
 
     def readlog(self):
         for line in self.server.stdout:
@@ -381,7 +419,10 @@ class Arm:
              env_overrides=list(args.env),
              cool_seconds=args.cool, warm_cool_seconds=args.warm_cool,
              ramp_seconds=args.ramp, context=args.context,
-             preflight_thermal=preflight,max_thermal_pressure=args.max_thermal_pressure, thermal_policy='retain flagged level1; abort above limit',
+             preflight_thermal=preflight,max_thermal_pressure=args.max_thermal_pressure,
+             warmup_max_thermal_pressure=args.warmup_max_thermal_pressure,
+             settle_thermal_seconds=args.settle_thermal_seconds,
+             thermal_policy='ramp/window limit unchanged; optional warm-up limit and pre-ramp settle',
              runtime_env={k:v for k,v in env.items() if k.startswith('QWEN_')},
              corpus_sha256=digest(args.corpus), protocol='steady-own-history-v2'))
         started = time.time()
@@ -415,6 +456,7 @@ class Arm:
                         raise RuntimeError('aborted during warm-up cooling')
             warmed=time.time()
             self.emit(event='warmed',startup_s=ready-started,warmup_s=warmed-ready)
+            self.settle_after_warm()
             if thermal_exceeds_limit(pressure(),args.max_thermal_pressure):raise RuntimeError('thermal pressure exceeds arm limit after warm-up')
             barrier=threading.Barrier(4)
             self.window_begin=time.time()+args.ramp
@@ -475,7 +517,7 @@ class Arm:
             raise RuntimeError('arm aborted; no accepted timing summary')
         result=summarize(self.rows,self.window_begin,self.window_end,
                          lambda text:len(token_text(args.tokenizer,args.model,text=text)),self.lines)
-        result.update(startup_s=ready-started,warmup_s=warmed-ready,arm=args.arm,
+        result.update(startup_s=ready-started,warmup_s=warmed-ready,warm_settle_s=self.warm_settle_s,arm=args.arm,
                       family=self.plan['family'],seed=self.plan['seed'],thermal_max=max(x['thermal'] for x in self.samples),
                       sampling=dict(mode=args.sampling, fields=self.sampling),
                       metric='delivered text+reasoning tokens retokenized; excludes EOS/format control')
@@ -768,6 +810,10 @@ def main():
     p.add_argument('--harness-commit',default='working-tree')
     p.add_argument('--max-thermal-pressure',type=int,choices=(0,1),default=1,
                    help='retain level1 arms with flags by default; 0 restores strict pressure0')
+    p.add_argument('--warmup-max-thermal-pressure',type=int,choices=(0,1,2),default=None,
+                   help='optional warm-up-only limit; ramp/window retain --max-thermal-pressure')
+    p.add_argument('--settle-thermal-seconds',type=float,default=0,
+                   help='require this many continuous seconds at the measurement thermal limit after warming')
     p=sub.add_parser('analyze');p.add_argument('directory',type=Path)
     p=sub.add_parser('compare');p.add_argument('reference',type=Path);p.add_argument('candidate',type=Path)
     args=parser.parse_args()
@@ -775,6 +821,8 @@ def main():
         with args.calls_csv.open() as f:plan=make_plan(list(csv.DictReader(f)),args.family,args.seed,args.seconds)
         dump(args.out,plan);print(json.dumps({k:v for k,v in plan.items() if k!='population'}))
     elif args.command=='run':
+        if not math.isfinite(args.settle_thermal_seconds) or args.settle_thermal_seconds < 0:
+            parser.error('--settle-thermal-seconds must be finite and nonnegative')
         arm=Arm(args)
         def stop(sig,frame):
             arm.abort.set();arm.finish.set()

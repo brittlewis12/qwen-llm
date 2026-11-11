@@ -130,6 +130,21 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Fast packet pressure peaked at 2 for Metal/prose and yielded until 1; Rust
   observed 0, Python 1, and the packet finished at 1.
   Branch `research/glm-prefill-numerics`; no merge; M5 worktree removed.
+## 2026-11-11 - Serve Thermal Preparation: Separate Warm-Up from Timing
+
+- Two layer-slice baseline attempts aborted before measurement when shared
+  compiler activity drove warm-up pressure to 2; 120s between roots did not
+  prevent the second abort (72 compiler processes, ~3200% CPU).
+- The harness now has opt-in `--warmup-max-thermal-pressure` and
+  `--settle-thermal-seconds`. Existing defaults are unchanged. The revised
+  experiment permits pressure 2 only during warm-up, then requires pressure
+  <=1 continuously for 15s before the ramp. Ramp/window still abort above 1.
+  Full thermal samples remain in the raw evidence; no warm-up exception is
+  applied to measured timing. Two CPU tests cover phase isolation and reset
+  of the continuous settle interval; all 17 harness tests pass.
+- Production integration/knob/default are unchanged by this preparation fix.
+  Raw runs: `metagross:~/qwen-runs/2026-11-11-layer-slice-production/`.
+
 ## 2026-11-11 - GLM Production Layer Cursor: Integration Gate
 
 - Branch `perf/glm-layer-sliced-prefill` adds the production row-preserving

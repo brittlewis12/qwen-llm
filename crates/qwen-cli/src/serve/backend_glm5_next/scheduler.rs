@@ -14,14 +14,13 @@ const MAX_ACTIVE: &str = "QWEN_SERVE_GLM_MAX_ACTIVE";
 /// Idle live sessions retained for exact-prefix reuse; default four when
 /// batching is enabled. Optional states are released after snapshot relief.
 const LIVE_STATES: &str = "QWEN_SERVE_GLM_LIVE_STATES";
-/// Keep the admitted normal prefill geometry under load; 0 restores 512-row alternation.
+/// Keep the admitted normal prefill geometry under load; 0 selects 512-row geometry. Layer slicing has its own rollback.
 const PREFILL_FAIR: &str = "QWEN_SERVE_GLM_PREFILL_FAIR";
-/// Target decode service percentage under mixed load (1..=90, default 10).
+/// Target decode service percentage under mixed load when layer slicing is disabled (1..=90, default 10).
 const DECODE_PERCENT: &str = "QWEN_SERVE_GLM_DECODE_PERCENT";
-/// Nominal GPU milliseconds per row-preserving layer slice under mixed load;
-/// 0 restores whole-row chunks and the original decode-percentage policy.
+/// Nominal GPU milliseconds per row-preserving layer slice under mixed load (default 0; 100 opts in). Zero restores whole-row chunks and the original decode-percentage policy.
 const LAYER_SLICE_MS: &str = "QWEN_SERVE_GLM_LAYER_SLICE_MS";
-// Default stays off until the served A/B gate has been evaluated.
+// Keep opt-in: the served reverse pair improved maximum gap but regressed global p99.
 const DEFAULT_LAYER_SLICE_MS: usize = 0;
 /// Persistent threads that sample a multi-member step beside the owner; 0
 /// samples serially on the owner (rollback). Default: max_active - 1.
@@ -151,6 +150,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             .with_sample_workers(sample_workers)?;
         let sample_workers = driver.sample_workers();
         self.scheduler = Some(driver);
+        if config.layer_slice_ms > 0 {
+            tracing::info!(target:"qwen_diag", "serve layer prefill: family=glm5_next target_gpu_ms={} rows=original", config.layer_slice_ms);
+        }
         tracing::info!(target:"qwen_diag","serve batch: family=glm5_next max_active={} live_states={} sample_workers={} arithmetic=fast_half",config.active,config.live,sample_workers);
         Ok(())
     }

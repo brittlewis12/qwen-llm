@@ -1696,14 +1696,27 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         run.layer_work.finished = true;
         // A turn cancelled during decode never reaches `finish_run`; emit the
         // prefill record now so partial turns are represented in the budget.
-        tracing::info!(
-            target: "qwen_diag",
-            "serve prefill: family=glm5_next complete=true cancelled=false prefill_ms={:.1} reused_tokens={} prefill_tokens={} reused_source={}",
-            run.prefill_ms,
-            run.matched,
-            run.tokens.len().saturating_sub(run.matched),
-            run.reuse_source,
-        );
+        if run.layer_work.armed {
+            tracing::info!(
+                target: "qwen_diag",
+                "serve prefill: family=glm5_next complete=true cancelled=false prefill_ms={:.1} reused_tokens={} prefill_tokens={} reused_source={} layer_slices={} layer_gpu_ms={:.3}",
+                run.prefill_ms,
+                run.matched,
+                run.tokens.len().saturating_sub(run.matched),
+                run.reuse_source,
+                run.layer_work.commands,
+                run.layer_work.gpu_ms,
+            );
+        } else {
+            tracing::info!(
+                target: "qwen_diag",
+                "serve prefill: family=glm5_next complete=true cancelled=false prefill_ms={:.1} reused_tokens={} prefill_tokens={} reused_source={}",
+                run.prefill_ms,
+                run.matched,
+                run.tokens.len().saturating_sub(run.matched),
+                run.reuse_source,
+            );
+        }
         run.ready = true;
         Ok(())
     }

@@ -6,7 +6,7 @@
 //! a decode removes that idle. The guard is nested-safe and never lowers a
 //! thread already at or above user-initiated.
 crate::env_flag!(
-    /// Raise the thread that feeds the GPU to user-initiated QoS for the duration of a decode or burst, so it is scheduled promptly when the host CPU is saturated. 0 disables every raise.
+    /// Raise the thread that feeds the GPU to user-initiated QoS for the duration of a decode, prefill slice or burst, so it is scheduled promptly when the host CPU is saturated. 0 disables every raise.
     default_on qos_enabled, "QWEN_GPU_THREAD_QOS"
 );
 

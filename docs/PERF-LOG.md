@@ -130,6 +130,48 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Fast packet pressure peaked at 2 for Metal/prose and yielded until 1; Rust
   observed 0, Python 1, and the packet finished at 1.
   Branch `research/glm-prefill-numerics`; no merge; M5 worktree removed.
+## 2026-11-11 - GLM Layer-Sliced Production Prefill: Land Opt-In, Global p99 Gate Fails
+
+- **Production implementation complete; default remains 0.**
+  `QWEN_SERVE_GLM_LAYER_SLICE_MS=100` enables nominal 100ms GPU layer quanta
+  and one ready-peer round. Zero retains the original row-chunk/percentage
+  path. Cursor ownership, final validation, cancellation disposal, normal
+  checkpoint observers and the all-decoding pipelined group loop are covered.
+  Landing branch `perf/glm-layer-sliced-prefill`, rebased onto `2aa654ed7`;
+  no merge. Report: `docs/bench/2026-11-11-glm-layer-slice-serve.md`.
+- **Real-sampling ABBA, 30s windows, three 48K agents, M5 Ultra / iter:**
+  off4/on4/on5/off5 delivered **44.10 / 75.47 / 73.40 / 73.77 tok/s**.
+  Gap p50 **27.4 / 27.6 / 28.1 / 28.2ms**; global p99
+  **560.9 / 133.4 / 138.1 / 65.2ms**; max
+  **2120 / 252 / 253 / 2112ms**. Timing thermal **0 / 0 / 1 / 1**;
+  shared-host compiler work overlapped every window and is recorded.
+- **Use the comparable reverse pair for the throughput call:** same turn mix
+  and one sampled tool call each, on **-0.50% tok/s** (within run variation),
+  max **-88.0% (~8.4x shorter)**, but **global p99 +112%**. Rare long stalls
+  became more numerous ~100ms gaps. The strict p99+max default-on rule fails;
+  reported before any workaround. No policy/metric substitution. Off4's
+  thirteen tool calls and 22 turns versus eleven turns in the other arms
+  explain its lower throughput; do not claim a 71% engine speedup.
+- Reverse-pair append TTFT p50/p99 **844/1869 -> 1097/3050ms**;
+  `partial_prefill_s` **2.3791 -> 2.4156s**. All four arms' TTFT and partial
+  accounting are in the report. Twelve sampled completions are structurally
+  valid/on-topic; off4's repeated-file-request loop is retained as a
+  coherence/workload limitation. No garbled/cross-agent text in those samples.
+- **Validation:** all 96 post-refactor paired probes bitwise in logits,
+  persistent caches, next decode and peers; 24 production-API cases plus
+  frontier/partial-restore checks pass. Existing leased cancellation/checkpoint
+  regression passes on M5 (17.76s), including the new partial-layer case.
+  CPU: 688 serve tests, 23 Driver tests, explicit layer/accounting/QoS coverage,
+  17 harness tests; no new ignored tests. Iter builds pass locally and on M5.
+  Integration contracts passed; final-tree contracts are recorded at handoff.
+- Cold 15s-idle first gap remains **795ms** (command GPU total **306ms**);
+  native warm ~103–150ms is not a cold or streamed maximum guarantee.
+  Failed warm-up arms and the compiler-loaded pilot are retained separately.
+  Final ABBA uses explicit warm-up-only tolerance plus 15s continuous <=1
+  settling; ramp/window limit stays <=1. All GPU holds were below seven
+  minutes. Raw, hashes, exact commands and analysis:
+  `metagross:~/qwen-runs/2026-11-11-layer-slice-production/`.
+
 ## 2026-11-11 - GLM Layer Cancellation: Checkpoint Restore Regression
 
 - Extended the existing leased `gpu_chunk_checkpoint_cancel_resume` model

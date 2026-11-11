@@ -227,6 +227,71 @@ mod probe {
             .collect()
     }
 
+    fn route_rows(
+        routes: Vec<(usize, Vec<i32>)>,
+        rows: usize,
+        top_k: usize,
+    ) -> Vec<Vec<(usize, Vec<i32>)>> {
+        let mut result = vec![Vec::new(); rows];
+        for (block, ids) in routes {
+            assert_eq!(ids.len(), rows * top_k, "route block {block} size");
+            for row in 0..rows {
+                result[row].push((block, ids[row * top_k..(row + 1) * top_k].to_vec()));
+            }
+        }
+        result
+    }
+
+    fn route_deltas(
+        reference: &[Vec<(usize, Vec<i32>)>],
+        path: &[Vec<(usize, Vec<i32>)>],
+    ) -> Vec<Value> {
+        assert_eq!(reference.len(), path.len());
+        let mut blocks: Vec<usize> = reference
+            .iter()
+            .flatten()
+            .map(|(block, _)| *block)
+            .collect();
+        blocks.sort_unstable();
+        blocks.dedup();
+        blocks
+            .into_iter()
+            .map(|block| {
+                let mut changed_slots = 0usize;
+                let mut changed_rows = 0usize;
+                let mut total_slots = 0usize;
+                for row in 0..reference.len() {
+                    let reference_ids = reference[row]
+                        .iter()
+                        .find(|(found, _)| *found == block)
+                        .map(|(_, ids)| ids.as_slice())
+                        .expect("reference route layer");
+                    let path_ids = path[row]
+                        .iter()
+                        .find(|(found, _)| *found == block)
+                        .map(|(_, ids)| ids.as_slice())
+                        .expect("path route layer");
+                    assert_eq!(reference_ids.len(), path_ids.len());
+                    let changed = reference_ids
+                        .iter()
+                        .zip(path_ids)
+                        .filter(|(a, b)| a != b)
+                        .count();
+                    changed_slots += changed;
+                    changed_rows += usize::from(changed > 0);
+                    total_slots += reference_ids.len();
+                }
+                json!({
+                    "layer": block,
+                    "changed_rows": changed_rows,
+                    "rows": reference.len(),
+                    "changed_slots": changed_slots,
+                    "slots": total_slots,
+                })
+            })
+            .collect()
+    }
+
     fn audit_prompt(
         ctx: &MetalContext,
         weights: &Glm5NextWeights,
@@ -288,11 +353,13 @@ mod probe {
             let started = Instant::now();
             let mut reference = Vec::with_capacity(width);
             let mut reference_features = Vec::new();
+            let mut reference_routes = Vec::new();
             for &token in append {
                 if layer_audit {
                     let captured = session.forward_with_captures(ctx, token, &mut bank)?;
                     reference.push(capture_logits(&captured));
                     reference_features.extend(capture_features(&captured));
+                    reference_routes.push(session.perf_decode_route_ids()?);
                 } else {
                     reference.push(session.forward(ctx, token)?);
                 }
@@ -311,6 +378,7 @@ mod probe {
 
             let mut control_logits = Vec::new();
             let mut control_features = Vec::new();
+            let mut control_routes = Vec::new();
             if layer_audit {
                 // Same-lineage one-row packed calls are a legal alternative
                 // schedule to ordinary one-token decode. This control
@@ -323,6 +391,14 @@ mod probe {
                     let captured = session.verify_packed_with_captures(ctx, &[token], &mut bank)?;
                     control_logits.extend(capture_logits(&captured));
                     control_features.extend(capture_features(&captured));
+                    control_routes.push(
+                        route_rows(
+                            session.perf_packed_route_ids()?,
+                            1,
+                            weights.config.expert_used_count as usize,
+                        )[0]
+                        .clone(),
+                    );
                 }
                 let control_rows: Vec<Vec<f32>> =
                     control_logits.chunks(vocab).map(<[f32]>::to_vec).collect();
@@ -343,6 +419,7 @@ mod probe {
                         weights.config.hidden_size as usize,
                         &weights.config,
                     ),
+                    "route_deltas": route_deltas(&reference_routes, &control_routes),
                     "pressure": pressure(),
                 }));
             }
@@ -363,6 +440,15 @@ mod probe {
                 );
                 let packed_features = if layer_audit {
                     Some(capture_features(&captured))
+                } else {
+                    None
+                };
+                let packed_routes = if layer_audit {
+                    Some(route_rows(
+                        session.perf_packed_route_ids()?,
+                        width,
+                        weights.config.expert_used_count as usize,
+                    ))
                 } else {
                     None
                 };
@@ -417,6 +503,9 @@ mod probe {
                     } else {
                         Value::Null
                     },
+                    "route_deltas": packed_routes
+                        .map(|routes| json!(route_deltas(&reference_routes, &routes)))
+                        .unwrap_or(Value::Null),
                     "next_token": next, "next2_token": next2,
                     "pressure": pressure(), "loadavg": loadavg(),
                 }));

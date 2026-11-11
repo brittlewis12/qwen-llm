@@ -818,6 +818,16 @@ impl PackedScratch {
         self.rows
     }
 
+    #[cfg(feature = "perf-ablations")]
+    pub(super) fn perf_route_ids(&self) -> Result<Vec<(usize, Vec<i32>)>> {
+        self.routes
+            .iter()
+            .enumerate()
+            .filter_map(|(block, route)| route.as_ref().map(|route| (block, &route.ids)))
+            .map(|(block, ids)| Ok((block, read_i32(ids)?)))
+            .collect()
+    }
+
     /// This scratch's chunk arithmetic.
     pub(super) fn arith(&self) -> Arith {
         Arith {

@@ -1282,6 +1282,26 @@ impl<'w> Glm5NextSession<'w> {
         self.position
     }
 
+    /// Diagnostic-only route IDs from the last scalar decode token.
+    #[cfg(feature = "perf-ablations")]
+    pub fn perf_decode_route_ids(&self) -> Result<Vec<(usize, Vec<i32>)>> {
+        self.routes
+            .iter()
+            .enumerate()
+            .filter_map(|(block, route)| route.as_ref().map(|route| (block, &route.ids)))
+            .map(|(block, ids)| Ok((block, read_i32(ids)?)))
+            .collect()
+    }
+
+    /// Diagnostic-only route IDs from the last packed chunk.
+    #[cfg(feature = "perf-ablations")]
+    pub fn perf_packed_route_ids(&self) -> Result<Vec<(usize, Vec<i32>)>> {
+        self.packed
+            .as_ref()
+            .ok_or_else(|| Glm5NextMetalError::Invalid("no packed scratch".into()))?
+            .perf_route_ids()
+    }
+
     /// Whether a failed token left the session unusable.
     pub fn is_poisoned(&self) -> bool {
         self.poisoned

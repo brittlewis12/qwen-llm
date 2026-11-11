@@ -542,6 +542,21 @@ def match_native(records,row):
     return best[1] if best else None
 
 
+def prefill_records(native_lines):
+    """Parse `serve prefill:` lines emitted at prefill completion or cancel.
+
+    A completed turn also carries the same `prefill_ms` in its phases line; a
+    cancelled turn emits no phases line, so this is the only record of the
+    prefill it paid. Each record times the end of the prefill span.
+    """
+    out=[]
+    for entry in native_lines:
+        line=entry['line']
+        if 'serve prefill:' in line:
+            rec=kv(line);rec['_time']=entry['time'];out.append(rec)
+    return out
+
+
 def round_budget(cleaned,native_lines,begin,end,gap_p50_s=None):
     """Owner-time budget from the server's own per-call phase lines.
 
@@ -550,8 +565,11 @@ def round_budget(cleaned,native_lines,begin,end,gap_p50_s=None):
     cohort host per round is the median content gap minus that round wall:
     stable and positive, and it leaves the long append stalls in the gap tail
     rather than smearing them into every round. Prefill/capture are counted
-    only where their estimated span overlaps the window; partial calls emit no
-    phases line, so `coverage` states how much of the window was observed.
+    only where their estimated span overlaps the window. Partial calls have no
+    phases line, so their prefill comes from `serve prefill: complete=false`
+    records and is reported separately as `partial_prefill_s` (included in
+    `prefill_s`); `coverage` still states how many delivered tokens were
+    observed by completed phases lines.
     """
     records=native_records(native_lines)
     spans=[]
@@ -597,9 +615,34 @@ def round_budget(cleaned,native_lines,begin,end,gap_p50_s=None):
         transition_ms+=frac*s['transition']
         steps+=steps_in
         wsum+=steps_in*s['width']
+    # Prefill records whose turn never completed (cancelled mid-prefill or
+    # during decode). A completed turn's record is already in the spans above
+    # and is recognised by its prompt length and its near-first-token time.
+    finished=[(r.get('prompt'),r['first']) for r in cleaned
+              if r.get('completed') and r['first'] is not None]
+    partial_prefill_s=0.0
+    partial_prefill_calls=0
+    for rec in prefill_records(native_lines):
+        try:pre=float(rec.get('prefill_ms') or 0)/1000
+        except (TypeError,ValueError):continue
+        if pre<=0:continue
+        try:prompt=int(float(rec.get('prefill_tokens',0)))+int(float(rec.get('reused_tokens',0)))
+        except (TypeError,ValueError):prompt=None
+        if prompt is not None and any(p==prompt and abs(rec['_time']-f)<=3
+                                      for p,f in finished):
+            continue
+        lo=rec['_time']-pre
+        span=rec['_time']-lo
+        overlap_s=overlap(lo,rec['_time'],begin,end)
+        if overlap_s>0 and span>0:
+            partial_prefill_s+=pre*(overlap_s/span)
+            partial_prefill_calls+=1
+    prefill_s+=partial_prefill_s
     if steps<=0:
         return dict(rounds_est=0.0,avg_width=0.0,coverage=0.0,transition_s=0.0,
-                    prefill_s=0.0,capture_s=0.0,host_s=0.0,
+                    prefill_s=prefill_s,partial_prefill_s=partial_prefill_s,
+                    partial_prefill_calls=partial_prefill_calls,
+                    capture_s=capture_s,host_s=0.0,
                     transition_ms_per_round=None,host_ms_per_round=None,
                     host_metric='median content gap minus native round wall')
     avg_width=wsum/steps
@@ -613,7 +656,8 @@ def round_budget(cleaned,native_lines,begin,end,gap_p50_s=None):
     return dict(rounds_est=rounds,avg_width=avg_width,
                 coverage=(covered/total_tokens) if total_tokens else 0.0,
                 transition_s=transition_per_round*rounds/1000,
-                prefill_s=prefill_s,capture_s=capture_s,
+                prefill_s=prefill_s,partial_prefill_s=partial_prefill_s,
+                partial_prefill_calls=partial_prefill_calls,capture_s=capture_s,
                 host_s=(host_per_round*rounds/1000) if host_per_round is not None else 0.0,
                 transition_ms_per_round=transition_per_round,
                 host_ms_per_round=host_per_round,

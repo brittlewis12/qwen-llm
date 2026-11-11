@@ -154,6 +154,21 @@ class SteadyTests(unittest.TestCase):
         self.assertEqual(x['coverage'],1.0)
         self.assertEqual(bench.round_budget([],lines,0.,10.)['host_s'],0.0)
 
+    def test_partial_prefill_record_is_counted_without_double_counting(self):
+        completed=dict(first=5.,end=10.,window_tokens=100,prompt=42,completed=True,
+                       phases=dict(batch=dict(stepped_transitions=30,width_mean=2.0),
+                                   prefill_ms=1000.0,snapshot_capture_ms=0.0))
+        partial=dict(first=None,end=8.,window_tokens=20,prompt=None,completed=False,phases={})
+        lines=[dict(time=4.9,line='serve prefill: family=glm5_next complete=true cancelled=false '
+                    'prefill_ms=1000.0 reused_tokens=0 prefill_tokens=42'),
+               dict(time=8.0,line='serve prefill: family=glm5_next complete=false cancelled=true '
+                    'prefill_ms=4000.0 reused_tokens=0 prefill_tokens=20')]
+        x=bench.round_budget([completed,partial],lines,0.,10.,0.1)
+        self.assertAlmostEqual(x['partial_prefill_s'],4.0)
+        self.assertEqual(x['partial_prefill_calls'],1)
+        # The completed turn's record is already in its phases span.
+        self.assertAlmostEqual(x['prefill_s'],5.0)
+
     def test_completed_empty_eos_is_not_a_request_pending_at_cutoff(self):
         k='response.output_text.delta'
         empty=self.row(0,11,None,12,[])

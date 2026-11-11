@@ -1472,6 +1472,17 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                     // is consistent, so a retry of this prompt resumes
                     // from it.
                     let position = session.position();
+                    // Measurement fix: a cancelled turn never reaches
+                    // `finish_run`, so its prefill would otherwise vanish from
+                    // the phase budget. Report the elapsed prefill here.
+                    let prefill_ms = run.prefill_t0.elapsed().as_secs_f64() * 1e3 - run.capture_ms;
+                    tracing::info!(
+                        target: "qwen_diag",
+                        "serve prefill: family=glm5_next complete=false cancelled=true prefill_ms={prefill_ms:.1} reused_tokens={} prefill_tokens={} reused_source={}",
+                        run.matched,
+                        position.saturating_sub(run.matched),
+                        run.reuse_source,
+                    );
                     self.history = tokens[..position].to_vec();
                     self.live_canonical = canonical && lineage == PackedLineage::Fast;
                     self.chunk_origin = chunk_capture
@@ -1547,6 +1558,16 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             self.last_prefill_logits = run.logits.iter().map(|v| v.to_bits()).collect();
         }
         if let Err(abort) = sink.tick() {
+            // Measurement fix: prefill completed but the turn was cancelled
+            // before decode, so no phases line will be emitted by `finish_run`.
+            let prefill_ms = run.prefill_t0.elapsed().as_secs_f64() * 1e3 - run.capture_ms;
+            tracing::info!(
+                target: "qwen_diag",
+                "serve prefill: family=glm5_next complete=false cancelled=true phase=finish prefill_ms={prefill_ms:.1} reused_tokens={} prefill_tokens={} reused_source={}",
+                run.matched,
+                run.tokens.len().saturating_sub(run.matched),
+                run.reuse_source,
+            );
             self.session = None;
             return Err(BackendFailure::Aborted(abort));
         }
@@ -1559,6 +1580,16 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         run.chunk_capture_ms = run.chunk_capture.as_ref().map_or(0.0, |c| c.elapsed_ms);
         run.capture_ms += run.chunk_capture_ms;
         run.prefill_ms = run.prefill_t0.elapsed().as_secs_f64() * 1e3 - run.capture_ms;
+        // A turn cancelled during decode never reaches `finish_run`; emit the
+        // prefill record now so partial turns are represented in the budget.
+        tracing::info!(
+            target: "qwen_diag",
+            "serve prefill: family=glm5_next complete=true cancelled=false prefill_ms={:.1} reused_tokens={} prefill_tokens={} reused_source={}",
+            run.prefill_ms,
+            run.matched,
+            run.tokens.len().saturating_sub(run.matched),
+            run.reuse_source,
+        );
         run.ready = true;
         Ok(())
     }

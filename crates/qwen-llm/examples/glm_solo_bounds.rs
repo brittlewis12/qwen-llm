@@ -84,7 +84,7 @@ fn main() -> anyhow::Result<()> {
                 "label":row.label,"layer":row.layer,
                 "gpu_ns":row.gpu_ns,"gpu_start":row.gpu_start,"gpu_end":row.gpu_end,
                 "grid":row.grid,"threads":row.threads,
-                "concurrent":row.concurrent
+                "concurrent":row.concurrent,"bindings":row.bindings()
             }));
         }
         return Ok(());

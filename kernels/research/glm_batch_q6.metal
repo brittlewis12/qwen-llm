@@ -82,7 +82,7 @@ kernel void glm_batch_q6_vector(
 typedef decltype(glm_batch_q6_vector<2,1,4>) glm_batch_q6_t;
 #define V(B,O,S) template [[host_name("glm_batch_q6_vector_b" #B "_o" #O "_s" #S)]] kernel glm_batch_q6_t glm_batch_q6_vector<B,O,S>;
 #define VS(B) V(B,1,2) V(B,1,4) V(B,2,2) V(B,2,4) V(B,4,2) V(B,4,4)
-VS(2) VS(3) VS(4)
+VS(1) VS(2) VS(3) VS(4)
 
 // Eight consecutive quant values/lane. Apply the exact F32 block scale
 // after each short dot, avoiding full scaled weight fragments in registers.
@@ -125,7 +125,7 @@ kernel void glm_batch_q6_scaled(
 typedef decltype(glm_batch_q6_scaled<2,1,4>) glm_batch_q6_scaled_t;
 #define S(B,O,N) template [[host_name("glm_batch_q6_scaled_b" #B "_o" #O "_s" #N)]] kernel glm_batch_q6_scaled_t glm_batch_q6_scaled<B,O,N>;
 #define SS(B) S(B,1,2) S(B,1,4) S(B,2,2) S(B,2,4) S(B,4,2) S(B,4,4)
-SS(2) SS(3) SS(4)
+SS(1) SS(2) SS(3) SS(4)
 
 // Arithmetic of kernel_mat_vec_f32_f32_lcpp_r2, with weight loads and
 // both barriers shared by independent member accumulators.

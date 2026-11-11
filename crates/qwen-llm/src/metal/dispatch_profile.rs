@@ -50,6 +50,20 @@ pub struct DispatchProfileRow {
     /// summing a timeline.
     pub gpu_start: Option<u64>,
     pub gpu_end: Option<u64>,
+    /// Tensor bindings recorded by the replay state, keyed by buffer slot.
+    /// Bench-only shape attribution; absent in product builds.
+    #[serde(skip)]
+    #[cfg(feature = "perf-ablations")]
+    bindings: Vec<(usize, serde_json::Value)>,
+}
+
+#[cfg(feature = "perf-ablations")]
+impl DispatchProfileRow {
+    /// Captured tensor bindings (`slot` plus dtype/shape/bytes/writable) for
+    /// this dispatch, for bench-only shape attribution.
+    pub fn bindings(&self) -> &[(usize, serde_json::Value)] {
+        &self.bindings
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -319,6 +333,17 @@ pub(crate) fn split_for_dispatch(enc: &KernelEncoder, grid: MTLSize, threads: MT
             .expect("per-dispatch sampled compute encoder");
         replay.apply(&raw);
         *enc.raw.borrow_mut() = raw;
+        #[cfg(feature = "perf-ablations")]
+        let bindings = replay
+            .metadata
+            .iter()
+            .map(|(slot, meta)| {
+                (
+                    *slot,
+                    serde_json::to_value(meta).expect("serialize captured binding"),
+                )
+            })
+            .collect();
         active.rows.push(DispatchProfileRow {
             label: active.label,
             layer: active.layer,
@@ -334,6 +359,8 @@ pub(crate) fn split_for_dispatch(enc: &KernelEncoder, grid: MTLSize, threads: MT
             gpu_ns: None,
             gpu_start: None,
             gpu_end: None,
+            #[cfg(feature = "perf-ablations")]
+            bindings,
         });
     });
 }

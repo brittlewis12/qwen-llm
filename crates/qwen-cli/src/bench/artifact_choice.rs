@@ -61,8 +61,10 @@ impl ArtifactFamily {
 
 #[derive(Clone)]
 struct Prompt {
-    id: &'static str,
-    stratum: &'static str,
+    id: String,
+    stratum: String,
+    language: Option<String>,
+    source_label: String,
     path: PathBuf,
     utf8_sha256: String,
     ids: Vec<i32>,
@@ -190,19 +192,37 @@ fn load_prompts(
     depth: usize,
     targets: usize,
 ) -> Result<Vec<PromptScored>> {
-    const FILES: [(&str, &str, &str); 4] = [
-        ("rust-agent-corpus", "code", "rust-agent-corpus.txt"),
-        ("metal-routed-kernels", "code", "metal-routed-kernels.txt"),
-        ("python-dflash-profile", "code", "python-dflash-profile.txt"),
-        ("performance-log", "prose", "performance-log.txt"),
-    ];
-    FILES
-        .into_iter()
-        .map(|(id, stratum, filename)| {
+    let manifest_path = cohort_dir.join("manifest.json");
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .with_context(|| format!("read cohort manifest {}", manifest_path.display()))?,
+    )
+    .context("parse cohort manifest")?;
+    let entries = manifest["prompts"]
+        .as_array()
+        .context("cohort manifest prompts must be an array")?;
+    ensure!(!entries.is_empty(), "cohort manifest contains no prompts");
+    entries
+        .iter()
+        .map(|entry| {
+            let id = entry["id"]
+                .as_str()
+                .context("cohort prompt id must be a string")?
+                .to_owned();
+            let stratum = entry["stratum"]
+                .as_str()
+                .context("cohort prompt stratum must be a string")?
+                .to_owned();
+            let filename = entry["file"]
+                .as_str()
+                .context("cohort prompt file must be a string")?;
             let path = cohort_dir.join(filename);
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("read cohort prompt {}", path.display()))?;
             let utf8_sha256 = sha256(text.as_bytes());
+            if let Some(expected) = entry["source_utf8_sha256"].as_str() {
+                ensure!(utf8_sha256 == expected, "{id} source hash differs from manifest");
+            }
             let ids = tokenizer.encode(&text, false)?;
             ensure!(
                 ids.len() >= depth + targets + 1,
@@ -214,6 +234,8 @@ fn load_prompts(
                 prompt: Prompt {
                     id,
                     stratum,
+                    language: entry["language"].as_str().map(str::to_owned),
+                    source_label: entry["source"].as_str().map(str::to_owned).unwrap_or_else(|| filename.to_owned()),
                     path,
                     utf8_sha256,
                     ids,
@@ -428,10 +450,15 @@ fn prompt_report(item: &PromptScored, observations: Vec<Value>, execution: Strin
     json!({
         "id": item.prompt.id,
         "stratum": item.prompt.stratum,
-        "source": item.prompt.path.file_name().and_then(|name| name.to_str()),
+        "language": item.prompt.language,
+        "source": item.prompt.source_label,
+        "source_file": item.prompt.path.file_name().and_then(|name| name.to_str()),
         "source_utf8_sha256": item.prompt.utf8_sha256,
         "token_count": item.prompt.ids.len(),
         "token_ids_sha256_i32le": token_ids_sha256_i32le(&item.prompt.ids),
+        "scored_token_ids_sha256_i32le": observations.first().and_then(|row| row["position"].as_u64()).map(|start| {
+            token_ids_sha256_i32le(&item.prompt.ids[..start as usize + observations.len()])
+        }),
         "targets": observations.len(),
         "mean_nll": nll.iter().sum::<f64>() / nll.len().max(1) as f64,
         "top1_accuracy": hits as f64 / observations.len().max(1) as f64,

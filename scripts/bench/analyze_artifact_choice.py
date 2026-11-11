@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import math
 import random
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,23 @@ def bootstrap(rows: list[float], rng: random.Random) -> dict[str, float]:
         "ci90_high": percentile(samples, 0.95),
         "upper95_one_sided": percentile(samples, 0.95),
         "prompt_means": rows,
+    }
+
+
+def sign_test(rows: list[float]) -> dict[str, int | float]:
+    """Exact two-sided sign test over independent prompt-cluster means."""
+    nonzero = [value for value in rows if value != 0.0]
+    positive = sum(value > 0.0 for value in nonzero)
+    negative = len(nonzero) - positive
+    n = len(nonzero)
+    tail = min(positive, negative)
+    p = min(1.0, 2.0 * sum(math.comb(n, k) for k in range(tail + 1)) / (2**n)) if n else 1.0
+    return {
+        "positive_prompts": positive,
+        "negative_prompts": negative,
+        "zero_prompts": len(rows) - n,
+        "nonzero_prompts": n,
+        "two_sided_p": p,
     }
 
 
@@ -122,6 +140,8 @@ def compare_pair(
         "right": right_name,
         "equal_prompt_all": bootstrap(all_prompts, rng),
         "equal_prompt_code_only": bootstrap(code, rng),
+        "exact_prompt_sign_test_all": sign_test(all_prompts),
+        "exact_prompt_sign_test_code_only": sign_test(code),
         "pooled_top1_agreement": agreement_num / total_targets,
         "per_prompt": per_prompt,
         "paired_positions": paired_positions,

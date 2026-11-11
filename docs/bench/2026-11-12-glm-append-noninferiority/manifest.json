@@ -1,0 +1,56 @@
+{
+  "name": "glm53-append-noninferiority-v1",
+  "depth": 49152,
+  "teacher_forced_append_rows": [8, 16, 32, 64],
+  "reference": "Exact packed prefix followed by sequential Exact decode of the same appended token IDs",
+  "arms": [
+    "sequential_fast_half",
+    "packed_fast_half",
+    "packed_dense_f32_suffix",
+    "packed_f32_suffix"
+  ],
+  "statistics": {
+    "item": "prompt",
+    "aggregation": "equal-prompt mean of per-prompt mean signed dNLL",
+    "interval": "central 90% and one-sided 95% prompt-cluster bootstrap",
+    "bootstrap_resamples": 20000,
+    "seed": 1196182867
+  },
+  "prompts": [
+    {
+      "id": "rust-agent-corpus",
+      "stratum": "code",
+      "source": "metagross:~/qwen-runs/2026-11-07-serve-agents/code.txt",
+      "construction": "frozen prior real-code corpus; five Rust SOURCE markers; no cycling"
+    },
+    {
+      "id": "metal-routed-kernels",
+      "stratum": "code",
+      "sources": [
+        "kernels/moe.metal",
+        "kernels/mat_vec.metal"
+      ],
+      "construction": "UTF-8 concatenation in listed order, separated by a newline and a // SOURCE marker; no cycling"
+    },
+    {
+      "id": "python-dflash-profile",
+      "stratum": "code",
+      "sources": [
+        "scripts/profile/dflash_k0s.py"
+      ],
+      "construction": "whole source file; no cycling"
+    },
+    {
+      "id": "performance-log",
+      "stratum": "prose",
+      "sources": [
+        "docs/PERF-LOG.md"
+      ],
+      "construction": "whole prose ledger; no cycling"
+    }
+  ],
+  "provenance": {
+    "quality_cohort": "scripts/reference/glm53/quality-v1.json supplies the established 8-prose/8-code/6-long strata and names kernels/mat_vec.metal and kernels/moe.metal as code witnesses; its 2112-token items are too short for a natural 48K root, so this packet uses full source files from the repository instead.",
+    "input_hashes": "record SHA-256 and token count for each actual assembled prompt in the raw run header"
+  }
+}

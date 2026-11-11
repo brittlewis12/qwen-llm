@@ -30,12 +30,13 @@ mod probe {
         gguf::GgufFile,
         glm5_next_metal::{
             FastPrecision, Glm5NextCapturedRows, Glm5NextRowBank, Glm5NextRowBankPlan,
-            Glm5NextSession, Glm5NextWeights, set_expert_packet_max_rows,
+            Glm5NextSession, Glm5NextWeights, PackedLineage, set_expert_packet_max_rows,
         },
         metal::*,
         tokenizer::Tokenizer,
     };
     use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
     use std::{io::Write, time::Instant};
 
     const CAPACITY: usize = 65536;
@@ -530,6 +531,275 @@ mod probe {
         Ok(())
     }
 
+    fn route_set_deltas(
+        reference: &[Vec<(usize, Vec<i32>)>],
+        path: &[Vec<(usize, Vec<i32>)>],
+    ) -> Vec<Value> {
+        assert_eq!(reference.len(), path.len());
+        let mut blocks: Vec<usize> = reference
+            .iter()
+            .flatten()
+            .map(|(block, _)| *block)
+            .collect();
+        blocks.sort_unstable();
+        blocks.dedup();
+        blocks
+            .into_iter()
+            .map(|block| {
+                let mut changed_rows = 0usize;
+                let mut changed_slots = 0usize;
+                for row in 0..reference.len() {
+                    let mut a = reference[row]
+                        .iter()
+                        .find(|(found, _)| *found == block)
+                        .map(|(_, ids)| ids.clone())
+                        .expect("reference route block");
+                    let mut b = path[row]
+                        .iter()
+                        .find(|(found, _)| *found == block)
+                        .map(|(_, ids)| ids.clone())
+                        .expect("path route block");
+                    a.sort_unstable();
+                    b.sort_unstable();
+                    let changed = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+                    changed_rows += usize::from(changed > 0);
+                    changed_slots += changed;
+                }
+                json!({
+                    "layer": block,
+                    "changed_rows": changed_rows,
+                    "rows": reference.len(),
+                    "changed_slots": changed_slots,
+                    "slots": reference.len() * 8,
+                })
+            })
+            .collect()
+    }
+
+    fn quality_result(
+        prompt: &str,
+        stratum: &str,
+        arm: &str,
+        width: usize,
+        exact: &[Vec<f32>],
+        sequential_fast: &[Vec<f32>],
+        candidate: &[Vec<f32>],
+        actual: &[u32],
+        exact_routes: &[Vec<(usize, Vec<i32>)>],
+        candidate_routes: &[Vec<(usize, Vec<i32>)>],
+        wall_ms: Option<f64>,
+    ) {
+        let exact = &exact[..width];
+        let sequential_fast = &sequential_fast[..width];
+        let candidate = &candidate[..width];
+        let actual = &actual[..width];
+        let exact_m = position_metrics(exact, exact, actual);
+        let seq_m = position_metrics(exact, sequential_fast, actual);
+        let m = position_metrics(exact, candidate, actual);
+        let seq_dnll: Vec<f64> = m
+            .dnll
+            .iter()
+            .zip(&seq_m.dnll)
+            .map(|(candidate, sequential)| candidate - sequential)
+            .collect();
+        emit(json!({
+            "kind": "quality_result",
+            "prompt": prompt,
+            "stratum": stratum,
+            "arm": arm,
+            "width": width,
+            "positions": width,
+            "mean_dnll_vs_exact": m.dnll.iter().sum::<f64>() / width as f64,
+            "dnll_vs_exact": m.dnll,
+            "mean_dnll_vs_sequential_fast": seq_dnll.iter().sum::<f64>() / width as f64,
+            "dnll_vs_sequential_fast": seq_dnll,
+            "mean_kl_exact_to_arm": m.kl_ref_path.iter().sum::<f64>() / width as f64,
+            "mean_kl_arm_to_exact": m.kl_path_ref.iter().sum::<f64>() / width as f64,
+            "max_kl_exact_to_arm": m.kl_ref_path.iter().copied().fold(0.0, f64::max),
+            "top1_agree": m.top1.iter().filter(|agree| **agree).count(),
+            "top1_rate": m.top1.iter().filter(|agree| **agree).count() as f64 / width as f64,
+            "exact_repeat_mean_dnll": exact_m.dnll.iter().sum::<f64>() / width as f64,
+            "router_set_changes_vs_exact": route_set_deltas(
+                &exact_routes[..width],
+                &candidate_routes[..width],
+            ),
+            "wall_ms": wall_ms,
+        }));
+    }
+
+    fn audit_quality_prompt(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        tokenizer: &Tokenizer,
+        path: &str,
+        text: &str,
+        depth: usize,
+    ) -> anyhow::Result<()> {
+        const MAX_ROWS: usize = 64;
+        const WIDTHS: [usize; 4] = [8, 16, 32, 64];
+        let escaped = text.replace("<|", "‹|").replace("<｜", "‹｜");
+        let ids: Vec<u32> = tokenizer
+            .encode(&escaped, false)?
+            .into_iter()
+            .map(|token| token as u32)
+            .collect();
+        anyhow::ensure!(
+            ids.len() >= depth + MAX_ROWS + 1,
+            "{path} has {} tokens; need at least {} real prefix + continuation tokens",
+            ids.len(),
+            depth + MAX_ROWS + 1
+        );
+        let source_sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let mut token_bytes = Vec::with_capacity(ids.len() * 4);
+        for token in &ids {
+            token_bytes.extend_from_slice(&token.to_le_bytes());
+        }
+        let tokens_sha256 = format!("{:x}", Sha256::digest(&token_bytes));
+        let append = &ids[depth..depth + MAX_ROWS];
+        let actual = &ids[depth + 1..depth + MAX_ROWS + 1];
+        let stratum = if path.ends_with("PERF-LOG.md") {
+            "prose"
+        } else {
+            "code"
+        };
+        emit(json!({
+            "kind": "quality_prompt",
+            "prompt": path,
+            "stratum": stratum,
+            "tokens": ids.len(),
+            "source_sha256": source_sha256,
+            "tokens_sha256": tokens_sha256,
+            "depth": depth,
+            "append_rows": MAX_ROWS,
+            "preview": escaped.chars().take(120).collect::<String>(),
+            "pressure": pressure(),
+        }));
+
+        let mut exact_session =
+            Glm5NextSession::with_prefill_rows(ctx, weights, CAPACITY, PREFILL_ROWS)?;
+        exact_session.set_packed_lineage(PackedLineage::Exact)?;
+        let started = Instant::now();
+        for part in ids[..depth].chunks(PREFILL_ROWS) {
+            gate();
+            exact_session.prefill_packed(ctx, part)?;
+        }
+        let exact_prefix_ms = started.elapsed().as_secs_f64() * 1e3;
+        let mut exact_logits = Vec::with_capacity(MAX_ROWS);
+        let mut exact_routes = Vec::with_capacity(MAX_ROWS);
+        for &token in append {
+            gate();
+            exact_logits.push(exact_session.forward(ctx, token)?);
+            exact_routes.push(exact_session.perf_decode_route_ids()?);
+        }
+        drop(exact_session);
+        emit(json!({
+            "kind": "quality_prefix",
+            "prompt": path,
+            "lineage": "Exact",
+            "wall_ms": exact_prefix_ms,
+            "pressure": pressure(),
+        }));
+
+        let mut fast = Glm5NextSession::with_prefill_rows(ctx, weights, CAPACITY, PREFILL_ROWS)?;
+        fast.set_packed_lineage(PackedLineage::Fast)?;
+        fast.set_fast_precision(FastPrecision::Half)?;
+        let started = Instant::now();
+        for part in ids[..depth].chunks(PREFILL_ROWS) {
+            gate();
+            fast.prefill_packed(ctx, part)?;
+        }
+        let fast_prefix_ms = started.elapsed().as_secs_f64() * 1e3;
+        let snapshot = fast.capture_snapshot()?;
+        let plan = Glm5NextRowBankPlan::new(&weights.config, &[], 0, MAX_ROWS)?;
+        let mut bank = Glm5NextRowBank::new(ctx, weights, plan)?;
+
+        fast.restore_snapshot(&snapshot)?;
+        let mut sequential_fast = Vec::with_capacity(MAX_ROWS);
+        let mut sequential_routes = Vec::with_capacity(MAX_ROWS);
+        for &token in append {
+            gate();
+            sequential_fast.push(fast.forward(ctx, token)?);
+            sequential_routes.push(fast.perf_decode_route_ids()?);
+        }
+        emit(json!({
+            "kind": "quality_prefix",
+            "prompt": path,
+            "lineage": "Fast/Half",
+            "wall_ms": fast_prefix_ms,
+            "pressure": pressure(),
+        }));
+
+        for width in WIDTHS {
+            let exact_rows = &exact_logits[..width];
+            quality_result(
+                path,
+                stratum,
+                "Exact",
+                width,
+                &exact_logits,
+                &sequential_fast,
+                exact_rows,
+                actual,
+                &exact_routes,
+                &exact_routes,
+                None,
+            );
+            quality_result(
+                path,
+                stratum,
+                "sequential_fast_half",
+                width,
+                &exact_logits,
+                &sequential_fast,
+                &sequential_fast,
+                actual,
+                &exact_routes,
+                &sequential_routes,
+                None,
+            );
+            for (arm, precision) in [
+                ("packed_fast_half", FastPrecision::Half),
+                ("packed_dense_f32_suffix", FastPrecision::DenseF32),
+                ("packed_f32_suffix", FastPrecision::F32),
+            ] {
+                fast.restore_snapshot(&snapshot)?;
+                if precision != FastPrecision::Half {
+                    fast.perf_override_fast_precision(precision)?;
+                }
+                let started = Instant::now();
+                let captured =
+                    fast.verify_packed_with_captures(ctx, &append[..width], &mut bank)?;
+                let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+                let logits = read_f32(captured.logits().expect("packed all-row logits"));
+                let path_logits: Vec<Vec<f32>> = logits
+                    .chunks(weights.config.vocab_size as usize)
+                    .map(<[f32]>::to_vec)
+                    .collect();
+                let route_ids = fast.perf_packed_route_ids(width)?;
+                let routes =
+                    route_rows(route_ids, width, weights.config.expert_used_count as usize);
+                drop(captured);
+                if precision != FastPrecision::Half {
+                    fast.perf_override_fast_precision(FastPrecision::Half)?;
+                }
+                quality_result(
+                    path,
+                    stratum,
+                    arm,
+                    width,
+                    &exact_logits,
+                    &sequential_fast,
+                    &path_logits,
+                    actual,
+                    &exact_routes,
+                    &routes,
+                    Some(wall_ms),
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn run() -> anyhow::Result<()> {
         assert!(
             std::env::var_os("QWEN_METAL_LEASE_FD").is_some(),
@@ -538,11 +808,12 @@ mod probe {
         let args: Vec<String> = std::env::args().collect();
         let mode = args.get(1).map(String::as_str).unwrap_or_default();
         let layer_audit = matches!(mode, "--layers" | "--layers-f32");
+        let quality_cohort = mode == "--cohort";
         let f32_suffix = mode == "--layers-f32";
-        let base = if layer_audit { 2 } else { 1 };
+        let base = if layer_audit || quality_cohort { 2 } else { 1 };
         anyhow::ensure!(
             args.len() >= base + 2,
-            "usage: glm_append_audit [--layers|--layers-f32] <depth> <prompt> [prompt ...]"
+            "usage: glm_append_audit [--layers|--layers-f32|--cohort] <depth> <prompt> [prompt ...]"
         );
         let depth: usize = args[base].parse()?;
         let ctx = MetalContext::new()?;
@@ -553,8 +824,10 @@ mod probe {
         let tokenizer = Tokenizer::from_gguf(&gguf)?;
         let weights = Glm5NextWeights::load(&ctx, &gguf)?;
         emit(json!({
-            "kind": "header", "depth": depth, "widths": WIDTHS,
+            "kind": "header", "depth": depth,
+            "widths": if quality_cohort { json!([8, 16, 32, 64]) } else { json!(WIDTHS) },
             "layer_audit": layer_audit,
+            "quality_cohort": quality_cohort,
             "prefix_precision": "Half",
             "packed_suffix_precision": if f32_suffix { "F32" } else { "Half" },
             "capacity": CAPACITY, "prefill_rows": PREFILL_ROWS,
@@ -562,16 +835,20 @@ mod probe {
         }));
         for path in &args[base + 1..] {
             let text = std::fs::read_to_string(path)?;
-            audit_prompt(
-                &ctx,
-                &weights,
-                &tokenizer,
-                path,
-                &text,
-                depth,
-                layer_audit,
-                f32_suffix,
-            )?;
+            if quality_cohort {
+                audit_quality_prompt(&ctx, &weights, &tokenizer, path, &text, depth)?;
+            } else {
+                audit_prompt(
+                    &ctx,
+                    &weights,
+                    &tokenizer,
+                    path,
+                    &text,
+                    depth,
+                    layer_audit,
+                    f32_suffix,
+                )?;
+            }
         }
         emit(json!({
             "kind": "done", "pressure": pressure(), "loadavg": loadavg(),

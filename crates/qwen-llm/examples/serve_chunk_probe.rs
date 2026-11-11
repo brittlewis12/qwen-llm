@@ -155,13 +155,14 @@ fn median(mut xs: Vec<f64>) -> f64 {
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let corpus = args.get(1).ok_or_else(|| {
-        anyhow::anyhow!("usage: serve_chunk_probe <corpus> [mode] [first_n] [load_threads] [capacity] [decode_steps]")
+        anyhow::anyhow!("usage: serve_chunk_probe <corpus> [mode] [first_n] [load_threads] [capacity] [decode_steps] [idle_ms]")
     })?;
     let mode = args.get(2).map(String::as_str).unwrap_or("all");
     let first_n: usize = args.get(3).map_or(Ok(32), |s| s.parse())?;
     let load_threads: usize = args.get(4).map_or(Ok(0), |s| s.parse())?;
     let capacity: usize = args.get(5).map_or(Ok(CAPACITY), |s| s.parse())?;
     let decode_steps: usize = args.get(6).map_or(Ok(0), |s| s.parse())?;
+    let idle_ms: u64 = args.get(7).map_or(Ok(0), |s| s.parse())?;
 
     let c = MetalContext::new()?;
     let path = qwen_llm::test_fixtures::GLM53_FLASH_UD_IQ3_XXS
@@ -188,12 +189,13 @@ fn main() -> anyhow::Result<()> {
     emit(serde_json::json!({
         "kind": "header", "mode": mode, "depth": DEPTH, "first_n": first_n,
         "load_threads": load_threads, "capacity": capacity,
-        "decode_steps": decode_steps, "pressure": pressure(), "loadavg": loadavg(),
+        "decode_steps": decode_steps, "idle_ms": idle_ms,
+        "pressure": pressure(), "loadavg": loadavg(),
         "clock": clock_note(), "corpus_tokens": ids.len(),
     }));
 
     if mode == "all" || mode == "stage" {
-        stage(&c, &w, &ids, first_n, load_threads, capacity, decode_steps)?;
+        stage(&c, &w, &ids, first_n, load_threads, capacity, decode_steps, idle_ms)?;
     }
     if mode == "all" || mode == "chunk" {
         chunk(&c, &w, &ids)?;
@@ -279,10 +281,22 @@ fn stage(
     load_threads: usize,
     capacity: usize,
     decode_steps: usize,
+    idle_ms: u64,
 ) -> anyhow::Result<()> {
     let base = DEPTH + decode_steps;
     let mut s = new_session(c, w, ids, capacity, decode_steps)?;
     let snap = s.capture_snapshot()?;
+    if idle_ms > 0 {
+        emit(serde_json::json!({
+            "kind": "idle_start", "idle_ms": idle_ms,
+            "pressure": pressure(), "loadavg": loadavg(),
+        }));
+        std::thread::sleep(std::time::Duration::from_millis(idle_ms));
+        emit(serde_json::json!({
+            "kind": "idle_end", "idle_ms": idle_ms,
+            "pressure": pressure(), "loadavg": loadavg(),
+        }));
+    }
     let load = (load_threads > 0).then(|| HostLoad::start(load_threads));
     if load.is_some() {
         // Let the busy threads saturate before the first append.

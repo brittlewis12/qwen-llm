@@ -75,6 +75,29 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   holds through the real GPU loops; `fn_hc_up_regrid` is an isolated
   research probe. Evidence `metagross:~/qwen-runs/2026-11-11-solo-b1/`.
   No merge; M5 worktree removed.
+## 2026-11-11 - GLM Fast/Half Append Numerics: Code Routes Diverge at Sparse MLA
+
+- **Probe only; no production behavior change.** M5 Ultra, GLM-5.3-Flash
+  UD-IQ3_XXS, 48K prefix, `iter`; new `glm_append_audit --layers` compares
+  sequential decode, repeated one-row packed calls, and an 8-row packed call
+  with post-block activation and router-ID captures. `--layers-f32` switches
+  only the packed suffix to F32 from the same Fast/Half prefix.
+- **No accepted nonzero schedule noise floor.** The 8-row code result is
+  within the one-row control on mean KL (4.359e-3 vs 4.363e-3), but exceeds it
+  on mean |dNLL| (0.113 vs 0.0533), max |dNLL| (0.404 vs 0.122) and state KL
+  (0.0759 vs 0.0220). Prose remains at output-noise level (README mean KL
+  2.4e-8). The policy remains same-schedule bitwise identity and cohort
+  qualification for any non-bit-identical schedule.
+- **First material divergence:** block 7, sparse MLA + MoE; relative RMS
+  1.90e-3 and the first route mismatch (one row, one expert slot). F32 suffix
+  removes route mismatches and reduces code mean KL/state KL to 5.0e-8 /
+  5.6e-9. Its 8-row wall is 206.8 ms versus 140.4 ms for Half (+47%); the
+  existing sequential decode reference is 174.3 ms (+24% over Half). This
+  locates the sensitive boundary before expert execution; the exact MLA
+  subkernel/score margin remains unisolated.
+- Model note: `docs/bench/2026-11-11-glm-prefill-numerics.md`. Raw and thermal
+  records: `metagross:~/qwen-runs/2026-11-11-glm-numerics/`. Branch
+  `research/glm-prefill-numerics`; no merge; M5 worktree removed.
 
 ## 2026-11-11 - Serve Chunk Gate: The Append Floor Is Per Forward
 

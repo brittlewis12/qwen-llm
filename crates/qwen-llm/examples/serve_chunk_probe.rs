@@ -196,7 +196,16 @@ fn main() -> anyhow::Result<()> {
     }));
 
     if mode == "all" || mode == "stage" {
-        stage(&c, &w, &ids, first_n, load_threads, capacity, decode_steps, idle_ms)?;
+        stage(
+            &c,
+            &w,
+            &ids,
+            first_n,
+            load_threads,
+            capacity,
+            decode_steps,
+            idle_ms,
+        )?;
     }
     if mode == "all" || mode == "chunk" {
         chunk(&c, &w, &ids)?;
@@ -368,8 +377,8 @@ fn edges(c: &MetalContext, w: &Glm5NextWeights, ids: &[u32]) -> anyhow::Result<(
     let mut s = new_session(c, w, ids, CAPACITY, 0)?;
     let snap = s.capture_snapshot()?;
     for width in [
-        1usize, 2, 4, 8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384,
-        448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 1025, 1032,
+        1usize, 2, 4, 8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448,
+        512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 1025, 1032,
     ] {
         let mut walls = Vec::new();
         for _ in 0..3 {

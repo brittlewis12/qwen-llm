@@ -12,9 +12,10 @@
 //! one common token through ordinary decode to compare the resulting state.
 //! Output is JSON lines. No production change.
 //!
-//! Usage: `glm_append_audit [--layers] <depth> <prompt> [prompt ...]`
+//! Usage: `glm_append_audit [--layers|--layers-f32] <depth> <prompt> [prompt ...]`
 //! `--layers` compares every post-block activation for sequential decode,
-//! one-row packed control, and the 8-row packed schedule.
+//! one-row packed control, and the 8-row packed schedule. `--layers-f32`
+//! repeats that diagnostic with F32 packed operands.
 
 #[cfg(not(feature = "perf-ablations"))]
 fn main() {
@@ -27,8 +28,8 @@ mod probe {
     use qwen_llm::{
         gguf::GgufFile,
         glm5_next_metal::{
-            Glm5NextCapturedRows, Glm5NextRowBank, Glm5NextRowBankPlan, Glm5NextSession,
-            Glm5NextWeights, set_expert_packet_max_rows,
+            FastPrecision, Glm5NextCapturedRows, Glm5NextRowBank, Glm5NextRowBankPlan,
+            Glm5NextSession, Glm5NextWeights, set_expert_packet_max_rows,
         },
         metal::*,
         tokenizer::Tokenizer,
@@ -300,6 +301,7 @@ mod probe {
         text: &str,
         depth: usize,
         layer_audit: bool,
+        precision: FastPrecision,
     ) -> anyhow::Result<()> {
         let escaped = text.replace("<|", "‹|").replace("<｜", "‹｜");
         let mut ids: Vec<u32> = tokenizer
@@ -323,6 +325,7 @@ mod probe {
         }));
 
         let mut session = Glm5NextSession::with_prefill_rows(ctx, weights, CAPACITY, PREFILL_ROWS)?;
+        session.set_fast_precision(precision)?;
         for part in ids[..depth].chunks(PREFILL_ROWS) {
             gate();
             session.prefill_packed(ctx, part)?;
@@ -527,11 +530,17 @@ mod probe {
             "canonical lease required"
         );
         let args: Vec<String> = std::env::args().collect();
-        let layer_audit = args.get(1).is_some_and(|arg| arg == "--layers");
+        let mode = args.get(1).map(String::as_str).unwrap_or_default();
+        let layer_audit = matches!(mode, "--layers" | "--layers-f32");
+        let precision = if mode == "--layers-f32" {
+            FastPrecision::F32
+        } else {
+            FastPrecision::Half
+        };
         let base = if layer_audit { 2 } else { 1 };
         anyhow::ensure!(
             args.len() >= base + 2,
-            "usage: glm_append_audit [--layers] <depth> <prompt> [prompt ...]"
+            "usage: glm_append_audit [--layers|--layers-f32] <depth> <prompt> [prompt ...]"
         );
         let depth: usize = args[base].parse()?;
         let ctx = MetalContext::new()?;
@@ -543,13 +552,22 @@ mod probe {
         let weights = Glm5NextWeights::load(&ctx, &gguf)?;
         emit(json!({
             "kind": "header", "depth": depth, "widths": WIDTHS,
-            "layer_audit": layer_audit,
+            "layer_audit": layer_audit, "precision": format!("{precision:?}"),
             "capacity": CAPACITY, "prefill_rows": PREFILL_ROWS,
             "device": ctx.device_facts(), "pressure": pressure(), "loadavg": loadavg(),
         }));
         for path in &args[base + 1..] {
             let text = std::fs::read_to_string(path)?;
-            audit_prompt(&ctx, &weights, &tokenizer, path, &text, depth, layer_audit)?;
+            audit_prompt(
+                &ctx,
+                &weights,
+                &tokenizer,
+                path,
+                &text,
+                depth,
+                layer_audit,
+                precision,
+            )?;
         }
         emit(json!({
             "kind": "done", "pressure": pressure(), "loadavg": loadavg(),

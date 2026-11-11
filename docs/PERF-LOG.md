@@ -56,6 +56,38 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   reports `partial_prefill_s` / `partial_prefill_calls` inside `prefill_s`.
   Unit-tested; no arithmetic change.
 - Branch `perf/serve-chunked-prefill`; no merge; M5 worktree removed.
+## 2026-11-11 - GLM Small Append: Expert Union Is The Floor; Middle Path Misses The Gate
+
+- **Pricing only; no production change and no middle path built.** GLM-5.3
+  Flash UD-IQ3_XXS, M5 Ultra, 48K, `--profile iter`, thermal 0 throughout. New
+  probe `glm_small_append_price` (stage + per-dispatch census at 1..128 rows,
+  independent batch B=1..4) and `serve_idle_append.py` (real serve idle-gap
+  TTFT).
+- **Floor cause:** at 32 rows the packed prefill is 300.2 ms and
+  `routed_experts` is **187.9 ms (63%)**. The generic grouped-slot gate/up
+  (`moe_swiglu_clamped_iq2_s_..._grouped_slots_generic`) is 111.7 ms and the
+  grouped down retile 57.2 ms. At 8 rows the per-slot expert kernels cost only
+  36.3 ms; the 8→16 jump is a kernel switch (plus a worse dense tile), not row
+  count. Indexer/attention is ~10 ms at 32 rows; grids are exact-row, not
+  64-row padded. Even the 128-row tensor island still costs 195.4 ms of
+  experts and 315.9 ms total.
+- **Middle-path price:** batch wall B=1..4 at 48K is 22.9 / 29.6 / 34.0 /
+  38.9 ms (marginals +6.7 / +4.4 / +4.9). But B≤4 touches ≤32 expert slots;
+  32 rows touches 256 slots (~170 distinct). At the measured 0.396 ms/slot the
+  expert work is **~101 ms**, plus ~112 ms non-expert floor and ~15 ms
+  attention, so a 32-row middle path projects **~210–235 ms** (best generous
+  combination 194 ms) against the **180 ms** gate. The claimed
+  `22 + (r−1)×4.4 ≈ 159 ms` is invalid because the expert union grows ~8×.
+  **Gate fails; do not build.**
+- **Keep-alive:** real serve, 44-token append after 49,178 reused tokens,
+  default 60 s window vs 0. Default: 15 s → 417 ms TTFT, 45 s → 416 ms, 90 s →
+  1000 ms. Disabled: 981 / 968 / 979 ms. The 60 s window covers ≤60 s gaps; the
+  ~1.5 s cold first append leaks only past the window or immediately after the
+  root prefill. Cold penalty here is +0.56 s. Leave the default; retention, not
+  scheduling.
+- Model: `docs/bench/2026-11-11-glm-small-append-price.md`. Raw:
+  `metagross:~/qwen-runs/2026-11-11-glm-small-append/`. Branch
+  `perf/glm-small-append`; no merge; M5 worktree removed.
 
 ## 2026-11-11 - V4.1 Causal Re-Pricing: Dense Split-Cols Fails; Member Axis Is Small
 

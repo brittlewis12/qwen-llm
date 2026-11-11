@@ -12,6 +12,9 @@
 //! used for comparisons. Comparing the three modes across grid shapes answers
 //! whether the missed time is constant per dispatch or tied to launch
 //! geometry, payload size, or dispatch dependency.
+//! `--resource-barriers [reps] [long_us]` instead runs the long-kernel/short-chain
+//! overlap probe. See the sibling module for controls and timestamp semantics.
+mod resource_barriers;
 use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLSize};
 use qwen_llm::metal::{
     Buffer, KernelEncoder, MetalContext, commit_and_wait, dispatch_profile_begin,
@@ -274,6 +277,9 @@ fn profile_window_us(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("--resource-barriers") {
+        return resource_barriers::run();
+    }
     let ctx = MetalContext::new()?;
     let touch = ctx.buffer_uninit(BUFFER_BYTES)?;
     let dependent = ctx.pipeline("kernel_dispatch_deadtime_dependent")?;

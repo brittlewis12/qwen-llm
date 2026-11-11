@@ -198,6 +198,9 @@ fn main() -> anyhow::Result<()> {
     if mode == "all" || mode == "chunk" {
         chunk(&c, &w, &ids)?;
     }
+    if mode == "edges" {
+        edges(&c, &w, &ids)?;
+    }
     emit(serde_json::json!({
         "kind": "done", "pressure": pressure(), "loadavg": loadavg(),
         "clock": clock_note(),
@@ -343,6 +346,54 @@ fn stage(
     emit(serde_json::json!({
         "kind": "load_end", "threads": load_threads, "loadavg": loadavg(),
     }));
+    Ok(())
+}
+
+fn edges(c: &MetalContext, w: &Glm5NextWeights, ids: &[u32]) -> anyhow::Result<()> {
+    let mut s = new_session(c, w, ids, CAPACITY, 0)?;
+    let snap = s.capture_snapshot()?;
+    for width in [
+        64usize, 96, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1025,
+        1026, 1027, 1032,
+    ] {
+        let mut walls = Vec::new();
+        for _ in 0..3 {
+            gate();
+            s.restore_snapshot(&snap)?;
+            let t = Instant::now();
+            let logits = s.prefill_packed(c, &ids[DEPTH..DEPTH + width])?;
+            walls.push(t.elapsed().as_secs_f64() * 1e3);
+            anyhow::ensure!(logits.iter().all(|x| x.is_finite()), "non-finite logits");
+        }
+        emit(serde_json::json!({
+            "kind": "edge", "width": width, "wall_ms": median(walls),
+            "pressure": pressure(), "loadavg": loadavg(),
+        }));
+    }
+    for base in [512usize, 1024] {
+        for extra in [1usize, 2, 3] {
+            let mut base_ms = Vec::new();
+            let mut plus_ms = Vec::new();
+            for _ in 0..3 {
+                gate();
+                s.restore_snapshot(&snap)?;
+                let t = Instant::now();
+                s.prefill_packed(c, &ids[DEPTH..DEPTH + base])?;
+                base_ms.push(t.elapsed().as_secs_f64() * 1e3);
+                gate();
+                s.restore_snapshot(&snap)?;
+                let t = Instant::now();
+                s.prefill_packed(c, &ids[DEPTH..DEPTH + base + extra])?;
+                plus_ms.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let b = median(base_ms);
+            let p = median(plus_ms);
+            emit(serde_json::json!({
+                "kind": "edge_marginal", "base": base, "extra": extra,
+                "base_ms": b, "plus_ms": p, "delta_ms": p - b,
+            }));
+        }
+    }
     Ok(())
 }
 

@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-11 - V4.1 Causal Re-Pricing: Dense Split-Cols Fails; Member Axis Is Small
+
+- **Pricing and probes only; no production change.** Re-ran the V4.1
+  counterfactual holds with the causal executor enabled (the old bounds forced
+  the native path), added `IndexHold`, and dumped one causal dispatch graph.
+  Also extended the B=1 work-split Q5_K kernel to 1..4 columns and measured it
+  against the skinny MMA. M5 Ultra, B=3, thermal 0, every lease wait 0 s.
+- **Causal-on wall savings, B=3 32K / 48K** (controls 26.90 / 25.69 ms):
+  DenseHold **6.92 / 6.51**; RoutedHold 7.67 / 7.63; RoutedRead 1.22 / 1.82;
+  AttentionCoreHold 2.47 / 2.30; FlashPartialHold 1.55 / 1.64;
+  FlashCombineHold 0.59 / 0.60; **IndexHold 0.52 / 0.74**; PostControls
+  0.76 / 0.61; AttentionIo 0.51 / 0.73; AllHc 1.27 / 1.45. The native bounds
+  overstated exposure: dense 8.51 -> 6.92, routed compute 2.60 -> 1.22, core
+  3.45 -> 2.47 ms.
+- **Critical path from the graph.** One round is 41 scopes / 1,062 waves;
+  sampled wave spans sum to **24.33 ms**. Dense skinny-MMA waves are 8.16 ms of
+  it, routed gate/up ~6 ms, flash partial 1.67, combine 0.47, index 0.84
+  (overlapping). Most layers are 0.55-0.60 ms; the head is one 0.52 ms dense
+  dispatch. Flash partial/combine and index already run three sequences in one
+  causal wave.
+- **Dense split-cols probe: gate failed.** The extended work-split kernel is
+  bitwise to the per-column path on all five shapes but reaches only
+  **313 / 438 / 453 / 222 / 300 GB/s** at cols=3 (q_b / output_b / output_a /
+  shared gate-up / shared down) versus the same-run MMA **631 / 663 / 603 /
+  315 / 491**. Best anywhere is output_a cols=2 at 621 vs MMA 606, still under
+  the **800 GB/s** gate. Three columns cost 1.52x one column instead of 3x, so
+  the read is amortized, but the kernel is ALU-bound; the MMA still wins per
+  weight byte. **The dense band is closed on this artifact.**
+- **Member-axis price: small.** GLM's member-axis selected attention and index
+  batching are the precedent, but V4.1's per-sequence partial/combine already
+  share a causal wave: partial waves are ~0.041 ms each with three dispatches,
+  combine ~0.011 ms. Merging buys only dispatch/encoder overhead, ~0.1-0.2 ms
+  for attention. The index hold is 0.52/0.74 ms but is mostly scoring/sort
+  work; member-axis batching should recover ~0.1-0.3 ms, with the GLM +0.8%
+  (~0.22 ms at B=4) as the anchor. Combined member-axis price ~0.2-0.4 ms at
+  32K, ~0.3-0.5 ms at 48K.
+- **Call:** build neither the split-cols dense path nor attention member-axis.
+  If a small bitwise win is wanted, batch the index chain first at 48K.
+  Reopen dense only for a lower-byte artifact or an address-only tile repack.
+  Model: `docs/bench/2026-11-11-v41-causal-price.md`.
+- Raw: `metagross:~/qwen-runs/2026-11-11-v41-price/`. Branch
+  `perf/v41-causal-price`; no merge; M5 worktree removed.
+
 ## 2026-11-10 - Serve Standing: Three-Agent 30 s, V4.1 Flat And GLM +10%
 
 - **Question:** how much faster is real three-agent serving on tonight's main

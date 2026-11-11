@@ -274,10 +274,6 @@ fn solo_causal_enabled(ctx: &MetalContext) -> bool {
     {
         return false;
     }
-    #[cfg(feature = "perf-ablations")]
-    if metal::decode_bounds::is_active() {
-        return false;
-    }
     #[cfg(test)]
     if let Some(enabled) = SOLO_CAUSAL_OVERRIDE.with(std::cell::Cell::get) {
         return enabled;
@@ -285,6 +281,10 @@ fn solo_causal_enabled(ctx: &MetalContext) -> bool {
     #[cfg(feature = "perf-ablations")]
     if let Some(enabled) = metal::decode_bounds::batch_causal_override() {
         return enabled;
+    }
+    #[cfg(feature = "perf-ablations")]
+    if metal::decode_bounds::is_active() {
+        return false;
     }
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| crate::env_flag::read_default_on(SOLO_CAUSAL_ENV))

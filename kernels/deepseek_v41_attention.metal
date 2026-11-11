@@ -10,6 +10,15 @@ kernel void kernel_deepseek_v41_attention_selection_prepare(
     if (a.z && t < a.y) mask[t] = 1;
 }
 
+// Counterfactual-only sequential fill for the selected-key list. The core
+// validates every selected ID, so an IndexHold that removes the real selection
+// must still leave `selected[0..n] = 0..n` valid.
+kernel void kernel_deepseek_v41_attention_selection_repair(
+    constant uint &n [[buffer(0)]], device uint *ids [[buffer(1)]],
+    uint t [[thread_position_in_grid]]) {
+    if (t < n) ids[t] = t;
+}
+
 // Batched selection preparation: one 2-D grid over (visible key, row).
 // a: start, ratio, top_k, candidate_block. b: selected stride, candidates
 // stride, rows, publish_mask. Unpruned rows write ids 0..length-1; the

@@ -186,8 +186,9 @@ fn main() -> Result<()> {
         let is_causal = args.get(5).is_some_and(|s| s == "causal");
         let is_profile = args.get(5).is_some_and(|s| s == "profile");
         let is_hostgap = args.get(5).is_some_and(|s| s == "hostgap");
+        let is_graph = args.get(5).is_some_and(|s| s == "graph");
         let screen_batch: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(3);
-        let members = if is_bounds || is_waves {
+        let members = if is_bounds || is_waves || is_graph {
             3
         } else if is_causal {
             ensure!((2..=4).contains(&screen_batch), "causal screen width 2..=4");
@@ -258,6 +259,19 @@ fn main() -> Result<()> {
             return waves(&ctx, &f, &mut states, &streams);
             #[cfg(not(feature = "perf-ablations"))]
             anyhow::bail!("waves requires perf-ablations");
+        }
+        if is_graph {
+            #[cfg(feature = "perf-ablations")]
+            return causal_graph(
+                &ctx,
+                &f,
+                &mut states,
+                &entries,
+                &streams,
+                args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(8),
+            );
+            #[cfg(not(feature = "perf-ablations"))]
+            anyhow::bail!("graph requires perf-ablations");
         }
         if is_bounds {
             #[cfg(feature = "perf-ablations")]
@@ -698,6 +712,9 @@ fn bounds(
     use qwen_llm::metal::decode_bounds::{Experiment, Mode};
     ensure!((8..=64).contains(&n), "8..64 bounded probe steps");
     let experiment = Experiment::default();
+    // Price every hold on the production causal schedule rather than the
+    // native encoder cuts the bound used to force.
+    let _causal = metal::decode_bounds::batch_causal_scope(true);
     let restore = |states: &mut [State]| -> Result<()> {
         for (s, e) in states.iter_mut().zip(entries) {
             f.restore_snapshot(s, e)?;
@@ -736,7 +753,7 @@ fn bounds(
     let (_, reference, _) = run(Mode::Capture, states)?;
     println!(
         "{}",
-        serde_json::json!({"kind":"bound_capture","frames":n,"calls":experiment.captured_calls(),"routed_bytes_per_round":experiment.captured_bytes()/n as u64})
+        serde_json::json!({"kind":"bound_capture","causal":true,"frames":n,"calls":experiment.captured_calls(),"routed_bytes_per_round":experiment.captured_bytes()/n as u64})
     );
     // Compile/warm the substituted pipeline outside the measured cells.
     let (_, check, _) = run(Mode::RoutedRead, states)?;
@@ -754,6 +771,7 @@ fn bounds(
         Mode::AttentionCoreHold,
         Mode::FlashPartialHold,
         Mode::FlashCombineHold,
+        Mode::IndexHold,
         Mode::Reference,
         Mode::AllHc,
     ] {
@@ -764,7 +782,7 @@ fn bounds(
         }
         println!(
             "{}",
-            serde_json::json!({"kind":"bound","mode":mode,"rounds":n,"ms_round":ms,"stats":stats,"hashes":hashes})
+            serde_json::json!({"kind":"bound","causal":true,"mode":mode,"rounds":n,"ms_round":ms,"stats":stats,"hashes":hashes})
         );
     }
     for read in [true, false, true, false] {
@@ -784,6 +802,66 @@ fn bounds(
             serde_json::json!({"kind":"expert_stream","read":read,"frames":n,"ms_per_round":ms,"logical_gb_s":read.then_some((experiment.captured_bytes() as f64/n as f64)/ms/1e6)})
         );
     }
+    Ok(())
+}
+
+/// One production causal round with every wave boundary timestamped: the
+/// kernel names per wave and the GPU span each wave takes. Waves are separated
+/// by buffer barriers, so the spans sum to the scope critical path.
+#[cfg(feature = "perf-ablations")]
+fn causal_graph(
+    ctx: &MetalContext,
+    f: &Forward<'_>,
+    states: &mut [State],
+    entries: &[qwen_llm::deepseek_v41::forward::Snapshot],
+    streams: &[Vec<u32>],
+    n: usize,
+) -> Result<()> {
+    ensure!((1..=8).contains(&n), "1..8 graph rounds");
+    let width = states.len();
+    for (s, snap) in states.iter_mut().zip(entries) {
+        f.restore_snapshot(s, snap)?;
+    }
+    for j in 0..8 {
+        let tokens: Vec<_> = (0..width).map(|i| streams[i][4300 + j]).collect();
+        step(f, states, &tokens, true)?;
+    }
+    let guard = metal::causal_graph_begin(ctx, 2000)?;
+    let scope =
+        qwen_llm::deepseek_v41::forward::profile::Scope::begin().map_err(anyhow::Error::msg)?;
+    let start = Instant::now();
+    let mut heads = Vec::with_capacity(n);
+    for j in 0..n {
+        let tokens: Vec<_> = (0..width).map(|i| streams[i][4310 + j]).collect();
+        heads.push(step(f, states, &tokens, true)?);
+    }
+    let wall_ms = start.elapsed().as_secs_f64() * 1000. / n as f64;
+    let report = scope.finish();
+    let gpu_ms = report
+        .operations
+        .iter()
+        .find(|o| o.operation == "gpu_step_batch")
+        .and_then(|o| o.gpu_ms)
+        .map(|v| v / n as f64)
+        .unwrap_or(f64::NAN);
+    let mut value = metal::causal_graph_finish(ctx, guard)?;
+    value["width"] = serde_json::json!(width);
+    value["rounds"] = serde_json::json!(n);
+    value["wall_ms_round"] = serde_json::json!(wall_ms);
+    value["gpu_ms_round"] = serde_json::json!(gpu_ms);
+    value["hashes"] = serde_json::json!(
+        heads
+            .iter()
+            .map(|row| {
+                let mut d = blake3::Hasher::new();
+                for h in row {
+                    d.update(bytemuck::cast_slice(h));
+                }
+                d.finalize().to_hex().to_string()
+            })
+            .collect::<Vec<_>>()
+    );
+    println!("{value}");
     Ok(())
 }
 

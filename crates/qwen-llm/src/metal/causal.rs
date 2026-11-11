@@ -3,6 +3,8 @@
 use super::*;
 use objc2_metal::MTLBinding;
 #[cfg(feature = "perf-ablations")]
+pub mod graph;
+#[cfg(feature = "perf-ablations")]
 mod token_price;
 #[cfg(feature = "perf-ablations")]
 pub use token_price::{TokenPriceBook, TokenPriceGuard, TokenPriceMode};
@@ -71,12 +73,16 @@ struct Node {
     state: Bindings,
     grid: MTLSize,
     threads: MTLSize,
+    #[cfg(feature = "perf-ablations")]
+    label: &'static str,
 }
 impl Node {
     fn name(&self) -> &str {
         &self.state.pipeline.as_ref().unwrap().name
     }
     fn encode(&self, enc: &KernelEncoder) {
+        #[cfg(feature = "perf-ablations")]
+        super::decode_bounds::label(self.label);
         enc.set_pipeline(self.state.pipeline.as_ref().unwrap());
         for (i, b) in &self.state.slots {
             match b {
@@ -164,6 +170,8 @@ impl Recording {
             state,
             grid,
             threads,
+            #[cfg(feature = "perf-ablations")]
+            label: super::decode_bounds::current_label(),
         });
     }
 }
@@ -289,6 +297,32 @@ impl KernelEncoder {
                 t.borrow_mut()
                     .push(serde_json::json!({"rows":rows,"waves":waves}))
             });
+        }
+        #[cfg(feature = "perf-ablations")]
+        if graph::active() {
+            graph::begin_scope();
+            graph::suspend(self);
+            for (wave_index, wave) in waves.iter().enumerate() {
+                let (enc, span) = graph::begin_wave(self);
+                for &i in wave {
+                    if token_price::replace(ctx, &enc, &recording.nodes[i])? {
+                        continue;
+                    }
+                    recording.nodes[i].encode(&enc);
+                }
+                token_price::after_wave(ctx, &enc, &recording.nodes, wave)?;
+                enc.end();
+                graph::finish_wave(
+                    graph::scope(),
+                    wave_index,
+                    wave.iter()
+                        .map(|&i| recording.nodes[i].name().to_string())
+                        .collect(),
+                    span,
+                );
+            }
+            graph::resume(self);
+            return Ok(());
         }
         for wave in waves {
             self.buffer_barrier();
@@ -474,6 +508,8 @@ fn fuse_flash_next(ctx: &MetalContext, nodes: &mut Vec<Node>, mode: u8) -> Resul
                         height: 1,
                         depth: 1,
                     },
+                    #[cfg(feature = "perf-ablations")]
+                    label: nodes[inject].label,
                 };
                 nodes[inject] = fused;
                 for i in [axpy + 1, axpy, sum] {

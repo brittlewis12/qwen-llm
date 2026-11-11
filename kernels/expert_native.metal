@@ -424,6 +424,115 @@ kernel void kernel_expert_native_q5_K_f32_split(
     }
 }
 
+// Probe-only extension of the Q5_K work split above: the exact same lane
+// mapping (four channels per 128-thread threadgroup, one per simdgroup; each
+// lane owns the same byte positions of four sub-blocks, `yl`/`yh` activation
+// registers and the scale-after-dot reduction) but with up to four activation
+// columns. A block's quant bytes, high bits and scales are decoded once and
+// feed one FMA chain per column, so each weight byte is read once per dispatch
+// instead of once per column. Columns are strided independently of the row so
+// grouped banks can bind a group view and still reuse the bank across columns.
+struct q5_k_split_cols_args {
+    ulong row_bytes;
+    ulong group_bytes;
+    uint n_in;
+    uint n_out;
+    uint groups;
+    uint cols;
+    uint input_stride;  // floats between activation columns
+    uint output_stride; // floats between output columns
+    uint input_group;   // floats between group views of one column
+    uint output_group;  // floats between output group views of one column
+};
+
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_expert_native_q5_K_f32_split_cols(
+        constant q5_k_split_cols_args & args [[buffer(0)]],
+        device const uchar * bank [[buffer(1)]],
+        device const float * input [[buffer(2)]],
+        device float * output [[buffer(3)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simd [[simdgroup_index_in_threadgroup]]) {
+    const uint g = group.y;
+    const uint channel = group.x * 4u + uint(simd);
+    if (channel >= args.n_out || g >= args.groups) return;
+    device const uchar * row = bank + ulong(g) * args.group_bytes
+        + ulong(channel) * args.row_bytes;
+    const uint nb = args.n_in / 256u;
+    constexpr ushort kmask1 = 0x3f3f;
+    constexpr ushort kmask2 = 0x0f0f;
+    constexpr ushort kmask3 = 0xc0c0;
+    const ushort tid = lane / 4;
+    const ushort ix = lane % 4;
+    const ushort iq = tid / 4;
+    const ushort ir = tid % 4;
+    const ushort l0 = 8 * ir;
+    const ushort q_offset = 32 * iq + l0;
+    const ushort y_offset = 64 * iq + l0;
+    const uchar hm1 = 1u << (2 * iq);
+    const uchar hm2 = hm1 << 1;
+    const uchar hm3 = hm1 << 4;
+    const uchar hm4 = hm2 << 4;
+    ushort sc16[4];
+    thread const uchar * sc8 = (thread const uchar *)sc16;
+    device const float * x0 =
+        input + ulong(g) * args.input_group + uint(ix) * 256u + y_offset;
+    float sum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint i = ix; i < nb; i += 4) {
+        device const uchar * block = row + ulong(i) * QT_Q5_K_BYTES;
+        device const uchar * q1 = block + 48 + q_offset;
+        device const uchar * q2 = q1 + 64;
+        device const uchar * qh = block + 16 + l0;
+        device const half * dh = (device const half *)block;
+        device const ushort * a = (device const ushort *)(block + 4) + iq;
+        sc16[0] = a[0] & kmask1;
+        sc16[1] = a[2] & kmask1;
+        sc16[2] = ((a[4] >> 0) & kmask2) | ((a[0] & kmask3) >> 2);
+        sc16[3] = ((a[4] >> 4) & kmask2) | ((a[2] & kmask3) >> 2);
+        // Each column reuses this block's decoded bytes and scale registers.
+        for (uint c = 0; c < args.cols; ++c) {
+            device const float * y1 = x0 + ulong(c) * args.input_stride;
+            device const float * y2 = y1 + 128;
+            float yl[16], yh[16];
+            float4 sumy = 0.0f;
+            QT_FOR_UNROLL (ushort l = 0; l < 8; ++l) {
+                yl[l + 0] = y1[l + 0]; sumy[0] += yl[l + 0];
+                yl[l + 8] = y1[l + 32]; sumy[1] += yl[l + 8];
+                yh[l + 0] = y2[l + 0]; sumy[2] += yh[l + 0];
+                yh[l + 8] = y2[l + 32]; sumy[3] += yh[l + 8];
+            }
+            float4 acc1 = 0.0f;
+            float4 acc2 = 0.0f;
+            QT_FOR_UNROLL (ushort l = 0; l < 8; ++l) {
+                const uchar h = qh[l];
+                acc1[0] += yl[l + 0] * float(q1[l] & 0x0F);
+                acc1[1] += yl[l + 8] * float(q1[l] & 0xF0);
+                acc1[2] += yh[l + 0] * float(q2[l] & 0x0F);
+                acc1[3] += yh[l + 8] * float(q2[l] & 0xF0);
+                acc2[0] += h & hm1 ? yl[l + 0] : 0.0f;
+                acc2[1] += h & hm2 ? yl[l + 8] : 0.0f;
+                acc2[2] += h & hm3 ? yh[l + 0] : 0.0f;
+                acc2[3] += h & hm4 ? yh[l + 8] : 0.0f;
+            }
+            sum[c] += float(dh[0]) * (float(sc8[0]) * (acc1[0] + 16.0f * acc2[0]) +
+                                      float(sc8[1]) * (acc1[1] / 16.0f + 16.0f * acc2[1]) +
+                                      float(sc8[4]) * (acc1[2] + 16.0f * acc2[2]) +
+                                      float(sc8[5]) * (acc1[3] / 16.0f + 16.0f * acc2[3])) -
+                      float(dh[1]) * (sumy[0] * float(sc8[2]) + sumy[1] * float(sc8[3]) +
+                                      sumy[2] * float(sc8[6]) + sumy[3] * float(sc8[7]));
+        }
+        x0 += 4 * 256;
+    }
+    for (uint c = 0; c < args.cols; ++c) {
+        const float value = simd_sum(sum[c]);
+        if (lane == 0) {
+            output[ulong(g) * args.output_group + ulong(c) * args.output_stride
+                   + channel] = value;
+        }
+    }
+}
+
 // IQ2_XXS F32-operand projections with the work split of llama.cpp's
 // kernel_mul_mv_iq2_xxs_f32 (same source and license as the Q5_K split
 // above): each lane owns whole 32-weight groups, a simdgroup computes

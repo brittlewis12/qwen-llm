@@ -3594,6 +3594,17 @@ impl Workspace {
                         dispatch(enc, &pso, selected_count);
                     }
                 }
+                // IndexHold removes scoring and selection, but the core still
+                // validates every selected key. A sequential-id fill is the
+                // cheapest valid repair; its kernel name is not in the bound.
+                #[cfg(feature = "perf-ablations")]
+                if metal::decode_bounds::index_hold() {
+                    label("attn_index_repair");
+                    let pso = pipeline(ctx, enc, "selection_repair")?;
+                    enc.set_bytes(0, &(selected_count as u32));
+                    enc.set_tensor(1, &self.selected);
+                    dispatch(enc, &pso, selected_count);
+                }
             }
         }
         #[cfg(test)]

@@ -227,10 +227,8 @@ fn batch_causal_enabled() -> bool {
     if metal::dispatch_census_is_active() || metal::dispatch_profile_records() {
         return false;
     }
-    #[cfg(feature = "perf-ablations")]
-    if metal::decode_bounds::is_active() {
-        return false;
-    }
+    // An explicit bound override wins over the counterfactual's native default,
+    // so the same holds can be priced on the causal schedule.
     #[cfg(test)]
     if let Some(enabled) = BATCH_CAUSAL_OVERRIDE.with(std::cell::Cell::get) {
         return enabled;
@@ -238,6 +236,10 @@ fn batch_causal_enabled() -> bool {
     #[cfg(feature = "perf-ablations")]
     if let Some(enabled) = metal::decode_bounds::batch_causal_override() {
         return enabled;
+    }
+    #[cfg(feature = "perf-ablations")]
+    if metal::decode_bounds::is_active() {
+        return false;
     }
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| crate::env_flag::read_default_on(BATCH_CAUSAL_ENV))

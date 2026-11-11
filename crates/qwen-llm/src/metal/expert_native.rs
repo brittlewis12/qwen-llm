@@ -1688,6 +1688,121 @@ pub fn encode_grouped_skinny_q5_k_split_probe(
     )
 }
 
+#[cfg(feature = "perf-ablations")]
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Q5SplitColsArgs {
+    row_bytes: u64,
+    group_bytes: u64,
+    n_in: u32,
+    n_out: u32,
+    groups: u32,
+    cols: u32,
+    input_stride: u32,
+    output_stride: u32,
+    input_group: u32,
+    output_group: u32,
+}
+
+/// Probe-only work-split Q5_K projection over `cols` (1..=4) activation
+/// columns. Keeps `kernel_expert_native_q5_K_f32_split`'s lane mapping and
+/// per-column summation order; the weight block is decoded once and feeds one
+/// FMA chain per column. Bank `[n_in, n_out, groups]`, input
+/// `[n_in * groups, cols]` (group-major inside a column), output
+/// `[n_out * groups, cols]` likewise. Used by `dense_band_census`.
+#[cfg(feature = "perf-ablations")]
+pub fn encode_q5_k_split_cols_probe(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    groups: usize,
+    cols: usize,
+) -> Result<(), MetalError> {
+    const K: &str = "q5_k_split_cols";
+    require_serial(K, enc)?;
+    if bank.dtype != GgmlType::Q5_K {
+        return Err(bad_shape(
+            K,
+            format!("bank must be Q5_K, got {:?}", bank.dtype),
+        ));
+    }
+    if n_in == 0 || !n_in.is_multiple_of(256) || n_out == 0 || groups == 0 {
+        return Err(bad_shape(
+            K,
+            "n_in must be a positive multiple of 256; n_out and groups positive",
+        ));
+    }
+    if !(1..=4).contains(&cols) {
+        return Err(bad_shape(K, "cols must be in 1..=4"));
+    }
+    let shape = [n_in as u64, n_out as u64, groups as u64];
+    if bank.shape != shape {
+        return Err(bad_shape(
+            K,
+            format!("bank must have shape {shape:?}, got {:?}", bank.shape),
+        ));
+    }
+    check_expert_bank(K, bank, n_in, n_out, groups, "bank")?;
+    check_tensor(
+        K,
+        input,
+        GgmlType::F32,
+        &[(n_in * groups) as u64, cols as u64],
+        false,
+        "input",
+    )?;
+    super::checks::check_alignment(K, input, 16, "input")?;
+    check_tensor(
+        K,
+        output,
+        GgmlType::F32,
+        &[(n_out * groups) as u64, cols as u64],
+        true,
+        "output",
+    )?;
+    check_disjoint(K, output, &[(input, "input"), (bank, "bank")])?;
+    check_device(ctx, enc, K, &[bank, input, output])?;
+    let (block, bytes) = GgmlType::Q5_K.storage_layout().expect("Q5_K layout");
+    let row_bytes = n_in as u64 / block * bytes;
+    let pso = ctx.pipeline("kernel_expert_native_q5_K_f32_split_cols")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Q5SplitColsArgs {
+            row_bytes,
+            group_bytes: row_bytes * n_out as u64,
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            groups: groups as u32,
+            cols: cols as u32,
+            input_stride: (n_in * groups) as u32,
+            output_stride: (n_out * groups) as u32,
+            input_group: n_in as u32,
+            output_group: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, bank);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, output);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(4),
+            height: groups,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_skinny_q5_k(
     ctx: &MetalContext,

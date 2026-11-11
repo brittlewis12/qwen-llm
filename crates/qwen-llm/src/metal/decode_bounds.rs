@@ -21,6 +21,9 @@ pub enum Mode {
     FlashPartialHold,
     /// Skip the flash split combine (and its inverse RoPE).
     FlashCombineHold,
+    /// Skip the index query/weight projections, scoring and selection chain.
+    /// `selected` stays stale, so the core's key count is unchanged.
+    IndexHold,
 }
 #[derive(Clone, Default, Debug, serde::Serialize)]
 pub struct Stats {
@@ -114,6 +117,15 @@ pub(crate) fn is_active() -> bool {
     ACTIVE.with(|v| v.borrow().is_some())
 }
 
+/// Whether the active counterfactual removes the attention index chain.
+pub(crate) fn index_hold() -> bool {
+    ACTIVE.with(|a| {
+        a.borrow()
+            .as_ref()
+            .is_some_and(|a| a.mode == Mode::IndexHold)
+    })
+}
+
 pub(crate) fn label(label: &'static str) {
     ACTIVE.with(|a| {
         if let Some(a) = a.borrow_mut().as_mut() {
@@ -121,10 +133,21 @@ pub(crate) fn label(label: &'static str) {
         }
     });
 }
+/// Label of the dispatch being recorded. Causal scopes replay recorded nodes
+/// after their caller's label sequence has moved on, so the recorder must
+/// preserve the label with each node.
+pub(crate) fn current_label() -> &'static str {
+    ACTIVE.with(|a| a.borrow().as_ref().map_or("", |a| a.label))
+}
 pub(crate) fn skip(name: &str) -> bool {
     ACTIVE.with(|a| {
         let mut a = a.borrow_mut();
         let Some(a) = a.as_mut() else { return false };
+        // IndexHold keeps a sequential-id repair so the core sees valid
+        // selected keys; never skip that repair.
+        if a.label == "attn_index_repair" {
+            return false;
+        }
         let io = matches!(a.label, "attn_qkv" | "attn_output")
             && (name.contains("gather_columns")
                 || name.contains("scatter_columns")
@@ -140,6 +163,15 @@ pub(crate) fn skip(name: &str) -> bool {
             || name.starts_with("kernel_dense_pair_skinny_mma_q8_0")
             || name.starts_with("kernel_expert_native_q5_K_f32_split")
             || name.starts_with("kernel_dense_pair_q8_0_f32_splitk");
+        // The index chain is labelled as a block by `attention_gpu`; the name
+        // prefixes make the bound work if a path encodes without the label.
+        let index = a.label == "attn_index"
+            || name.starts_with("kernel_deepseek_v41_attention_index")
+            || name.starts_with("kernel_deepseek_v41_attention_blocks")
+            || name.starts_with("kernel_deepseek_v41_attention_sort")
+            || name.starts_with("kernel_deepseek_v41_attention_select")
+            || name.starts_with("kernel_deepseek_v41_attention_selection_prepare")
+            || name.starts_with("kernel_deepseek_v41_attention_chronological");
         let core = name.starts_with("kernel_deepseek_v41_attention_flash");
         let combine = name.starts_with("kernel_deepseek_v41_attention_flash_combine");
         let partial = core && !combine;
@@ -151,6 +183,7 @@ pub(crate) fn skip(name: &str) -> bool {
             Mode::AttentionCoreHold => core,
             Mode::FlashPartialHold => partial,
             Mode::FlashCombineHold => combine,
+            Mode::IndexHold => index,
             _ => false,
         };
         if yes {
@@ -367,6 +400,18 @@ mod tests {
         }
         assert!(!elide_post_boundary());
         assert!(!skip("kernel_deepseek_v41_hc_post_controls"));
+    }
+    #[test]
+    fn index_bound_covers_label_and_kernel_names() {
+        let e = Experiment::default();
+        let g = e.scope(Mode::IndexHold).unwrap();
+        label("attn_index");
+        assert!(skip("kernel_dense_skinny_mma_q5_K_f32"));
+        label("attn_core");
+        assert!(skip("kernel_deepseek_v41_attention_select_radix_rows"));
+        assert!(skip("kernel_deepseek_v41_attention_chronological"));
+        assert!(!skip("kernel_deepseek_v41_attention_flash_partial"));
+        g.finish();
     }
     #[test]
     fn reference_is_a_noop_and_all_hc_is_explicit() {

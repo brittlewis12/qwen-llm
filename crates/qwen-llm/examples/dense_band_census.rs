@@ -15,7 +15,7 @@
 //! Metal lease.
 
 use anyhow::{Context, Result, ensure};
-use objc2_metal::{MTLCommandBuffer as _, MTLCommandQueue as _};
+use objc2_metal::{MTLBuffer as _, MTLCommandBuffer as _, MTLCommandQueue as _};
 use qwen_llm::metal::*;
 use qwen_llm::tensor::GgmlType;
 use std::io::Write;
@@ -177,6 +177,8 @@ enum Arm {
     PerColumn,
     Auto,
     Split(usize),
+    /// Work-split Q5_K with `cols` accumulators (probe kernel).
+    SplitCols,
 }
 
 impl Arm {
@@ -185,6 +187,7 @@ impl Arm {
             Arm::PerColumn => "per_column".into(),
             Arm::Auto => "auto".into(),
             Arm::Split(s) => format!("split{s}"),
+            Arm::SplitCols => "split_cols".into(),
         }
     }
 }
@@ -229,7 +232,7 @@ fn census_dense(
     let blocks = spec.n_in / 256;
     let channel_groups = spec.n_out.div_ceil(16) * spec.groups;
     let auto = auto_split(blocks, channel_groups);
-    let mut arms = vec![Arm::PerColumn, Arm::Auto];
+    let mut arms = vec![Arm::PerColumn, Arm::Auto, Arm::SplitCols];
     for s in splits(blocks) {
         if s != auto {
             arms.push(Arm::Split(s));
@@ -321,6 +324,19 @@ fn census_dense(
                                     )?;
                                 }
                             }
+                            Arm::SplitCols => {
+                                encode_q5_k_split_cols_probe(
+                                    ctx,
+                                    enc,
+                                    bank,
+                                    &xs,
+                                    &ys,
+                                    spec.n_in,
+                                    spec.n_out,
+                                    spec.groups,
+                                    c,
+                                )?;
+                            }
                         }
                     }
                     Ok(())
@@ -337,7 +353,91 @@ fn census_dense(
             }));
         }
     }
+    witness_split_cols(ctx, spec, &banks[0], &x, &y, &ids, &status, cols)?;
     Ok(())
+}
+
+/// Compare the multi-column work split against the production per-column
+/// split kernel on the same bank and activations, at the B=3 column count when
+/// it was requested. The per-column chain is the same lane map and summation
+/// order, so agreement is expected to be bitwise.
+fn witness_split_cols(
+    ctx: &MetalContext,
+    spec: &Spec,
+    bank: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    ids: &MetalTensor,
+    status: &MetalTensor,
+    cols: &[usize],
+) -> Result<()> {
+    let check = if cols.contains(&3) {
+        3
+    } else {
+        *cols.iter().max().unwrap_or(&1)
+    }
+    .min(4);
+    let xs = x.view_bytes(0, vec![(spec.n_in * spec.groups) as u64, check as u64]);
+    let ys = y.view_bytes(0, vec![(spec.n_out * spec.groups) as u64, check as u64]);
+    run(ctx, &|enc| {
+        for col in 0..check {
+            encode_all_slots_down_native(
+                ctx,
+                enc,
+                bank,
+                &x.view_bytes(
+                    (col * spec.n_in * spec.groups * 4) as u64,
+                    vec![spec.n_in as u64, spec.groups as u64],
+                ),
+                ids,
+                status,
+                &y.view_bytes(
+                    (col * spec.n_out * spec.groups * 4) as u64,
+                    vec![spec.n_out as u64, spec.groups as u64],
+                ),
+                spec.n_in,
+                spec.n_out,
+                spec.groups,
+                spec.groups,
+            )?;
+        }
+        Ok(())
+    })?;
+    let reference = read_f32_tensor(y);
+    run(ctx, &|enc| {
+        Ok(encode_q5_k_split_cols_probe(
+            ctx,
+            enc,
+            bank,
+            &xs,
+            &ys,
+            spec.n_in,
+            spec.n_out,
+            spec.groups,
+            check,
+        )?)
+    })?;
+    let got = read_f32_tensor(y);
+    let n = check * spec.n_out * spec.groups;
+    let bitwise = (0..n)
+        .filter(|&i| reference[i].to_bits() == got[i].to_bits())
+        .count();
+    let max_abs = qwen_llm::compare::report_max_abs_diff_f32(&reference[..n], &got[..n]);
+    emit(serde_json::json!({
+        "event": "witness", "name": spec.name, "cols": check,
+        "values": n, "bitwise": bitwise, "max_abs": max_abs,
+    }));
+    Ok(())
+}
+
+fn read_f32_tensor(tensor: &MetalTensor) -> Vec<f32> {
+    let mut values = vec![0.0f32; tensor.n_elements() as usize];
+    unsafe {
+        let source = (tensor.buffer.contents().as_ptr() as *const u8).add(tensor.offset as usize)
+            as *const f32;
+        std::ptr::copy_nonoverlapping(source, values.as_mut_ptr(), values.len());
+    }
+    values
 }
 
 fn census_pair(ctx: &MetalContext, cols: usize, reps: usize, target: u64) -> Result<()> {
@@ -438,6 +538,7 @@ fn census_pair(ctx: &MetalContext, cols: usize, reps: usize, target: u64) -> Res
                                 *s,
                             )?;
                         }
+                        Arm::SplitCols => unreachable!("split_cols is a Q5_K arm"),
                     }
                 }
                 Ok(())

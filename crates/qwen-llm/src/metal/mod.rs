@@ -288,6 +288,8 @@ mod attn;
 mod bench;
 mod causal;
 #[cfg(feature = "perf-ablations")]
+pub use causal::graph::{CausalGraphGuard, causal_graph_begin, causal_graph_finish};
+#[cfg(feature = "perf-ablations")]
 pub use causal::{TokenPriceBook, TokenPriceGuard, TokenPriceMode};
 mod qos;
 pub use qos::GpuThreadQos;

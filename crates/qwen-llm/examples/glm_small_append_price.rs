@@ -395,8 +395,11 @@ mod probe {
         let snapshot = session.capture_snapshot()?;
         for width in THRESHOLD_WIDTHS {
             let tokens = &ids[depth..depth + width];
+            // At 8 rows neither threshold selects grouped, so force it (0) to
+            // measure the two path's inherent arithmetic delta as a control.
+            let grouped_rows = if width == 8 { 0 } else { GROUPED_MAX_ROWS };
             // Warm both selections so neither arm pays a first-touch.
-            for max_rows in [GROUPED_MAX_ROWS, PACKET_MAX_ROWS] {
+            for max_rows in [grouped_rows, PACKET_MAX_ROWS] {
                 set_expert_packet_max_rows(max_rows);
                 gate();
                 session.restore_snapshot(&snapshot)?;
@@ -410,7 +413,7 @@ mod probe {
                 let order: [usize; 2] = if rep % 2 == 0 { [0, 1] } else { [1, 0] };
                 for arm in order {
                     let max_rows = if arm == 0 {
-                        GROUPED_MAX_ROWS
+                        grouped_rows
                     } else {
                         PACKET_MAX_ROWS
                     };
@@ -427,12 +430,12 @@ mod probe {
                 }
             }
 
-            // Name the selected expert kernels once per arm at 32 rows.
+            // Name the selected expert kernels once per arm at 8/32/48 rows.
             let mut selected = [Vec::new(), Vec::new()];
-            if width == 32 {
+            if matches!(width, 8 | 32 | 48) {
                 for arm in 0..2 {
                     set_expert_packet_max_rows(if arm == 0 {
-                        GROUPED_MAX_ROWS
+                        grouped_rows
                     } else {
                         PACKET_MAX_ROWS
                     });

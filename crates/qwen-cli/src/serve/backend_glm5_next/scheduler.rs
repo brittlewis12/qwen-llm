@@ -16,7 +16,7 @@ const MAX_ACTIVE: &str = "QWEN_SERVE_GLM_MAX_ACTIVE";
 const LIVE_STATES: &str = "QWEN_SERVE_GLM_LIVE_STATES";
 /// Keep the admitted normal prefill geometry under load; 0 selects 512-row geometry. Layer slicing has its own rollback.
 const PREFILL_FAIR: &str = "QWEN_SERVE_GLM_PREFILL_FAIR";
-/// Target decode service percentage under mixed load when layer slicing is disabled (1..=90, default 10).
+/// Target decode service percentage under mixed load for unsliced appends (1..=90, default 10).
 const DECODE_PERCENT: &str = "QWEN_SERVE_GLM_DECODE_PERCENT";
 /// Nominal GPU milliseconds per row-preserving layer slice under mixed load (default 0; 200 opts into selective slicing). Zero restores whole-row chunks and the original decode-percentage policy.
 const LAYER_SLICE_MS: &str = "QWEN_SERVE_GLM_LAYER_SLICE_MS";

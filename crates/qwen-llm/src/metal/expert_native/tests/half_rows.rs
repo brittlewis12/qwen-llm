@@ -371,10 +371,10 @@ fn native_half_rows_cpu_abi_capabilities_and_bounds() {
         assert_eq!(mode & 3, projection);
         assert_eq!(mode & !3, NATIVE_HALF_OPERANDS);
     }
-    for rows in 0..=17 {
+    for rows in 0..=MAX_HALF_ROWS + 2 {
         assert_eq!(
             check_half_rows("test", rows).is_ok(),
-            (1..=8).contains(&rows)
+            (1..=MAX_HALF_ROWS).contains(&rows)
         );
     }
     assert!(check_half_rows("test", usize::MAX).is_err());

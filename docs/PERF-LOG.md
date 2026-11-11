@@ -32,6 +32,41 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Landed on `main`; branch `research/resource-barriers` kept at
   `b3c1d0628`. Lane build output and worktrees removed after verification.
 
+## 2026-11-11 - HC Band Fusion Price: Exact Narrow Pair, Real-Schedule Gate Fails
+
+- **Three-family HC/mHC dispatch map and price; no production optimization.**
+  New `docs/bench/2026-11-11-hc-band-fusion.md` records the B=1 inputs,
+  outputs, bytes, ordering, causal edges, and merge candidates from code and
+  the M5 dumps. The 11/06 census entries are Flash-Next dispatch reduction,
+  GLM decode census, and V4.1 M5 decode census. M5 Ultra, `--profile iter`,
+  canonical `hc-fuse` lease. Probe code is on `perf/hc-band-fusion` at
+  `bead0f296`; this record is landed on `main`, the code is not.
+- **B=1 captures:** Flash-Next at 32K records 898 waves/49 scopes over two
+  token rounds, untruncated; GLM at 32K records 1,060 dispatches, including
+  90 Q8 mHC partial+finish pre-sites and 90 mHC posts; V4.1 `Forward::step`
+  at 32K records 701 waves/41 scopes, untruncated. Flash-Next/GLM headers
+  record thermal 0/1; the V4.1 harness thermal guard passed at level <2.
+- **Flash-Next design:** the existing read already combines BF16 down+SiLU+F32
+  injection preparation and BF16 up+sigmoid+gated mean. A broader RMS+down
+  remap was **0.83x** after removing branch division (initially 0.61x) and was
+  rejected. A narrower F32 post-injection+next-RMSNorm kernel preserves output
+  bits and shortens a five-dispatch neighboring HC chain to four; isolated
+  median **42.83 → 41.12 us (1.042x)**.
+- **Real-schedule price misses the gate.** Paired same-snapshot B=1 32K
+  counterfactual at thermal 1 engaged 47 fused transitions/token and preserved
+  the full-logit/token hash. Baseline/candidate whole reference was
+  **12.309/12.323 ms**; HC hold was **9.934/9.910 ms**. Remaining HC wall
+  **2.374/2.413 ms (0.984x)**; floor-adjusted closable gap
+  **1.284/1.323 ms (0.971x)**. It misses the 1.25x gate, so the default stays
+  off and there is no production path change. The comparison route and
+  `QWEN_FN_HC_INJECT_NORM` remain on `bead0f296`, not on `main`. The
+  conditional B1 48K/B3 A/B and GLM/V4.1 ports were not run after this
+  negative result.
+- The full all-hold `fn_solo_bounds ... bounds` pass later stopped on its
+  `experts` arm when QSA status was 0/count 0 instead of 512. The targeted
+  `hc-band` pair avoids that invalid late hold. Raw B=1 graph/profile and
+  probe output: `metagross:~/qwen-runs/2026-11-11-hc-fuse/`.
+
 ## 2026-11-11 - GLM Selective Layer Slicing Becomes The Default
 
 - **Decision: ship the selective 500ms/200ms layer policy on by default.**

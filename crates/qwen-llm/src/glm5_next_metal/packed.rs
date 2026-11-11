@@ -1036,8 +1036,44 @@ fn packet_fast_half(arith: Arith, mode: StageMode) -> bool {
         && mode == StageMode::Fast
 }
 
+/// Hard cap for the half-operand per-slot routed-expert packet. The packet
+/// dispatches one GEMV per `(row, top_k)` slot with grid depth = rows, so its
+/// arithmetic is row-independent; this is a validation bound, not a kernel
+/// limit. Grouped buckets are still available above it.
+const PACKET_HALF_MAX_ROWS: usize = 128;
+/// Rows above this use grouped buckets. Override with
+/// `QWEN_GLM53_EXPERT_PACKET_MAX_ROWS` (1..=`PACKET_HALF_MAX_ROWS`).
+const PACKET_HALF_DEFAULT_MAX_ROWS: usize = 8;
+
+#[cfg(any(test, feature = "perf-ablations"))]
+thread_local! {
+    static PACKET_HALF_MAX_ROWS_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn packet_half_max_rows() -> usize {
+    #[cfg(any(test, feature = "perf-ablations"))]
+    if let Some(rows) = PACKET_HALF_MAX_ROWS_OVERRIDE.with(std::cell::Cell::get) {
+        return rows.min(PACKET_HALF_MAX_ROWS);
+    }
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("QWEN_GLM53_EXPERT_PACKET_MAX_ROWS")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .filter(|rows: &usize| (1..=PACKET_HALF_MAX_ROWS).contains(rows))
+            .unwrap_or(PACKET_HALF_DEFAULT_MAX_ROWS)
+    })
+}
+
+/// Probe-only override; absent in ordinary builds.
+#[cfg(any(test, feature = "perf-ablations"))]
+pub(super) fn set_packet_half_max_rows(rows: usize) {
+    PACKET_HALF_MAX_ROWS_OVERRIDE.with(|cell| cell.set(Some(rows)));
+}
+
 /// Half weights and inputs, F32 accumulation and SwiGLU. The native reduction
-/// differs from grouped MMA; retain the primitive's supported row counts.
+/// differs from grouped MMA; the packet is row-independent up to the hard cap.
 fn packet_half_experts_selected(
     arith: Arith,
     mode: StageMode,
@@ -1051,7 +1087,7 @@ fn packet_half_experts_selected(
         return false;
     }
     packet_fast_half(arith, mode)
-        && (1..=8).contains(&rows)
+        && (1..=packet_half_max_rows()).contains(&rows)
         && crate::metal::all_slots_gate_up_native_half_rows_supported(gate, up)
         && crate::metal::all_slots_down_native_half_rows_supported(down)
 }

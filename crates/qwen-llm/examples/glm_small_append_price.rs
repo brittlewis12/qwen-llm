@@ -10,10 +10,13 @@
 //!     This prices the row-independent dense/MoE/head work a middle path would
 //!     borrow, and shows whether the per-row cost is linear over the only
 //!     widths the shipped batch plumbing admits.
+//!  3. `threshold`: A/B the half-operand per-slot routed-expert packet against
+//!     grouped buckets at widths 8..=96, with full-vocab KL / signed dNLL and
+//!     the selected expert kernels at 32 rows.
 //!
 //! Output is JSON lines. No production scheduling change.
 //!
-//! Usage: `glm_small_append_price <corpus> [all|census|batch] [depth]`
+//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold] [depth]`
 
 #[cfg(not(feature = "perf-ablations"))]
 fn main() {
@@ -26,7 +29,7 @@ mod probe {
         gguf::GgufFile,
         glm5_next_metal::{
             GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch, Glm5NextSession, Glm5NextStageReport,
-            Glm5NextWeights,
+            Glm5NextWeights, set_expert_packet_max_rows,
         },
         metal::*,
         tokenizer::Tokenizer,
@@ -37,6 +40,9 @@ mod probe {
     const CAPACITY: usize = 65536;
     const PREFILL_ROWS: usize = 2048;
     const CENSUS_WIDTHS: [usize; 9] = [1, 2, 4, 8, 16, 32, 48, 64, 128];
+    const THRESHOLD_WIDTHS: [usize; 8] = [8, 12, 16, 24, 32, 48, 64, 96];
+    const GROUPED_MAX_ROWS: usize = 8;
+    const PACKET_MAX_ROWS: usize = 128;
 
     fn emit(v: Value) {
         println!("{v}");
@@ -350,6 +356,138 @@ mod probe {
         Ok(())
     }
 
+    fn log_softmax(x: &[f32]) -> Vec<f64> {
+        let max = x.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
+        let sum: f64 = x.iter().map(|v| (*v as f64 - max).exp()).sum();
+        let logsum = max + sum.ln();
+        x.iter().map(|v| *v as f64 - logsum).collect()
+    }
+
+    fn kl(reference: &[f32], other: &[f32]) -> f64 {
+        let (p, q) = (log_softmax(reference), log_softmax(other));
+        p.iter().zip(&q).map(|(lp, lq)| lp.exp() * (lp - lq)).sum()
+    }
+
+    fn log_prob(logits: &[f32], token: u32) -> f64 {
+        log_softmax(logits)[token as usize]
+    }
+
+    fn top1(logits: &[f32]) -> usize {
+        let mut best = 0;
+        for (i, v) in logits.iter().enumerate() {
+            if *v > logits[best] {
+                best = i;
+            }
+        }
+        best
+    }
+
+    /// A/B the per-slot half packet against grouped buckets by row count.
+    /// Both arms use the same session, snapshot and token prefix; only the
+    /// packet row threshold differs.
+    fn threshold(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        ids: &[u32],
+        depth: usize,
+    ) -> anyhow::Result<()> {
+        let mut session = new_session(ctx, weights, ids, depth)?;
+        let snapshot = session.capture_snapshot()?;
+        for width in THRESHOLD_WIDTHS {
+            let tokens = &ids[depth..depth + width];
+            // Warm both selections so neither arm pays a first-touch.
+            for max_rows in [GROUPED_MAX_ROWS, PACKET_MAX_ROWS] {
+                set_expert_packet_max_rows(max_rows);
+                gate();
+                session.restore_snapshot(&snapshot)?;
+                let logits = session.prefill_packed(ctx, tokens)?;
+                anyhow::ensure!(logits.iter().all(|v| v.is_finite()), "non-finite warm");
+            }
+
+            let mut walls: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+            let mut logits: [Option<Vec<f32>>; 2] = [None, None];
+            for rep in 0..3 {
+                let order: [usize; 2] = if rep % 2 == 0 { [0, 1] } else { [1, 0] };
+                for arm in order {
+                    let max_rows = if arm == 0 {
+                        GROUPED_MAX_ROWS
+                    } else {
+                        PACKET_MAX_ROWS
+                    };
+                    set_expert_packet_max_rows(max_rows);
+                    gate();
+                    session.restore_snapshot(&snapshot)?;
+                    let t = Instant::now();
+                    let out = session.prefill_packed(ctx, tokens)?;
+                    walls[arm].push(t.elapsed().as_secs_f64() * 1e3);
+                    anyhow::ensure!(out.iter().all(|v| v.is_finite()), "non-finite logits");
+                    if rep == 2 {
+                        logits[arm] = Some(out);
+                    }
+                }
+            }
+
+            // Name the selected expert kernels once per arm at 32 rows.
+            let mut selected = [Vec::new(), Vec::new()];
+            if width == 32 {
+                for arm in 0..2 {
+                    set_expert_packet_max_rows(if arm == 0 {
+                        GROUPED_MAX_ROWS
+                    } else {
+                        PACKET_MAX_ROWS
+                    });
+                    gate();
+                    session.restore_snapshot(&snapshot)?;
+                    let guard = dispatch_profile_begin(ctx, 16384)?;
+                    let out = session.prefill_packed(ctx, tokens)?;
+                    anyhow::ensure!(out.iter().all(|v| v.is_finite()), "non-finite profile");
+                    let report = dispatch_profile_finish(ctx, guard)?;
+                    let mut by_name = BTreeMap::<String, (usize, f64)>::new();
+                    for row in &report.rows {
+                        if row.kernel.contains("expert") || row.kernel.contains("moe_") {
+                            let e = by_name.entry(row.kernel.clone()).or_default();
+                            e.0 += 1;
+                            e.1 += row.gpu_ns.unwrap_or(0) as f64 / 1e6;
+                        }
+                    }
+                    selected[arm] = by_name
+                        .into_iter()
+                        .map(|(k, (c, ms))| json!({"kernel": k, "calls": c, "gpu_ms": ms}))
+                        .collect();
+                }
+            }
+
+            let grouped = median(walls[0].clone());
+            let packet = median(walls[1].clone());
+            let g = logits[0].as_ref().expect("grouped logits");
+            let p = logits[1].as_ref().expect("packet logits");
+            let next = ids[depth + width];
+            let max_abs = g
+                .iter()
+                .zip(p)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            emit(json!({
+                "kind": "threshold", "width": width, "depth": depth,
+                "grouped_ms": grouped, "packet_ms": packet,
+                "delta_ms": packet - grouped,
+                "saving_pct": 100.0 * (grouped - packet) / grouped,
+                "grouped_logits_sha": blake3::hash(bytemuck::cast_slice(g)).to_hex().as_str(),
+                "packet_logits_sha": blake3::hash(bytemuck::cast_slice(p)).to_hex().as_str(),
+                "max_abs_logit_diff": max_abs,
+                "top1_grouped": top1(g), "top1_packet": top1(p),
+                "top1_agree": top1(g) == top1(p),
+                "kl_grouped_packet": kl(g, p), "kl_packet_grouped": kl(p, g),
+                "next_token": next,
+                "dnll_signed": log_prob(g, next) - log_prob(p, next),
+                "grouped_kernels": selected[0], "packet_kernels": selected[1],
+                "pressure": pressure(), "loadavg": loadavg(),
+            }));
+        }
+        set_expert_packet_max_rows(GROUPED_MAX_ROWS);
+        Ok(())
+    }
+
     pub fn run() -> anyhow::Result<()> {
         assert!(
             std::env::var_os("QWEN_METAL_LEASE_FD").is_some(),
@@ -357,7 +495,9 @@ mod probe {
         );
         let args: Vec<String> = std::env::args().collect();
         let corpus = args.get(1).ok_or_else(|| {
-            anyhow::anyhow!("usage: glm_small_append_price <corpus> [all|census|batch] [depth]")
+            anyhow::anyhow!(
+                "usage: glm_small_append_price <corpus> [all|census|batch|threshold] [depth]"
+            )
         })?;
         let mode = args.get(2).map(String::as_str).unwrap_or("all");
         let depth: usize = args
@@ -366,7 +506,7 @@ mod probe {
             .transpose()?
             .unwrap_or(48 * 1024);
         anyhow::ensure!(
-            matches!(mode, "all" | "census" | "batch"),
+            matches!(mode, "all" | "census" | "batch" | "threshold"),
             "unknown mode {mode}"
         );
 
@@ -403,6 +543,9 @@ mod probe {
         }
         if mode == "all" || mode == "batch" {
             batch(&ctx, &weights, &ids, depth)?;
+        }
+        if mode == "threshold" {
+            threshold(&ctx, &weights, &ids, depth)?;
         }
         emit(json!({
             "kind": "done", "pressure": pressure(), "loadavg": loadavg(),

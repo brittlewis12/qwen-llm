@@ -2671,5 +2671,12 @@ pub use packed::batch::{with_batch_attention, with_batch_index, with_batch_waves
 pub use packed::{FastPrecision, PackedLineage};
 pub use snapshot::{Glm5NextSnapshot, SNAPSHOT_POLICY_VERSION, snapshot_bytes};
 
+/// Probe-only control for the half-operand per-slot routed-expert packet row
+/// threshold. Production reads `QWEN_GLM53_EXPERT_PACKET_MAX_ROWS` instead.
+#[cfg(feature = "perf-ablations")]
+pub fn set_expert_packet_max_rows(rows: usize) {
+    packed::set_packet_half_max_rows(rows);
+}
+
 #[cfg(test)]
 mod tests;

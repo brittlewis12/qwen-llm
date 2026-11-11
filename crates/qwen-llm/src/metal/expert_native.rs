@@ -427,9 +427,17 @@ impl NativeOperands {
     }
 }
 
+/// One GEMV per `(row, top_k)` slot with grid depth = rows; the arithmetic is
+/// row-independent. Callers select this packet (and their own row policy)
+/// independently of this bound.
+const MAX_HALF_ROWS: usize = 128;
+
 fn check_half_rows(kernel: &'static str, rows: usize) -> Result<(), MetalError> {
-    if !(1..=8).contains(&rows) {
-        return Err(bad_shape(kernel, "half-operand packets require 1..=8 rows"));
+    if !(1..=MAX_HALF_ROWS).contains(&rows) {
+        return Err(bad_shape(
+            kernel,
+            "half-operand packets require 1..=128 rows",
+        ));
     }
     Ok(())
 }
@@ -874,7 +882,7 @@ pub fn encode_all_slots_gate_up_swiglu_native_rows(
 }
 
 /// Two serial half-operand GEMVs, not a grouped MMA or an F32 fallback.
-/// Accepts 1..=8 rows: input `[K, rows]`, IDs `[top_k, rows]`, status `[rows]`,
+/// Accepts 1..=128 rows: input `[K, rows]`, IDs `[top_k, rows]`, status `[rows]`,
 /// caller-provided inner/output `[M, top_k * rows]` (slot varies before token).
 /// All bindings and both pipelines are preflighted before any dispatch. No
 /// allocation, routing readback, buckets, or full-expert tiled grid is needed.

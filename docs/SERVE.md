@@ -443,7 +443,11 @@ connections that arrive during the load wait in the backlog and are answered
 once the accept loop starts. Request bodies are
 limited to 16 MiB. The whole request read has a 30 s absolute deadline; the
 socket read timeout is 35 s so it cannot preempt that mapping, and writes have a
-30 s timeout. For an optional trace,
+30 s timeout. Accepted connections set `TCP_NODELAY`: every SSE event is a small
+flushed write, and Nagle plus delayed ACKs could otherwise hold tokens for tens
+of milliseconds on a real network such as a laptop agent reaching the M5 over a
+LAN. A platform refusal of the option is non-fatal and logged at debug level.
+For an optional trace,
 prepare a private directory rather than using a predictable shared `/tmp` name:
 
 ```sh

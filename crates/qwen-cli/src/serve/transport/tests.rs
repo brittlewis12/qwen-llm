@@ -826,3 +826,65 @@ fn bridged_output_refusal_answers_typed_and_reports_one_failure() {
         "one completion, reported as a server failure"
     );
 }
+
+/// A scripted backend blocks after its first piece; the client must observe
+/// that piece's SSE event before the backend is allowed to finish. This drives
+/// the real request handler, partition, SSE writer and socket flush.
+#[test]
+fn sse_delta_reaches_the_socket_before_generation_completes() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (release, released) = channel::<()>();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut backend = Backend(move |sink: &mut dyn GenerationSink| {
+            sink.piece(b"first").map_err(BackendFailure::Aborted)?;
+            released.recv_timeout(WAIT).unwrap();
+            sink.piece(b"second").map_err(BackendFailure::Aborted)?;
+            Ok(outcome())
+        });
+        http::handle_connection(&stream, &mut backend, None).unwrap();
+    });
+    let body = r#"{"model":"test","input":"hi","stream":true}"#;
+    let mut client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(WAIT)).unwrap();
+    client
+        .write_all(
+            format!(
+                "POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut reader = BufReader::new(client);
+    let (mut first, mut second, mut terminal, mut line) = (false, false, false, String::new());
+    loop {
+        line.clear();
+        assert!(
+            reader.read_line(&mut line).unwrap() > 0,
+            "server closed early"
+        );
+        if line.contains(r#""delta":"first""#) {
+            assert!(!second, "second piece preceded the release");
+            first = true;
+            release.send(()).unwrap();
+        }
+        if line.contains(r#""delta":"second""#) {
+            second = true;
+        }
+        if line.starts_with("event: response.completed")
+            || line.starts_with("event: response.incomplete")
+        {
+            terminal = true;
+        }
+        if line.starts_with("data: [DONE]") {
+            break;
+        }
+    }
+    assert!(first && second && terminal);
+    server.join().unwrap();
+}

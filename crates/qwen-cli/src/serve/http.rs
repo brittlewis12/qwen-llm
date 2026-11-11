@@ -578,6 +578,14 @@ pub(crate) fn configure_stream(stream: &TcpStream) -> io::Result<()> {
     // BSD accept can inherit the listener's nonblocking flag. Request reads
     // must wait for arriving bytes under the existing deadline, not return EAGAIN.
     stream.set_nonblocking(false)?;
+    // Each SSE event is a small flushed write. Nagle plus delayed ACKs can hold
+    // those writes for tens of milliseconds over a real network, so streamed
+    // token latency must not depend on the client's ACK timing. Not fatal when
+    // the platform refuses the option: buffering policy degrades, it does not
+    // break the connection.
+    if let Err(error) = stream.set_nodelay(true) {
+        tracing::debug!(target: "qwen_diag", "serve: TCP_NODELAY unavailable: {error}");
+    }
     stream.set_read_timeout(Some(SOCKET_READ_TIMEOUT))?;
     stream.set_write_timeout(Some(SOCKET_WRITE_TIMEOUT))
 }
@@ -1365,6 +1373,19 @@ mod tests {
             .unwrap();
         let request = server.join().unwrap().unwrap().unwrap();
         assert_eq!(request.path, "/v1/models");
+    }
+
+    #[test]
+    fn configure_stream_disables_nagle() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        // Prove the assertion observes configure_stream's effect rather than a
+        // platform default.
+        stream.set_nodelay(false).unwrap();
+        assert!(!stream.nodelay().unwrap());
+        configure_stream(&stream).unwrap();
+        assert!(stream.nodelay().unwrap());
     }
 
     fn roundtrip(mut backend: impl GenerationBackend + Send + 'static, request: &str) -> String {

@@ -465,11 +465,8 @@ mod probe {
             let g = logits[0].as_ref().expect("grouped logits");
             let p = logits[1].as_ref().expect("packet logits");
             let next = ids[depth + width];
-            let max_abs = g
-                .iter()
-                .zip(p)
-                .map(|(a, b)| (a - b).abs())
-                .fold(0.0f32, f32::max);
+            let max_abs =
+                qwen_llm::compare::report_max_abs_diff_f32(g.iter().copied(), p.iter().copied());
             emit(json!({
                 "kind": "threshold", "width": width, "depth": depth,
                 "grouped_ms": grouped, "packet_ms": packet,

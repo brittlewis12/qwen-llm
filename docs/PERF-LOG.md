@@ -99,6 +99,36 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   records: `metagross:~/qwen-runs/2026-11-11-glm-numerics/`. Branch
   `research/glm-prefill-numerics`; no merge; M5 worktree removed.
 
+## 2026-11-11 - GLM 48K Append Non-Inferiority: Half Is Not Worse Than Sequential
+
+- **Follow-up probe; no production change.** Four uncylced 48K+ source prompts:
+  a frozen multi-file Rust code corpus, Metal kernels, a Python profile script,
+  and the prose PERF-LOG; 8/16/32/64 real next-token targets. Cohort and arm
+  assembly: `docs/bench/2026-11-11-glm-append-noninferiority/manifest.json`.
+- **Exact feasibility:** an Exact 48K prefix had no completed-prefix event
+  after 7m51s in a 14m lease request, so it was stopped before expiration to
+  preserve the second short packet. No absolute dNLL/KL vs Exact is claimed.
+  The candidate-minus-sequential dNLL is still measurable directly because
+  the shared Exact term cancels. The paired result uses sequential Fast/Half
+  as the qualified reference.
+- **No systematic Half penalty vs sequential.** For the three-code prompt
+  cohort, equal-prompt mean packed-Half minus sequential signed dNLL at
+  8/16/32/64 rows is **−0.0209/−0.00563/−0.00586/−0.00499** nats/token;
+  central 90% prompt-bootstrap intervals are **[−0.04195,+0.00008]**,
+  **[−0.01145,+0.00019]**, **[−0.01214,+0.00042]** and
+  **[−0.01165,+0.00167]**. All include zero; one-sided 95% upper bounds are
+  at most **+0.00167**. Code-cohort top-1 agreement is **100/97.9/99.0/99.0%**.
+  Per-prompt values and the prose control are in the model note.
+- **Counterfactuals:** DenseF32 is mixed (code mean dNLL +0.00854 at 16 rows,
+  +0.00556 at 32, with CIs crossing zero); all-F32 is near the sequential
+  path. Neither is warranted by a Half-vs-sequential worsening signal.
+- **Call: change nothing.** The code.txt route flips remain a different but
+  non-worse trajectory by the user’s paired sequential decision rule; the
+  Exact-referenced absolute cohort remains open because Exact did not finish
+  within the two short-packet budget. Raw/partial Exact and completed Fast
+  cohort plus thermal records: `metagross:~/qwen-runs/2026-11-11-glm-append-noninferiority/`.
+  Branch `research/glm-prefill-numerics`; no merge; M5 worktree removed.
+
 ## 2026-11-11 - Serve Chunk Gate: The Append Floor Is Per Forward
 
 - **Probes and a decision; no production scheduling change.** New

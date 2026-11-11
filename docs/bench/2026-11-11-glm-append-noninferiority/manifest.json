@@ -2,7 +2,10 @@
   "name": "glm53-append-noninferiority-v1",
   "depth": 49152,
   "teacher_forced_append_rows": [8, 16, 32, 64],
-  "reference": "Exact packed prefix followed by sequential Exact decode of the same appended token IDs",
+  "planned_reference": "Exact packed prefix followed by sequential Exact decode of the same appended token IDs",
+  "exact_reference_status": "attempted for the first 48K prompt; no completed prefix result after 7m51s, stopped before the 14m lease request expired to preserve the second short packet",
+  "completed_packet_reference": "sequential Fast/Half from the same Fast/Half prefix; the paired dNLL difference between append schedules cancels any shared Exact reference term",
+  "raw_run_root": "metagross:~/qwen-runs/2026-11-11-glm-append-noninferiority/",
   "arms": [
     "sequential_fast_half",
     "packed_fast_half",
@@ -30,7 +33,7 @@
         "kernels/moe.metal",
         "kernels/mat_vec.metal"
       ],
-      "construction": "docs/bench/2026-11-12-glm-append-noninferiority/assemble_metal.py; UTF-8 concatenation in listed order with // SOURCE markers; no cycling"
+      "construction": "docs/bench/2026-11-11-glm-append-noninferiority/assemble_metal.py; UTF-8 concatenation in listed order with // SOURCE markers; no cycling"
     },
     {
       "id": "python-dflash-profile",

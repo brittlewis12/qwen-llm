@@ -353,8 +353,8 @@ fn edges(c: &MetalContext, w: &Glm5NextWeights, ids: &[u32]) -> anyhow::Result<(
     let mut s = new_session(c, w, ids, CAPACITY, 0)?;
     let snap = s.capture_snapshot()?;
     for width in [
-        64usize, 96, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1025,
-        1026, 1027, 1032,
+        1usize, 2, 4, 8, 16, 24, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384,
+        448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 1025, 1032,
     ] {
         let mut walls = Vec::new();
         for _ in 0..3 {

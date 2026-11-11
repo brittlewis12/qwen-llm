@@ -37,6 +37,45 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw: `metagross:~/qwen-runs/2026-11-11-v41-live-ced/`. Branch
   `perf/v41-live-ced-threshold`; not merged; local and M5 worktrees removed.
 
+## 2026-11-11 - Solo B=1 Census: Dense/Routed Rows Closed; HC And Q6 Lead
+
+- **Census plus negative kernel gate; no production optimization shipped.**
+  Branch `perf/solo-decode`, base `7c6062f18`, M5 Ultra. B=1 real paths at
+  32K: Flash-Next GPU loop **12.03 ms/token** (floor 4.73), V4.1
+  `Forward::step` **14.02** (floor 7.41), GLM GPU loop **17.62** (floor 9.56).
+  Full tables and reproduction: `docs/bench/2026-11-11-solo-b1-census.md`.
+- **V4.1 counterfactual holds, causal on:** dense **5.27** exposed, routed
+  **3.68** (compute 0.58, read stream 3.63 ms at 896 GB/s), HC pre+post
+  **1.08**, attention core **1.04**, posts **0.47**, index **0.30**. Causal
+  graph: 701 waves/41 scopes; dense -> routed gate/up -> routed down is the
+  chain.
+- **Flash-Next holds:** HC **2.63**, Q6 **2.12**, routed **2.06**, GDN 0.99,
+  QSA core 0.97, routing 0.34. Byte-floor gaps rank HC **1.54**, routed
+  **1.23**, QSA 0.92, GDN 0.79, Q6 0.53. Graph: 49 scopes, ~449 waves/token.
+- **GLM holds:** Q6 **7.02** (floor 5.50, gap 1.52), Q8 2.01, mHC gap ~1.08,
+  MLA 0.74, routed profile 4.33. B=1 is 1,060 dispatches; the width-1 batch
+  path (with causal waves) is 30.3 ms under profile and not a faster solo path.
+- **Ranked closable ms:** FN HC 1.54, GLM Q6 1.52, FN routed 1.23, GLM mHC
+  1.08, V4.1 HC+posts 1.07, V4.1 attention core 1.04, V4.1 dense 0.95, FN QSA
+  0.92, GLM routed 0.88, FN GDN 0.79, V4.1 routed 0.74. The large bands are
+  bytes/occupancy structural; no quick kernel mapping remained.
+- **Three levers built and killed by the isolated gate.** (1) B=1 dense
+  split-cols/MMA: per-column wins every Q5_K shape except output_a
+  split-cols at 1.11x. (2) V4.1 IQ2_XXS rows 1/2/4/8: r4 is 1.006x gate/up
+  and 1.016x down versus shipped r2; r1/r8 lose. (3) Flash-Next HC up-mix
+  re-grid 2/4/8/16 rows per threadgroup: 0.991/1.000/1.003/0.997x. The dead
+  production instantiations were reverted; the HC probe stays research-only.
+- **Serve baseline:** one V4.1 agent, real sampling, 31,918 prompt tokens,
+  64 generated: TTFT **33.58 s**, decode **14.32 ms/token** (66.94 tok/s),
+  coherent text. The V4.1 SSE path buffered deltas to completion, so client
+  inter-delta percentiles are not token latency; only aggregate
+  `transition_ms`/`transitions` is exposed.
+- **Tools:** `v41_batch_depth` bounds/graph accept width 1..4;
+  `fn_solo_bounds` and `glm_solo_bounds` (perf-ablations) price B=1 family
+  holds through the real GPU loops; `fn_hc_up_regrid` is an isolated
+  research probe. Evidence `metagross:~/qwen-runs/2026-11-11-solo-b1/`.
+  No merge; M5 worktree removed.
+
 ## 2026-11-11 - Serve Chunk Gate: The Append Floor Is Per Forward
 
 - **Probes and a decision; no production scheduling change.** New

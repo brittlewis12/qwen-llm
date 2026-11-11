@@ -87,6 +87,65 @@ pub(crate) fn skip(name: &str) -> bool {
             "norms" => {
                 name.contains("rms_norm") || name.contains("l2_norm") || name.contains("rope")
             }
+            // B=1 family holds shared by Flash-Next and GLM solo probes.
+            "dense" => {
+                name.contains("mat_vec_q6_K")
+                    || name.contains("mat_vec_q5_K")
+                    || name.contains("mat_vec_q4_K")
+                    || name.contains("mat_vec_q8_0")
+                    || name.contains("mat_vec_iq")
+                    || name.contains("mat_vec_bf16")
+                    || name.contains("mat_vec_f32_f32_lcpp")
+            }
+            "head" => name.contains("mat_vec_q6_K_f32") || name.contains("lm_head"),
+            "attention" => {
+                name.contains("qsa_")
+                    || name.contains("select_top_k")
+                    || name.contains("expand_ids")
+                    || name.contains("selected_attention")
+                    || name.contains("latent_attention")
+                    || name.contains("attention")
+            }
+            // QSA compute only; leaves norm/publish/selection status intact.
+            "qsa_core" => {
+                name.contains("qsa_split")
+                    || name.contains("qsa_decode_logits")
+                    || name.contains("qsa_expand_ids")
+            }
+            "routed" => {
+                name.contains("expert_native")
+                    || name.contains("qwen4exp_expert_compat")
+                    || name.contains("moe_swiglu")
+                    || name.contains("moe_down")
+                    || name.contains("glm_batch_gate_up")
+                    || name.contains("glm_batch_down")
+                    || name.contains("weighted_sum")
+                    || name.contains("finalizer")
+            }
+            "q6" => name.contains("q6_K") || name.contains("q6_k"),
+            "q8" => name.contains("q8_0") || name.contains("q8_"),
+            "index" => {
+                name.contains("indexer")
+                    || name.contains("index_score")
+                    || name.contains("select_top_k")
+                    || name.contains("expand_selection")
+                    || name.contains("scatter_offset")
+            }
+            "kda" => name.contains("kda"),
+            "hc" => name.contains("hc_") || name.contains("mhc"),
+            "router" => name.contains("route_learned"),
+            "pointwise" => {
+                name.contains("rms_norm")
+                    || name.contains("l2_norm")
+                    || name.contains("swiglu")
+                    || name.contains("silu")
+                    || name.contains("argmax")
+                    || name.contains("copy")
+                    || name.contains("fill")
+                    || name.contains("add")
+                    || name.contains("scale")
+                    || name.contains("rope")
+            }
             _ => false,
         };
         if yes {

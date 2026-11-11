@@ -188,8 +188,11 @@ fn main() -> Result<()> {
         let is_hostgap = args.get(5).is_some_and(|s| s == "hostgap");
         let is_graph = args.get(5).is_some_and(|s| s == "graph");
         let screen_batch: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(3);
-        let members = if is_bounds || is_waves || is_graph {
+        let members = if is_waves {
             3
+        } else if is_bounds || is_graph {
+            ensure!((1..=4).contains(&screen_batch), "bounds/graph width 1..4");
+            screen_batch
         } else if is_causal {
             ensure!((2..=4).contains(&screen_batch), "causal screen width 2..=4");
             screen_batch
@@ -711,6 +714,8 @@ fn bounds(
     use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
     use qwen_llm::metal::decode_bounds::{Experiment, Mode};
     ensure!((8..=64).contains(&n), "8..64 bounded probe steps");
+    let width = states.len();
+    ensure!(width <= streams.len(), "width has a stream");
     let experiment = Experiment::default();
     // Price every hold on the production causal schedule rather than the
     // native encoder cuts the bound used to force.
@@ -729,12 +734,12 @@ fn bounds(
         let start = Instant::now();
         let mut heads = Vec::with_capacity(n);
         for j in 0..n {
-            let tokens: Vec<_> = (0..3).map(|i| streams[i][4310 + j]).collect();
-            heads.push(step(f, states, &tokens, true)?);
+            let tokens: Vec<_> = (0..width).map(|i| streams[i][4310 + j]).collect();
+            heads.push(step(f, states, &tokens, width > 1)?);
         }
         let ms = start.elapsed().as_secs_f64() * 1000. / n as f64;
         let stats = scope.finish();
-        let mut digests: Vec<_> = (0..3).map(|_| blake3::Hasher::new()).collect();
+        let mut digests: Vec<_> = (0..width).map(|_| blake3::Hasher::new()).collect();
         for row in &heads {
             for (h, d) in row.iter().zip(&mut digests) {
                 ensure!(h.iter().all(|v| v.is_finite()), "finite bound head");
@@ -833,7 +838,7 @@ fn causal_graph(
     let mut heads = Vec::with_capacity(n);
     for j in 0..n {
         let tokens: Vec<_> = (0..width).map(|i| streams[i][4310 + j]).collect();
-        heads.push(step(f, states, &tokens, true)?);
+        heads.push(step(f, states, &tokens, width > 1)?);
     }
     let wall_ms = start.elapsed().as_secs_f64() * 1000. / n as f64;
     let report = scope.finish();

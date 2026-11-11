@@ -138,6 +138,80 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if mode == "quality" {
+        let mask = args
+            .get(5)
+            .and_then(|v| u8::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0xC);
+        let n: usize = args.get(6).and_then(|v| v.parse().ok()).unwrap_or(32);
+        let mut arm = |bits: u8| -> anyhow::Result<Vec<Vec<f32>>> {
+            s.restore_snapshot(&entry)?;
+            let _override = diagnostic_q6_research(bits);
+            let mut logits = Vec::with_capacity(n);
+            for i in 0..n {
+                logits.push(s.forward(&ctx, ids[64 + i])?);
+            }
+            Ok(logits)
+        };
+        let reference = arm(0)?;
+        let candidate = arm(mask)?;
+        let logz = |v: &[f32]| {
+            let max = v.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+            max + v.iter().map(|&x| (x as f64 - max).exp()).sum::<f64>().ln()
+        };
+        let (mut sum_dnll, mut sum_abs, mut max_abs, mut sum_kl, mut max_kl, mut wins, mut finite) =
+            (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0usize, 0usize);
+        for i in 0..n {
+            let (r, c) = (&reference[i], &candidate[i]);
+            let target = ids[64 + i + 1] as usize;
+            let (lzr, lzc) = (logz(r), logz(c));
+            let dnll = (lzc - c[target] as f64) - (lzr - r[target] as f64);
+            let kl: f64 = r
+                .iter()
+                .zip(c)
+                .map(|(&x, &y)| {
+                    let (p, lr, lc) = ((x as f64 - lzr).exp(), x as f64 - lzr, y as f64 - lzc);
+                    p * (lr - lc)
+                })
+                .sum();
+            let max = r
+                .iter()
+                .zip(c)
+                .map(|(&x, &y)| (x as f64 - y as f64).abs())
+                .fold(0.0, f64::max);
+            let argmax = |v: &[f32]| {
+                v.iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                    .map(|(i, _)| i)
+                    .unwrap()
+            };
+            if argmax(r) == argmax(c) {
+                wins += 1;
+            }
+            if r.iter().chain(c).all(|x| x.is_finite()) {
+                finite += 1;
+            }
+            sum_dnll += dnll;
+            sum_abs += dnll.abs();
+            max_abs = max_abs.max(dnll.abs());
+            sum_kl += kl;
+            max_kl = max_kl.max(kl);
+        }
+        emit(json!({
+            "kind":"quality","mask":mask,"tokens":n,
+            "mean_dnll":sum_dnll / n as f64,
+            "mean_abs_dnll":sum_abs / n as f64,
+            "max_abs_dnll":max_abs,
+            "mean_kl":sum_kl / n as f64,
+            "max_kl":max_kl,
+            "argmax_equal":wins,
+            "finite":finite,
+            "thermal":thermal()
+        }));
+        return Ok(());
+    }
+
     if mode == "gridholds" {
         let holds: [(&str, &str, usize, u64); 10] = [
             ("", "q6_r1", 0, 0),

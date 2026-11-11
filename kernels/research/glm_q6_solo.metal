@@ -163,3 +163,75 @@ typedef decltype(glm_q6_pair_splitk<2, 0>) glm_q6_pair_splitk_t;
         glm_q6_pair_splitk_t glm_q6_pair_splitk<N, S>;
 PAIR(2, 0) PAIR(4, 0) PAIR(8, 0)
 PAIR(2, 1) PAIR(4, 1) PAIR(8, 1)
+
+// Three same-input rows per threadgroup (GLM KDA q/k/v), K split across
+// simdgroups. One dispatch replaces the three-matrix x3 form.
+template <ushort NSG>
+kernel void glm_q6_triple_splitk(
+    constant glm_q6_solo_args &a [[buffer(0)]],
+    device const uchar *w0 [[buffer(1)]],
+    device const uchar *w1 [[buffer(2)]],
+    device const uchar *w2 [[buffer(3)]],
+    device const float *x [[buffer(4)]],
+    device float *y0 [[buffer(5)]],
+    device float *y1 [[buffer(6)]],
+    device float *y2 [[buffer(7)]],
+    uint row [[threadgroup_position_in_grid]],
+    ushort lane [[thread_index_in_simdgroup]],
+    ushort simd [[simdgroup_index_in_threadgroup]],
+    ushort tid [[thread_index_in_threadgroup]]) {
+    threadgroup float p0[NSG];
+    threadgroup float p1[NSG];
+    threadgroup float p2[NSG];
+    if (row >= a.n_out) return;
+    const ulong row_bytes = ulong(a.n_in / 256u) * 210u;
+    device const uchar *r0 = w0 + ulong(row) * row_bytes;
+    device const uchar *r1 = w1 + ulong(row) * row_bytes;
+    device const uchar *r2 = w2 + ulong(row) * row_bytes;
+    float s0 = 0.0f;
+    float s1 = 0.0f;
+    float s2 = 0.0f;
+    for (uint k = (uint(simd) * 32u + uint(lane)) * 16u; k < a.n_in; k += NSG * 512u) {
+        float4x4 v0;
+        float4x4 v1;
+        float4x4 v2;
+        const short il = short((k / 16u) % 16u);
+        q6solo_gen::dequant(r0 + (k / 256u) * 210u, il, v0);
+        q6solo_gen::dequant(r1 + (k / 256u) * 210u, il, v1);
+        q6solo_gen::dequant(r2 + (k / 256u) * 210u, il, v2);
+        FOR_UNROLL (uint i = 0; i < 16; ++i) {
+            const float xv = x[k + i];
+            s0 = fma(v0[i / 4][i % 4], xv, s0);
+            s1 = fma(v1[i / 4][i % 4], xv, s1);
+            s2 = fma(v2[i / 4][i % 4], xv, s2);
+        }
+    }
+    s0 = simd_sum(s0);
+    s1 = simd_sum(s1);
+    s2 = simd_sum(s2);
+    if (lane == 0) {
+        p0[simd] = s0;
+        p1[simd] = s1;
+        p2[simd] = s2;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float t0 = 0.0f;
+        float t1 = 0.0f;
+        float t2 = 0.0f;
+        FOR_UNROLL (uint i = 0; i < NSG; ++i) {
+            t0 += p0[i];
+            t1 += p1[i];
+            t2 += p2[i];
+        }
+        y0[row] = t0;
+        y1[row] = t1;
+        y2[row] = t2;
+    }
+}
+
+typedef decltype(glm_q6_triple_splitk<2>) glm_q6_triple_splitk_t;
+#define TRIPLE(N) \
+    template [[host_name("glm_q6_triple_splitk_s" #N)]] kernel \
+        glm_q6_triple_splitk_t glm_q6_triple_splitk<N>;
+TRIPLE(2) TRIPLE(4) TRIPLE(8)

@@ -290,3 +290,67 @@ pub fn encode_glm_q6_pair_swiglu_splitk_f32(
     );
     Ok(())
 }
+
+/// Bench-only fused same-input Q6 triple GEMV (GLM KDA q/k/v): one threadgroup
+/// per output row, K split across `nsg` simdgroups.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_glm_q6_triple_splitk_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weights: [&MetalTensor; 3],
+    x: &MetalTensor,
+    ys: [&MetalTensor; 3],
+    n_in: usize,
+    n_out: usize,
+    nsg: usize,
+) -> Result<(), MetalError> {
+    for weight in weights {
+        if weight.dtype != crate::tensor::GgmlType::Q6_K
+            || weight.shape != [n_in as u64, n_out as u64]
+        {
+            return Err(MetalError::BadShape {
+                kernel: "glm_q6_triple_splitk",
+                detail: format!(
+                    "weight {:?} n_in={n_in} n_out={n_out} nsg={nsg}",
+                    weight.shape
+                ),
+            });
+        }
+    }
+    if x.dtype != crate::tensor::GgmlType::F32
+        || x.n_elements() as usize != n_in
+        || ys.iter().any(|y| y.n_elements() as usize != n_out)
+        || !n_in.is_multiple_of(256)
+    {
+        return Err(MetalError::BadShape {
+            kernel: "glm_q6_triple_splitk",
+            detail: format!(
+                "x {} ys {:?} n_in={n_in} n_out={n_out} nsg={nsg}",
+                x.n_elements(),
+                ys.iter().map(|y| y.n_elements()).collect::<Vec<_>>()
+            ),
+        });
+    }
+    let name = format!("glm_q6_triple_splitk_s{nsg}");
+    glm_q6_solo_args(ctx, enc, &name, n_in, n_out, 10.0, nsg)?;
+    enc.set_tensor(1, weights[0]);
+    enc.set_tensor(2, weights[1]);
+    enc.set_tensor(3, weights[2]);
+    enc.set_tensor(4, x);
+    enc.set_tensor(5, ys[0]);
+    enc.set_tensor(6, ys[1]);
+    enc.set_tensor(7, ys[2]);
+    enc.dispatch(
+        MTLSize {
+            width: n_out,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: nsg * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}

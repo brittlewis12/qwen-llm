@@ -1853,7 +1853,7 @@ impl<'w> Glm5NextSession<'w> {
                     self.stage(enc, Glm5NextStage::DenseFfn, Some(index))?;
                     let f = c.dense_ffn_size as usize;
                     #[cfg(feature = "perf-ablations")]
-                    let fused = q6_splitk_research()
+                    let fused = q6_research_bit(Q6_RESEARCH_DENSE_PAIR)
                         && dense.gate.dtype == GgmlType::Q6_K
                         && dense.up.dtype == GgmlType::Q6_K
                         && h >= 4096;
@@ -2131,7 +2131,26 @@ impl<'w> Glm5NextSession<'w> {
         // (each row bitwise equal to its own mat-vec, so packed rows keep
         // the lineage with separate dispatches).
         let qkv = [&kda.query, &kda.key, &kda.value];
-        if qkv.iter().all(|w| w.dtype == GgmlType::Q6_K) && width.is_multiple_of(2) {
+        #[cfg(feature = "perf-ablations")]
+        let triple = q6_research_bit(Q6_RESEARCH_TRIPLE)
+            && qkv.iter().all(|w| w.dtype == GgmlType::Q6_K)
+            && h >= 4096
+            && width >= 4096;
+        #[cfg(not(feature = "perf-ablations"))]
+        let triple = false;
+        if triple {
+            #[cfg(feature = "perf-ablations")]
+            crate::metal::encode_glm_q6_triple_splitk_f32(
+                ctx,
+                enc,
+                qkv,
+                &s.normed,
+                [&s.q, &s.k, &s.v],
+                h,
+                width,
+                8,
+            )?;
+        } else if qkv.iter().all(|w| w.dtype == GgmlType::Q6_K) && width.is_multiple_of(2) {
             crate::metal::encode_mat_vec_q6_k_x3_f32(
                 ctx,
                 enc,
@@ -2638,7 +2657,7 @@ fn shared_gate_up_swiglu(
     clamp: f32,
 ) -> Result<()> {
     #[cfg(feature = "perf-ablations")]
-    if q6_splitk_research()
+    if q6_research_bit(Q6_RESEARCH_SHARED_PAIR)
         && shared.gate.dtype == GgmlType::Q6_K
         && shared.up.dtype == GgmlType::Q6_K
         && h >= 4096
@@ -2708,32 +2727,50 @@ fn low_rank_expand(
 
 /// Bench-only counterfactual selector for the Q6 solo mapping screen.
 #[cfg(feature = "perf-ablations")]
+const Q6_RESEARCH_SPLITK: u8 = 1;
+#[cfg(feature = "perf-ablations")]
+const Q6_RESEARCH_SHARED_PAIR: u8 = 2;
+#[cfg(feature = "perf-ablations")]
+const Q6_RESEARCH_DENSE_PAIR: u8 = 4;
+#[cfg(feature = "perf-ablations")]
+const Q6_RESEARCH_TRIPLE: u8 = 8;
+
+#[cfg(feature = "perf-ablations")]
 static Q6_RESEARCH_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// Research override for same-process paired arms: 0 follows the environment,
-/// 1 forces the split-K/pair mapping, 2 forces the incumbent.
+/// Research override for same-process paired arms: 0 follows
+/// `QWEN_GLM53_Q6_RESEARCH` (hex mask), otherwise that mask is forced.
+/// Bit 0 split-K singles, bit 1 shared pair, bit 2 dense pair, bit 3 KDA triple.
 #[cfg(feature = "perf-ablations")]
-pub fn diagnostic_q6_research(mode: u8) -> impl Drop {
+pub fn diagnostic_q6_research(mask: u8) -> impl Drop {
     use std::sync::atomic::Ordering;
-    assert!(mode <= 2);
+    assert!(mask <= 15);
     struct Guard;
     impl Drop for Guard {
         fn drop(&mut self) {
             Q6_RESEARCH_OVERRIDE.store(0, Ordering::SeqCst);
         }
     }
-    Q6_RESEARCH_OVERRIDE.store(mode, Ordering::SeqCst);
+    Q6_RESEARCH_OVERRIDE.store(mask, Ordering::SeqCst);
     Guard
 }
 
 #[cfg(feature = "perf-ablations")]
-fn q6_splitk_research() -> bool {
+fn q6_research_mask() -> u8 {
     use std::sync::atomic::Ordering;
-    match Q6_RESEARCH_OVERRIDE.load(Ordering::SeqCst) {
-        1 => true,
-        2 => false,
-        _ => std::env::var("QWEN_GLM53_Q6_RESEARCH").as_deref() == Ok("1"),
+    let forced = Q6_RESEARCH_OVERRIDE.load(Ordering::SeqCst);
+    if forced != 0 {
+        return forced;
     }
+    std::env::var("QWEN_GLM53_Q6_RESEARCH")
+        .ok()
+        .and_then(|v| u8::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "perf-ablations")]
+fn q6_research_bit(bit: u8) -> bool {
+    q6_research_mask() & bit != 0
 }
 
 fn matvec(
@@ -2746,7 +2783,7 @@ fn matvec(
     n_out: usize,
 ) -> Result<()> {
     #[cfg(feature = "perf-ablations")]
-    if q6_splitk_research()
+    if q6_research_bit(Q6_RESEARCH_SPLITK)
         && weight.dtype == GgmlType::Q6_K
         && n_in >= 4096
         && (4096..=16_384).contains(&n_out)

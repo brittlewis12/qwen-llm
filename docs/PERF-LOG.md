@@ -130,6 +130,40 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Fast packet pressure peaked at 2 for Metal/prose and yielded until 1; Rust
   observed 0, Python 1, and the packet finished at 1.
   Branch `research/glm-prefill-numerics`; no merge; M5 worktree removed.
+## 2026-11-11 - Selective GLM 500ms/200ms Packet: Still Opt-In
+
+- One requested variant, one attempted 30s real-sampling ABBA: **>500ms**
+  predicted original append wall enables **200ms** layer quanta. Small
+  appends retain the legacy path; phase records confirm zero slices for all
+  reported 32/45/67-row appends. 342/951/1509 use 4/16/8 slices. No retune.
+- Accepted off-a/on-a/on-b delivered **73.07 / 77.13 / 71.87 tok/s**;
+  gap p50 **29.3 / 28.1 / 28.7ms**, global p99 **58.4 / 211.5 / 197.5ms**,
+  max **1794 / 536 / 705ms**. Append TTFT p50/p99 **943/1940 / 955/2064 /
+  1007/2150ms**; partial-prefill seconds **2.3622 / 2.4041 / 2.4240**.
+  Accepted timing thermal 1 throughout, shared compiler activity recorded.
+- Final off-b rejected at pressure 2 during ramp (95 compiler processes,
+  ~2678% CPU); no accepted reverse control. No replacement run: the valid
+  forward pair already fails p99 (**+262%**) while max improves **70%**.
+  Default remains **SLICE_MS=0**; **SLICE_MS=200, MIN_MS=500** is opt-in.
+  No alternate metric or sampler was used to turn the gate into a pass.
+- In the valid pair, gaps >100ms rise **18 -> 68**, >200ms **13 -> 23**,
+  while >1s fall **4 -> 0**. Selectivity removes the small forward's own
+  slice tax, but not queuing or enough slower samples to protect global p99.
+  Nine sampled completions are on-topic/structurally valid; sampled tool
+  calls are 0 / 1 / 1, with 10 / 11 / 11 turns; do not claim a fixed-output
+  engine gain from the single positive throughput pair.
+- 693 serve tests, four layer-plan tests and new selector/cut/rollback tests
+  pass; integration contracts pass on `5ec7e2ec7`; no ignored tests added.
+  Core forward/cancellation/cache code is unchanged from the validated cursor.
+  Both arms include main's TCP_NODELAY fix. M5 iter CLI build passed; no M5
+  test-profile or extra policy-probe build. Checked shared disk 41–48 GiB
+  before building, 36 GiB during build, later 18 GiB; own worktree removal
+  completed at 19 GiB. No shared-cache cleanup. GPU holds 326–382s; all waits
+  retained. M5 temporary branch removed; no merge.
+- Branch `perf/glm-layer-sliced-prefill`; report:
+  `docs/bench/2026-11-11-glm-selective-layer-serve.md`. Raw:
+  `metagross:~/qwen-runs/2026-11-11-glm-selective-layer/`.
+
 ## 2026-11-11 - Selective GLM Layer Policy: One 500ms / 200ms Variant
 
 - Branch `perf/glm-layer-sliced-prefill` adds one requested policy variant:

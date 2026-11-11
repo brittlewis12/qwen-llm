@@ -20,7 +20,7 @@ const PREFILL_FAIR: &str = "QWEN_SERVE_GLM_PREFILL_FAIR";
 const DECODE_PERCENT: &str = "QWEN_SERVE_GLM_DECODE_PERCENT";
 /// Nominal GPU milliseconds per row-preserving layer slice under mixed load (default 0; 200 opts into selective slicing). Zero restores whole-row chunks and the original decode-percentage policy.
 const LAYER_SLICE_MS: &str = "QWEN_SERVE_GLM_LAYER_SLICE_MS";
-// Keep opt-in: the served reverse pair improved maximum gap but regressed global p99.
+// Keep opt-in: the selective 500ms/200ms packet also regressed global p99.
 const DEFAULT_LAYER_SLICE_MS: usize = 0;
 /// Slice only appends whose predicted original prefill wall exceeds this many milliseconds (default 500). Zero restores the all-append slicing policy; LAYER_SLICE_MS=0 still disables slicing entirely.
 const LAYER_SLICE_MIN_MS: &str = "QWEN_SERVE_GLM_LAYER_SLICE_MIN_MS";

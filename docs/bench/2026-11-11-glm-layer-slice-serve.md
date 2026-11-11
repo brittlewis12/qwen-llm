@@ -7,6 +7,11 @@ serve pair is throughput-neutral and cuts the maximum gap by 88%, but its
 global gap p99 worsens. This extends the native design/pricing work in
 `2026-11-11-layer-sliced-prefill.md`.
 
+This is the historical **all-append 100ms** packet. With the newer selective
+controls, reproduce that mode using `QWEN_SERVE_GLM_LAYER_SLICE_MS=100` and
+`QWEN_SERVE_GLM_LAYER_SLICE_MIN_MS=0`. The later 500ms/200ms experiment is in
+`2026-11-11-glm-selective-layer-serve.md`.
+
 ## Behavior and rollback
 
 `QWEN_SERVE_GLM_LAYER_SLICE_MS` is a startup integer, 0..10000 milliseconds.

@@ -6,6 +6,84 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-10 - Serve Standing: Three-Agent 30 s, V4.1 Flat And GLM +10%
+
+- **Question:** how much faster is real three-agent serving on tonight's main
+  **`6526a6919`** than this morning's **`bcb1b46b8`**, for V4.1 and GLM?
+  Flash-Next was already measured at **1.36x** this evening and was skipped.
+- **Method:** release `--bin qwen` builds in separate M5 worktrees, outside the
+  lease (`qwen-tok` built once from tonight for harness retokenization). Harness
+  tonight's `scripts/bench/serve_realistic.py` (unchanged from the 40 s
+  standing), three agents, three **48K** roots, seed **20261109**, real agent
+  sampling (no fields; model defaults), **30 s** windows, 15 s ramp,
+  `--warm-cool 45` (60/75 for GLM retries), `--cool 30` (60 for the single-arm
+  GLM retry), fresh server per arm, default env (no knobs). Each family ran
+  order-balanced AB then BA packets. `host` is
+  `round_budget.host_ms_per_round`; load is the mean/max 1-minute load inside
+  the measured window.
+
+  | Family | Order | Build | tok/s | Gap p50 ms | Host ms/round | Thermal | Compile overlap | Load mean/max |
+  | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: |
+  | V4.1 | AB | morning | 92.767 | 28.30 | 0.998 | 0 | yes | 36.7 / 39.9 |
+  | V4.1 | AB | tonight | 89.433 | 29.52 | 0.117 | 1 | yes | 54.9 / 56.6 |
+  | V4.1 | BA | tonight | 96.633 | 27.69 | 0.090 | 0 | no | 20.0 / 20.9 |
+  | V4.1 | BA | morning | 97.233 | 27.41 | 1.001 | 0 | yes | 24.6 / 25.4 |
+  | GLM | AB | morning | 70.267 | 30.88 | 2.509 | 1 | yes | 20.9 / 22.1 |
+  | GLM | AB | tonight | 76.300 | 27.80 | 0.0* | 1 | yes | 43.5 / 48.2 |
+  | GLM | BA | tonight | 79.433 | 27.67 | 0.0* | 1 (timing 0) | no | 16.6 / 17.0 |
+  | GLM | BA | morning | 71.233 | 30.67 | 2.155 | 1 | yes | 15.5 / 15.7 |
+
+  \*GLM tonight host is clamped at 0: native transition/round
+  (**32.26 / 31.89 ms**) exceeds gap p50 (**27.80 / 27.67 ms**), so the
+  subtraction is not a negative-host claim.
+
+- **Morning -> tonight delivered ratio (tonight/morning):**
+
+  | Family | AB | BA | Geomean | Spread |
+  | --- | ---: | ---: | ---: | ---: |
+  | V4.1 | 0.9641 | 0.9938 | **0.9788 (-2.12%)** | -3.59% to -0.62% |
+  | GLM | **1.0859 (+8.59%)** | **1.1151 (+11.51%)** | **1.1004 (+10.04%)** | +8.59% to +11.51% |
+
+- **Read: V4.1 is flat to slightly negative, not a win.** The AB pair is
+  load-confounded against tonight (55 vs 37); the cleaner BA pair has matched
+  loads (20 vs 25), tonight with no compile overlap and morning with one, and
+  still lands at **-0.62%**, i.e. inside the order/load noise. Host/round fell
+  **1.00 -> 0.09-0.12 ms**, so the batched GPU-sampled exact path removed the
+  host bubble, but native transition/round dominates delivered throughput.
+  This agrees with the prior 40 s standing's -1.34% geomean.
+- **Read: GLM is +10%, with the clean BA pair at +11.5%.** BA has matched loads
+  (16.6/17.0 vs 15.5/15.7) and tonight with no compile overlap; gap p50 falls
+  **30.7-30.9 -> 27.7-27.8 ms**. The AB pair is cross-attempt (morning from
+  attempt 1, tonight from attempt 2 after the first tonight arm hit thermal 2)
+  and heavily load-confounded against tonight (43.5/48.2 vs 20.9/22.1), yet
+  still shows **+8.6%**, so AB is a lower bound rather than the primary
+  estimate. Treat BA as the clean GLM number.
+- **Coherence:** sampled delivered text from every accepted arm is normal
+  engineering prose (Rust review), not garbage: printable ratio
+  **0.996-0.999**, zero U+FFFD, no long token runs. V4.1 ran its default exact
+  sampler (fast sampler opt-in and off); GLM ran the default fast `top_k=0`
+  GPU sampler. The day's gumbel block-0 bug is not exercised here.
+- **Thermal/compile:** V4.1 accepted arms are thermal **0**, except AB tonight
+  at timing level 1; all but BA tonight had compiler overlap. GLM had thermal-2
+  aborts at AB attempt-1 tonight (warm-up cooling), AB redo morning (window)
+  and BA original tonight (drain immediately after the window); accepted GLM
+  arms are thermal 1, with the BA tonight retry timing-0. The M5 was shared and
+  not quieted: window loads ranged **15.5-56.6** and the host's 1-minute load
+  reached **62**, while external clang/rustc waves from another lane produced
+  the compile-overlap flags. Builds were outside the lease.
+- **Lease:** six acquisitions, every one waited **0 s**; holds were
+  **7.0-12.3 min**, all under the 15-minute cap; no packet was extended or
+  requeued.
+- Evidence: `~/qwen-runs/2026-11-10-serve-standing-b/` (`v41-ab`, `v41-ba`,
+  `glm-ab`, `glm-ba`, build logs, `builds.json`, `analysis.txt`,
+  `coherence.txt`, thermal/load logs; failed attempts preserved as
+  `glm-ab-failed1`, `glm-ab/morning-failed2`, `glm-ba/tonight-failed1`,
+  `glm-b`). Branch `bench/serve-standing-1110b`; no merge; M5 worktrees
+  removed.
+- **Next:** a load-matched GLM AB repeat would tighten the AB order; the BA
+  pair is already the clean GLM estimate. V4.1 needs no follow-up from this
+  measurement.
+
 ## 2026-11-10 - V4.1 Fast Gumbel Sampler Published Block 0 Only; Fixed And Opt-In
 
 - **Bug.** `kernel_token_gumbel_final` reduced the block winners into `tg`, then

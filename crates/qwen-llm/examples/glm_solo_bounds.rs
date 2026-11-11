@@ -105,6 +105,21 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if mode == "ship" {
+        s.restore_snapshot(&entry)?;
+        let mut sampler = greedy();
+        let started = Instant::now();
+        let stats = s.generate_gpu_tokens(&ctx, &head, &mut sampler, steps, &[], |_| true)?;
+        let wall = started.elapsed().as_secs_f64() * 1e3;
+        emit(json!({
+            "kind":"arm","group":"ship",
+            "ms_token":wall / (steps - 1) as f64,
+            "wall_ms":wall,"gpu_ms":stats.gpu_ms,"encode_ms":stats.encode_cpu_ms,
+            "wait_ms":stats.completion_wait_ms,"thermal":thermal()
+        }));
+        return Ok(());
+    }
+
     if mode == "research" {
         let mask = args
             .get(5)

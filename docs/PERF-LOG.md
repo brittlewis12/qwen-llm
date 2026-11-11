@@ -101,7 +101,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
 ## 2026-11-11 - GLM 48K Append Non-Inferiority: Half Is Not Worse Than Sequential
 
-- **Follow-up probe; no production change.** Four uncylced 48K+ source prompts:
+- **Follow-up probe; no production change.** Four uncycled 48K+ source prompts:
   a frozen multi-file Rust code corpus, Metal kernels, a Python profile script,
   and the prose PERF-LOG; 8/16/32/64 real next-token targets. Cohort and arm
   assembly: `docs/bench/2026-11-11-glm-append-noninferiority/manifest.json`.

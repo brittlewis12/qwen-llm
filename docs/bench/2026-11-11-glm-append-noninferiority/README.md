@@ -7,7 +7,7 @@ tokens.
 
 ## Cohort
 
-The 48K prompt source set is uncylced and comes from the repository/witness
+The 48K prompt source set is uncycled and comes from the repository/witness
 corpus:
 
 - `code.txt`: frozen three-agent code corpus with five Rust source markers;
@@ -81,7 +81,12 @@ The Python code prompt is the most positive packed-Half case at 64 rows
 (+0.00249), while the Rust corpus favors packed Half. This prompt spread is
 why the equal-prompt interval matters; the Rust outlier does not make the
 cohort-wide result a general answer-quality qualification. The prose control
-is one prompt, so it has per-prompt metrics but no document-level interval.
+is one prompt, so its per-prompt metrics have no document-level interval.
+For prose Half, `KL(sequential ‖ packed)` at widths 8/16/32/64 is
+0.001791/0.001104/0.006365/0.005708; top-1 agreement is
+100/100/93.75/93.75%. The code bootstrap has only three independent prompt
+clusters, so its intervals describe this small cohort and have limited
+population-level resolution.
 
 ## F32 alternatives and decision
 

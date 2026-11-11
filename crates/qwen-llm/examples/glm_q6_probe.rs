@@ -563,7 +563,7 @@ fn main() -> anyhow::Result<()> {
                     time(&ctx, reps, |enc, rep| {
                         let view =
                             w.view_bytes(rep * per_call_bytes, vec![case.k as u64, case.n as u64]);
-                        let name = format!("glm_q6_splitk_s{nsg}");
+                        let name = format!("kernel_glm_q6_splitk_s{nsg}");
                         splitk(&ctx, enc, &name, &view, &x, &y, case.k, case.n, nsg)
                     })?,
                     per_call_bytes,
@@ -577,7 +577,7 @@ fn main() -> anyhow::Result<()> {
                             vec![case.k as u64, case.n as u64],
                         );
                         let name = format!(
-                            "glm_q6_pair_splitk_s{nsg}_swiglu{}",
+                            "kernel_glm_q6_pair_splitk_s{nsg}_swiglu{}",
                             if swiglu { 1 } else { 0 }
                         );
                         pair_splitk(

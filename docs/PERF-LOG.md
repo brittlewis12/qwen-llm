@@ -29,6 +29,42 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   predicted under 500ms take the unsliced path.
 - Branch `perf/glm-layer-sliced-prefill`; evidence:
   `docs/bench/2026-11-11-glm-selective-layer-serve.md`.
+## 2026-11-11 - GLM Q6 Solo Band: Split-K Fusion Ships 0.51 ms At B=1
+
+- **Shipped default-on `QWEN_GLM53_Q6_SOLO`** (`=0` restores the incumbent)
+  on the serial B=1 GLM token loop. Branch `perf/glm-q6-solo`, base
+  `f03637fa2`, M5 Ultra, `--profile iter`, thermal 0 for every retained
+  packet. No merge.
+- **Per-shape census first.** `glm_solo_bounds ... gridholds` prices each Q6
+  class by kernel, grid and slot-1 weight bytes at 32K. Exposure (hold
+  saving): KDA qkv `_x3` **3.157** ms, KDA out **1.363**, shared gate+up
+  **1.175**, head 0.745, dense gate+up **0.609**, shared down 0.535, MLA q_a
+  0.263, MLA out 0.704, dense down 0.228. The sampled profile's 11.07 ms Q6
+  sum exceeds the 7.02 ms family hold by ~4 ms because short dependent
+  kernels inherit the previous dispatch's drain.
+- **Candidates priced isolated, then in the real schedule.**
+  `glm_q6_probe` (rotating set above the shared cache, one dispatch per
+  command): split-K 1.04-1.70x vs r1, pair-SwiGLU 1.47x vs the fused shared
+  kernel and 2.15x vs two r1 calls, KDA triple 1.69x vs r1. In-schedule only
+  the full set survives: the dense pair is 1.96x, but the split-K singles and
+  shared pair alone are neutral or worse. This is the overlap lesson again;
+  isolated wins are not additive.
+- **Whole-path B=1 ABBA, 32 steps/arm, six retained arms per config.** 32K
+  **17.0072 -> 16.5000 ms/token (0.5072 ms, 2.98%)**; 48K **17.1179 ->
+  16.6062 (0.5117 ms, 2.99%)**. Every candidate arm beat every control at
+  both depths. Mask prices at 32K, thermal 0: `1f` 0.4966, `3f` 0.5183,
+  `5f` 0.5148; the shipped set is `3f`.
+- **Exactness:** 32 teacher-forced full-vocabulary targets, same process.
+  Mean signed dNLL **-9.39e-9**, mean |dNLL| **1.19e-8**, max |dNLL| 1.11e-7,
+  mean KL **1.32e-11**, max KL 2.42e-10, argmax 32/32, finite 32/32. F32
+  reassociation only; non-inferior.
+- **Scope:** serial B=1 only. The packed batched path keeps its own Q6 tile
+  selection, so B=3 is unchanged. Product kernels are in
+  `kernels/mat_vec_q6_k_solo.metal`; the research mask and
+  `glm_solo_bounds {profile,gridholds,research,quality}` remain bench-only.
+  Full model, tables and negatives: `docs/bench/2026-11-11-glm-q6-solo.md`.
+- **Evidence:** `metagross:~/qwen-runs/2026-11-11-glm-q6/`. M5 worktree
+  removed after the run.
 
 ## 2026-11-11 - V4.1 Live-CED Threshold: The Lever Is Below The Dependency Halo
 

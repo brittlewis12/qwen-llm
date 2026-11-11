@@ -111,14 +111,14 @@ fn main() -> anyhow::Result<()> {
             .and_then(|v| u8::from_str_radix(v.trim_start_matches("0x"), 16).ok())
             .unwrap_or(0xC);
         // Compile both arms before the paired packet.
-        for arm in [mask, 0] {
+        for arm in [mask, 0x80] {
             s.restore_snapshot(&entry)?;
             let _override = diagnostic_q6_research(arm);
             s.generate_gpu_tokens(&ctx, &head, &mut greedy(), 2, &[], |_| true)?;
         }
         let reps: usize = args.get(6).and_then(|v| v.parse().ok()).unwrap_or(2);
         for rep in 0..reps {
-            for arm in [0u8, mask, mask, 0] {
+            for arm in [0x80u8, mask, mask, 0x80] {
                 s.restore_snapshot(&entry)?;
                 let _override = diagnostic_q6_research(arm);
                 let mut sampler = greedy();
@@ -128,7 +128,7 @@ fn main() -> anyhow::Result<()> {
                 let wall = started.elapsed().as_secs_f64() * 1e3;
                 emit(json!({
                     "kind":"arm","rep":rep,
-                    "group":if arm == 0 {"reference".to_string()} else {format!("research_{mask:x}")},
+                    "group":if arm == 0x80 {"reference".to_string()} else {format!("research_{mask:x}")},
                     "ms_token":wall / (steps - 1) as f64,
                     "wall_ms":wall,"gpu_ms":stats.gpu_ms,"encode_ms":stats.encode_cpu_ms,
                     "wait_ms":stats.completion_wait_ms,"thermal":thermal()
@@ -153,7 +153,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(logits)
         };
-        let reference = arm(0)?;
+        let reference = arm(0x80)?;
         let candidate = arm(mask)?;
         let logz = |v: &[f32]| {
             let max = v.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;

@@ -1,4 +1,6 @@
-// Bench-only Q6_K B=1 mappings for GLM's solo decode band. No runtime selector.
+// GLM Q6_K B=1 solo-decode mappings.
+//
+// Selected by the GLM packed/solo path behind QWEN_GLM53_Q6_SOLO.
 //
 // The incumbent `kernel_mat_vec_q6_K_f32_r1` gives one simdgroup a whole row.
 // Small or short-K rows then expose the reduction latency, and the row count
@@ -94,7 +96,7 @@ kernel void glm_q6_splitk(
 
 typedef decltype(glm_q6_splitk<2>) glm_q6_splitk_t;
 #define SPLITK(N) \
-    template [[host_name("glm_q6_splitk_s" #N)]] kernel glm_q6_splitk_t glm_q6_splitk<N>;
+    template [[host_name("kernel_glm_q6_splitk_s" #N)]] kernel glm_q6_splitk_t glm_q6_splitk<N>;
 SPLITK(2) SPLITK(4) SPLITK(8)
 
 // Two same-input rows per threadgroup, K split across simdgroups. `mode` 1
@@ -159,7 +161,7 @@ kernel void glm_q6_pair_splitk(
 
 typedef decltype(glm_q6_pair_splitk<2, 0>) glm_q6_pair_splitk_t;
 #define PAIR(N, S) \
-    template [[host_name("glm_q6_pair_splitk_s" #N "_swiglu" #S)]] kernel \
+    template [[host_name("kernel_glm_q6_pair_splitk_s" #N "_swiglu" #S)]] kernel \
         glm_q6_pair_splitk_t glm_q6_pair_splitk<N, S>;
 PAIR(2, 0) PAIR(4, 0) PAIR(8, 0)
 PAIR(2, 1) PAIR(4, 1) PAIR(8, 1)
@@ -232,6 +234,6 @@ kernel void glm_q6_triple_splitk(
 
 typedef decltype(glm_q6_triple_splitk<2>) glm_q6_triple_splitk_t;
 #define TRIPLE(N) \
-    template [[host_name("glm_q6_triple_splitk_s" #N)]] kernel \
+    template [[host_name("kernel_glm_q6_triple_splitk_s" #N)]] kernel \
         glm_q6_triple_splitk_t glm_q6_triple_splitk<N>;
 TRIPLE(2) TRIPLE(4) TRIPLE(8)

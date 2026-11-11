@@ -30,7 +30,7 @@
         "kernels/moe.metal",
         "kernels/mat_vec.metal"
       ],
-      "construction": "UTF-8 concatenation in listed order, separated by a newline and a // SOURCE marker; no cycling"
+      "construction": "docs/bench/2026-11-12-glm-append-noninferiority/assemble_metal.py; UTF-8 concatenation in listed order with // SOURCE markers; no cycling"
     },
     {
       "id": "python-dflash-profile",

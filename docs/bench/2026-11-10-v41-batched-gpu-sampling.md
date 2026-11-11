@@ -29,7 +29,8 @@ Branch `perf/v41-batch-loop`, built `--profile iter`. Raw runs:
 - **The exact GPU sampler does not win the released preset** (B=2 22.81,
   B=3 27.75, B=4 36.86 ms; -0.5 to -5%) even though it skips the readback:
   its ~0.74 ms/member cost replaces host sampling. It is a correctness arm,
-  not a throughput arm. Only the fast Gumbel sampler ships on the hot path.
+  not a throughput arm. The fast Gumbel sampler is the only device-sampling
+  throughput path; it is opt-in (see What ships).
 
 ## Native A/B method
 
@@ -53,10 +54,13 @@ Model depth 32768, 4096-token terminal window per sequence.
 | 3 | 27.62 | 25.43 | +8.58% | 27.75 | 0 | 25.83 | +5.03% |
 | 4 | 35.08 | 32.26 | +8.73% | 36.86 | 0 | 33.53 | +1.52% |
 
-`fast mismatches` is non-zero by design (53 / 79 / 104 of 64 / 96 / 128 token
-vectors): the fast sampler is distribution-exact, not token-identical, to the
-host at the same seed. Its correctness is pinned separately by the
-chi-square/determinism tests in `metal/token_feedback.rs`.
+`fast mismatches` (53 / 79 / 104 of 64 / 96 / 128 token vectors) were **not**
+valid alternative draws. The pre-fix `kernel_token_gumbel_final` published
+thread 0's two-block scan, so at the 129,280-token vocabulary the fast arm
+returned only block 0 winners (token ids 0-511). Those were block-0-only draws.
+The fixed sampler is distribution-exact, not token-identical, to the host at the
+same seed; correctness is pinned by the chi-square/determinism tests and the
+large-vocab late-block regression in `metal/token_feedback.rs`.
 
 ## What ships
 
@@ -67,14 +71,15 @@ chi-square/determinism tests in `metal/token_feedback.rs`.
 - `Sampler::gpu_seed`: peeks one whole draw for the fast path, sharing the
   RNG stream with `gpu_uniform`/`commit_gpu_draw`.
 - Serve: `QWEN_SERVE_V41_GPU_SAMPLE` (default on) routes batches of width >= 2
-  through the sampled step. Per member: fast when
-  `fast_sampler_allowed` (T>0, top_k=0, top_p=1, min_p=0) and the request
-  named no seed; otherwise the exact host sampler. Width 1 stays serial.
-  `Run.explicit_seed = request.seed.is_some()`, so the server's default seed
-  is not treated as explicit.
-- Rollbacks: `QWEN_SERVE_V41_GPU_SAMPLE=0` restores the host batch path;
-  `QWEN_FAST_SAMPLER=0` (or `QWEN_GPU_SAMPLER_EXACT=1`) forces exact sampling
-  for fast-eligible requests. The fast-sampler pipelines are warmed at start.
+  through the sampled step. Per member: fast when `fast_sampler_allowed`
+  (T>0, top_k=0, top_p=1, min_p=0), the request named no seed, and
+  `QWEN_FAST_SAMPLER=1` opted in; otherwise the exact host sampler. Width 1
+  stays serial. `Run.explicit_seed = request.seed.is_some()`, so the server's
+  default seed is not treated as explicit.
+- Rollbacks: `QWEN_SERVE_V41_GPU_SAMPLE=0` restores the host batch path. Fast
+  sampling is opt-in with `QWEN_FAST_SAMPLER=1`; unset is exact, and
+  `QWEN_GPU_SAMPLER_EXACT=1` forces exact even when opted in. The fast-sampler
+  pipelines are warmed at start.
 
 ## Serve A/B
 
@@ -89,7 +94,9 @@ follows; the original rows are kept only to explain the earlier record.
 `--context 196608`, `--max-thermal-pressure 1`. Plan
 `serve-pair/plan-v41-25s.json`. Corrected pair: `serve-seed-pair/pair`,
 `--flag QWEN_FAST_SAMPLER --reference 0 --candidate unset` (both arms keep the
-sampled step; reference forces Host mode).
+sampled step; reference forces Host mode). This pair predates the opt-in
+default, when unset meant fast; reproduce now with the reference unset and the
+candidate at `1`.
 
 | order | arm | tps | gap p50 s | transition ms/round | host ms/round | thermal |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |

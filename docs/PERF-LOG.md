@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-10 - V4.1 Fast Gumbel Sampler Published Block 0 Only; Fixed And Opt-In
+
+- **Bug.** `kernel_token_gumbel_final` reduced the block winners into `tg`, then
+  published thread 0's local `best`. Thread 0 scans only blocks 0 and 256
+  (stride 256), so at V4.1's 129,280-token vocabulary (253 blocks of 512) every
+  fast draw returned block 0's winner, token ids 0-511. The seed-intent fix made
+  unseeded V4.1 serve requests at batch width >= 2 actually take this path, so
+  their output was garbage.
+- **Fix.** Publish `tg[0]` with the Gumbel part of `4a2b98a05`
+  (`perf/glm-fast-nucleus`) and add a large-vocab regression with a dominant
+  token in a late block. The regression exercises blocks outside thread 0's two
+  scans and would fail while the kernel published its local accumulator.
+- **Opt-in.** The corrected serve A/B measured no wall gain for V4.1 (neutral
+  within +/-1.6%, see the entry below), so the fast sampler no longer ships
+  default-on. `QWEN_FAST_SAMPLER=1` opts in for unforced, seed-implicit requests;
+  the default and `QWEN_GPU_SAMPLER_EXACT=1` are exact.
+- **Correction.** The earlier "79/96 fast mismatches = valid different draws"
+  reading was wrong. Those were block-0-only draws from this bug, not samples
+  from the full-vocabulary Gumbel distribution. Pre-fix fast mismatches are not
+  evidence of distribution-exact sampling.
+
 ## 2026-11-10 - V4.1 Fast Sampler Was Never Reached In Serve; Fixed, Serve Is Neutral
 
 - **Bug.** `fill_sampling_defaults` inserts a fresh seed into every request, so

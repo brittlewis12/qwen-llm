@@ -95,27 +95,30 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             arm_summaries = {}
             for arm in ARMS:
                 selected = [by_key[(prompt, width, arm)] for prompt in members]
-                dnll = bootstrap([row["mean_dnll_vs_exact"] for row in selected])
+                dnll = bootstrap([row["mean_dnll_vs_reference"] for row in selected])
                 arm_summaries[arm] = {
-                    "dnll_vs_exact": dnll,
-                    "mean_kl_exact_to_arm": statistics.fmean(
-                        row["mean_kl_exact_to_arm"] for row in selected
+                    "dnll_vs_reference": dnll,
+                    "mean_kl_reference_to_arm": statistics.fmean(
+                        row["mean_kl_reference_to_arm"] for row in selected
                     ),
-                    "mean_kl_arm_to_exact": statistics.fmean(
-                        row["mean_kl_arm_to_exact"] for row in selected
+                    "mean_kl_arm_to_reference": statistics.fmean(
+                        row["mean_kl_arm_to_reference"] for row in selected
                     ),
                     "top1_rate": statistics.fmean(row["top1_rate"] for row in selected),
                     "per_prompt": {
                         row["prompt"]: {
-                            "mean_dnll_vs_exact": row["mean_dnll_vs_exact"],
+                            "mean_dnll_vs_reference": row["mean_dnll_vs_reference"],
+                            "reference_kind": row["reference_kind"],
                             "mean_dnll_vs_sequential_fast": row[
                                 "mean_dnll_vs_sequential_fast"
                             ],
-                            "mean_kl_exact_to_arm": row["mean_kl_exact_to_arm"],
+                            "mean_kl_reference_to_arm": row[
+                                "mean_kl_reference_to_arm"
+                            ],
                             "top1_rate": row["top1_rate"],
                             "route_set_changes": sum(
                                 layer["changed_rows"]
-                                for layer in row["router_set_changes_vs_exact"]
+                                for layer in row["router_set_changes_vs_reference"]
                             ),
                         }
                         for row in selected
@@ -130,9 +133,13 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             ]
             paired = bootstrap(deltas)
             threshold = 0.005 if stratum == "all" else 0.010
+            reference_kinds = sorted({row["reference_kind"] for row in rows if row["prompt"] in members})
+            exact_reference_available = reference_kinds == ["Exact"]
             out.append(
                 {
                     "stratum": stratum,
+                    "reference_kinds": reference_kinds,
+                    "exact_reference_available": exact_reference_available,
                     "width": width,
                     "prompts": members,
                     "noninferiority_limit_nats_per_token": threshold,
@@ -145,14 +152,14 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
                         paired["upper95"] <= threshold
                     ),
                     "packed_half_exact_95pct_upper_passes_policy_limit": (
-                        arm_summaries["packed_fast_half"]["dnll_vs_exact"]["upper95"]
-                        <= threshold
+                        arm_summaries["packed_fast_half"]["dnll_vs_reference"]["upper95"]
+                        <= threshold if exact_reference_available else None
                     ),
                 }
             )
     return {
         "schema": "glm53.append_noninferiority_summary.v1",
-        "estimand": "equal-prompt mean of per-prompt mean signed dNLL; positive is worse than Exact",
+        "estimand": "equal-prompt mean of per-prompt mean signed dNLL; positive is worse than the declared reference",
         "ci": "central 90% cluster bootstrap over prompts; one-sided 95% upper uses percentile 95",
         "quality_v1_limits_nats_per_token": {"overall": 0.005, "stratum": 0.010},
         "prompts": prompts,

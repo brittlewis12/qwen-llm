@@ -579,23 +579,24 @@ mod probe {
     fn quality_result(
         prompt: &str,
         stratum: &str,
+        reference_kind: &str,
         arm: &str,
         width: usize,
-        exact: &[Vec<f32>],
+        reference: &[Vec<f32>],
         sequential_fast: &[Vec<f32>],
         candidate: &[Vec<f32>],
         actual: &[u32],
-        exact_routes: &[Vec<(usize, Vec<i32>)>],
+        reference_routes: &[Vec<(usize, Vec<i32>)>],
         candidate_routes: &[Vec<(usize, Vec<i32>)>],
         wall_ms: Option<f64>,
     ) {
-        let exact = &exact[..width];
+        let reference = &reference[..width];
         let sequential_fast = &sequential_fast[..width];
         let candidate = &candidate[..width];
         let actual = &actual[..width];
-        let exact_m = position_metrics(exact, exact, actual);
-        let seq_m = position_metrics(exact, sequential_fast, actual);
-        let m = position_metrics(exact, candidate, actual);
+        let reference_m = position_metrics(reference, reference, actual);
+        let seq_m = position_metrics(reference, sequential_fast, actual);
+        let m = position_metrics(reference, candidate, actual);
         let seq_dnll: Vec<f64> = m
             .dnll
             .iter()
@@ -606,21 +607,22 @@ mod probe {
             "kind": "quality_result",
             "prompt": prompt,
             "stratum": stratum,
+            "reference_kind": reference_kind,
             "arm": arm,
             "width": width,
             "positions": width,
-            "mean_dnll_vs_exact": m.dnll.iter().sum::<f64>() / width as f64,
-            "dnll_vs_exact": m.dnll,
+            "mean_dnll_vs_reference": m.dnll.iter().sum::<f64>() / width as f64,
+            "dnll_vs_reference": m.dnll,
             "mean_dnll_vs_sequential_fast": seq_dnll.iter().sum::<f64>() / width as f64,
             "dnll_vs_sequential_fast": seq_dnll,
-            "mean_kl_exact_to_arm": m.kl_ref_path.iter().sum::<f64>() / width as f64,
-            "mean_kl_arm_to_exact": m.kl_path_ref.iter().sum::<f64>() / width as f64,
-            "max_kl_exact_to_arm": m.kl_ref_path.iter().copied().fold(0.0, f64::max),
+            "mean_kl_reference_to_arm": m.kl_ref_path.iter().sum::<f64>() / width as f64,
+            "mean_kl_arm_to_reference": m.kl_path_ref.iter().sum::<f64>() / width as f64,
+            "max_kl_reference_to_arm": m.kl_ref_path.iter().copied().fold(0.0, f64::max),
             "top1_agree": m.top1.iter().filter(|agree| **agree).count(),
             "top1_rate": m.top1.iter().filter(|agree| **agree).count() as f64 / width as f64,
-            "exact_repeat_mean_dnll": exact_m.dnll.iter().sum::<f64>() / width as f64,
-            "router_set_changes_vs_exact": route_set_deltas(
-                &exact_routes[..width],
+            "reference_repeat_mean_dnll": reference_m.dnll.iter().sum::<f64>() / width as f64,
+            "router_set_changes_vs_reference": route_set_deltas(
+                &reference_routes[..width],
                 &candidate_routes[..width],
             ),
             "wall_ms": wall_ms,
@@ -634,6 +636,7 @@ mod probe {
         path: &str,
         text: &str,
         depth: usize,
+        exact_reference: bool,
     ) -> anyhow::Result<()> {
         const MAX_ROWS: usize = 64;
         const WIDTHS: [usize; 4] = [8, 16, 32, 64];
@@ -675,30 +678,34 @@ mod probe {
             "pressure": pressure(),
         }));
 
-        let mut exact_session =
-            Glm5NextSession::with_prefill_rows(ctx, weights, CAPACITY, PREFILL_ROWS)?;
-        exact_session.set_packed_lineage(PackedLineage::Exact)?;
-        let started = Instant::now();
-        for part in ids[..depth].chunks(PREFILL_ROWS) {
-            gate();
-            exact_session.prefill_packed(ctx, part)?;
+        let mut exact_logits = Vec::new();
+        let mut exact_routes = Vec::new();
+        if exact_reference {
+            let mut exact_session =
+                Glm5NextSession::with_prefill_rows(ctx, weights, CAPACITY, PREFILL_ROWS)?;
+            exact_session.set_packed_lineage(PackedLineage::Exact)?;
+            let started = Instant::now();
+            for part in ids[..depth].chunks(PREFILL_ROWS) {
+                gate();
+                exact_session.prefill_packed(ctx, part)?;
+            }
+            let exact_prefix_ms = started.elapsed().as_secs_f64() * 1e3;
+            exact_logits.reserve(MAX_ROWS);
+            exact_routes.reserve(MAX_ROWS);
+            for &token in append {
+                gate();
+                exact_logits.push(exact_session.forward(ctx, token)?);
+                exact_routes.push(exact_session.perf_decode_route_ids()?);
+            }
+            drop(exact_session);
+            emit(json!({
+                "kind": "quality_prefix",
+                "prompt": path,
+                "lineage": "Exact",
+                "wall_ms": exact_prefix_ms,
+                "pressure": pressure(),
+            }));
         }
-        let exact_prefix_ms = started.elapsed().as_secs_f64() * 1e3;
-        let mut exact_logits = Vec::with_capacity(MAX_ROWS);
-        let mut exact_routes = Vec::with_capacity(MAX_ROWS);
-        for &token in append {
-            gate();
-            exact_logits.push(exact_session.forward(ctx, token)?);
-            exact_routes.push(exact_session.perf_decode_route_ids()?);
-        }
-        drop(exact_session);
-        emit(json!({
-            "kind": "quality_prefix",
-            "prompt": path,
-            "lineage": "Exact",
-            "wall_ms": exact_prefix_ms,
-            "pressure": pressure(),
-        }));
 
         let mut fast = Glm5NextSession::with_prefill_rows(ctx, weights, CAPACITY, PREFILL_ROWS)?;
         fast.set_packed_lineage(PackedLineage::Fast)?;
@@ -729,31 +736,40 @@ mod probe {
             "pressure": pressure(),
         }));
 
+        let (reference_kind, reference_logits, reference_routes) = if exact_reference {
+            ("Exact", &exact_logits, &exact_routes)
+        } else {
+            ("sequential_fast_half", &sequential_fast, &sequential_routes)
+        };
+
         for width in WIDTHS {
-            let exact_rows = &exact_logits[..width];
+            if exact_reference {
+                quality_result(
+                    path,
+                    stratum,
+                    "Exact",
+                    "Exact",
+                    width,
+                    reference_logits,
+                    &sequential_fast,
+                    &exact_logits,
+                    actual,
+                    reference_routes,
+                    reference_routes,
+                    None,
+                );
+            }
             quality_result(
                 path,
                 stratum,
-                "Exact",
-                width,
-                &exact_logits,
-                &sequential_fast,
-                exact_rows,
-                actual,
-                &exact_routes,
-                &exact_routes,
-                None,
-            );
-            quality_result(
-                path,
-                stratum,
+                reference_kind,
                 "sequential_fast_half",
                 width,
-                &exact_logits,
+                reference_logits,
                 &sequential_fast,
                 &sequential_fast,
                 actual,
-                &exact_routes,
+                reference_routes,
                 &sequential_routes,
                 None,
             );
@@ -785,13 +801,14 @@ mod probe {
                 quality_result(
                     path,
                     stratum,
+                    reference_kind,
                     arm,
                     width,
-                    &exact_logits,
+                    reference_logits,
                     &sequential_fast,
                     &path_logits,
                     actual,
-                    &exact_routes,
+                    reference_routes,
                     &routes,
                     Some(wall_ms),
                 );
@@ -808,12 +825,13 @@ mod probe {
         let args: Vec<String> = std::env::args().collect();
         let mode = args.get(1).map(String::as_str).unwrap_or_default();
         let layer_audit = matches!(mode, "--layers" | "--layers-f32");
-        let quality_cohort = mode == "--cohort";
+        let quality_cohort = matches!(mode, "--cohort" | "--cohort-fast");
+        let exact_reference = mode == "--cohort";
         let f32_suffix = mode == "--layers-f32";
         let base = if layer_audit || quality_cohort { 2 } else { 1 };
         anyhow::ensure!(
             args.len() >= base + 2,
-            "usage: glm_append_audit [--layers|--layers-f32|--cohort] <depth> <prompt> [prompt ...]"
+            "usage: glm_append_audit [--layers|--layers-f32|--cohort|--cohort-fast] <depth> <prompt> [prompt ...]"
         );
         let depth: usize = args[base].parse()?;
         let ctx = MetalContext::new()?;
@@ -828,6 +846,7 @@ mod probe {
             "widths": if quality_cohort { json!([8, 16, 32, 64]) } else { json!(WIDTHS) },
             "layer_audit": layer_audit,
             "quality_cohort": quality_cohort,
+            "exact_reference_requested": exact_reference,
             "prefix_precision": "Half",
             "packed_suffix_precision": if f32_suffix { "F32" } else { "Half" },
             "capacity": CAPACITY, "prefill_rows": PREFILL_ROWS,
@@ -836,7 +855,15 @@ mod probe {
         for path in &args[base + 1..] {
             let text = std::fs::read_to_string(path)?;
             if quality_cohort {
-                audit_quality_prompt(&ctx, &weights, &tokenizer, path, &text, depth)?;
+                audit_quality_prompt(
+                    &ctx,
+                    &weights,
+                    &tokenizer,
+                    path,
+                    &text,
+                    depth,
+                    exact_reference,
+                )?;
             } else {
                 audit_prompt(
                     &ctx,

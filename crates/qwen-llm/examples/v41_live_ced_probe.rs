@@ -100,10 +100,7 @@ mod probe {
     }
 
     fn max_abs(a: &[f32], b: &[f32]) -> f64 {
-        a.iter()
-            .zip(b)
-            .map(|(x, y)| (*x as f64 - *y as f64).abs())
-            .fold(0.0, f64::max)
+        qwen_llm::compare::report_max_abs_diff_f32(a, b) as f64
     }
 
     fn corpus(path: &str) -> Result<String> {

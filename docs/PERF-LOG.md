@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-11 - V4.1 Live-CED Threshold: The Lever Is Below The Dependency Halo
+
+- **Measurement and a decision; nothing shipped.** New
+  `v41_live_ced_probe` (`perf-ablations`) compares Full against live CED from a
+  fixed 48K snapshot for the real V4.1 append sizes. M5 Ultra, GSQ-RCO IQ2_XS
+  + IQ4_NL Engram, `--profile iter`, thermal 0-1, every lease hold under 10 min.
+- **The threshold is not the binding constraint.** A live CED episode needs
+  `ids.len() - matched >= 8192` at serve (`execution.rs:289-293`) and
+  `>= 4096` at the episode planner, but the native planner first refuses any
+  prefix whose decoder halo (`1 + 20*(128-1) = 2541` rows, `ced_plan.rs:168`)
+  reaches into committed state. Of 54 recorded V4.1 primary appends (15 / 427 /
+  934 / 20650 rows min/p50/mean/max), **53 are below 2541**. Only the 20650 call
+  is long enough, and it is already above 8192 and already yields.
+- **Candidates 2048/1024/512 are inert on that distribution.** The probe
+  declines CED for 405/1499/2260 at every slice width before mutation; a 4096
+  gate would only add the empty 4097..8191 band. There is nothing for a
+  three-agent A/B to compare, so none was run.
+- **Partition:** CED at Full's 4096 chunk width is **bitwise** (logits and
+  state) at 2600/3000/5000/8191/20650, and 1.4-1.9x faster than Full for the
+  large appends. Sub-4096 slicing is **not** bitwise: 2600 mean KL 5.8e-4,
+  dNLL +7.8e-3, state KL 2.8e-3; 20650 mean KL 1.2e-5, dNLL +2.6e-4, max |d|
+  2.2. It also does not bound the tail: the final slice still runs the whole
+  decoder reconstruction (1.2-3.7 s at 4096, 1.0-1.9 s at 512).
+- **Call:** keep the threshold and `QWEN_SERVE_V41_LIVE_CED` as they are. The
+  real lever for sub-4096 appends is splitting the Full forward at layer-scope
+  boundaries (same row partition) or overlapping the endpoint decoder
+  reconstruction, both engine work outside this turn. Note under
+  `docs/bench/2026-11-11-v41-live-ced-threshold.md`.
+- Raw: `metagross:~/qwen-runs/2026-11-11-v41-live-ced/`. Branch
+  `perf/v41-live-ced-threshold`; not merged; local and M5 worktrees removed.
+
 ## 2026-11-11 - Serve Chunk Gate: The Append Floor Is Per Forward
 
 - **Probes and a decision; no production scheduling change.** New

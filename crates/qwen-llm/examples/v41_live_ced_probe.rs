@@ -13,8 +13,8 @@
 //! corpus continuation). One common post-append decode step compares state.
 //!
 //! No production change. Usage:
-//! `v41_live_ced_probe <model.gguf> <corpus> <depth> [--widths 4096,1024,512]
-//!  [--sizes 405,1499,2260,3000,5000,8191,20650]`
+//! `v41_live_ced_probe <model.gguf> <corpus> <depth> [--widths 4096,2048,1024,512]
+//!  [--sizes 405,1499,2260,2600,3000,5000,8191,20650] [--no-state]`
 
 #[cfg(not(feature = "perf-ablations"))]
 fn main() {
@@ -144,7 +144,6 @@ mod probe {
         wall_ms: f64,
         slices: Vec<(usize, f64)>,
         logits: Vec<f32>,
-        max_rows: usize,
     }
 
     fn ced_append(
@@ -161,7 +160,6 @@ mod probe {
                 wall_ms: 0.0,
                 slices: Vec::new(),
                 logits: Vec::new(),
-                max_rows,
             });
         }
         let start = Instant::now();
@@ -180,7 +178,6 @@ mod probe {
             wall_ms: start.elapsed().as_secs_f64() * 1e3,
             slices,
             logits,
-            max_rows,
         })
     }
 
@@ -194,7 +191,7 @@ mod probe {
         let model = &args[1];
         let corpus_path = &args[2];
         let depth: usize = args[3].parse()?;
-        let mut widths = vec![2048usize, 1024, 512];
+        let mut widths = vec![4096usize, 2048, 1024, 512];
         let mut sizes = vec![405usize, 1499, 2260, 2600, 3000, 5000, 8191, 20650];
         let mut check_state = true;
         let mut i = 4;

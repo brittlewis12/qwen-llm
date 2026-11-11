@@ -1690,7 +1690,7 @@ impl Glm5NextSession<'_> {
             if batch_index {
                 let sp = p.sparse.as_ref().expect("preflighted sparse scratch");
                 seq.stage(enc, Glm5NextStage::MlaIndexer, Some(block))?;
-                matvec(
+                matvec_incumbent(
                     ctx,
                     enc,
                     &mla.indexer.head_weights,
@@ -1701,7 +1701,7 @@ impl Glm5NextSession<'_> {
                 )?;
             } else {
                 seq.stage(enc, Glm5NextStage::MlaIndexer, Some(block))?;
-                matvec(
+                matvec_incumbent(
                     ctx,
                     enc,
                     &mla.indexer.key,
@@ -1710,7 +1710,7 @@ impl Glm5NextSession<'_> {
                     h,
                     index_dim,
                 )?;
-                matvec(
+                matvec_incumbent(
                     ctx,
                     enc,
                     &mla.indexer.pool_gate,

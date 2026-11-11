@@ -5065,7 +5065,7 @@ fn glm_q6_solo_args(
     Ok(())
 }
 
-/// Bench-only GLM Q6 split-K GEMV: one threadgroup per output row, K split
+/// GLM solo-decode Q6 split-K GEMV: one threadgroup per output row, K split
 /// across `nsg` simdgroups. Fast-lineage only (different summation order).
 pub fn encode_glm_q6_splitk_f32(
     ctx: &MetalContext,
@@ -5114,8 +5114,8 @@ pub fn encode_glm_q6_splitk_f32(
     Ok(())
 }
 
-/// Bench-only fused same-input Q6 gate/up with clamped SwiGLU: one threadgroup
-/// per output row, K split across `nsg` simdgroups.
+/// GLM solo-decode fused same-input Q6 gate/up with clamped SwiGLU: one
+/// threadgroup per output row, K split across `nsg` simdgroups.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_glm_q6_pair_swiglu_splitk_f32(
     ctx: &MetalContext,
@@ -5172,8 +5172,8 @@ pub fn encode_glm_q6_pair_swiglu_splitk_f32(
     Ok(())
 }
 
-/// Bench-only fused same-input Q6 triple GEMV (GLM KDA q/k/v): one threadgroup
-/// per output row, K split across `nsg` simdgroups.
+/// GLM solo-decode fused same-input Q6 triple GEMV (KDA q/k/v): one
+/// threadgroup per output row, K split across `nsg` simdgroups.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_glm_q6_triple_splitk_f32(
     ctx: &MetalContext,

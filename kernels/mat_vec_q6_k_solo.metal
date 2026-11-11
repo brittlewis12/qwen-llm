@@ -1,6 +1,7 @@
 // GLM Q6_K B=1 solo-decode mappings.
 //
-// Selected by the GLM packed/solo path behind QWEN_GLM53_Q6_SOLO.
+// Selected by the GLM serial B=1 token path behind QWEN_GLM53_Q6_SOLO.
+// Packed prefill and the independent B>1 batch keep their own projections.
 //
 // The incumbent `kernel_mat_vec_q6_K_f32_r1` gives one simdgroup a whole row.
 // Small or short-K rows then expose the reduction latency, and the row count

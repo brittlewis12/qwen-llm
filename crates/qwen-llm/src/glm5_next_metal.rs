@@ -2711,7 +2711,7 @@ fn low_rank_expand(
     for row in 0..rows {
         let xr = x.view_subrange((row * n_in) as u64, vec![n_in as u64]);
         let yr = y.view_subrange((row * n_out) as u64, vec![n_out as u64]);
-        matvec(ctx, enc, weight, &xr, &yr, n_in, n_out)?;
+        matvec_incumbent(ctx, enc, weight, &xr, &yr, n_in, n_out)?;
     }
     Ok(())
 }
@@ -2831,6 +2831,22 @@ fn matvec(
         crate::metal::encode_glm_q6_splitk_f32(ctx, enc, weight, x, y, n_in, n_out, 4)?;
         return Ok(());
     }
+    crate::metal_forward::encode_mat_vec_dispatch(ctx, enc, weight, x, y, n_in, n_out)?;
+    Ok(())
+}
+
+/// The incumbent mat-vec for callers outside the serial B=1 token path
+/// (packed prefill and the independent B>1 batch). Keeps the
+/// `QWEN_GLM53_Q6_SOLO` mappings scoped to [`matvec`].
+fn matvec_incumbent(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<()> {
     crate::metal_forward::encode_mat_vec_dispatch(ctx, enc, weight, x, y, n_in, n_out)?;
     Ok(())
 }

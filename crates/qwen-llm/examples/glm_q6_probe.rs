@@ -95,6 +95,13 @@ enum Kind {
     Needle,
     X3,
     SharedSwiglu,
+    SplitK {
+        nsg: usize,
+    },
+    PairSplitK {
+        nsg: usize,
+        swiglu: bool,
+    },
     Research {
         name: &'static str,
         out: usize,
@@ -157,6 +164,103 @@ fn research(
         },
         objc2_metal::MTLSize {
             width: (nsg * 32) as usize,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+fn splitk(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    name: &str,
+    w: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    k: usize,
+    n: usize,
+    nsg: usize,
+) -> anyhow::Result<()> {
+    let pso = ctx.pipeline(name)?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        clamp: f32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: k as u32,
+            n_out: n as u32,
+            clamp: 10.0,
+        },
+    );
+    enc.set_tensor(1, w);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.dispatch(
+        objc2_metal::MTLSize {
+            width: n,
+            height: 1,
+            depth: 1,
+        },
+        objc2_metal::MTLSize {
+            width: nsg * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pair_splitk(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    name: &str,
+    gate: &MetalTensor,
+    up: &MetalTensor,
+    x: &MetalTensor,
+    yg: &MetalTensor,
+    yu: &MetalTensor,
+    k: usize,
+    n: usize,
+    nsg: usize,
+) -> anyhow::Result<()> {
+    let pso = ctx.pipeline(name)?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        clamp: f32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: k as u32,
+            n_out: n as u32,
+            clamp: 10.0,
+        },
+    );
+    enc.set_tensor(1, gate);
+    enc.set_tensor(2, up);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, yg);
+    enc.set_tensor(5, yu);
+    enc.dispatch(
+        objc2_metal::MTLSize {
+            width: n,
+            height: 1,
+            depth: 1,
+        },
+        objc2_metal::MTLSize {
+            width: nsg * 32,
             height: 1,
             depth: 1,
         },
@@ -327,6 +431,9 @@ fn main() -> anyhow::Result<()> {
                 nsg: 4,
             },
         ),
+        ("splitk_s2", Kind::SplitK { nsg: 2 }),
+        ("splitk_s4", Kind::SplitK { nsg: 4 }),
+        ("splitk_s8", Kind::SplitK { nsg: 8 }),
     ];
 
     for case in cases {
@@ -366,6 +473,36 @@ fn main() -> anyhow::Result<()> {
         }
         if case.label.starts_with("shared gate+up") {
             variants.push(("shared_swiglu_fused", Kind::SharedSwiglu));
+        }
+        if case.label.starts_with("shared gate+up") || case.label.starts_with("dense gate+up") {
+            variants.push((
+                "pair_splitk_s4",
+                Kind::PairSplitK {
+                    nsg: 4,
+                    swiglu: false,
+                },
+            ));
+            variants.push((
+                "pair_swiglu_s2",
+                Kind::PairSplitK {
+                    nsg: 2,
+                    swiglu: true,
+                },
+            ));
+            variants.push((
+                "pair_swiglu_s4",
+                Kind::PairSplitK {
+                    nsg: 4,
+                    swiglu: true,
+                },
+            ));
+            variants.push((
+                "pair_swiglu_s8",
+                Kind::PairSplitK {
+                    nsg: 8,
+                    swiglu: true,
+                },
+            ));
         }
         let mut base_ms = 0.0;
         for (name, kind) in variants {
@@ -419,6 +556,33 @@ fn main() -> anyhow::Result<()> {
                             &ctx, enc, &gate, &up, &x, &y_swiglu, case.k, case.n, 10.0,
                         )?;
                         Ok(())
+                    })?,
+                    2 * per_call_bytes,
+                ),
+                Kind::SplitK { nsg } => (
+                    time(&ctx, reps, |enc, rep| {
+                        let view =
+                            w.view_bytes(rep * per_call_bytes, vec![case.k as u64, case.n as u64]);
+                        let name = format!("glm_q6_splitk_s{nsg}");
+                        splitk(&ctx, enc, &name, &view, &x, &y, case.k, case.n, nsg)
+                    })?,
+                    per_call_bytes,
+                ),
+                Kind::PairSplitK { nsg, swiglu } => (
+                    time(&ctx, reps, |enc, rep| {
+                        let gate =
+                            w.view_bytes(rep * per_call_bytes, vec![case.k as u64, case.n as u64]);
+                        let up = w.view_bytes(
+                            ((rep + 1) % reps) * per_call_bytes,
+                            vec![case.k as u64, case.n as u64],
+                        );
+                        let name = format!(
+                            "glm_q6_pair_splitk_s{nsg}_swiglu{}",
+                            if swiglu { 1 } else { 0 }
+                        );
+                        pair_splitk(
+                            &ctx, enc, &name, &gate, &up, &x, &y, &y2, case.k, case.n, nsg,
+                        )
                     })?,
                     2 * per_call_bytes,
                 ),

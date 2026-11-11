@@ -78,10 +78,11 @@ const COLD_CED_ENV: &str = "QWEN_SERVE_V41_COLD_CED";
 /// Read once when preparing the server.
 const LIVE_CED_ENV: &str = "QWEN_SERVE_V41_LIVE_CED";
 /// Sample batched decode members on the device: fast Gumbel-max when the
-/// request leaves its seed implicit, host sampling otherwise. Skips the logit
-/// readback for fast members. Default on; 0 restores the host sampling path.
-/// `QWEN_FAST_SAMPLER=0` alone only forces the exact sampler. Read once when
-/// preparing the server.
+/// request leaves its seed implicit and the operator opts in with
+/// `QWEN_FAST_SAMPLER=1`, host sampling otherwise. Skips the logit readback for
+/// fast members. Default on; 0 restores the host sampling path. Fast sampling
+/// is opt-in; `QWEN_GPU_SAMPLER_EXACT=1` keeps the exact sampler even when
+/// opted in. Read once when preparing the server.
 const GPU_SAMPLE_ENV: &str = "QWEN_SERVE_V41_GPU_SAMPLE";
 
 /// Keep up to four conversations in flight. Cohort throughput depends on

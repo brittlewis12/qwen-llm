@@ -809,7 +809,7 @@ impl AsyncTokenReadback {
 ///
 /// This is **not** token-identical with [`GpuTokenSampler`] or the host sampler
 /// at the same seed; it is statistically exact from `softmax(logits / T)`. The
-/// exact path stays available through [`fast_sampler_allowed`]'s callers.
+/// exact path remains the default; [`fast_sampler_allowed`] gates this path.
 pub struct FastGpuSampler {
     vocab: usize,
     members: usize,
@@ -941,21 +941,53 @@ impl FastGpuSampler {
     }
 }
 
-/// Whether the fast Gumbel sampler may serve this request. Only the unforced
-/// agent preset qualifies (`T>0`, `top_k=0`, `top_p=1`, `min_p=0`) and only when
-/// the request carries **no explicit seed**; an explicit seed, `QWEN_FAST_SAMPLER=0`
-/// or `QWEN_GPU_SAMPLER_EXACT=1` keeps the exact sampler. The serve default seed
-/// (42) must not be confused with an explicit one; callers pass `explicit_seed`
-/// from the request's parse-time `seed_explicit` intent.
-pub fn fast_sampler_allowed(config: &SamplingConfig, explicit_seed: bool) -> bool {
+crate::env_flag!(
+    /// Opt in to the fast Gumbel-max sampler for unforced, seed-implicit requests. Unset or any non-truthy value keeps the exact sampler, which is the default.
+    default_off fast_sampler_opted_in,
+    "QWEN_FAST_SAMPLER"
+);
+
+crate::env_flag!(
+    /// Force the exact sampler even when `QWEN_FAST_SAMPLER` opts in.
+    default_off exact_sampler_forced,
+    "QWEN_GPU_SAMPLER_EXACT"
+);
+
+/// Whether the request's sampling shape and seed intent qualify for the fast
+/// Gumbel sampler: only the unforced agent preset (`T>0`, `top_k=0`, `top_p=1`,
+/// `min_p=0`) with **no explicit seed**. The serve default seed (42) must not be
+/// confused with an explicit one; callers pass `explicit_seed` from the
+/// request's parse-time `seed_explicit` intent. This does not consult the
+/// process-wide opt-in; see [`fast_sampler_allowed`].
+pub fn fast_sampler_eligible(config: &SamplingConfig, explicit_seed: bool) -> bool {
     config.temperature > 0.0
         && config.temperature.is_finite()
         && config.top_k == 0
         && config.top_p >= 1.0
         && config.min_p == 0.0
         && !explicit_seed
-        && std::env::var("QWEN_FAST_SAMPLER").as_deref() != Ok("0")
-        && std::env::var("QWEN_GPU_SAMPLER_EXACT").as_deref() != Ok("1")
+}
+
+fn fast_sampler_allowed_with(
+    config: &SamplingConfig,
+    explicit_seed: bool,
+    opted_in: bool,
+    exact_forced: bool,
+) -> bool {
+    fast_sampler_eligible(config, explicit_seed) && opted_in && !exact_forced
+}
+
+/// Whether the fast Gumbel sampler may serve this request. The sampling shape
+/// and seed intent must qualify (see [`fast_sampler_eligible`]) and the operator
+/// must opt in with `QWEN_FAST_SAMPLER=1`; the default is exact.
+/// `QWEN_GPU_SAMPLER_EXACT=1` keeps the exact sampler even when opted in.
+pub fn fast_sampler_allowed(config: &SamplingConfig, explicit_seed: bool) -> bool {
+    fast_sampler_allowed_with(
+        config,
+        explicit_seed,
+        fast_sampler_opted_in(),
+        exact_sampler_forced(),
+    )
 }
 
 #[cfg(test)]
@@ -1074,8 +1106,28 @@ mod fast_sampler_tests {
         assert!(a.iter().all(|&t| (0..vocab as i32).contains(&t)));
     }
 
+    /// The final reduction must see winners from every block, not only the two
+    /// thread 0 scans. A dominant token in a late block exposes the difference.
     #[test]
-    fn fast_sampler_policy_is_unforced_and_filter_free_only() {
+    fn fast_sampler_large_vocab_reaches_late_blocks() {
+        let Some(ctx) = context() else {
+            return;
+        };
+        let vocab = 129_280usize;
+        let winner = 100_000usize;
+        assert_ne!(winner / 512, 0);
+        assert_ne!(winner / 512, 256);
+        let mut logits = vec![-50.0f32; vocab];
+        logits[winner] = 50.0;
+        let row = repeat_row(&logits, 4);
+        let draws = draw(&ctx, &row, vocab, 4, 7, 1.0);
+        for (member, &t) in draws.iter().enumerate() {
+            assert_eq!(t, winner as i32, "member {member}");
+        }
+    }
+
+    #[test]
+    fn fast_sampler_policy_is_opt_in_and_filter_free_only() {
         let base = SamplingConfig {
             temperature: 1.0,
             top_k: 0,
@@ -1083,19 +1135,44 @@ mod fast_sampler_tests {
             min_p: 0.0,
             seed: 42,
         };
-        assert!(fast_sampler_allowed(&base, false));
         assert!(
-            !fast_sampler_allowed(&base, true),
+            !fast_sampler_allowed_with(&base, false, false, false),
+            "the fast sampler is opt-in; the default is exact"
+        );
+        assert!(fast_sampler_allowed_with(&base, false, true, false));
+        assert!(
+            !fast_sampler_allowed_with(&base, false, true, true),
+            "QWEN_GPU_SAMPLER_EXACT=1 wins over the opt-in"
+        );
+        assert!(fast_sampler_eligible(&base, false));
+        assert!(
+            !fast_sampler_eligible(&base, true),
             "explicit seed forces exact"
         );
         let mut filtered = base;
         filtered.top_p = 0.95;
-        assert!(!fast_sampler_allowed(&filtered, false));
+        assert!(!fast_sampler_allowed_with(&filtered, false, true, false));
         filtered = base;
         filtered.top_k = 200;
-        assert!(!fast_sampler_allowed(&filtered, false));
+        assert!(!fast_sampler_allowed_with(&filtered, false, true, false));
         filtered = base;
         filtered.temperature = 0.0;
-        assert!(!fast_sampler_allowed(&filtered, false));
+        assert!(!fast_sampler_allowed_with(&filtered, false, true, false));
+    }
+
+    #[test]
+    fn fast_sampler_defaults_to_exact_without_opt_in() {
+        if std::env::var_os("QWEN_FAST_SAMPLER").is_none()
+            && std::env::var_os("QWEN_GPU_SAMPLER_EXACT").is_none()
+        {
+            let base = SamplingConfig {
+                temperature: 1.0,
+                top_k: 0,
+                top_p: 1.0,
+                min_p: 0.0,
+                seed: 42,
+            };
+            assert!(!fast_sampler_allowed(&base, false));
+        }
     }
 }

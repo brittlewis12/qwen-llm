@@ -382,5 +382,5 @@ kernel void kernel_token_gumbel_final(
         if (tid < s) tg[tid] = token_pair_winner(tg[tid], tg[tid + s]);
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    if (tid == 0) token[member] = best.id == UINT_MAX ? INT_MIN : int(best.id);
+    if (tid == 0) token[member] = tg[0].id == UINT_MAX ? INT_MIN : int(tg[0].id);
 }

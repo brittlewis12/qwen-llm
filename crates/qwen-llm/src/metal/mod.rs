@@ -294,7 +294,7 @@ pub use qos::GpuThreadQos;
 mod token_feedback;
 pub use token_feedback::{
     AsyncTokenReadback, FastGpuSampler, GPU_SAMPLER_ALGORITHM_VERSION, GpuTokenSampler,
-    fast_sampler_allowed,
+    fast_sampler_allowed, fast_sampler_eligible,
 };
 #[cfg(feature = "perf-ablations")]
 mod timeline;

@@ -565,8 +565,19 @@ mod tests {
             "a fresh draw is not explicit intent"
         );
         assert!(
+            qwen_llm::metal::fast_sampler_eligible(&config(&implicit), implicit.seed_explicit),
+            "an unseeded V4.1 request is fast-eligible"
+        );
+        let opted_in = std::env::var("QWEN_FAST_SAMPLER")
+            .as_deref()
+            .is_ok_and(qwen_llm::env_flag::env_value_truthy)
+            && !std::env::var("QWEN_GPU_SAMPLER_EXACT")
+                .as_deref()
+                .is_ok_and(qwen_llm::env_flag::env_value_truthy);
+        assert_eq!(
             qwen_llm::metal::fast_sampler_allowed(&config(&implicit), implicit.seed_explicit),
-            "an unseeded V4.1 request takes the fast path"
+            opted_in,
+            "fast sampling is opt-in; the default is exact"
         );
 
         let mut explicit = profile
@@ -576,6 +587,10 @@ mod tests {
         profile.normalize(&mut explicit).unwrap();
         assert_eq!(explicit.seed, Some(7));
         assert!(explicit.seed_explicit);
+        assert!(
+            !qwen_llm::metal::fast_sampler_eligible(&config(&explicit), explicit.seed_explicit),
+            "a seeded V4.1 request is never fast-eligible"
+        );
         assert!(
             !qwen_llm::metal::fast_sampler_allowed(&config(&explicit), explicit.seed_explicit),
             "a seeded V4.1 request stays exact"

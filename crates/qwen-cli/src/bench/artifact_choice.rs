@@ -237,7 +237,7 @@ fn score_v41(
     capacity: usize,
 ) -> Result<Value> {
     let execution = crate::family_options::v41_prefill_execution_from_env()?;
-    let cold = v41_weights::plan_cold_prefill_with_target(
+    let cold = qwen_llm::deepseek_v41::forward::plan_cold_prefill_with_target(
         ctx,
         gguf,
         depth,
@@ -260,6 +260,7 @@ fn score_v41(
         weights.raw_pad,
         &cold,
     )
+    .map_err(anyhow::Error::msg)
     .context("bind V4.1 forward")?;
     let request_plan = forward
         .plan_request_from_cold(&cold)
@@ -279,6 +280,7 @@ fn score_v41(
         let prefill_start = Instant::now();
         let (mut logits, prefill_report) = forward
             .prefill_with_execution(&mut state, &token_ids[..depth], None, execution)
+            .map_err(anyhow::Error::msg)
             .context("V4.1 quality prefix prefill")?;
         prompt_seconds.push(prefill_start.elapsed().as_secs_f64());
         let (observations, decode_seconds_one) = score_targets_v41(
@@ -322,6 +324,7 @@ fn score_targets_v41(
         if position + 1 < depth + targets {
             *logits = forward
                 .step(state, token_ids[position], None)
+                .map_err(anyhow::Error::msg)
                 .context("V4.1 teacher-forced decode")?;
         }
     }
@@ -482,7 +485,7 @@ fn fit_v41(
     capacity: usize,
 ) -> Result<(usize, Value, Value, Value)> {
     let execution = crate::family_options::v41_prefill_execution_from_env()?;
-    let cold = v41_weights::plan_cold_prefill_with_target(
+    let cold = qwen_llm::deepseek_v41::forward::plan_cold_prefill_with_target(
         ctx,
         gguf,
         capacity,
@@ -505,6 +508,7 @@ fn fit_v41(
         weights.raw_pad,
         &cold,
     )
+    .map_err(anyhow::Error::msg)
     .context("bind V4.1 fit forward")?;
     let mut states = Vec::with_capacity(3);
     let mut per_agent_plan = Value::Null;

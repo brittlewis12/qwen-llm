@@ -54,7 +54,7 @@ pub(crate) enum Cmd {
     /// Report model-agnostic retained-GGUF geometry and byte coverage without loading weights.
     GgufStoragePlan(GgufStoragePlanArgs),
     /// Compare artifact tokenizer identity, teacher-forced scores, and multi-agent fit.
-    ArtifactChoice(super::artifact_choice::ArtifactChoiceArgs),
+    ArtifactChoice(ArtifactChoiceArgs),
     /// Decode N tokens after a prompt using the plain no-spec path.
     ///
     /// Packed prefill is the default no-spec path. `--sequential-prefill`

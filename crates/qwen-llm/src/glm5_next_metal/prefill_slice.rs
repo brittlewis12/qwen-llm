@@ -2,6 +2,21 @@
 //! geometry; observed slow slices reduce subsequent quanta without changing
 //! any row, kernel or arithmetic choice.
 
+/// Warm M5 Fast/Half wall-time seed for one original packed row forward at
+/// roughly 48K depth. This prices the measured row regimes, not a hard bound;
+/// it excludes idle residency, sampling and interleaved peer service.
+pub fn predicted_prefill_ms(rows: usize) -> f64 {
+    // Measured row regimes, including the ragged 513..1023 attention cliff.
+    match rows {
+        0 => 0.0,
+        1..=8 => 20.0 + 14.0 * rows.saturating_sub(1) as f64,
+        9..=112 => 212.0 + 3.0 * rows as f64,
+        113..=512 => 224.0 + 0.97 * rows as f64,
+        513..=1023 => 362.0 + 1.68 * rows as f64,
+        _ => 204.0 + 0.90 * rows as f64,
+    }
+}
+
 pub(super) struct Cursor {
     pub tokens: Vec<u32>,
     pub plan: LayerPlan,
@@ -16,14 +31,7 @@ pub(super) struct LayerPlan {
 }
 impl LayerPlan {
     pub fn new(layers: usize, rows: usize, target_ms: f64) -> Self {
-        // Measured row regimes, including the ragged 513..1023 attention cliff.
-        let total = match rows {
-            0..=8 => 20.0 + 14.0 * rows.saturating_sub(1) as f64,
-            9..=112 => 212.0 + 3.0 * rows as f64,
-            113..=512 => 224.0 + 0.97 * rows as f64,
-            513..=1023 => 362.0 + 1.68 * rows as f64,
-            _ => 204.0 + 0.90 * rows as f64,
-        };
+        let total = predicted_prefill_ms(rows);
         let wanted = ((total / target_ms).ceil() as usize).clamp(1, layers);
         let slices = wanted.next_power_of_two().min(layers);
         Self {
@@ -87,6 +95,20 @@ mod tests {
                 plan.complete(end, 100.0);
             }
             assert_eq!(seen, (0..45).collect::<Vec<_>>());
+        }
+    }
+    #[test]
+    fn two_hundred_ms_target_keeps_large_append_row_geometry() {
+        for (rows, slices) in [(342, 4), (951, 16), (1509, 8)] {
+            let mut p = LayerPlan::new(45, rows, 200.0);
+            assert_eq!(p.slices, slices);
+            let mut layers = Vec::new();
+            while !p.finished() {
+                let end = p.end(true);
+                layers.extend(p.next()..end);
+                p.complete(end, 200.0);
+            }
+            assert_eq!(layers, (0..45).collect::<Vec<_>>());
         }
     }
     #[test]

@@ -18,10 +18,13 @@ const LIVE_STATES: &str = "QWEN_SERVE_GLM_LIVE_STATES";
 const PREFILL_FAIR: &str = "QWEN_SERVE_GLM_PREFILL_FAIR";
 /// Target decode service percentage under mixed load when layer slicing is disabled (1..=90, default 10).
 const DECODE_PERCENT: &str = "QWEN_SERVE_GLM_DECODE_PERCENT";
-/// Nominal GPU milliseconds per row-preserving layer slice under mixed load (default 0; 100 opts in). Zero restores whole-row chunks and the original decode-percentage policy.
+/// Nominal GPU milliseconds per row-preserving layer slice under mixed load (default 0; 200 opts into selective slicing). Zero restores whole-row chunks and the original decode-percentage policy.
 const LAYER_SLICE_MS: &str = "QWEN_SERVE_GLM_LAYER_SLICE_MS";
 // Keep opt-in: the served reverse pair improved maximum gap but regressed global p99.
 const DEFAULT_LAYER_SLICE_MS: usize = 0;
+/// Slice only appends whose predicted original prefill wall exceeds this many milliseconds (default 500). Zero restores the all-append slicing policy; LAYER_SLICE_MS=0 still disables slicing entirely.
+const LAYER_SLICE_MIN_MS: &str = "QWEN_SERVE_GLM_LAYER_SLICE_MIN_MS";
+const DEFAULT_LAYER_SLICE_MIN_MS: usize = 500;
 /// Persistent threads that sample a multi-member step beside the owner; 0
 /// samples serially on the owner (rollback). Default: max_active - 1.
 const SAMPLE_WORKERS: &str = "QWEN_SERVE_GLM_SAMPLE_WORKERS";
@@ -37,6 +40,7 @@ pub(super) struct Config {
     pub fair: bool,
     pub decode_percent: usize,
     pub layer_slice_ms: usize,
+    pub layer_slice_min_ms: usize,
     pub sample_workers: usize,
 }
 fn parse(key: &str, value: Option<&str>) -> Result<usize> {
@@ -72,6 +76,16 @@ fn parse_slice_ms(value: Option<&str>) -> Result<usize> {
     );
     Ok(ms)
 }
+fn parse_slice_min_ms(value: Option<&str>) -> Result<usize> {
+    let ms = value
+        .map_or(Ok(DEFAULT_LAYER_SLICE_MIN_MS), str::parse::<usize>)
+        .context("QWEN_SERVE_GLM_LAYER_SLICE_MIN_MS must be 0..=1000000")?;
+    anyhow::ensure!(
+        ms <= 1_000_000,
+        "QWEN_SERVE_GLM_LAYER_SLICE_MIN_MS must be 0..=1000000"
+    );
+    Ok(ms)
+}
 fn parse_workers(key: &str, value: Option<&str>) -> Result<usize> {
     let n = match value {
         None => return Ok(usize::MAX), // resolved to max_active - 1 by the caller
@@ -88,6 +102,9 @@ impl Config {
             fair: qwen_llm::env_flag::read_default_on(PREFILL_FAIR),
             decode_percent: parse_percent(std::env::var(DECODE_PERCENT).ok().as_deref())?,
             layer_slice_ms: parse_slice_ms(std::env::var(LAYER_SLICE_MS).ok().as_deref())?,
+            layer_slice_min_ms: parse_slice_min_ms(
+                std::env::var(LAYER_SLICE_MIN_MS).ok().as_deref(),
+            )?,
             active: parse(MAX_ACTIVE, std::env::var(MAX_ACTIVE).ok().as_deref())?,
             live: parse(LIVE_STATES, std::env::var(LIVE_STATES).ok().as_deref())?,
             sample_workers: parse_workers(
@@ -151,7 +168,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         let sample_workers = driver.sample_workers();
         self.scheduler = Some(driver);
         if config.layer_slice_ms > 0 {
-            tracing::info!(target:"qwen_diag", "serve layer prefill: family=glm5_next target_gpu_ms={} rows=original", config.layer_slice_ms);
+            tracing::info!(target:"qwen_diag", "serve layer prefill: family=glm5_next target_gpu_ms={} minimum_predicted_ms={} rows=original", config.layer_slice_ms, config.layer_slice_min_ms);
         }
         tracing::info!(target:"qwen_diag","serve batch: family=glm5_next max_active={} live_states={} sample_workers={} arithmetic=fast_half",config.active,config.live,sample_workers);
         Ok(())
@@ -318,6 +335,17 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
         let ms = self.0.prepared.batching.layer_slice_ms;
         if ms == 0 || (!peers && !run.layer_work.armed) {
             return None;
+        }
+        if !run.layer_work.armed {
+            let predicted_ms = layer_prefill::predicted_append_ms(
+                run.matched,
+                &run.ends,
+                rows.min(run.selected_rows).max(1),
+            );
+            if !layer_prefill::qualifies(predicted_ms, self.0.prepared.batching.layer_slice_min_ms)
+            {
+                return None;
+            }
         }
         // Batching already requires M5 Fast/Half; a serial/unequal workspace
         // that cannot hold the original row quantum keeps the legacy path.
@@ -636,6 +664,18 @@ mod tests {
         }
         for n in ["10001", "-1", "x", "1.5", ""] {
             assert!(parse_slice_ms(Some(n)).is_err());
+        }
+    }
+    #[test]
+    fn selective_slice_threshold_is_bounded_and_has_an_all_append_rollback() {
+        assert_eq!(parse_slice_min_ms(None).unwrap(), 500);
+        assert_eq!(parse_slice_min_ms(Some("0")).unwrap(), 0);
+        assert_eq!(parse_slice_ms(Some("0")).unwrap(), 0);
+        for n in ["1", "500", "1000000"] {
+            assert!(parse_slice_min_ms(Some(n)).is_ok());
+        }
+        for n in ["1000001", "-1", "1.5", "x", ""] {
+            assert!(parse_slice_min_ms(Some(n)).is_err());
         }
     }
     #[test]

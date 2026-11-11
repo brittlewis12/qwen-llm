@@ -130,6 +130,26 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Fast packet pressure peaked at 2 for Metal/prose and yielded until 1; Rust
   observed 0, Python 1, and the packet finished at 1.
   Branch `research/glm-prefill-numerics`; no merge; M5 worktree removed.
+## 2026-11-11 - Selective GLM Layer Policy: One 500ms / 200ms Variant
+
+- Branch `perf/glm-layer-sliced-prefill` adds one requested policy variant:
+  only appends with predicted original prefill wall **>500ms** enter the layer
+  cursor; selected appends use a **200ms** target. Small appends use the
+  existing prefill/credit path. Prediction sums the unchanged row chunks and
+  checkpoint cuts, sharing the original measured floor/per-row seed.
+- `QWEN_SERVE_GLM_LAYER_SLICE_MIN_MS` defaults to 500; zero retains all-append
+  slicing. `QWEN_SERVE_GLM_LAYER_SLICE_MS=0` remains the exact whole-row-chunk
+  rollback. Default stays off until the single 30s real-sampling ABBA is
+  evaluated against throughput, global p99/max and appending-turn TTFT p50.
+- Model-free tests cover the strict threshold, small/large widths, original
+  chunk/cut floors and 200ms layer coverage. Core forward/cancellation/cache
+  code is unchanged. Rebased onto `f03637fa2`, including the accepted-HTTP
+  TCP_NODELAY fix in both benchmark arms; no cross-run comparison with the
+  earlier Nagle-enabled packet is used for the decision.
+- M5 disk checked before builds: initially **41 GiB**, then **48 GiB** free on
+  the shared volume. Remote builds are limited to cached iter artifacts;
+  test-profile suites run locally; no cache garbage collection.
+
 ## 2026-11-11 - GLM Layer-Sliced Production Prefill: Land Opt-In, Global p99 Gate Fails
 
 - **Production implementation complete; default remains 0.**

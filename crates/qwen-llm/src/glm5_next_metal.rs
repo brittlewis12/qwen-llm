@@ -2688,7 +2688,7 @@ mod lens;
 mod packed;
 mod prefill_attention;
 mod prefill_slice;
-pub use prefill_slice::Glm5NextPrefillSlice;
+pub use prefill_slice::{Glm5NextPrefillSlice, predicted_prefill_ms as glm5_next_prefill_ms};
 pub mod prefill_plan;
 pub(crate) mod row_policy;
 mod short_prefill;

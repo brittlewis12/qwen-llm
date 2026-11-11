@@ -6424,5 +6424,33 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed model-free layer scheduling, cancellation/accounting or nested host QoS; no Metal context or model import."
+  },
+  {
+    "target": "lib",
+    "name": "glm5_next_metal::prefill_slice::tests::two_hundred_ms_target_keeps_large_append_row_geometry",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure selective-prefill cost, threshold, row-plan and layer coverage checks; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_glm5_next::layer_prefill::tests::selective_policy_keeps_small_appends_on_the_legacy_path",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure selective-prefill cost, threshold, row-plan and layer coverage checks; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_glm5_next::layer_prefill::tests::append_prediction_prices_original_chunks_and_checkpoint_cuts",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure selective-prefill cost, threshold, row-plan and layer coverage checks; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_glm5_next::scheduler::tests::selective_slice_threshold_is_bounded_and_has_an_all_append_rollback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Reviewed pure selective-prefill cost, threshold, row-plan and layer coverage checks; no Metal context or model import."
   }
 ]

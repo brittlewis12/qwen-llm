@@ -6,6 +6,57 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-11 - Serve Chunk Gate: The Append Floor Is Per Forward
+
+- **Probes and a decision; no production scheduling change.** New
+  `serve_chunk_probe` (`perf-ablations`) prices GLM-5.3-Flash UD-IQ3_XXS at
+  48K. Stage timers, a 1..2048-row width map, a 1509-row split test, and an
+  idle/cold-start test ran under the lease (M5 Ultra, thermal 0-1, wait 0 s,
+  no hold over 12 min). Model note:
+  `docs/bench/2026-11-11-serve-chunk-price.md`. Raw:
+  `metagross:~/qwen-runs/2026-11-11-serve-chunk/`.
+- **The append is GPU work, not host bookkeeping.** At 48K the buckets are
+  prepare < 1 us, finish/release < 1 us, and GPU 99.9% of the kernel. Warm:
+  1 row 20.6 ms, 32 rows 301.2, 85 rows 474.2, 342 rows 579.0. These match
+  serve's *later* appends (304.6 / 468.4 for 32/67) to 1-2%.
+- **The chunk floor is repaid per chunk.** Single forward: 128 rows 319.6 ms,
+  512 696.7, 1024 1121.2, 2048 2054.4; the fast-island fit is ~204 ms +
+  0.90 ms/row. Widths 16-112 cost ~212 + 3.0 ms/row; 513-1023 (e.g. 640
+  1436.7, 896 1868.4) cost ~362 + 1.68 ms/row. Splitting 1509 rows: 1024
+  chunks 1.81 s (+8%), 512 2.09 s (+24%), 128 4.19 s (+150%), 32 14.67 s
+  (+775%). There is no 50-150 ms chunk: 16 rows already cost 261 ms.
+- **Ragged rows only merge at 1024.** +3 rows costs +14.4 ms at 1024 (1.3%)
+  and +11.3 ms at 128 (3.6%), but +1 row at 512 costs +560 ms (513 enters the
+  bad regime). 1024 is the only coarse quantum that halves the current
+  2048-row stall and tolerates decode rows.
+- **The ~1.5 s first append is a cold-idle cost.** Hot first 32-row append
+  315.7 ms; 48 CPU-load threads 312.8; capacity 196608 + 8 decode steps 312.0;
+  but 15 s idle 1024.9 and 60 s idle 995.7, in the GPU kernel. Serve's first
+  32-token turn is 1892.4 ms vs 304.6 later. Prepare/admission, workspace
+  release (`released_bytes=0`), host load, thermal and pipeline compile are
+  ruled out; it is cold-GPU first-touch/residency (keep-alive lapses), possibly
+  with a clock ramp. Fix by retention/warming or exclude it from the steady
+  budget, not by scheduling.
+- **Mixed forward:** GLM's prefill chunk is single-sequence (`self.position`
+  KV scatter/attention/index/sparse). The independent decode batch already has
+  per-member sparse/MLA/KDA and a shared row-independent FFN, so a merged
+  forward needs a row->(sequence, position) map and per-sequence attention
+  groups, with the row-independent FFN spanning all rows. Keep prefill
+  attention on an exact fast island; do not make 512 ragged. Exactness is not
+  preserved if the prefill partition changes.
+- **Call: the fine-grained gate fails; take the pre-agreed fallback.** Coarse
+  1024-row chunking of large appends only while another decoder is pending,
+  2048 when idle. Expect GLM delivered ~75-77 tok/s (flat to -3%), gap max
+  1.76-2.8 -> ~1.1-1.2 s, large-append p99 ~0.5 -> ~1.1 s (worst case halves,
+  p99 can worsen). Do not split V4.1 warm appends; its lever is the live-CED
+  threshold. The cheapest real win is removing the cold-idle first-append
+  penalty (~1.5 s TTFT, ~10% of delivered in a post-idle window).
+- **Measurement fix (separate commit):** cancelled GLM turns now emit
+  `serve prefill:` at completion and at both cancellation points; the harness
+  reports `partial_prefill_s` / `partial_prefill_calls` inside `prefill_s`.
+  Unit-tested; no arithmetic change.
+- Branch `perf/serve-chunked-prefill`; no merge; M5 worktree removed.
+
 ## 2026-11-11 - V4.1 Causal Re-Pricing: Dense Split-Cols Fails; Member Axis Is Small
 
 - **Pricing and probes only; no production change.** Re-ran the V4.1

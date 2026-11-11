@@ -9,7 +9,8 @@
 //!     back per chunk? Also times a 1509-row append split into C-row chunks and
 //!     the marginal 3 rows in a prefill forward.
 //!
-//! `all` runs both. Output is JSON lines; no production scheduling is changed.
+//! `edges` maps the row-geometry islands and the ragged-row cliff. `all` runs
+//! stage + chunk. Output is JSON lines; no production scheduling is changed.
 //!
 //! Usage: `serve_chunk_probe <corpus> [all|stage|chunk] [first_n] [load_threads]`
 use qwen_llm::{
@@ -155,7 +156,7 @@ fn median(mut xs: Vec<f64>) -> f64 {
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let corpus = args.get(1).ok_or_else(|| {
-        anyhow::anyhow!("usage: serve_chunk_probe <corpus> [mode] [first_n] [load_threads] [capacity] [decode_steps] [idle_ms]")
+        anyhow::anyhow!("usage: serve_chunk_probe <corpus> [all|stage|chunk|edges] [first_n] [load_threads] [capacity] [decode_steps] [idle_ms]")
     })?;
     let mode = args.get(2).map(String::as_str).unwrap_or("all");
     let first_n: usize = args.get(3).map_or(Ok(32), |s| s.parse())?;

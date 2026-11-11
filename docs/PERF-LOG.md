@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-11 - GLM Selective Layer Slicing Becomes The Default
+
+- **Decision: ship the selective 500ms/200ms layer policy on by default.**
+  `QWEN_SERVE_GLM_LAYER_SLICE_MS` now defaults to **200**; appends whose
+  predicted original prefill wall exceeds `QWEN_SERVE_GLM_LAYER_SLICE_MIN_MS`
+  (default **500**) are split at layer boundaries with the original row
+  partition, and one ready-peer decode round runs between slices. Appends
+  predicted under 500ms keep the unsliced path.
+  `QWEN_SERVE_GLM_LAYER_SLICE_MS=0` is the exact rollback to whole-row chunks
+  and the original decode-percentage policy.
+- **Three-agent serve A/B (30s real sampling):** gap max **1794 -> 536ms**,
+  append TTFT p50 **943 -> 955ms** (unchanged), throughput
+  **73.07 -> 77.13 tok/s** (one pair, neutral). Global gap p99 rose
+  **58 -> 211ms**: splitting one long stall into several slice-sized gaps
+  raises the gap-count p99 by construction while total stall time stays the
+  same. That made the p99 gate the wrong metric for this change; the lane's
+  earlier opt-in conclusion is superseded.
+- Cancellation between slices disposes the partial session and keeps
+  checkpoint/snapshot capture consistent; the cancellation-through-restore
+  regression passes. `MS=0` retains the prior path exactly, and appends
+  predicted under 500ms take the unsliced path.
+- Branch `perf/glm-layer-sliced-prefill`; evidence:
+  `docs/bench/2026-11-11-glm-selective-layer-serve.md`.
+
 ## 2026-11-11 - V4.1 Live-CED Threshold: The Lever Is Below The Dependency Halo
 
 - **Measurement and a decision; nothing shipped.** New

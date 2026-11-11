@@ -856,6 +856,14 @@ plain throwaway decode before accepting requests.
   whose earlier output has not drained is parked outside decode batches;
   after 30 seconds without draining it is aborted alone. Queue depth still
   bounds active plus waiting connections.
+- **Layer-sliced prefill.** `QWEN_SERVE_GLM_LAYER_SLICE_MS` defaults to
+  **200**: an append whose predicted original prefill wall exceeds
+  `QWEN_SERVE_GLM_LAYER_SLICE_MIN_MS` (default 500) is split at layer
+  boundaries with the original row partition, and one ready-peer decode round
+  runs between slices. Smaller appends keep the whole-row-chunk path.
+  `QWEN_SERVE_GLM_LAYER_SLICE_MS=0` is the exact rollback to whole-row chunks
+  and the original decode-percentage policy;
+  `QWEN_SERVE_GLM_LAYER_SLICE_MIN_MS=0` slices every appended request.
 - **Arithmetic and state.** Batched dense Q6/Q8 projections use few-row MMA
   with F32 dequantized weights and activations; summation differs from plain
   decode. Routed experts retain the native F32 token-grid arithmetic.

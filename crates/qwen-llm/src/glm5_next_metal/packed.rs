@@ -34,6 +34,15 @@ use crate::metal::{
 };
 use objc2_metal::MTLComputePipelineState;
 
+/// Synchronous research hook. The session stays poisoned and its published
+/// position stays unchanged until every layer and the normal validation finish.
+#[cfg(feature = "perf-ablations")]
+struct LayerSliceProbe<'a> {
+    ends: &'a [usize],
+    completed: Vec<(usize, f64)>,
+    between: &'a mut dyn FnMut(usize) -> Result<()>,
+}
+
 #[cfg(test)]
 #[path = "tests/prefill_observer.rs"]
 mod prefill_observer;
@@ -1821,6 +1830,55 @@ impl Glm5NextSession<'_> {
         want_logits: bool,
         output: Option<&capture::RowOutput<'_>>,
     ) -> Result<Option<Vec<f32>>> {
+        self.step_packed_inner(
+            ctx,
+            tokens,
+            want_logits,
+            output,
+            #[cfg(feature = "perf-ablations")]
+            None,
+        )
+    }
+
+    /// Price layer boundaries without changing row geometry or arithmetic.
+    /// `ends` contains strictly increasing exclusive layer ends, including the
+    /// final layer. The callback runs after a completed nonfinal command; it
+    /// must operate only on other sessions. An error leaves this session
+    /// poisoned: a partial-layer append is never a reusable prefix.
+    #[cfg(feature = "perf-ablations")]
+    pub fn prefill_layer_sliced_probe(
+        &mut self,
+        ctx: &MetalContext,
+        tokens: &[u32],
+        ends: &[usize],
+        between: &mut dyn FnMut(usize) -> Result<()>,
+    ) -> Result<(Vec<f32>, Vec<(usize, f64)>)> {
+        let layers = self.weights.blocks.len();
+        if ends.first().is_none_or(|&x| x == 0)
+            || ends.last() != Some(&layers)
+            || ends.windows(2).any(|w| w[0] >= w[1])
+        {
+            return invalid("slice ends must increase from >0 through the final layer");
+        }
+        let mut probe = LayerSliceProbe {
+            ends,
+            completed: Vec::new(),
+            between,
+        };
+        let logits = self
+            .step_packed_inner(ctx, tokens, true, None, Some(&mut probe))?
+            .ok_or_else(|| Glm5NextMetalError::Invalid("missing sliced logits".into()))?;
+        Ok((logits, probe.completed))
+    }
+
+    fn step_packed_inner(
+        &mut self,
+        ctx: &MetalContext,
+        tokens: &[u32],
+        want_logits: bool,
+        output: Option<&capture::RowOutput<'_>>,
+        #[cfg(feature = "perf-ablations")] probe: Option<&mut LayerSliceProbe<'_>>,
+    ) -> Result<Option<Vec<f32>>> {
         self.validate_request(tokens)?;
         let rows = self.prefill_rows();
         if tokens.len() > rows {
@@ -1855,7 +1913,14 @@ impl Glm5NextSession<'_> {
             write_i32(&sp.select_status, &vec![-1; mla * sp.rows])?;
         }
         self.poisoned = true;
-        self.encode_chunk(ctx, tokens, want_logits, output)?;
+        self.encode_chunk(
+            ctx,
+            tokens,
+            want_logits,
+            output,
+            #[cfg(feature = "perf-ablations")]
+            probe,
+        )?;
         let packed = self.packed.as_ref().expect("packed scratch");
         for (layer, route) in packed.routes.iter().enumerate() {
             if let Some(route) = route {
@@ -1903,16 +1968,31 @@ impl Glm5NextSession<'_> {
         tokens: &[u32],
         want_logits: bool,
         output: Option<&capture::RowOutput<'_>>,
+        #[cfg(feature = "perf-ablations")] probe: Option<&mut LayerSliceProbe<'_>>,
     ) -> Result<()> {
         // Completed autoreleased commands/encoders can still retain every
         // bound prompt buffer. Drain their references before decode drops
         // the workspace. Supported independent batches keep their old path.
         if self.release_prefill_for_decode {
             objc2::rc::autoreleasepool(|_| {
-                self.encode_chunk_inner(ctx, tokens, want_logits, output)
+                self.encode_chunk_inner(
+                    ctx,
+                    tokens,
+                    want_logits,
+                    output,
+                    #[cfg(feature = "perf-ablations")]
+                    probe,
+                )
             })
         } else {
-            self.encode_chunk_inner(ctx, tokens, want_logits, output)
+            self.encode_chunk_inner(
+                ctx,
+                tokens,
+                want_logits,
+                output,
+                #[cfg(feature = "perf-ablations")]
+                probe,
+            )
         }
     }
 
@@ -1922,6 +2002,7 @@ impl Glm5NextSession<'_> {
         tokens: &[u32],
         want_logits: bool,
         output: Option<&capture::RowOutput<'_>>,
+        #[cfg(feature = "perf-ablations")] mut probe: Option<&mut LayerSliceProbe<'_>>,
     ) -> Result<()> {
         let w = self.weights;
         let c = &w.config;
@@ -1944,7 +2025,8 @@ impl Glm5NextSession<'_> {
             );
         }
         let v = |t: &MetalTensor| rows_view(t, rows);
-        let command = ctx
+        #[allow(unused_mut)]
+        let mut command = ctx
             .queue
             .commandBuffer()
             .ok_or_else(|| Glm5NextMetalError::Invalid("no command buffer".into()))?;
@@ -2239,6 +2321,25 @@ impl Glm5NextSession<'_> {
                     &a,
                 )?;
             }
+            #[cfg(feature = "perf-ablations")]
+            if let Some(probe) = probe.as_mut()
+                && index + 1 < w.blocks.len()
+                && probe.ends.contains(&(index + 1))
+            {
+                enc.end();
+                command.commit();
+                wait_completed(&command)?;
+                probe.completed.push((
+                    index + 1,
+                    (command.GPUEndTime() - command.GPUStartTime()) * 1e3,
+                ));
+                (probe.between)(index + 1)?;
+                command = ctx
+                    .queue
+                    .commandBuffer()
+                    .ok_or_else(|| Glm5NextMetalError::Invalid("no slice command buffer".into()))?;
+                enc = KernelEncoder::begin(&command);
+            }
         }
         if want_logits {
             self.stage(&mut enc, Glm5NextStage::Head, None)?;
@@ -2260,6 +2361,13 @@ impl Glm5NextSession<'_> {
         enc.end();
         command.commit();
         wait_completed(&command)?;
+        #[cfg(feature = "perf-ablations")]
+        if let Some(probe) = probe {
+            probe.completed.push((
+                w.blocks.len(),
+                (command.GPUEndTime() - command.GPUStartTime()) * 1e3,
+            ));
+        }
         if let Some(recorder) = self.stage_recorder.borrow_mut().as_mut() {
             recorder.command_gpu_ms += (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
         }

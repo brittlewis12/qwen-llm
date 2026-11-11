@@ -130,6 +130,41 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Fast packet pressure peaked at 2 for Metal/prose and yielded until 1; Rust
   observed 0, Python 1, and the packet finished at 1.
   Branch `research/glm-prefill-numerics`; no merge; M5 worktree removed.
+## 2026-11-11 - GLM Layer-Sliced Append: Exact, Neutral GPU Cost, ~150ms Gaps
+
+- **Build recommendation; probe/design only, no serve change.** New
+  `layer_slice_probe` behind `perf-ablations` preserves the original row grid
+  and kernels, submits after whole layers, and interleaves independent decode
+  batches. M5 Ultra, GLM-5.3-Flash UD-IQ3_XXS, 48K prefix, real code corpus,
+  `iter`. Report: `docs/bench/2026-11-11-layer-sliced-prefill.md`; raw:
+  `metagross:~/qwen-runs/2026-11-11-layer-slice/` (including source/data hashes).
+- **Requested three-other-decoder sweep:** 32/342/1509 rows × 1/2/4/8 slices,
+  eight alternating-order paired repeats. All 96 pairs are bitwise in append
+  logits, every persistent cache byte, one following decode, and the other
+  decoders' logits/state. GPU delta versus unsplit plus the same intervening
+  rounds run afterwards: **-0.10% to +0.15%**. Gap max at eight slices:
+  **74 / 114 / 267ms**, versus unsplit **329 / 602 / 1603ms**.
+- **Actual three-agent case (two other decoders):** another 96 exact pairs,
+  4/8/16/32 slices. Selected 4/8/16 slices at 32/342/1509 rows give native
+  append-local gap p99/max **103 / 113 / 152ms**, with GPU deltas
+  **+0.01 / +0.13 / +0.01%**. Appender TTFT **299→367 / 579→751 /
+  1565→1931ms**. No additional activation allocation: one live four-stream
+  F32 mHC residual, 2.0 / 21.375 / 94.3125 MiB, in already admitted scratch.
+- **Policy:** nominal 100ms prefill GPU slices, one other-member batch round
+  between them, original row partition throughout. Use row/depth layer cost
+  estimates; whole-layer skew reaches ~127ms here. Keep the appender exclusive
+  until final validation/position publication; no partial-layer snapshots or
+  reuse. Integrate slice service into existing credit rather than paying it
+  twice; strict 10% credit cannot deliver a round every ~100ms.
+- **Expected, not a served result:** warm gap p99/max ~105–155ms plus
+  sampling/transport, delivered ~75–79 tok/s versus 76.3–79.4 (flat to ~2%
+  lower). Appender TTFT grows ~23–30%. Two-member service displaces some
+  three-member rounds, so neutral GPU work is not proof of neutral delivered
+  tokens. Cold-idle faults remain outside this bound. Next gate: served A/B.
+- `scripts/check-contracts.sh` passed; local/M5 iter builds and all 192 paired
+  exactness gates passed; no ignored tests added. Thermal **0** in the requested
+  sweep, **0–1** in policy calibration; holds **4m41s / 5m25s**, waits **0s /
+  26.5s**. M5 worktree removed. Branch `research/layer-sliced-prefill`; no merge.
 
 ## 2026-11-11 - Serve Chunk Gate: The Append Floor Is Per Forward
 

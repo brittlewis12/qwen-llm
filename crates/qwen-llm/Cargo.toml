@@ -122,6 +122,10 @@ name = "serve_chunk_probe"
 required-features = ["perf-ablations"]
 
 [[example]]
+name = "layer_slice_probe"
+required-features = ["perf-ablations"]
+
+[[example]]
 name = "spec_batch_rows"
 required-features = ["perf-ablations"]
 

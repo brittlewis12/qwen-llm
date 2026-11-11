@@ -105,6 +105,50 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if mode == "gridholds" {
+        let holds: [(&str, &str, usize, u64); 10] = [
+            ("", "q6_r1", 0, 0),
+            ("q6_shared_gate_up", "q6_shared_swiglu", 512, 6_881_280),
+            ("q6_mla_q_a", "q6_r1", 768, 5_160_960),
+            ("q6_shared_down", "q6_r1", 2048, 6_881_280),
+            ("q6_kda_out", "q6_r1", 2048, 27_525_120),
+            ("q6_dense_down", "q6_r1", 2048, 41_287_680),
+            ("q6_dense_gate_up", "q6_r1", 6144, 41_287_680),
+            ("q6_kda_qkv_x3", "q6_x3", 6144, 27_525_120),
+            ("q6_head", "q6_two_row", 38_720, 520_396_800),
+            ("", "q6_r1", 0, 0),
+        ];
+        for (label, group, grid, bytes) in holds {
+            for _ in 0..2 {
+                if thermal() >= 2 {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                }
+                s.restore_snapshot(&entry)?;
+                let _scope = if label.is_empty() {
+                    None
+                } else {
+                    Some(qwen_llm::metal::fn_batch_probe::scope_q6_shape(
+                        group, grid, bytes,
+                    ))
+                };
+                let mut sampler = greedy();
+                let started = Instant::now();
+                let stats =
+                    s.generate_gpu_tokens(&ctx, &head, &mut sampler, steps, &[], |_| true)?;
+                let wall = started.elapsed().as_secs_f64() * 1e3;
+                emit(json!({
+                    "kind":"arm","group":if label.is_empty(){"reference"}else{label},
+                    "ms_token":wall / (steps - 1) as f64,
+                    "wall_ms":wall,"gpu_ms":stats.gpu_ms,"encode_ms":stats.encode_cpu_ms,
+                    "wait_ms":stats.completion_wait_ms,
+                    "skipped":qwen_llm::metal::fn_batch_probe::skipped(),
+                    "thermal":thermal()
+                }));
+            }
+        }
+        return Ok(());
+    }
+
     let groups = [
         "",
         "q6",

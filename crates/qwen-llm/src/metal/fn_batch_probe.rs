@@ -5,6 +5,8 @@ struct Settings {
     other: Option<bool>,
 
     group: String,
+    grid: Option<usize>,
+    weight_bytes: Option<u64>,
     skipped: BTreeMap<String, usize>,
     observed: BTreeMap<String, usize>,
     causal: bool,
@@ -23,6 +25,20 @@ pub fn scope(other: Option<bool>, group: &str, causal: bool) -> Scope {
             other,
             group: group.into(),
             causal,
+            ..Default::default()
+        })
+    }))
+}
+
+/// Hold one Q6 dispatch class by kernel name, grid width and the slot-1
+/// weight byte size. Together those identify GLM's media projections (see
+/// `glm_solo_bounds gridholds`); held outputs are intentionally invalid.
+pub fn scope_q6_shape(name: &'static str, grid: usize, weight_bytes: u64) -> Scope {
+    Scope(ACTIVE.with(|a| {
+        a.replace(Settings {
+            group: name.into(),
+            grid: Some(grid),
+            weight_bytes: Some(weight_bytes),
             ..Default::default()
         })
     }))
@@ -146,6 +162,28 @@ pub(crate) fn skip(name: &str) -> bool {
                     || name.contains("scale")
                     || name.contains("rope")
             }
+            _ => false,
+        };
+        if yes {
+            *a.skipped.entry(name.into()).or_default() += 1;
+        }
+        yes
+    })
+}
+
+/// Shape-qualified variant of [`skip`]: holds a named Q6 kernel only at one
+/// dispatch width and slot-1 weight size. No-op outside [`scope_q6_shape`].
+pub(crate) fn skip_shape(name: &str, width: usize, weight_bytes: u64) -> bool {
+    ACTIVE.with(|a| {
+        let mut a = a.borrow_mut();
+        if a.grid != Some(width) || a.weight_bytes != Some(weight_bytes) {
+            return false;
+        }
+        let yes = match a.group.as_str() {
+            "q6_r1" => name == "kernel_mat_vec_q6_K_f32_r1",
+            "q6_two_row" => name == "kernel_mat_vec_q6_K_f32",
+            "q6_x3" => name == "kernel_mat_vec_q6_K_f32_x3",
+            "q6_shared_swiglu" => name == "kernel_ds4_shared_swiglu_q6_K_f32",
             _ => false,
         };
         if yes {

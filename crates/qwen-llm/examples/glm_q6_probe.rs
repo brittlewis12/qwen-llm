@@ -16,7 +16,7 @@ use qwen_llm::{
 use std::{io::Write, time::Instant};
 
 /// Keep the rotating set comfortably above the M5 shared cache.
-const TARGET_BYTES: u64 = 768 << 20;
+const TARGET_BYTES: u64 = 384 << 20;
 
 fn emit(v: serde_json::Value) {
     println!("{v}");
@@ -93,6 +93,8 @@ struct Case {
 #[derive(Clone, Copy)]
 enum Kind {
     Needle,
+    X3,
+    SharedSwiglu,
     Research {
         name: &'static str,
         out: usize,
@@ -162,33 +164,36 @@ fn research(
     Ok(())
 }
 
-/// Encode `reps` cold calls, each against a distinct replica, and return the
-/// median per-call GPU milliseconds of `samples` passes.
+/// Time one dispatch per command so successive calls cannot overlap (the real
+/// B=1 token is one serial encoder), rotating `reps` cold replicas. Returns the
+/// median per-call GPU milliseconds.
 fn time<F>(ctx: &MetalContext, reps: u64, mut encode: F) -> anyhow::Result<f64>
 where
     F: FnMut(&KernelEncoder, u64) -> anyhow::Result<()>,
 {
-    let mut sample = || -> anyhow::Result<f64> {
+    let mut one = |rep: u64| -> anyhow::Result<f64> {
         let cmd = ctx
             .queue
             .commandBuffer()
             .ok_or_else(|| anyhow::anyhow!("no command buffer"))?;
         let enc = KernelEncoder::begin(&cmd);
-        for rep in 0..reps {
-            encode(&enc, rep)?;
-        }
+        encode(&enc, rep)?;
         enc.end();
         cmd.commit();
         wait_completed(&cmd)?;
         anyhow::ensure!(cmd.error().is_none(), "command error: {:?}", cmd.error());
-        Ok((cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3 / reps as f64)
+        Ok((cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3)
     };
-    for _ in 0..3 {
-        sample()?;
+    for pass in 0..2 {
+        for rep in 0..reps {
+            one((rep + pass) % reps)?;
+        }
     }
-    let mut times: Vec<f64> = Vec::with_capacity(9);
-    for _ in 0..9 {
-        times.push(sample()?);
+    let mut times: Vec<f64> = Vec::with_capacity(5 * reps as usize);
+    for pass in 0..5 {
+        for rep in 0..reps {
+            times.push(one((rep + pass) % reps)?);
+        }
     }
     times.sort_by(|a, b| a.partial_cmp(b).unwrap());
     Ok(times[times.len() / 2])
@@ -345,6 +350,9 @@ fn main() -> anyhow::Result<()> {
             GgmlType::F32,
         )?;
         let y = MetalTensor::zeros_f32(&ctx, vec![case.n as u64])?;
+        let y2 = MetalTensor::zeros_f32(&ctx, vec![case.n as u64])?;
+        let y3 = MetalTensor::zeros_f32(&ctx, vec![case.n as u64])?;
+        let y_swiglu = MetalTensor::zeros_f32(&ctx, vec![(case.n * 3) as u64])?;
         let per_call_bytes = case.n_bytes;
         let bytes_per_pass = per_call_bytes * reps;
         emit(serde_json::json!({
@@ -352,28 +360,83 @@ fn main() -> anyhow::Result<()> {
             "bytes":per_call_bytes,"calls_per_token":case.calls,
             "reps":reps,"pass_bytes":bytes_per_pass
         }));
+        let mut variants = variants.to_vec();
+        if case.label.starts_with("KDA qkv") {
+            variants.push(("incumbent_x3_two_row", Kind::X3));
+        }
+        if case.label.starts_with("shared gate+up") {
+            variants.push(("shared_swiglu_fused", Kind::SharedSwiglu));
+        }
         let mut base_ms = 0.0;
         for (name, kind) in variants {
             let started = Instant::now();
-            let ms = match kind {
+            let (ms, variant_bytes) = match kind {
                 Kind::Needle => {
                     let two_row = name == "incumbent_two_row";
-                    time(&ctx, reps, |enc, rep| {
-                        let view =
-                            w.view_bytes(rep * per_call_bytes, vec![case.k as u64, case.n as u64]);
-                        incumbent(&ctx, enc, &view, &x, &y, case.k, case.n, two_row)
-                    })?
+                    (
+                        time(&ctx, reps, |enc, rep| {
+                            let view = w.view_bytes(
+                                rep * per_call_bytes,
+                                vec![case.k as u64, case.n as u64],
+                            );
+                            incumbent(&ctx, enc, &view, &x, &y, case.k, case.n, two_row)
+                        })?,
+                        per_call_bytes,
+                    )
                 }
+                Kind::X3 => (
+                    time(&ctx, reps, |enc, rep| {
+                        let views: Vec<_> = (0..3)
+                            .map(|i| {
+                                w.view_bytes(
+                                    ((rep + i) % reps) * per_call_bytes,
+                                    vec![case.k as u64, case.n as u64],
+                                )
+                            })
+                            .collect();
+                        encode_mat_vec_q6_k_x3_f32(
+                            &ctx,
+                            enc,
+                            [&views[0], &views[1], &views[2]],
+                            &x,
+                            [&y, &y2, &y3],
+                            case.k,
+                            case.n,
+                        )?;
+                        Ok(())
+                    })?,
+                    3 * per_call_bytes,
+                ),
+                Kind::SharedSwiglu => (
+                    time(&ctx, reps, |enc, rep| {
+                        let gate =
+                            w.view_bytes(rep * per_call_bytes, vec![case.k as u64, case.n as u64]);
+                        let up = w.view_bytes(
+                            ((rep + 1) % reps) * per_call_bytes,
+                            vec![case.k as u64, case.n as u64],
+                        );
+                        encode_ds4_shared_swiglu_q6_k_f32(
+                            &ctx, enc, &gate, &up, &x, &y_swiglu, case.k, case.n, 10.0,
+                        )?;
+                        Ok(())
+                    })?,
+                    2 * per_call_bytes,
+                ),
                 Kind::Research { name, out, nsg } => {
                     // Views are aligned to `out` rows so a group's rows stay in
                     // one replica.
                     let rows = case.n.div_ceil(out * nsg) * out * nsg;
                     anyhow::ensure!(rows == case.n, "case {name} n={} not tile aligned", case.n);
-                    time(&ctx, reps, |enc, rep| {
-                        let view =
-                            w.view_bytes(rep * per_call_bytes, vec![case.k as u64, case.n as u64]);
-                        research(&ctx, enc, name, &view, &x, &y, case.k, case.n, out, nsg)
-                    })?
+                    (
+                        time(&ctx, reps, |enc, rep| {
+                            let view = w.view_bytes(
+                                rep * per_call_bytes,
+                                vec![case.k as u64, case.n as u64],
+                            );
+                            research(&ctx, enc, name, &view, &x, &y, case.k, case.n, out, nsg)
+                        })?,
+                        per_call_bytes,
+                    )
                 }
             };
             if name == "incumbent_r1" {
@@ -381,14 +444,14 @@ fn main() -> anyhow::Result<()> {
             }
             emit(serde_json::json!({
                 "kind":"variant","label":case.label,"name":name,"us":ms*1e3,
-                "gbps":per_call_bytes as f64/(ms*1e6),
+                "gbps":variant_bytes as f64/(ms*1e6),
                 "vs_r1":if base_ms>0.0 {base_ms/ms}else{0.0},
                 "per_token_ms":ms*case.calls as f64,
                 "wall_ms":started.elapsed().as_secs_f64()*1e3,
                 "thermal":thermal()
             }));
         }
-        drop((w, x, y));
+        drop((w, x, y, y2, y3, y_swiglu));
     }
     Ok(())
 }

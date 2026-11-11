@@ -25,6 +25,9 @@ pub struct KernelEncoder {
     // Always track the binding: census can start after this encoder was bound.
     // Arc cloning costs no allocation or Objective-C message send.
     pub(crate) bound_pipeline_name: std::cell::RefCell<Option<Arc<str>>>,
+    /// Bench-only per-slot tensor byte sizes, for shape-qualified holds.
+    #[cfg(feature = "perf-ablations")]
+    pub(crate) bound_tensor_bytes: std::cell::RefCell<[u64; 16]>,
     /// True when created via [`KernelEncoder::begin_concurrent`]. Concurrent
     /// passes provide NO ordering between dispatches, so every dispatch pair
     /// must be independent (disjoint writes; no dispatch reads another's
@@ -61,6 +64,8 @@ impl KernelEncoder {
             ended: false,
             census_identity: Cell::new(census_encoder_identity()),
             bound_pipeline_name: std::cell::RefCell::new(None),
+            #[cfg(feature = "perf-ablations")]
+            bound_tensor_bytes: std::cell::RefCell::new([0; 16]),
             concurrent,
             replay: std::cell::RefCell::new(None),
             #[cfg(debug_assertions)]
@@ -322,6 +327,10 @@ impl KernelEncoder {
     /// Bind a `MetalTensor` at slot `index`. Convenience wrapper over
     /// `set_buffer` that respects the tensor's `offset`.
     pub fn set_tensor(&self, index: usize, tensor: &MetalTensor) {
+        #[cfg(feature = "perf-ablations")]
+        if let Some(slot) = self.bound_tensor_bytes.borrow_mut().get_mut(index) {
+            *slot = tensor.n_bytes();
+        }
         if let Some(r) = self.recording.borrow_mut().as_mut() {
             r.tensor(index, tensor);
             return;
@@ -412,6 +421,14 @@ impl KernelEncoder {
     pub fn dispatch(&self, grid: MTLSize, threads: MTLSize) {
         #[cfg(feature = "perf-ablations")]
         if fn_batch_probe::skip(self.bound_pipeline_name.borrow().as_deref().unwrap_or("")) {
+            return;
+        }
+        #[cfg(feature = "perf-ablations")]
+        if fn_batch_probe::skip_shape(
+            self.bound_pipeline_name.borrow().as_deref().unwrap_or(""),
+            grid.width,
+            self.bound_tensor_bytes.borrow()[1],
+        ) {
             return;
         }
         if let Some(r) = self.recording.borrow_mut().as_mut() {

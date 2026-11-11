@@ -148,3 +148,145 @@ pub fn encode_roofline_fma_f32(
     );
     Ok(())
 }
+
+fn glm_q6_solo_args(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    name: &str,
+    n_in: usize,
+    n_out: usize,
+    clamp: f32,
+    nsg: usize,
+) -> Result<(), MetalError> {
+    if !matches!(nsg, 2 | 4 | 8) {
+        return Err(MetalError::BadShape {
+            kernel: "glm_q6_solo",
+            detail: format!("nsg={nsg} must be 2, 4 or 8"),
+        });
+    }
+    let pso = ctx.pipeline(name)?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        clamp: f32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            clamp,
+        },
+    );
+    Ok(())
+}
+
+/// Bench-only GLM Q6 split-K GEMV: one threadgroup per output row, K split
+/// across `nsg` simdgroups. Fast-lineage only (different summation order).
+pub fn encode_glm_q6_splitk_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    nsg: usize,
+) -> Result<(), MetalError> {
+    if weight.dtype != crate::tensor::GgmlType::Q6_K
+        || weight.shape != [n_in as u64, n_out as u64]
+        || x.dtype != crate::tensor::GgmlType::F32
+        || x.n_elements() as usize != n_in
+        || y.n_elements() as usize != n_out
+        || !n_in.is_multiple_of(256)
+    {
+        return Err(MetalError::BadShape {
+            kernel: "glm_q6_splitk",
+            detail: format!(
+                "weight {:?} x {:?} y {} n_in={n_in} n_out={n_out} nsg={nsg}",
+                weight.shape,
+                x.shape,
+                y.n_elements()
+            ),
+        });
+    }
+    let name = format!("glm_q6_splitk_s{nsg}");
+    glm_q6_solo_args(ctx, enc, &name, n_in, n_out, 10.0, nsg)?;
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.dispatch(
+        MTLSize {
+            width: n_out,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: nsg * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// Bench-only fused same-input Q6 gate/up with clamped SwiGLU: one threadgroup
+/// per output row, K split across `nsg` simdgroups.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_glm_q6_pair_swiglu_splitk_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate: &MetalTensor,
+    up: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    nsg: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    if gate.dtype != crate::tensor::GgmlType::Q6_K
+        || up.dtype != crate::tensor::GgmlType::Q6_K
+        || gate.shape != [n_in as u64, n_out as u64]
+        || up.shape != [n_in as u64, n_out as u64]
+        || x.dtype != crate::tensor::GgmlType::F32
+        || x.n_elements() as usize != n_in
+        || (y.n_elements() as usize) < n_out
+        || !n_in.is_multiple_of(256)
+    {
+        return Err(MetalError::BadShape {
+            kernel: "glm_q6_pair_swiglu_splitk",
+            detail: format!(
+                "gate {:?} up {:?} x {} y {} n_in={n_in} n_out={n_out} nsg={nsg}",
+                gate.shape,
+                up.shape,
+                x.n_elements(),
+                y.n_elements()
+            ),
+        });
+    }
+    let name = format!("glm_q6_pair_splitk_s{nsg}_swiglu1");
+    glm_q6_solo_args(ctx, enc, &name, n_in, n_out, clamp, nsg)?;
+    enc.set_tensor(1, gate);
+    enc.set_tensor(2, up);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, y);
+    // The SwiGLU form leaves buffer 5 unused; bind the same output.
+    enc.set_tensor(5, y);
+    enc.dispatch(
+        MTLSize {
+            width: n_out,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: nsg * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}

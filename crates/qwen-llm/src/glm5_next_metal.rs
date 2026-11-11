@@ -1852,16 +1852,39 @@ impl<'w> Glm5NextSession<'w> {
                 FfnTensors::Dense(dense) => {
                     self.stage(enc, Glm5NextStage::DenseFfn, Some(index))?;
                     let f = c.dense_ffn_size as usize;
-                    matvec(ctx, &enc, &dense.gate, &s.normed, &s.dense_gate, h, f)?;
-                    matvec(ctx, &enc, &dense.up, &s.normed, &s.dense_up, h, f)?;
-                    encode_clamped_swiglu(
-                        ctx,
-                        &enc,
-                        &s.dense_gate,
-                        &s.dense_up,
-                        &s.dense_gate,
-                        c.swiglu_clamp,
-                    )?;
+                    #[cfg(feature = "perf-ablations")]
+                    let fused = q6_splitk_research()
+                        && dense.gate.dtype == GgmlType::Q6_K
+                        && dense.up.dtype == GgmlType::Q6_K
+                        && h >= 4096;
+                    #[cfg(not(feature = "perf-ablations"))]
+                    let fused = false;
+                    if fused {
+                        #[cfg(feature = "perf-ablations")]
+                        crate::metal::encode_glm_q6_pair_swiglu_splitk_f32(
+                            ctx,
+                            &enc,
+                            &dense.gate,
+                            &dense.up,
+                            &s.normed,
+                            &s.dense_gate,
+                            h,
+                            f,
+                            8,
+                            c.swiglu_clamp,
+                        )?;
+                    } else {
+                        matvec(ctx, &enc, &dense.gate, &s.normed, &s.dense_gate, h, f)?;
+                        matvec(ctx, &enc, &dense.up, &s.normed, &s.dense_up, h, f)?;
+                        encode_clamped_swiglu(
+                            ctx,
+                            &enc,
+                            &s.dense_gate,
+                            &s.dense_up,
+                            &s.dense_gate,
+                            c.swiglu_clamp,
+                        )?;
+                    }
                     matvec(ctx, &enc, &dense.down, &s.dense_gate, &s.block_out, f, h)?;
                 }
                 FfnTensors::Moe(moe) => {
@@ -2614,6 +2637,26 @@ fn shared_gate_up_swiglu(
     sf: usize,
     clamp: f32,
 ) -> Result<()> {
+    #[cfg(feature = "perf-ablations")]
+    if q6_splitk_research()
+        && shared.gate.dtype == GgmlType::Q6_K
+        && shared.up.dtype == GgmlType::Q6_K
+        && h >= 4096
+    {
+        crate::metal::encode_glm_q6_pair_swiglu_splitk_f32(
+            ctx,
+            enc,
+            &shared.gate,
+            &shared.up,
+            x,
+            scratch,
+            h,
+            sf,
+            8,
+            clamp,
+        )?;
+        return Ok(());
+    }
     if shared.gate.dtype == GgmlType::Q6_K && shared.up.dtype == GgmlType::Q6_K {
         crate::metal::encode_ds4_shared_swiglu_q6_k_f32(
             ctx,
@@ -2663,6 +2706,36 @@ fn low_rank_expand(
     Ok(())
 }
 
+/// Bench-only counterfactual selector for the Q6 solo mapping screen.
+#[cfg(feature = "perf-ablations")]
+static Q6_RESEARCH_OVERRIDE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Research override for same-process paired arms: 0 follows the environment,
+/// 1 forces the split-K/pair mapping, 2 forces the incumbent.
+#[cfg(feature = "perf-ablations")]
+pub fn diagnostic_q6_research(mode: u8) -> impl Drop {
+    use std::sync::atomic::Ordering;
+    assert!(mode <= 2);
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            Q6_RESEARCH_OVERRIDE.store(0, Ordering::SeqCst);
+        }
+    }
+    Q6_RESEARCH_OVERRIDE.store(mode, Ordering::SeqCst);
+    Guard
+}
+
+#[cfg(feature = "perf-ablations")]
+fn q6_splitk_research() -> bool {
+    use std::sync::atomic::Ordering;
+    match Q6_RESEARCH_OVERRIDE.load(Ordering::SeqCst) {
+        1 => true,
+        2 => false,
+        _ => std::env::var("QWEN_GLM53_Q6_RESEARCH").as_deref() == Ok("1"),
+    }
+}
+
 fn matvec(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2672,6 +2745,16 @@ fn matvec(
     n_in: usize,
     n_out: usize,
 ) -> Result<()> {
+    #[cfg(feature = "perf-ablations")]
+    if q6_splitk_research()
+        && weight.dtype == GgmlType::Q6_K
+        && n_in >= 4096
+        && (4096..=16_384).contains(&n_out)
+    {
+        // The probe prices 8 simdgroups best at K >= 4096.
+        crate::metal::encode_glm_q6_splitk_f32(ctx, enc, weight, x, y, n_in, n_out, 8)?;
+        return Ok(());
+    }
     crate::metal_forward::encode_mat_vec_dispatch(ctx, enc, weight, x, y, n_in, n_out)?;
     Ok(())
 }

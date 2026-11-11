@@ -105,6 +105,34 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if mode == "research" {
+        // Compile both arms before the paired packet.
+        for arm in [1u8, 2] {
+            s.restore_snapshot(&entry)?;
+            let _override = diagnostic_q6_research(arm);
+            s.generate_gpu_tokens(&ctx, &head, &mut greedy(), 2, &[], |_| true)?;
+        }
+        for rep in 0..2 {
+            for arm in [2u8, 1, 1, 2] {
+                s.restore_snapshot(&entry)?;
+                let _override = diagnostic_q6_research(arm);
+                let mut sampler = greedy();
+                let started = Instant::now();
+                let stats =
+                    s.generate_gpu_tokens(&ctx, &head, &mut sampler, steps, &[], |_| true)?;
+                let wall = started.elapsed().as_secs_f64() * 1e3;
+                emit(json!({
+                    "kind":"arm","rep":rep,
+                    "group":if arm == 1 {"research"} else {"reference"},
+                    "ms_token":wall / (steps - 1) as f64,
+                    "wall_ms":wall,"gpu_ms":stats.gpu_ms,"encode_ms":stats.encode_cpu_ms,
+                    "wait_ms":stats.completion_wait_ms,"thermal":thermal()
+                }));
+            }
+        }
+        return Ok(());
+    }
+
     if mode == "gridholds" {
         let holds: [(&str, &str, usize, u64); 10] = [
             ("", "q6_r1", 0, 0),

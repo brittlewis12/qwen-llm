@@ -1295,11 +1295,11 @@ impl<'w> Glm5NextSession<'w> {
 
     /// Diagnostic-only route IDs from the last packed chunk.
     #[cfg(feature = "perf-ablations")]
-    pub fn perf_packed_route_ids(&self) -> Result<Vec<(usize, Vec<i32>)>> {
+    pub fn perf_packed_route_ids(&self, rows: usize) -> Result<Vec<(usize, Vec<i32>)>> {
         self.packed
             .as_ref()
             .ok_or_else(|| Glm5NextMetalError::Invalid("no packed scratch".into()))?
-            .perf_route_ids()
+            .perf_route_ids(rows)
     }
 
     /// Whether a failed token left the session unusable.

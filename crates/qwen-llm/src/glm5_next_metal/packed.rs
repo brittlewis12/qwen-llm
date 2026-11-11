@@ -819,12 +819,19 @@ impl PackedScratch {
     }
 
     #[cfg(feature = "perf-ablations")]
-    pub(super) fn perf_route_ids(&self) -> Result<Vec<(usize, Vec<i32>)>> {
+    pub(super) fn perf_route_ids(&self, rows: usize) -> Result<Vec<(usize, Vec<i32>)>> {
+        if rows > self.rows {
+            return invalid("route capture rows exceed packed scratch");
+        }
         self.routes
             .iter()
             .enumerate()
             .filter_map(|(block, route)| route.as_ref().map(|route| (block, &route.ids)))
-            .map(|(block, ids)| Ok((block, read_i32(ids)?)))
+            .map(|(block, ids)| {
+                let top_k = ids.n_elements() as usize / self.rows;
+                let live = ids.view_subrange(0, vec![(top_k * rows) as u64]);
+                Ok((block, read_i32(&live)?))
+            })
             .collect()
     }
 

@@ -382,8 +382,8 @@ mod probe {
             if layer_audit {
                 // Same-lineage one-row packed calls are a legal alternative
                 // schedule to ordinary one-token decode. This control
-                // measures the schedule floor before comparing an 8-row
-                // packed call with the sequential reference.
+                // measures the observed schedule delta before comparing an
+                // 8-row packed call with the sequential reference.
                 gate();
                 set_expert_packet_max_rows(PACKET_MAX_ROWS);
                 session.restore_snapshot(&snapshot)?;
@@ -393,7 +393,7 @@ mod probe {
                     control_features.extend(capture_features(&captured));
                     control_routes.push(
                         route_rows(
-                            session.perf_packed_route_ids()?,
+                            session.perf_packed_route_ids(1)?,
                             1,
                             weights.config.expert_used_count as usize,
                         )[0]
@@ -406,11 +406,18 @@ mod probe {
                 let abs_dnll: Vec<f64> = m.dnll.iter().map(|x| x.abs()).collect();
                 let (mean_abs_dnll, max_abs_dnll, _) = aggregates(&abs_dnll);
                 let (mean_kl, max_kl, _) = aggregates(&m.kl_path_ref);
+                let control_state = session.forward(ctx, next)?;
+                let (state_dnll, state_kl_path_ref, state_kl_ref_path, state_top1_agree) =
+                    state_metrics(&reference_state, &control_state, next2);
                 emit(json!({
                     "kind": "serial_control", "prompt": path, "width": width,
                     "schedule": "one_row_packed_vs_forward_decode",
                     "mean_abs_dnll": mean_abs_dnll, "max_abs_dnll": max_abs_dnll,
                     "mean_kl_path_ref": mean_kl, "max_kl_path_ref": max_kl,
+                    "state_dnll": state_dnll,
+                    "state_kl_path_ref": state_kl_path_ref,
+                    "state_kl_ref_path": state_kl_ref_path,
+                    "state_top1_agree": state_top1_agree,
                     "layer_deltas": layer_deltas(
                         &reference_features,
                         &control_features,
@@ -445,7 +452,7 @@ mod probe {
                 };
                 let packed_routes = if layer_audit {
                     Some(route_rows(
-                        session.perf_packed_route_ids()?,
+                        session.perf_packed_route_ids(width)?,
                         width,
                         weights.config.expert_used_count as usize,
                     ))

@@ -155,11 +155,13 @@ fn median(mut xs: Vec<f64>) -> f64 {
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let corpus = args.get(1).ok_or_else(|| {
-        anyhow::anyhow!("usage: serve_chunk_probe <corpus> [mode] [first_n] [load_threads]")
+        anyhow::anyhow!("usage: serve_chunk_probe <corpus> [mode] [first_n] [load_threads] [capacity] [decode_steps]")
     })?;
     let mode = args.get(2).map(String::as_str).unwrap_or("all");
     let first_n: usize = args.get(3).map_or(Ok(32), |s| s.parse())?;
     let load_threads: usize = args.get(4).map_or(Ok(0), |s| s.parse())?;
+    let capacity: usize = args.get(5).map_or(Ok(CAPACITY), |s| s.parse())?;
+    let decode_steps: usize = args.get(6).map_or(Ok(0), |s| s.parse())?;
 
     let c = MetalContext::new()?;
     let path = qwen_llm::test_fixtures::GLM53_FLASH_UD_IQ3_XXS
@@ -185,12 +187,13 @@ fn main() -> anyhow::Result<()> {
     let w = Glm5NextWeights::load(&c, &g)?;
     emit(serde_json::json!({
         "kind": "header", "mode": mode, "depth": DEPTH, "first_n": first_n,
-        "load_threads": load_threads, "pressure": pressure(), "loadavg": loadavg(),
+        "load_threads": load_threads, "capacity": capacity,
+        "decode_steps": decode_steps, "pressure": pressure(), "loadavg": loadavg(),
         "clock": clock_note(), "corpus_tokens": ids.len(),
     }));
 
     if mode == "all" || mode == "stage" {
-        stage(&c, &w, &ids, first_n, load_threads)?;
+        stage(&c, &w, &ids, first_n, load_threads, capacity, decode_steps)?;
     }
     if mode == "all" || mode == "chunk" {
         chunk(&c, &w, &ids)?;
@@ -206,18 +209,28 @@ fn new_session<'a>(
     c: &MetalContext,
     w: &'a Glm5NextWeights,
     ids: &[u32],
+    capacity: usize,
+    decode_steps: usize,
 ) -> anyhow::Result<Glm5NextSession<'a>> {
-    let mut s = Glm5NextSession::with_prefill_rows(c, w, CAPACITY, PREFILL_ROWS)?;
+    let mut s = Glm5NextSession::with_prefill_rows(c, w, capacity, PREFILL_ROWS)?;
     for part in ids[..DEPTH].chunks(PREFILL_ROWS) {
         gate();
         s.prefill_packed(c, part)?;
     }
-    anyhow::ensure!(s.position() == DEPTH, "prefill position {}", s.position());
+    // Serve's first measured append follows the warm-up reply's decode, not
+    // the root prefill itself. Advance the same way before time zero.
+    for step in 0..decode_steps {
+        gate();
+        let logits = s.forward(c, ids[DEPTH + step])?;
+        anyhow::ensure!(logits.iter().all(|x| x.is_finite()), "non-finite decode");
+    }
+    let base = DEPTH + decode_steps;
+    anyhow::ensure!(s.position() == base, "prefill position {}", s.position());
     let released = s.prepare_decode(c)?;
     emit(serde_json::json!({
-        "kind": "session", "depth": DEPTH, "capacity": CAPACITY,
-        "prefill_rows": PREFILL_ROWS, "released_bytes": released,
-        "pressure": pressure(), "loadavg": loadavg(),
+        "kind": "session", "depth": DEPTH, "base": base, "capacity": capacity,
+        "decode_steps": decode_steps, "prefill_rows": PREFILL_ROWS,
+        "released_bytes": released, "pressure": pressure(), "loadavg": loadavg(),
     }));
     Ok(s)
 }
@@ -261,8 +274,11 @@ fn stage(
     ids: &[u32],
     first_n: usize,
     load_threads: usize,
+    capacity: usize,
+    decode_steps: usize,
 ) -> anyhow::Result<()> {
-    let mut s = new_session(c, w, ids)?;
+    let base = DEPTH + decode_steps;
+    let mut s = new_session(c, w, ids, capacity, decode_steps)?;
     let snap = s.capture_snapshot()?;
     let load = (load_threads > 0).then(|| HostLoad::start(load_threads));
     if load.is_some() {
@@ -274,7 +290,7 @@ fn stage(
         "pressure": pressure(),
     }));
 
-    let (p, k, f, rel, hash) = measure(&mut s, c, &ids[DEPTH..DEPTH + first_n])?;
+    let (p, k, f, rel, hash) = measure(&mut s, c, &ids[base..base + first_n])?;
     emit(serde_json::json!({
         "kind": "stage", "first": true, "n": first_n, "rep": 0,
         "prepare_ms": p, "kernel_ms": k, "finish_ms": f, "total_ms": p + k + f,
@@ -283,7 +299,7 @@ fn stage(
     }));
     gate();
     s.restore_snapshot(&snap)?;
-    let (pwall, pgpu) = profiled(&mut s, c, &ids[DEPTH..DEPTH + first_n])?;
+    let (pwall, pgpu) = profiled(&mut s, c, &ids[base..base + first_n])?;
     emit(serde_json::json!({
         "kind": "stage_profiled", "first": true, "n": first_n,
         "wall_ms": pwall, "gpu_ms": pgpu, "wall_minus_gpu_ms": pwall - pgpu,
@@ -297,7 +313,7 @@ fn stage(
         for rep in 0..REPS {
             gate();
             s.restore_snapshot(&snap)?;
-            let (p, k, f, rel, hash) = measure(&mut s, c, &ids[DEPTH..DEPTH + n])?;
+            let (p, k, f, rel, hash) = measure(&mut s, c, &ids[base..base + n])?;
             prepares.push(p);
             kernels.push(k);
             finishes.push(f);
@@ -311,7 +327,7 @@ fn stage(
         }
         gate();
         s.restore_snapshot(&snap)?;
-        let (pwall, pgpu) = profiled(&mut s, c, &ids[DEPTH..DEPTH + n])?;
+        let (pwall, pgpu) = profiled(&mut s, c, &ids[base..base + n])?;
         let prepare = median(prepares);
         let kernel = median(kernels);
         let finish = median(finishes);
@@ -331,7 +347,7 @@ fn stage(
 }
 
 fn chunk(c: &MetalContext, w: &Glm5NextWeights, ids: &[u32]) -> anyhow::Result<()> {
-    let mut s = new_session(c, w, ids)?;
+    let mut s = new_session(c, w, ids, CAPACITY, 0)?;
     let snap = s.capture_snapshot()?;
 
     let mut fit = Vec::new();

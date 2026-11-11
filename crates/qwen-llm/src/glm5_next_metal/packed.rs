@@ -1058,6 +1058,7 @@ fn packet_half_max_rows() -> usize {
     }
     static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *MAX.get_or_init(|| {
+        // Rows above this use grouped buckets; default 8, hard cap 128.
         std::env::var("QWEN_GLM53_EXPERT_PACKET_MAX_ROWS")
             .ok()
             .and_then(|value| value.trim().parse().ok())

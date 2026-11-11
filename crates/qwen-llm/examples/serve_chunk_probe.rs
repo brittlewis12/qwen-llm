@@ -281,6 +281,8 @@ fn stage(
         "released_bytes": rel, "hash": hash,
         "pressure": pressure(), "loadavg": loadavg(), "clock": clock_note(),
     }));
+    gate();
+    s.restore_snapshot(&snap)?;
     let (pwall, pgpu) = profiled(&mut s, c, &ids[DEPTH..DEPTH + first_n])?;
     emit(serde_json::json!({
         "kind": "stage_profiled", "first": true, "n": first_n,
@@ -307,6 +309,8 @@ fn stage(
                 "pressure": pressure(), "loadavg": loadavg(),
             }));
         }
+        gate();
+        s.restore_snapshot(&snap)?;
         let (pwall, pgpu) = profiled(&mut s, c, &ids[DEPTH..DEPTH + n])?;
         let prepare = median(prepares);
         let kernel = median(kernels);
@@ -346,6 +350,8 @@ fn chunk(c: &MetalContext, w: &Glm5NextWeights, ids: &[u32]) -> anyhow::Result<(
                 "pressure": pressure(), "loadavg": loadavg(),
             }));
         }
+        gate();
+        s.restore_snapshot(&snap)?;
         let (pwall, pgpu) = profiled(&mut s, c, &ids[DEPTH..DEPTH + chunk])?;
         let warm = median(walls);
         fit.push((chunk as f64, warm));

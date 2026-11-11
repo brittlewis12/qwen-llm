@@ -106,6 +106,10 @@ name = "glm_append_iq3_down"
 required-features = ["perf-ablations"]
 
 [[example]]
+name = "serve_chunk_probe"
+required-features = ["perf-ablations"]
+
+[[example]]
 name = "spec_batch_rows"
 required-features = ["perf-ablations"]
 

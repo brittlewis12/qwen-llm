@@ -127,6 +127,8 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Exact-referenced absolute cohort remains open because Exact did not finish
   within the two short-packet budget. Raw/partial Exact and completed Fast
   cohort plus thermal records: `metagross:~/qwen-runs/2026-11-11-glm-append-noninferiority/`.
+  Fast packet pressure peaked at 2 for Metal/prose and yielded until 1; Rust
+  observed 0, Python 1, and the packet finished at 1.
   Branch `research/glm-prefill-numerics`; no merge; M5 worktree removed.
 
 ## 2026-11-11 - Serve Chunk Gate: The Append Floor Is Per Forward

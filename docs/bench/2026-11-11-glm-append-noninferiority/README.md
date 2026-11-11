@@ -21,6 +21,9 @@ source tokens without cycling. `quality-v1.json` provides the established
 prose/code/long strata and the Metal file witnesses, but its frozen items are
 only 2,112 tokens and cannot supply a natural 48K prefix; full source text is
 used here. Source and token SHA256 values are retained in each raw prompt row.
+The Fast cohort ran under a 14-minute Metal lease. Thermal pressure peaked at
+2 during the Metal and prose prompts; the probe yielded and resumed at pressure
+1, finishing at pressure 1. The Rust prompt observed 0 and Python observed 1.
 
 Arms per prompt:
 

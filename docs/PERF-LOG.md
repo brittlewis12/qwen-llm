@@ -56,6 +56,31 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   reports `partial_prefill_s` / `partial_prefill_calls` inside `prefill_s`.
   Unit-tested; no arithmetic change.
 - Branch `perf/serve-chunked-prefill`; no merge; M5 worktree removed.
+## 2026-11-11 - GLM Expert Packet Threshold: 12-24 Rows Win, 32-Row Gate Fails
+
+- **Measurement + a default-off knob; nothing shipped.** GLM-5.3 Flash
+  UD-IQ3_XXS, M5 Ultra, 48K, iter, thermal 0. The prefill expert choice
+  (`packed.rs::packet_half_experts_selected`) now reads
+  `QWEN_GLM53_EXPERT_PACKET_MAX_ROWS` (default **8**, cap 128) and the half
+  packet's validation bound widened from 8 to 128. Default behavior unchanged.
+- **Sweep** (warm median of 3, same session/snapshot/tokens; grouped vs
+  per-slot packet wall): 8 rows 176.1/114.8 (34.8%); 12 220.2/150.9 (31.5%);
+  16 256.1/184.9 (27.8%); 24 296.8/219.7 (26.0%); **32 301.2/264.8 (12.1%)**;
+  48 366.0/368.4 (−0.7%); 64 412.9/461.1 (−11.7%); 96 495.3/661.2 (−33.5%).
+  Selected kernels confirm the swap (`moe_swiglu...generic` + down retile vs
+  `expert_native_iq2_s/iq3_s`). **Real crossover ~46-48 rows.**
+- **Gate fails:** 32-row saving is 12.1% (< 15%). The packet's per-slot rate is
+  ~0.575 ms/slot, not the batch kernel's 0.396, so the 32-row win is half the
+  estimate. Exactness is not bitwise; 24/32-row full-vocab KL 3.9e-2/2.4e-2 and
+  signed dNLL +0.193/+0.305 exceed the strict mean thresholds, though the 8-row
+  forced-grouped control is KL 1.1e-4 / −0.0034 and top-1 agrees everywhere.
+- **Decision: keep default 8; ship nothing.** The 12-24-row window (26-31%) is
+  a separate opportunity, not this gate. A 32-row winner would need the batch
+  tile in the prefill selection (0.396 ms/slot), a different packet.
+- Model + tables: `docs/bench/2026-11-11-glm-small-append-price.md` §5. Raw:
+  `metagross:~/qwen-runs/2026-11-11-glm-small-append/threshold{,2}.jsonl`.
+  Branch `perf/glm-small-append`; not merged; M5 worktree removed.
+
 ## 2026-11-11 - GLM Small Append: Expert Union Is The Floor; Middle Path Misses The Gate
 
 - **Pricing only; no production change and no middle path built.** GLM-5.3

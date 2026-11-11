@@ -173,3 +173,53 @@ matters, warm/retain rather than re-price prefill.
   its tensor expert path costs ~195 ms at 128 rows and would still leave the
   32-row total above 180 ms. Do not build without a kernel-level reason to
   expect ≤70 ms combined expert work at 32 rows.
+
+## 5. Follow-up: the expert-packet row threshold fails the 32-row gate
+
+The prefill expert choice is `packed.rs::packet_half_experts_selected`: rows
+1..=8 take the half-operand per-slot packet (`expert_native_iq2_s_f32` /
+`expert_native_iq3_s_f32`), rows above take grouped buckets. The cutoff is now
+`QWEN_GLM53_EXPERT_PACKET_MAX_ROWS` (default 8, hard cap 128); the packet's
+validation bound was widened from 8 to 128 so a probe can A/B it. The probe's
+`threshold` mode swaps only that cutoff on the same session, snapshot and
+tokens, alternates arm order, and reports full-vocab KL / signed dNLL.
+
+Warm median of three, 48K, same corpus. "grouped" is the shipped default; at
+8 rows grouped was forced (cutoff 0) because the default already selects the
+packet there.
+
+| rows | grouped ms | packet ms | packet saving | KL(g‖p) | signed dNLL |
+|---:|---:|---:|---:|---:|---:|
+| 8 | 176.1 | 114.8 | 34.8% | 1.1e-4 | −0.0034 |
+| 12 | 220.2 | 150.9 | 31.5% | 3.1e-3 | +0.0298 |
+| 16 | 256.1 | 184.9 | 27.8% | 5.1e-4 | −0.0337 |
+| 24 | 296.8 | 219.7 | 26.0% | 3.9e-2 | +0.1933 |
+| **32** | **301.2** | **264.8** | **12.1%** | **2.4e-2** | **+0.3053** |
+| 48 | 366.0 | 368.4 | −0.7% | 1.7e-5 | −0.0000 |
+| 64 | 412.9 | 461.1 | −11.7% | 2.7e-3 | −0.0048 |
+| 96 | 495.3 | 661.2 | −33.5% | 2.0e-3 | +0.0073 |
+
+The selected-kernel profiles confirm the swap: at 32 rows grouped runs
+`moe_swiglu...generic` 111.5 + `moe_down...m128_n16_retile` 57.1 ms, while the
+packet runs `expert_native_iq2_s_f32` 92.2 + `expert_native_iq3_s_f32` 55.0 ms.
+At 8 rows the same swap saves 34.8%, which is why the default already stops at
+8; the packet's per-slot rate is ~0.575 ms/slot, not the batch kernel's 0.396.
+
+**Gate result: fail.** The 32-row wall drops 12.1%, below the required 15%.
+The real crossover is **≈46–48 rows** (32 still wins 12%, 48 is a wash, 64
+loses 12%, 96 loses 33%). The 12–24-row window is a real 26–31% win, but it is
+not the gate as written.
+
+**Exactness is not bitwise** (different reduction), and the full-vocab
+single-token KL at 24/32 rows (3.9e-2 / 2.4e-2) and signed dNLL (+0.193 /
++0.305) exceed the strict same-binary mean thresholds (1e-2 / 0.005). The
+8-row forced-grouped control is the packet's inherent path delta (KL 1.1e-4,
+dNLL −0.0034); top-1 agrees at every width. A speed-passing version would still
+need a proper cohort, but the speed gate already fails.
+
+**Decision: keep the default at 8; ship nothing.** The env knob and the widened
+validation bound remain (default behavior unchanged) so the crossover can be
+re-measured without a code edit. The only measured lever that could clear 32
+rows is the batch tile (`glm_batch_iq2_s_gate_up_k4096_tg64` at ~0.396 ms/slot,
+1.45× the prefill packet), which is a separate selection/validation packet, not
+a threshold change.

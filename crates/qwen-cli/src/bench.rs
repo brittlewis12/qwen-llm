@@ -8,6 +8,8 @@
 
 #[path = "bench/args.rs"]
 mod args;
+#[path = "bench/artifact_choice.rs"]
+mod artifact_choice;
 mod attn_capture;
 #[path = "bench/attn_micro.rs"]
 mod attn_micro;
@@ -713,6 +715,7 @@ fn dispatch_command(
         Cmd::DecodeMoeGdnRepair(a) => moe_gdn_repair::run(a),
         Cmd::BuildInfo(a) => run_build_info(a),
         Cmd::GgufStoragePlan(a) => run_gguf_storage_plan(a),
+        Cmd::ArtifactChoice(a) => artifact_choice::run(a),
         Cmd::PrefixCache(a) => run_prefix_cache(a),
         Cmd::PrefixCacheVtAb(a) => {
             prefix_cache_vt_ab::run(a, serde_json::to_value(qwen_build_identity_packet())?)

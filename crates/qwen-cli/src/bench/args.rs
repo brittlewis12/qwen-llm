@@ -53,6 +53,8 @@ pub(crate) enum Cmd {
     BuildInfo(BuildInfoArgs),
     /// Report model-agnostic retained-GGUF geometry and byte coverage without loading weights.
     GgufStoragePlan(GgufStoragePlanArgs),
+    /// Compare artifact tokenizer identity, teacher-forced scores, and multi-agent fit.
+    ArtifactChoice(super::artifact_choice::ArtifactChoiceArgs),
     /// Decode N tokens after a prompt using the plain no-spec path.
     ///
     /// Packed prefill is the default no-spec path. `--sequential-prefill`
@@ -221,6 +223,31 @@ pub(crate) struct BuildInfoArgs {
     /// Output format. JSON emits one object rather than a benchmark-row array.
     #[arg(short = 'o', long, value_enum, default_value = "json")]
     pub(crate) output: OutputFormat,
+}
+
+#[derive(Parser, Debug)]
+pub(crate) struct ArtifactChoiceArgs {
+    #[arg(long, value_enum)]
+    pub(crate) mode: super::artifact_choice::ArtifactChoiceMode,
+    #[arg(long, value_enum)]
+    pub(crate) family: super::artifact_choice::ArtifactFamily,
+    #[arg(short = 'm', long)]
+    pub(crate) model: PathBuf,
+    /// Directory containing the frozen four-prompt cohort text files.
+    #[arg(long)]
+    pub(crate) cohort_dir: Option<PathBuf>,
+    /// Freeze the full 48K prefix for the fit check.
+    #[arg(long, default_value = "49152")]
+    pub(crate) depth: usize,
+    /// Number of real next-token targets per prompt.
+    #[arg(long, default_value = "1024")]
+    pub(crate) targets: usize,
+    /// All scoring runs must match the separately verified tokenizer identity.
+    #[arg(long)]
+    pub(crate) expected_tokenizer_sha256: Option<String>,
+    /// Output JSON path. Defaults to stdout.
+    #[arg(long)]
+    pub(crate) out: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

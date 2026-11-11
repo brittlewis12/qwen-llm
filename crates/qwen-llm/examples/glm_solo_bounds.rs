@@ -174,11 +174,8 @@ fn main() -> anyhow::Result<()> {
                     p * (lr - lc)
                 })
                 .sum();
-            let max = r
-                .iter()
-                .zip(c)
-                .map(|(&x, &y)| (x as f64 - y as f64).abs())
-                .fold(0.0, f64::max);
+            let max =
+                qwen_llm::compare::report_max_abs_diff_f64(r.iter().copied(), c.iter().copied());
             let argmax = |v: &[f32]| {
                 v.iter()
                     .enumerate()

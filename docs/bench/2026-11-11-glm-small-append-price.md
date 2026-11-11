@@ -223,3 +223,74 @@ re-measured without a code edit. The only measured lever that could clear 32
 rows is the batch tile (`glm_batch_iq2_s_gate_up_k4096_tg64` at ~0.396 ms/slot,
 1.45× the prefill packet), which is a separate selection/validation packet, not
 a threshold change.
+
+## 6. Correctness audit: the grouped path is not the offender
+
+The 3.9e-2 / 2.4e-2 grouped-vs-packet gap raised a quality question. The
+reference here is the **sequential 1-row decode path** (the qualified path),
+starting from the same 48K snapshot. `glm_append_audit` captures every
+appended row's logits with `verify_packed_with_captures` for both chunk
+paths, then feeds one common token through ordinary decode to compare the
+resulting state. Prompts: the real `code.txt` corpus (first 48K tokens, then
+the next 96) plus two prose prompts (`README.md` and the V4.1 causal-price
+doc), token-cycled to 48K. Warm, 48K, thermal 0.
+
+Code prompt, metrics vs the sequential reference (mean over positions; |dNLL|
+is absolute, signed mean is near zero in every row):
+
+| rows | path | mean KL | mean \|dNLL\| | max \|dNLL\| | state KL |
+|---:|---|---:|---:|---:|---:|
+| 8 | both (same path) | 4.36e-3 | 0.113 | 0.404 | 7.59e-2 |
+| 12 | grouped | 8.29e-3 | 0.077 | 0.379 | 1.01e-4 |
+| 12 | packet | 1.04e-2 | 0.104 | 0.400 | 1.28e-4 |
+| 16 | grouped | 8.18e-3 | 0.080 | 0.408 | 1.93e-3 |
+| 16 | packet | 8.52e-3 | 0.080 | 0.419 | 2.17e-3 |
+| 24 | grouped | 7.62e-3 | 0.093 | 0.502 | 8.01e-3 |
+| 24 | packet | 1.05e-2 | 0.100 | 0.400 | 2.22e-2 |
+| 32 | grouped | 7.59e-3 | 0.098 | 0.502 | 3.07e-6 |
+| 32 | packet | 9.48e-3 | 0.102 | 0.400 | 1.51e-6 |
+| 48 | grouped | 6.66e-3 | 0.081 | 0.502 | 1.03e-2 |
+| 48 | packet | 7.98e-3 | 0.083 | 0.400 | 5.94e-3 |
+| 64 | grouped | 5.65e-3 | 0.079 | 0.502 | 1.09e-3 |
+| 64 | packet | 6.60e-3 | 0.077 | 0.400 | 2.40e-3 |
+
+Both prose prompts: every grouped and packet metric is **≤1e-6** (typically
+1e-8), including state KL, with top-1 agreeing at every position. The code
+prompt is the sensitive case.
+
+**Answer: neither expert path is numerically off.** Three facts settle it:
+
+1. At 8 rows both audit arms are the *same* path (the packet is the shipped
+   choice), and the code prompt already differs from the sequential reference
+   by mean KL 4.36e-3, mean |dNLL| 0.113 and max 0.404 (position 6), with state
+   KL 7.6e-2. The chunk-vs-sequential difference is present before the 8→9
+   expert switch.
+2. At 24/32 the grouped path is not worse than the packet: slightly lower mean
+   KL (7.6e-3 vs 9.5-10.5e-3) and the same mean |dNLL| (~0.10). The grouped
+   maximum is at position 16 (0.502); the packet maximum is at position 24
+   (0.400), and the grouped is *better* at 24 (0.025 vs 0.365). Per-position
+   signs alternate, i.e. different reorderings, not a systematic bias.
+3. There is no jump at the 8→9 threshold: grouped mean KL is 8.3e-3 at 12,
+   8.2e-3 at 16, 7.6e-3 at 24, 7.6e-3 at 32. The growth from the 8-row
+   4.4e-3 is gradual.
+
+The 3.9e-2 / 2.4e-2 figure was the **mutual** grouped-vs-packet difference,
+not either path's distance to the reference. Each path is ~1e-2 from the
+reference; two different F32/Half schedules bracket it, so their mutual KL is
+larger than either error. That is the explanation for "both near the reference
+but far from each other".
+
+The shared chunk-vs-sequential divergence on the code prompt (mean |dNLL|
+~0.1, one 0.5-nat position) is **pre-existing and not threshold-related**; it
+is equally present at 8 rows where both arms share the packet path. The
+grouped suspects (`m128_n16_retile` down, generic swiglu) do not explain it,
+because the packet shows the same aggregate error. If that divergence is
+outside the accepted Fast chunk noise, the next audit must isolate the shared
+packed-prefill stages (dense tiles, attention partition, Half staging), not
+the expert kernel. No fix was attempted and no default changed.
+
+**Net:** the correctness concern does not block anything because the speed
+gate already blocks the threshold change. The grouped path is not a
+production correctness bug relative to the packet; both are valid Fast
+approximations of the sequential reference, with the code prompt sensitive to
+the chunk schedule.

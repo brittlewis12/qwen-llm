@@ -56,6 +56,33 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   reports `partial_prefill_s` / `partial_prefill_calls` inside `prefill_s`.
   Unit-tested; no arithmetic change.
 - Branch `perf/serve-chunked-prefill`; no merge; M5 worktree removed.
+## 2026-11-11 - GLM Append Audit: Neither Expert Path Is Off; Chunk Schedule Is Shared
+
+- **Correctness audit only; no fix, no default change.** New
+  `glm_append_audit` compares grouped and per-slot packet prefill against the
+  qualified sequential 1-row decode at every appended position (signed dNLL,
+  both KL directions) and one common post-append decode step for state. 48K,
+  iter, thermal 0, three real prompts: `code.txt`, `README.md`, the V4.1
+  causal-price doc.
+- **Prose:** both paths are bitwise to the reference (mean KL ≤1e-6, usually
+  1e-8; state KL likewise; top-1 agrees everywhere).
+- **Code:** both paths differ from the reference by mean KL ~7.6e-3 (grouped)
+  / 9.5e-3 (packet) at 24/32 rows, mean |dNLL| ~0.10, max ~0.50 / 0.40, state
+  KL 3e-6 to 2e-2. Crucially the **8-row same-path control already shows
+  mean KL 4.36e-3, mean |dNLL| 0.113, max 0.404, state KL 7.6e-2**, and there
+  is no 8→9 jump (grouped 8.3e-3 at 12, 8.2e-3 at 16, 7.6e-3 at 24/32).
+- **Call:** neither expert path is off. Grouped is slightly closer in mean KL
+  and has the same mean |dNLL|; per-position signs alternate (grouped max at
+  pos 16, packet max at pos 24; each is better at the other). The earlier
+  3.9e-2/2.4e-2 was the *mutual* gap; each path is ~1e-2 from the reference
+  and they bracket it. The shared chunk-vs-sequential divergence on code is
+  pre-existing, not threshold- or expert-kernel-related; the `m128_n16_retile`
+  down and generic swiglu suspects do not explain it. Nothing blocked beyond
+  the already-failed speed gate.
+- Model + tables: `docs/bench/2026-11-11-glm-small-append-price.md` §6. Raw:
+  `metagross:~/qwen-runs/2026-11-11-glm-small-append/audit.jsonl`. Branch
+  `perf/glm-small-append`; not merged; M5 worktree removed.
+
 ## 2026-11-11 - GLM Expert Packet Threshold: 12-24 Rows Win, 32-Row Gate Fails
 
 - **Measurement + a default-off knob; nothing shipped.** GLM-5.3 Flash

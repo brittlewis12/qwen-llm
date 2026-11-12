@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-11 - Two-Queue Causal Branches: Ceiling Passes, Isolation Does Not
+
+- **Negative stage-2 gate; no production default changed.** M5 GLM's optimal
+  scope-preserving two-queue ceiling is **1.111 ms/token / 6.65% of wall**.
+  A research-only prototype is bitwise for logits and persistent state, but
+  48 affected fork groups reach only **1.112x** isolated GPU speedup
+  (**4.813 -> 4.328 ms**), below 1.25x. Nine rotated interleaved sweeps;
+  every written byte matches. KDA controls 1.248x, MLA query/index 0.970x,
+  shared/routed FFN 0.979x. The conditional wall A/B and serve gates were not
+  entered; no token-wall win is claimed.
+- **Sync price:** device-local `MTLEvent` adds **4.6 us/handoff on M5** and
+  **4.4 on M4**, including the return join. Shared events are much costlier
+  (initial campaign 222/71 us). `dispatch_deadtime --event-sync` validates
+  dependent data through both queues; 121 reps at five chain depths.
+- **Measured-node graph, four forward rounds near 32K:** Flash-Next wave sum
+  **12.024 -> 11.616 ms**, 0.408 ms/3.39% of wall; V4.1 B=1
+  **13.211 -> 12.737**, 0.474 ms/3.39%; V4.1 B=3
+  **22.802 -> 21.447 ms/round**, 1.355 ms/4.91% (0.452 ms/output token).
+  These are static-duration scheduling prices with events, not measured
+  model wins. Global span-DAG bounds also remove artificial scope joins.
+  GLM B=1 is currently serial, so its wave baseline is a diagnostic retrofit
+  of the exact solo kernels, with serial and single-queue controls retained.
+- Per-node timestamps now use explicit same-queue completion events; encoder
+  boundaries alone allowed overlapping windows in the initial capture, which
+  is excluded. A landed GPU regression checks node isolation; the prototype
+  branch also carries fork/join and queue-certificate checks. Final model
+  preflights reject other model executables regardless of RSS and defer hot
+  loads. M5 builds and GPU work were queued under holds of ten minutes or less.
+- Branch `research/two-queue-causal`, rebased onto main `932f3b729`; final
+  prototype code `25a35a756`. Main keeps the record, CPU analyzer and capture
+  tooling; the execution prototype remains only on that branch. Evidence and
+  reproduction: `docs/bench/2026-11-11-two-queue-causal.md`; raw
+  `metagross:~/qwen-runs/2026-11-11-two-queue/`. Lane bundles, M5 worktree and
+  build output removed after verification.
+
 ## 2026-11-11 - Resource-Scoped Barriers Do Not Release The Wave Floor
 
 - **Probe 3a closes the direct barrier replacement class.** A single

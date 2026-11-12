@@ -45253,3 +45253,25 @@ its timing is excluded. Added a pressure-gated short re-price and peer-round
 diagnostics before serve A/B. Release serve binary built successfully under
 the 10m05s lease; default remains off. Frozen incumbent max is a 1959-row
 Full append at position 63471, confirming warm-append responsiveness ROI.
+
+## 2026-11-12 — V4.1 layer slices exact; serve thermal gate unmet, default off
+
+- Staged selective row-preserving Full/CED layer interleaving from main
+  `932f3b729`. Opt-in MS=200, minimum predicted 500 ms; MS=0 restores incumbent
+  native calls and decode budgeting. **Default remains 0; no default-on ship.**
+- **75/75 native pairs exact**, including logits, complete causal state,
+  subsequent decode and peers, plus five native cancel/restore cases.
+  Warm Full 1509-row/eight-cut probe: worst 1.39 s -> 0.217 s, equal-round GPU
+  duration ratio 0.990 at pressure 0. CED timing varies; hot timing excluded.
+- Both release three-agent control attempts hit thermal 2 before completing
+  the requested 180 s window. The corrected attempt used production max-active 4,
+  three sampler workers and longer cooling. No accepted summary or sliced
+  serve arm; aggregate throughput, live ITL and partial-prefill comparison
+  are unproven. Stopped at this gate before Flash-Next.
+- CPU: V4.1 95, Driver 23 and full serve 695 pass; 42 pre-existing ignored,
+  none added. Contracts pass and ENV is regenerated. Active/partial prefill
+  accounting and peer-round diagnostics are included under both arms.
+- Branch `perf/v41-layer-sliced-prefill`; measured source `25cde3c75`.
+  [Bench note](bench/2026-11-12-v41-layer-slice.md) and compact results record
+  all evidence/limitations. Raw M5 output retained; lane worktree, build output
+  and bundles removed. No artifact or roadmap change; no merge.

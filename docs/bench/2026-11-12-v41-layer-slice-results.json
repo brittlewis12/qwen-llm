@@ -1,0 +1,136 @@
+{
+  "exact_pairs": 75,
+  "native_cancel_cases": [
+    {
+      "depth": 0,
+      "ced": true,
+      "rows": 8192
+    },
+    {
+      "depth": 0,
+      "ced": true,
+      "rows": 8193
+    },
+    {
+      "depth": 49152,
+      "ced": false,
+      "rows": 342
+    },
+    {
+      "depth": 49152,
+      "ced": false,
+      "rows": 1509
+    },
+    {
+      "depth": 49152,
+      "ced": true,
+      "rows": 8192
+    }
+  ],
+  "files": [
+    {
+      "file": "full-probe.jsonl",
+      "exact_pairs": 24,
+      "thermal_levels": [
+        0
+      ]
+    },
+    {
+      "file": "ced-probe.jsonl",
+      "exact_pairs": 8,
+      "thermal_levels": [
+        0,
+        1
+      ]
+    },
+    {
+      "file": "cold-full-probe.jsonl",
+      "exact_pairs": 12,
+      "thermal_levels": [
+        1
+      ]
+    },
+    {
+      "file": "cold-ced-probe.jsonl",
+      "exact_pairs": 4,
+      "thermal_levels": [
+        1
+      ]
+    },
+    {
+      "file": "policy-ced.jsonl",
+      "exact_pairs": 10,
+      "thermal_levels": [
+        0,
+        2
+      ]
+    },
+    {
+      "file": "policy-cold-ced.jsonl",
+      "exact_pairs": 5,
+      "thermal_levels": [
+        2
+      ]
+    },
+    {
+      "file": "policy-full.jsonl",
+      "exact_pairs": 8,
+      "thermal_levels": [
+        2
+      ]
+    },
+    {
+      "file": "scalar-tail-ced.jsonl",
+      "exact_pairs": 4,
+      "thermal_levels": [
+        0
+      ]
+    }
+  ],
+  "accepted_serve_windows": 0,
+  "serve_gate": "unmet: both incumbent attempts thermal-aborted",
+  "default_layer_slice_ms": 0,
+  "trial_layer_slice_ms": 200,
+  "minimum_predicted_ms": 500,
+  "source_base": "932f3b729",
+  "measured_source": "25cde3c75",
+  "artifact": "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS (IQ4_NL Engram)",
+  "standing": {
+    "source": "2026-11-11-artifact-choice/serve-v2/A2",
+    "commit": "bba889ccf0a0a60d6a1df895631d01604e67c809",
+    "profile": "release",
+    "window_seconds": 180.0,
+    "aggregate_tps": 84.00555555555556,
+    "gap_samples": 14973,
+    "itl_p50_ms": 27.921199798583984,
+    "itl_p99_ms": 55.9382438659668,
+    "itl_max_ms": 2097.923994064331,
+    "summary_sha256": "ae1b90d39bd993005594d5b624b8175669bb415a4f4173190849002895335195"
+  },
+  "cpu": {
+    "v41_passed": 95,
+    "driver_passed": 23,
+    "serve_passed": 695,
+    "serve_preexisting_ignored": 42,
+    "new_ignored": 0
+  },
+  "serve_attempts": [
+    {
+      "path": "serve/A1-thermal-max3",
+      "max_active": 3,
+      "sample_workers": 2,
+      "accepted": false,
+      "reason": "thermal_abort",
+      "thermal_max": 2
+    },
+    {
+      "path": "serve/A1-thermal-max4",
+      "max_active": 4,
+      "sample_workers": 3,
+      "accepted": false,
+      "reason": "thermal_abort",
+      "thermal_max": 2
+    }
+  ],
+  "version": 1
+}

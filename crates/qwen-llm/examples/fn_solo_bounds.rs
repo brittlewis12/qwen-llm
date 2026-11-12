@@ -1,6 +1,6 @@
 #![cfg_attr(not(feature = "perf-ablations"), allow(unused))]
 //! Flash-Next B=1 solo-path family holds and causal wave graph.
-//! MODEL DEPTH [STEPS=32] [bounds|graph|serial]
+//! MODEL DEPTH [STEPS=32] [bounds|graph|nodes|serial]
 //! Requires `--features perf-ablations`; run under the canonical Metal lease.
 use qwen_llm::{
     gguf::GgufFile,
@@ -78,16 +78,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         json!({"kind":"header","depth":depth,"steps":steps,"mode":mode,"thermal":thermal(),"vocab":config.vocab_size})
     );
 
-    if mode == "graph" {
-        let guard = metal::causal_graph_begin(&ctx, 1000)?;
+    if mode == "graph" || mode == "nodes" {
+        let mut reference_ms = Vec::new();
+        for _ in 0..3 {
+            runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
+            let started = Instant::now();
+            let stats = runner.generate_gpu_tokens(&mut greedy(), 32, &[], |_| true)?;
+            reference_ms
+                .push(started.elapsed().as_secs_f64() * 1e3 / stats.forwarded_tokens as f64);
+        }
+        runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
+        runner.generate_gpu_tokens(&mut greedy(), steps, &[], |_| true)?;
+        let expected = runner.logits()?.to_vec();
+        let guard = if mode == "nodes" {
+            metal::causal_node_graph_begin(&ctx, 8192)?
+        } else {
+            metal::causal_graph_begin(&ctx, 1000)?
+        };
         runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
         let mut sampler = greedy();
         let started = Instant::now();
         let stats = runner.generate_gpu_tokens(&mut sampler, steps, &[], |_| true)?;
         let wall = started.elapsed().as_secs_f64() * 1e3;
+        assert!(
+            expected
+                .iter()
+                .zip(runner.logits()?.as_slice().iter())
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "node capture changed FN logits"
+        );
         let mut value = metal::causal_graph_finish(&ctx, guard)?;
         value["width"] = json!(1);
-        value["rounds"] = json!(steps);
+        value["rounds"] = json!(stats.forwarded_tokens);
+        value["reference_wall_ms_token"] = json!(reference_ms);
+        value["bitwise"] = json!(true);
         value["wall_ms_round"] = json!(wall / steps as f64);
         value["stats"] = json!({"wall_ms":stats.wall_ms,"gpu_ms":stats.gpu_ms,"encode_ms":stats.encode_cpu_ms,"wait_ms":stats.completion_wait_ms});
         println!("{value}");

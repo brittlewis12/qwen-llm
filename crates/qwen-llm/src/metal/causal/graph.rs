@@ -4,10 +4,11 @@
 //!
 //! M5 rejects `sampleCountersInBuffer:` inside a compute encoder, so a sampled
 //! dump encodes each wave in its own stage-boundary-sampled concurrent encoder.
-//! Waves are already separated by `MTLBarrierScope::Buffers`, so the wave graph
-//! and per-wave overlap are unchanged; encoder transitions add a small
-//! diagnostic overhead. The production encoder is suspended for the scope and
-//! reopened afterwards.
+//! Encoder transitions can allow independent passes to overlap, so wave-mode
+//! spans are diagnostic windows and are not an ordinary token-wall price.
+//! Node mode uses explicit same-queue events between sampled encoders to measure
+//! nonoverlapping individual dispatches. The production encoder is suspended
+//! for the scope and reopened afterwards.
 use super::*;
 use objc2_metal::{MTLCommandBuffer, MTLDispatchType};
 use std::cell::RefCell;
@@ -20,14 +21,19 @@ struct PendingWave {
     kernels: Vec<String>,
     start: usize,
     end: usize,
+    node: Option<usize>,
 }
 
 struct Active {
-    samples: MetalTimestampSampleBuffer,
+    samples: Vec<MetalTimestampSampleBuffer>,
     pending: Vec<PendingWave>,
     scope: usize,
     next_pair: usize,
     truncated: usize,
+    nodes: bool,
+    plans: Vec<serde_json::Value>,
+    isolation_event: Option<Retained<ProtocolObject<dyn objc2_metal::MTLEvent>>>,
+    isolation_value: u64,
 }
 
 thread_local! {
@@ -54,10 +60,40 @@ pub fn causal_graph_begin(
     ctx: &MetalContext,
     max_waves: usize,
 ) -> Result<CausalGraphGuard, MetalError> {
+    begin(ctx, max_waves, false)
+}
+
+/// Capture exact span-derived predecessor edges and one isolated GPU timestamp
+/// pair per node. This diagnostic serializes dispatches; use an uninstrumented
+/// run for token wall time. Scope entry/exit ordering remains intact.
+pub fn causal_node_graph_begin(
+    ctx: &MetalContext,
+    max_nodes: usize,
+) -> Result<CausalGraphGuard, MetalError> {
+    begin(ctx, max_nodes, true)
+}
+
+fn begin(
+    ctx: &MetalContext,
+    max_waves: usize,
+    nodes: bool,
+) -> Result<CausalGraphGuard, MetalError> {
     if max_waves == 0 {
         return Err(MetalError::Counter("empty causal graph dump".into()));
     }
-    let samples = ctx.timestamp_sample_buffer(2 * max_waves)?;
+    // One Metal counter sample buffer is capped at 4096 timestamps.
+    let samples = (0..max_waves.div_ceil(2048))
+        .map(|i| ctx.timestamp_sample_buffer(2 * (max_waves - i * 2048).min(2048)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let isolation_event = if nodes {
+        Some(
+            ctx.device
+                .newEvent()
+                .ok_or_else(|| MetalError::Counter("no node isolation event".into()))?,
+        )
+    } else {
+        None
+    };
     GRAPH.with(|g| {
         let mut g = g.borrow_mut();
         if g.is_some() {
@@ -71,6 +107,10 @@ pub fn causal_graph_begin(
             scope: 0,
             next_pair: 0,
             truncated: 0,
+            nodes,
+            plans: Vec::new(),
+            isolation_event,
+            isolation_value: 0,
         });
         Ok(CausalGraphGuard {
             _thread: PhantomData,
@@ -80,6 +120,37 @@ pub fn causal_graph_begin(
 
 pub(crate) fn active() -> bool {
     GRAPH.with(|g| g.borrow().is_some())
+}
+
+pub(crate) fn nodes_active() -> bool {
+    GRAPH.with(|g| g.borrow().as_ref().is_some_and(|a| a.nodes))
+}
+
+/// Encoder boundaries alone may overlap independent passes. The event wait is
+/// outside the next sampled encoder, so each node's start/end pair excludes
+/// the preceding pass and the synchronization command itself.
+pub(crate) fn isolate_node(enc: &KernelEncoder) {
+    GRAPH.with(|g| {
+        let mut g = g.borrow_mut();
+        let a = g.as_mut().expect("node graph");
+        let event = a.isolation_event.as_ref().expect("node isolation event");
+        a.isolation_value += 1;
+        enc.parent.encodeSignalEvent_value(event, a.isolation_value);
+        enc.parent
+            .encodeWaitForEvent_value(event, a.isolation_value);
+    });
+}
+
+pub(crate) fn record_plan(nodes: &[Node], spans: &[Vec<Access>], waves: &[Vec<usize>]) {
+    GRAPH.with(|g| {
+        let mut g = g.borrow_mut();
+        let Some(a) = g.as_mut() else { return };
+        let rows: Vec<_> = nodes.iter().enumerate().map(|(i,n)| {
+            let predecessors: Vec<_> = (0..i).filter(|&j| spans[j].iter().any(|&x|spans[i].iter().any(|&y|conflict(x,y)))).collect();
+            serde_json::json!({"id":i,"kernel":n.name(),"label":n.label,"grid":[n.grid.width,n.grid.height,n.grid.depth],"threads":[n.threads.width,n.threads.height,n.threads.depth],"predecessors":predecessors,"spans":spans[i].iter().map(|s|serde_json::json!({"buffer":s.buffer,"lo":s.lo,"hi":s.hi,"write":s.write})).collect::<Vec<_>>()})
+        }).collect();
+        a.plans.push(serde_json::json!({"scope":a.scope,"nodes":rows,"waves":waves}));
+    });
 }
 
 /// Begin a new causal scope (one per layer). Scopes are encoded in order, so
@@ -112,12 +183,20 @@ pub(crate) fn begin_wave(enc: &KernelEncoder) -> (KernelEncoder, Option<(usize, 
         };
         let start = 2 * a.next_pair;
         let end = start + 1;
-        if end >= a.samples.sample_count() {
+        let buffer = a.next_pair / 2048;
+        let local_start = (a.next_pair % 2048) * 2;
+        if buffer >= a.samples.len() || local_start + 1 >= a.samples[buffer].sample_count() {
             a.truncated += 1;
             return (KernelEncoder::begin_concurrent(&enc.parent), None);
         }
         a.next_pair += 1;
-        match KernelEncoder::try_begin_sampled(&enc.parent, &a.samples, start, end, true) {
+        match KernelEncoder::try_begin_sampled(
+            &enc.parent,
+            &a.samples[buffer],
+            local_start,
+            local_start + 1,
+            true,
+        ) {
             Ok(wave) => (wave, Some((start, end))),
             Err(_) => {
                 a.truncated += 1;
@@ -143,9 +222,27 @@ pub(crate) fn finish_wave(
                 kernels,
                 start,
                 end,
+                node: None,
             });
         }
     });
+}
+
+pub(crate) fn finish_node(
+    scope: usize,
+    wave: usize,
+    node: usize,
+    kernel: String,
+    span: Option<(usize, usize)>,
+) {
+    finish_wave(scope, wave, vec![kernel], span);
+    if span.is_some() {
+        GRAPH.with(|g| {
+            if let Some(a) = g.borrow_mut().as_mut() {
+                a.pending.last_mut().unwrap().node = Some(node);
+            }
+        });
+    }
 }
 
 /// Reopen the production concurrent encoder after the sampled waves.
@@ -176,7 +273,13 @@ pub fn causal_graph_finish(
             "causal graph dump recorded no waves".into(),
         ));
     }
-    let times = ctx.resolve_timestamp_samples(&active.samples, 2 * active.next_pair)?;
+    let mut times = Vec::with_capacity(2 * active.next_pair);
+    for (i, samples) in active.samples.iter().enumerate() {
+        let count = active.next_pair.saturating_sub(i * 2048).min(2048);
+        if count > 0 {
+            times.extend(ctx.resolve_timestamp_samples(samples, 2 * count)?);
+        }
+    }
     let mut rows = Vec::with_capacity(active.pending.len());
     let mut scopes = std::collections::BTreeMap::<usize, Vec<serde_json::Value>>::new();
     for w in &active.pending {
@@ -189,6 +292,9 @@ pub fn causal_graph_finish(
             "wave": w.wave,
             "kernels": w.kernels,
             "gpu_ns": ns,
+            "gpu_start": start,
+            "gpu_end": end,
+            "node": w.node,
         });
         scopes.entry(w.scope).or_default().push(row.clone());
         rows.push(row);
@@ -205,6 +311,9 @@ pub fn causal_graph_finish(
         .collect();
     Ok(serde_json::json!({
         "kind": "causal_graph",
+        "mode": if active.nodes {"nodes"} else {"waves"},
+        "node_isolation": if active.nodes {"same-queue MTLEvent signal/wait between sampled encoders"} else {"wave encoders"},
+        "plans": active.plans,
         "waves": rows.len(),
         "scope_count": scopes.len(),
         "truncated_waves": active.truncated,

@@ -301,7 +301,28 @@ impl KernelEncoder {
         #[cfg(feature = "perf-ablations")]
         if graph::active() {
             graph::begin_scope();
+            graph::record_plan(&recording.nodes, &spans, &waves);
             graph::suspend(self);
+            if graph::nodes_active() {
+                graph::isolate_node(self);
+                for (wave_index, wave) in waves.iter().enumerate() {
+                    for &i in wave {
+                        let (enc, span) = graph::begin_wave(self);
+                        recording.nodes[i].encode(&enc);
+                        enc.end();
+                        graph::finish_node(
+                            graph::scope(),
+                            wave_index,
+                            i,
+                            recording.nodes[i].name().to_string(),
+                            span,
+                        );
+                        graph::isolate_node(self);
+                    }
+                }
+                graph::resume(self);
+                return Ok(());
+            }
             for (wave_index, wave) in waves.iter().enumerate() {
                 let (enc, span) = graph::begin_wave(self);
                 for &i in wave {
@@ -556,6 +577,70 @@ fn fuse_flash_next(ctx: &MetalContext, nodes: &mut Vec<Node>, mode: u8) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "perf-ablations")]
+    #[test]
+    fn node_capture_events_isolate_independent_passes() {
+        let ctx = MetalContext::new().unwrap();
+        let seed: Vec<u32> = (1..=128).collect();
+        let long_input = ctx.buffer_from(&seed).unwrap();
+        let long_output = ctx.buffer_uninit(512).unwrap();
+        let chain = [
+            ctx.buffer_from(&seed).unwrap(),
+            ctx.buffer_uninit(512).unwrap(),
+        ];
+        let guard = graph::causal_node_graph_begin(&ctx, 8).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let enc = KernelEncoder::begin_causal(&command);
+        for (kernel, input, output, iterations) in [
+            (
+                "kernel_dispatch_barrier_long",
+                &long_input,
+                &long_output,
+                20000u32,
+            ),
+            ("kernel_dispatch_barrier_short", &chain[0], &chain[1], 1u32),
+            ("kernel_dispatch_barrier_short", &chain[1], &chain[0], 1u32),
+        ] {
+            enc.set_pipeline(&ctx.pipeline(kernel).unwrap());
+            enc.set_buffer(0, input, 0);
+            enc.set_buffer(1, output, 0);
+            enc.set_bytes(2, &iterations);
+            enc.dispatch(
+                MTLSize {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 128,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        }
+        enc.finish_causal_scope(&ctx, false).unwrap();
+        enc.end();
+        commit_and_wait(&command).unwrap();
+        let capture = graph::causal_graph_finish(&ctx, guard).unwrap();
+        let rows = capture["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        for pair in rows.windows(2) {
+            assert!(
+                pair[1]["gpu_start"].as_u64().unwrap() >= pair[0]["gpu_end"].as_u64().unwrap(),
+                "node windows overlap: {capture}"
+            );
+        }
+        let words =
+            unsafe { std::slice::from_raw_parts(chain[0].contents().as_ptr().cast::<u32>(), 128) };
+        for (&actual, mut expected) in words.iter().zip(seed) {
+            for _ in 0..2 {
+                expected ^= expected >> 13;
+                expected = expected.wrapping_mul(1664525).wrapping_add(1013904223);
+            }
+            assert_eq!(actual, expected);
+        }
+    }
     #[test]
     fn waves_preserve_read_write_and_alias_dependencies() {
         let a = |buffer, lo, hi, write| Access {

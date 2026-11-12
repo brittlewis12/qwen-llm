@@ -1,6 +1,6 @@
 #![cfg_attr(not(feature = "perf-ablations"), allow(unused))]
 //! GLM B=1 solo-path family holds and per-dispatch critical path.
-//! MODEL DEPTH [STEPS=32] [bounds|profile|serial]
+//! MODEL DEPTH [STEPS=32] [bounds|profile|nodes|serial]
 //! Requires `--features perf-ablations`; run under the canonical Metal lease.
 use qwen_llm::{
     gguf::GgufFile,
@@ -70,6 +70,45 @@ fn main() -> anyhow::Result<()> {
     // Compile the fixed pipelines and import any lazy scratch before the arms.
     s.generate_gpu_tokens(&ctx, &head, &mut greedy(), 2, &[], |_| true)?;
     emit(json!({"kind":"header","depth":depth,"steps":steps,"mode":mode,"thermal":thermal()}));
+
+    if mode == "nodes" {
+        let mut reference_ms = Vec::new();
+        for _ in 0..3 {
+            s.restore_snapshot(&entry)?;
+            let started = Instant::now();
+            let stats = s.generate_gpu_tokens(&ctx, &head, &mut greedy(), 32, &[], |_| true)?;
+            reference_ms
+                .push(started.elapsed().as_secs_f64() * 1e3 / stats.forwarded_tokens as f64);
+        }
+        anyhow::ensure!((1..=8).contains(&steps), "1..8 node-capture rounds");
+        s.restore_snapshot(&entry)?;
+        let mut expected = Vec::new();
+        for j in 0..steps {
+            expected.push(s.forward(&ctx, ids[(64 + j) % ids.len()])?);
+        }
+        s.restore_snapshot(&entry)?;
+        let guard = causal_node_graph_begin(&ctx, 8192)?;
+        let mut actual = Vec::new();
+        for j in 0..steps {
+            actual.push(s.forward(&ctx, ids[(64 + j) % ids.len()])?);
+        }
+        anyhow::ensure!(
+            expected
+                .iter()
+                .flatten()
+                .zip(actual.iter().flatten())
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "diagnostic DAG changed GLM logits"
+        );
+        let mut value = causal_graph_finish(&ctx, guard)?;
+        value["width"] = json!(1);
+        value["rounds"] = json!(steps);
+        value["production_path"] = json!("serial; wave schedule is hypothetical");
+        value["bitwise"] = json!(true);
+        value["reference_wall_ms_token"] = json!(reference_ms);
+        emit(value);
+        return Ok(());
+    }
 
     if mode == "profile" {
         s.restore_snapshot(&entry)?;

@@ -1734,7 +1734,15 @@ impl<'w> Glm5NextSession<'w> {
             .queue
             .commandBuffer()
             .ok_or_else(|| Glm5NextMetalError::Invalid("no command buffer".into()))?;
-        let mut enc = KernelEncoder::begin(&command);
+        #[cfg(feature = "perf-ablations")]
+        let diagnostic_nodes = crate::metal::causal_node_graph_active();
+        #[cfg(not(feature = "perf-ablations"))]
+        let diagnostic_nodes = false;
+        let mut enc = if diagnostic_nodes {
+            KernelEncoder::begin_causal(&command)
+        } else {
+            KernelEncoder::begin(&command)
+        };
         self.encode_token_body(
             ctx,
             &mut command,
@@ -1747,6 +1755,9 @@ impl<'w> Glm5NextSession<'w> {
             hooks,
             output,
         )?;
+        if diagnostic_nodes {
+            enc.finish_causal_scope(ctx, false)?;
+        }
         enc.end();
         let encode_ms = encode_started.map(|started| started.elapsed().as_secs_f64() * 1e3);
         let wait_started = self.decode_timing.get().map(|_| std::time::Instant::now());
@@ -2014,6 +2025,11 @@ impl<'w> Glm5NextSession<'w> {
                     .commandBuffer()
                     .ok_or_else(|| Glm5NextMetalError::Invalid("no command buffer".into()))?;
                 *enc = KernelEncoder::begin(command);
+            }
+            #[cfg(feature = "perf-ablations")]
+            if crate::metal::causal_node_graph_active() {
+                enc.finish_causal_scope(ctx, false)?;
+                enc.begin_causal_scope();
             }
         }
         if logits {

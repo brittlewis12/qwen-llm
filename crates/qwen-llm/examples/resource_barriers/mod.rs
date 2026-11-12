@@ -68,7 +68,7 @@ struct Sample {
     queue_overlap_us: Option<f64>,
 }
 
-fn mix(mut x: u32, iterations: u32) -> u32 {
+pub(super) fn mix(mut x: u32, iterations: u32) -> u32 {
     for _ in 0..iterations {
         x ^= x >> 13;
         x = x.wrapping_mul(1664525).wrapping_add(1013904223);
@@ -76,7 +76,7 @@ fn mix(mut x: u32, iterations: u32) -> u32 {
     x
 }
 
-fn dispatch(
+pub(super) fn dispatch(
     enc: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     pso: &Pipeline,
     input: &Buffer,

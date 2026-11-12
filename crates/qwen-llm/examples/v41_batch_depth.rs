@@ -1,6 +1,7 @@
 //! V4.1 independent decode at agent depth. CPU inventory: MODEL inventory.
 //! Timing: MODEL DEPTH BATCH STEPS [dump=TEMP_LOGITS]. Run under the canonical
-//! Metal lease; build unleased. Corpus regenerates from committed Git blobs.
+//! Metal lease; builds follow the host's campaign policy. Corpus regenerates
+//! from committed Git blobs. `nodes` exports isolated node times and span edges.
 use anyhow::{Result, ensure};
 use qwen_llm::{
     deepseek_v41::{
@@ -186,7 +187,8 @@ fn main() -> Result<()> {
         let is_causal = args.get(5).is_some_and(|s| s == "causal");
         let is_profile = args.get(5).is_some_and(|s| s == "profile");
         let is_hostgap = args.get(5).is_some_and(|s| s == "hostgap");
-        let is_graph = args.get(5).is_some_and(|s| s == "graph");
+        let is_nodes = args.get(5).is_some_and(|s| s == "nodes");
+        let is_graph = is_nodes || args.get(5).is_some_and(|s| s == "graph");
         let screen_batch: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(3);
         let members = if is_waves {
             3
@@ -272,6 +274,7 @@ fn main() -> Result<()> {
                 &entries,
                 &streams,
                 args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(8),
+                is_nodes,
             );
             #[cfg(not(feature = "perf-ablations"))]
             anyhow::bail!("graph requires perf-ablations");
@@ -821,6 +824,7 @@ fn causal_graph(
     entries: &[qwen_llm::deepseek_v41::forward::Snapshot],
     streams: &[Vec<u32>],
     n: usize,
+    nodes: bool,
 ) -> Result<()> {
     ensure!((1..=8).contains(&n), "1..8 graph rounds");
     let width = states.len();
@@ -831,7 +835,34 @@ fn causal_graph(
         let tokens: Vec<_> = (0..width).map(|i| streams[i][4300 + j]).collect();
         step(f, states, &tokens, true)?;
     }
-    let guard = metal::causal_graph_begin(ctx, 2000)?;
+    let mut reference_ms = Vec::new();
+    for _ in 0..3 {
+        for (s, snap) in states.iter_mut().zip(entries) {
+            f.restore_snapshot(s, snap)?;
+        }
+        let started = Instant::now();
+        for j in 0..8 {
+            let tokens: Vec<_> = (0..width).map(|i| streams[i][4310 + j]).collect();
+            step(f, states, &tokens, width > 1)?;
+        }
+        reference_ms.push(started.elapsed().as_secs_f64() * 1e3 / 8.0);
+    }
+    for (s, snap) in states.iter_mut().zip(entries) {
+        f.restore_snapshot(s, snap)?;
+    }
+    let mut expected = Vec::new();
+    for j in 0..n {
+        let tokens: Vec<_> = (0..width).map(|i| streams[i][4310 + j]).collect();
+        expected.push(step(f, states, &tokens, width > 1)?);
+    }
+    for (s, snap) in states.iter_mut().zip(entries) {
+        f.restore_snapshot(s, snap)?;
+    }
+    let guard = if nodes {
+        metal::causal_node_graph_begin(ctx, 16384)?
+    } else {
+        metal::causal_graph_begin(ctx, 2000)?
+    };
     let scope =
         qwen_llm::deepseek_v41::forward::profile::Scope::begin().map_err(anyhow::Error::msg)?;
     let start = Instant::now();
@@ -850,6 +881,17 @@ fn causal_graph(
         .map(|v| v / n as f64)
         .unwrap_or(f64::NAN);
     let mut value = metal::causal_graph_finish(ctx, guard)?;
+    ensure!(
+        expected
+            .iter()
+            .flatten()
+            .flatten()
+            .zip(heads.iter().flatten().flatten())
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "node capture changed V4.1 logits"
+    );
+    value["reference_wall_ms_round"] = serde_json::json!(reference_ms);
+    value["bitwise"] = serde_json::json!(true);
     value["width"] = serde_json::json!(width);
     value["rounds"] = serde_json::json!(n);
     value["wall_ms_round"] = serde_json::json!(wall_ms);

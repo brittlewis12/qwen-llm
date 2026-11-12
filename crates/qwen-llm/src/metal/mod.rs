@@ -288,7 +288,11 @@ mod attn;
 mod bench;
 mod causal;
 #[cfg(feature = "perf-ablations")]
-pub use causal::graph::{CausalGraphGuard, causal_graph_begin, causal_graph_finish};
+pub(crate) use causal::graph::nodes_active as causal_node_graph_active;
+#[cfg(feature = "perf-ablations")]
+pub use causal::graph::{
+    CausalGraphGuard, causal_graph_begin, causal_graph_finish, causal_node_graph_begin,
+};
 #[cfg(feature = "perf-ablations")]
 pub use causal::{TokenPriceBook, TokenPriceGuard, TokenPriceMode};
 mod qos;

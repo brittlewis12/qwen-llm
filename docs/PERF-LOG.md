@@ -6,6 +6,122 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 - Serve Standing: Three Agents On Main, Like-For-Like And Sustained
+
+- **Question / builds.** A fresh three-agent standing for all tier-1 families,
+  in two forms: baseline vs current main at 40 s, then a sustained window on
+  current main only. Baseline is **`6526a6919`**, the "tonight" build of the
+  newest three-agent standing (the 2026-11-10 30 s packet); its tonight arms
+  average **GLM 77.9** and **V4.1 93.0 tok/s**, matching the quoted standing.
+  Current is **`f691af6e1`**. The 40 s window and 45 s warm-cool / 30 s arm
+  cool are the earlier 2026-11-10 Morning-vs-Tonight packet's protocol.
+  Release binaries were built in separate M5 worktrees: baseline
+  `qwen` **dbd7bd3f** / `qwen-tok` **897228f5**, current `qwen` **b6881c0c** /
+  `qwen-tok` **7a623c8f** (sha256 prefixes).
+- **Protocol.** `scripts/bench/serve_realistic.py`, three agents, three **48K**
+  roots from the recorded agent corpus, seed **20261109**, real agent sampling
+  (no request sampling fields), **40 s** windows, 15 s ramp, `--warm-cool 45`,
+  `--cool 30`, one fresh server per arm, default env (no rollback knobs), AB
+  then BA packets, fresh server per arm, 60 s between packets. One exception:
+  the accepted GLM AB baseline needed a 60 s `<=1` settle after warm-up and
+  120 s warm-cool (`--warmup-max-thermal-pressure 2` only for warm-up; the
+  40 s measured window still required `<=1`). `--keep-bulk` retained events.
+- **Like-for-like arms** (`host` is `round_budget.host_ms_per_round`; load is
+  mean/max 1-minute load inside the measured window):
+
+  | Family | Order | Build | tok/s | Gap p50 ms | Host ms/round | Thermal | Compile overlap | Load mean/max |
+  | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: |
+  | V4.1 | AB | baseline | 94.500 | 28.03 | 0.200 | 0 | yes | 13.8 / 15.5 |
+  | V4.1 | AB | current | 89.650 | 29.21 | 0.235 | 1 | yes | 36.4 / 36.9 |
+  | V4.1 | BA | current | 93.375 | 28.27 | 0.225 | 0 | yes | 18.1 / 18.7 |
+  | V4.1 | BA | baseline | 98.025 | 27.05 | 0.223 | 0 | no | 21.2 / 22.6 |
+  | GLM | AB | baseline | 72.050 | 28.10 | 0.0* | 1 | yes | n/a† |
+  | GLM | AB | current | 76.200 | 27.60 | 0.0* | 1 | no | 5.5 / 5.9 |
+  | GLM | BA | current | 76.050 | 27.60 | 0.0* | 0 | yes | 8.7 / 9.2 |
+  | GLM | BA | baseline | 73.500 | 28.20 | 0.0* | 1 | yes | 15.9 / 16.0 |
+  | Flash-Next | AB | baseline | 140.600 | 18.83 | n/a‡ | 0 | yes | 5.9 / 6.1 |
+  | Flash-Next | AB | current | 136.550 | 19.10 | n/a‡ | 0 | yes | 23.7 / 27.7 |
+  | Flash-Next | BA | current | 142.175 | 18.96 | n/a‡ | 1 | yes | 15.3 / 15.8 |
+  | Flash-Next | BA | baseline | 136.225 | 18.90 | n/a‡ | 0 | no | 16.0 / 17.0 |
+
+  \*GLM host is clamped at 0: the native round exceeds gap p50, so this is not a
+  negative-host claim. †The accepted GLM AB baseline was produced by the
+  patient retry before its load sampler was added; its load is not sampled.
+  Adjacent GLM windows were 5.5-16.0. ‡Flash-Next's phase line has no
+  `transition_ms`, so the harness "host" equals the gap and is marked n/a.
+- **Baseline -> current delivered ratio (current/baseline):**
+
+  | Family | AB | BA | Geomean | Spread |
+  | --- | ---: | ---: | ---: | ---: |
+  | V4.1 | 0.9487 | 0.9526 | **0.9506 (-4.94%)** | 0.39 pp |
+  | GLM | 1.0576 | 1.0347 | **1.0461 (+4.61%)** | 2.29 pp |
+  | Flash-Next | 0.9712 | 1.0437 | **1.0068 (+0.68%)** | 7.25 pp |
+
+- **Read: V4.1 regressed about 5% and both orders agree.** AB is -5.13% with
+  the current arm at thermal 1 (load 36 vs 14); BA is the clean pair (both
+  thermal 0) at **-4.74%** with current compile overlap and baseline without.
+  This is the main conflict in this standing: the newest main is slower than
+  `6526a6919` on the V4.1 serve path, not flat as in the prior two standings.
+- **Bisect.** The V4.1 -4.94% is being bisected on `fix/v41-serve-regression`;
+  the GLM and Flash-Next numbers are not affected by that regression.
+- **Read: GLM is +4.6%, down from the prior +10%.** AB **+5.76%** (both thermal
+  1; baseline compile overlap, current none) and BA **+3.47%** (both compile
+  overlap). Gap p50 is 27.6-28.2 ms in all four arms. The gain is real but
+  smaller than the 2026-11-10 packet.
+- **Read: Flash-Next is inconclusive.** AB is **-2.88%** with loads confounded
+  against current (23.7/27.7 vs 5.9/6.1; both thermal 0); BA is **+4.37%** even
+  though current ran thermal 1 and baseline thermal 0. The 7.25 pp order spread
+  does not support a direction.
+- **Sustained (current only).** One 15-minute lease hold per family after a
+  60 s settle at `<=1`; pressure 2 was allowed, abort at 3. A 10-minute window
+  plus warm-up and the two 60 s settles did not fit, so the longest safe
+  windows were used: **480 s** for V4.1 and Flash-Next, **420 s** for GLM.
+  Actual lease holds were **14m12s / 14m02s / 14m01s**. Deliverables:
+
+  | Family | Window | tok/s | Gap p50/p99/max ms | Append TTFT p50/p95 ms | Thermal s (0 / 1 / 2) | Load mean/max |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | V4.1 | 480 s | 75.092 | 30.1 / 60.1 / 6249.5 | 987.9 / 3497.5 | 88.1 / 233.2 / 158.7 | 25.2 / 38.0 |
+  | GLM | 420 s | 80.336 | 29.0 / 191.0 / 1145.6 | 862.1 / 5903.5 | 111.8 / 1.0 / 307.2 | 30.8 / 53.9 |
+  | Flash-Next | 480 s | 130.725 | 19.9 / 102.9 / 800.0 | 951.7 / 3191.1 | 214.5 / 265.5 / 0.0 | 30.5 / 49.0 |
+
+- **Sustained decay per 2-minute bucket (last GLM bucket is 60 s):**
+
+  | Family | 0-2 min | 2-4 min | 4-6 min | 6-8 min | Last |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | V4.1 | 85.900 | 71.942 | 73.500 | 69.025 | - |
+  | GLM | 88.867 | 77.158 | 85.492 | - | 59.317 (60 s) |
+  | Flash-Next | 130.750 | 132.233 | 126.275 | 133.642 | - |
+
+- **Sustained read.** V4.1 decays about **20%** from the first to the last
+  2-minute bucket (85.9 -> 69.0) and spends 158.7 s at pressure 2; gap p99 stays
+  60 ms but one append stall reaches 6.25 s. GLM spends 307.2 s at pressure 2
+  and its final 60 s falls to 59.3 tok/s, though the middle buckets recover to
+  77.2 / 85.5, so the decay is not monotonic; p99 gap is 191 ms. Flash-Next is
+  flat at 126-134 tok/s, never reaches pressure 2, and holds the 0.80 s worst
+  gap, consistent with the default-on selective layer slicing protecting the
+  tail rather than the mean.
+- **Thermal / compile / load / lease.** Accepted like arms are thermal 0/1:
+  V4.1 AB current, GLM AB baseline/current, GLM BA baseline, and Flash-Next BA
+  current ran at 1; the remaining like arms at 0. Compile overlap is as
+  tabulated; loads ranged 5.5-38.0 in the like windows and 25.2-53.9 in
+  sustained. Every arm was one queued lease hold; like holds were 1-13 min,
+  except the accepted GLM AB baseline, which held **15m12s** (60 s settle +
+  120 s warm-cool; 12 s over the 15-minute cap). Sustained holds were under the
+  cap. Builds were separate queued holds of 78-129 s.
+- **Coherence.** 15 sampled measured completions across the two forms are
+  normal engineering prose: printable ratio **1.000**, zero U+FFFD, no long
+  garbage runs; one >80-character token is a Rust identifier.
+- **Conflict / caveats.** The GLM AB baseline needed three campaign retries
+  that hit pressure 2 before the accepted settle arm; its load sample is the
+  only missing column. The V4.1 regression is raised, not skipped: it is
+  consistent in both orders and in the clean BA pair. Flash-Next's order spread
+  is too large to call.
+- Evidence: `metagross:~/qwen-runs/2026-11-12-standing/` (`like/`,
+  `sustained/`, `plans/`, `logs/`, `analysis.txt`, `analysis.json`,
+  `coherence.txt`, `builds.json`; failed thermal attempts preserved as
+  `*-failed-*`). Branch `bench/standing-2026-11-12`; no merge. M5 worktrees,
+  build output and bundles removed after the run.
+
 ## 2026-11-12 - GLM Small-Append Explicit Adapter Accepts Its Down Policy
 
 - **Decision: ship the adapter fix on `fix/glm-tensor-adapter`.** Main's

@@ -1,0 +1,426 @@
+{
+  "version": 1,
+  "measured_source": "3218067d3e977200e5f81c5879d7a86b829e4644",
+  "order": [
+    "A1",
+    "B1",
+    "B2",
+    "A2",
+    "A3",
+    "B3"
+  ],
+  "pairs": [
+    [
+      "A1",
+      "B1"
+    ],
+    [
+      "A2",
+      "B2"
+    ],
+    [
+      "A3",
+      "B3"
+    ]
+  ],
+  "protocol": {
+    "profile": "release",
+    "family": "fn",
+    "model": "GSQ-RCO IQ3_S",
+    "warm_tokens": 49152,
+    "window_seconds": 180,
+    "ramp_seconds": 15,
+    "sampling": "release-default temperature/top-p, fixed request seed 20261109",
+    "max_thermal_pressure": 2,
+    "settle_max_thermal_pressure": 1,
+    "settle_continuous_seconds": 60,
+    "ms_off": 0,
+    "ms_on": 200,
+    "minimum_predicted_ms": 500
+  },
+  "throughput_ci": {
+    "n": 3,
+    "confidence": 0.95,
+    "df": 2,
+    "method": "paired Student t; arm pairs are replicates",
+    "paired_percent": [
+      -0.22785898538263405,
+      0.8646998982706045,
+      -4.515211114365824
+    ],
+    "paired_tps": [
+      -0.2944444444444514,
+      1.1333333333333258,
+      -5.994444444444454
+    ],
+    "percent": {
+      "mean": -1.2927900671592847,
+      "lower": -8.356840575933049,
+      "upper": 5.77126044161448,
+      "half_width": 7.064050508773764
+    },
+    "tps": {
+      "mean": -1.7185185185185265,
+      "lower": -11.086812218036103,
+      "upper": 7.6497751809990495,
+      "half_width": 9.368293699517576
+    },
+    "noise_within_two_pp": false,
+    "excludes_loss_above_two_percent": false
+  },
+  "pooled": {
+    "off": {
+      "window_seconds": 540,
+      "aggregate_tps": 131.01666666666668,
+      "itl_p50_ms": 19.564151763916016,
+      "itl_p99_ms": 25.645017623901367,
+      "itl_max_ms": 1754.216194152832,
+      "gap_samples": 70664,
+      "append_ttft_samples": 49,
+      "append_ttft_p50_ms": 977.4179458618164,
+      "append_ttft_p99_ms": 4555.086851119995,
+      "partial_prefill_s_total": 5.778337,
+      "partial_prefill_s_mean": 1.9261123333333332
+    },
+    "on": {
+      "window_seconds": 540,
+      "aggregate_tps": 129.29814814814816,
+      "itl_p50_ms": 19.54197883605957,
+      "itl_p99_ms": 130.33223152160645,
+      "itl_max_ms": 669.8188781738281,
+      "gap_samples": 69721,
+      "append_ttft_samples": 52,
+      "append_ttft_p50_ms": 1009.2160701751709,
+      "append_ttft_p99_ms": 4362.682104110718,
+      "partial_prefill_s_total": 6.029189999999999,
+      "partial_prefill_s_mean": 2.00973
+    }
+  },
+  "arms": {
+    "A1": {
+      "aggregate_tps": 129.22222222222223,
+      "itl_p50_ms": 19.428014755249023,
+      "itl_p99_ms": 25.88796615600586,
+      "itl_max_ms": 1754.216194152832,
+      "gap_samples": 23220,
+      "append_ttft_samples": 17,
+      "append_ttft_p50_ms": 999.0949630737305,
+      "append_ttft_p99_ms": 4555.086851119995,
+      "prefill_s": 18.743991287,
+      "partial_prefill_s": 1.8980449999999998,
+      "partial_prefill_calls": 3,
+      "layer_slices": 0,
+      "thermal_seconds": {
+        "0": 51.45608377456665,
+        "1": 128.54391622543335,
+        "2": 0.0,
+        "unknown": 0.0
+      },
+      "arm_thermal_seconds": {
+        "0": 195.24128007888794,
+        "1": 178.1791911125183,
+        "2": 20.578186988830566,
+        "unknown": 0.0
+      },
+      "compile_overlapped": true,
+      "coherence_samples": [
+        {
+          "agent": 0,
+          "file": "a0-t0.response.json",
+          "status": "incomplete",
+          "error": null,
+          "chars": 8483,
+          "replacement_chars": 0
+        },
+        {
+          "agent": 1,
+          "file": "a1-t1.response.json",
+          "status": "completed",
+          "error": null,
+          "chars": 4692,
+          "replacement_chars": 0
+        },
+        {
+          "agent": 2,
+          "file": "a2-t1.response.json",
+          "status": "incomplete",
+          "error": null,
+          "chars": 19489,
+          "replacement_chars": 0
+        }
+      ]
+    },
+    "B1": {
+      "aggregate_tps": 128.92777777777778,
+      "itl_p50_ms": 19.724130630493164,
+      "itl_p99_ms": 130.84912300109863,
+      "itl_max_ms": 364.20416831970215,
+      "gap_samples": 23180,
+      "append_ttft_samples": 15,
+      "append_ttft_p50_ms": 1134.3941688537598,
+      "append_ttft_p99_ms": 4362.682104110718,
+      "prefill_s": 18.790217252,
+      "partial_prefill_s": 2.16303,
+      "partial_prefill_calls": 3,
+      "layer_slices": 138,
+      "thermal_seconds": {
+        "0": 93.72025179862976,
+        "1": 86.27974820137024,
+        "2": 0.0,
+        "unknown": 0.0
+      },
+      "arm_thermal_seconds": {
+        "0": 176.80322003364563,
+        "1": 172.62682104110718,
+        "2": 0.0,
+        "unknown": 0.0
+      },
+      "compile_overlapped": true,
+      "coherence_samples": [
+        {
+          "agent": 0,
+          "file": "a0-t0.response.json",
+          "status": "incomplete",
+          "error": null,
+          "chars": 8509,
+          "replacement_chars": 0
+        },
+        {
+          "agent": 1,
+          "file": "a1-t1.response.json",
+          "status": "completed",
+          "error": null,
+          "chars": 14972,
+          "replacement_chars": 0
+        },
+        {
+          "agent": 2,
+          "file": "a2-t1.response.json",
+          "status": "incomplete",
+          "error": null,
+          "chars": 19489,
+          "replacement_chars": 0
+        }
+      ]
+    },
+    "B2": {
+      "aggregate_tps": 132.2,
+      "itl_p50_ms": 19.387006759643555,
+      "itl_p99_ms": 122.85113334655762,
+      "itl_max_ms": 669.8188781738281,
+      "gap_samples": 23758,
+      "append_ttft_samples": 15,
+      "append_ttft_p50_ms": 1398.244857788086,
+      "append_ttft_p99_ms": 4238.43789100647,
+      "prefill_s": 18.384873004623053,
+      "partial_prefill_s": 2.1002389999999997,
+      "partial_prefill_calls": 3,
+      "layer_slices": 138,
+      "thermal_seconds": {
+        "0": 117.58599901199341,
+        "1": 62.41400098800659,
+        "2": 0.0,
+        "unknown": 0.0
+      },
+      "arm_thermal_seconds": {
+        "0": 285.67213892936707,
+        "1": 62.14382481575012,
+        "2": 0.0,
+        "unknown": 0.0
+      },
+      "compile_overlapped": true,
+      "coherence_samples": [
+        {
+          "agent": 0,
+          "file": "a0-t0.response.json",
+          "status": "incomplete",
+          "error": null,
+          "chars": 8235,
+          "replacement_chars": 0
+        },
+        {
+          "agent": 1,
+          "file": "a1-t1.response.json",
+          "status": "completed",
+          "error": null,
+          "chars": 14972,
+          "replacement_chars": 0
+        },
+        {
+          "agent": 2,
+          "file": "a2-t1.response.json",
+          "status": "incomplete",
+          "error": null,
+          "chars": 19437,
+          "replacement_chars": 0
+        }
+      ]
+    },
+    "A2": {
+      "aggregate_tps": 131.06666666666666,
+      "itl_p50_ms": 19.76799964904785,
+      "itl_p99_ms": 25.699853897094727,
+      "itl_max_ms": 1555.21821975708,
+      "gap_samples": 23569,
+      "append_ttft_samples": 16,
+      "append_ttft_p50_ms": 923.6547946929932,
+      "append_ttft_p99_ms": 3553.61270904541,
+      "prefill_s": 15.52145521,
+      "partial_prefill_s": 1.9430839999999998,
+      "partial_prefill_calls": 3,
+      "layer_slices": 0,
+      "thermal_seconds": {
+        "0": 90.4061586856842,
+        "1": 89.5938413143158,
+        "2": 0.0,
+        "unknown": 0.0
+      },
+      "arm_thermal_seconds": {
+        "0": 256.4512529373169,
+        "1": 89.88108706474304,
+        "2": 0.0,
+        "unknown": 0.0
+      },
+      "compile_overlapped": true,
+      "coherence_samples": [
+        {
+          "agent": 0,
+          "file": "a0-t0.response.json",
+          "status": "incomplete",
+          "error": null,
+          "chars": 8483,
+          "replacement_chars": 0
+        },
+        {
+          "agent": 1,
+          "file": "a1-t1.response.json",
+          "status": "completed",
+          "error": null,
+          "chars": 14972,
+          "replacement_chars": 0
+        },
+        {
+          "agent": 2,
+          "file": "a2-t1.response.json",
+          "status": "incomplete",
+          "error": null,
+          "chars": 19795,
+          "replacement_chars": 0
+        }
+      ]
+    },
+    "A3": {
+      "aggregate_tps": 132.76111111111112,
+      "itl_p50_ms": 19.4549560546875,
+      "itl_p99_ms": 25.17104148864746,
+      "itl_max_ms": 1569.0319538116455,
+      "gap_samples": 23875,
+      "append_ttft_samples": 16,
+      "append_ttft_p50_ms": 969.9347019195557,
+      "append_ttft_p99_ms": 3840.522050857544,
+      "prefill_s": 15.493616211,
+      "partial_prefill_s": 1.937208,
+      "partial_prefill_calls": 3,
+      "layer_slices": 0,
+      "thermal_seconds": {
+        "0": 0.0,
+        "1": 180.0,
+        "2": 0.0,
+        "unknown": 0.0
+      },
+      "arm_thermal_seconds": {
+        "0": 70.87216281890869,
+        "1": 279.14357233047485,
+        "2": 0.0,
+        "unknown": 0.0
+      },
+      "compile_overlapped": true,
+      "coherence_samples": [
+        {
+          "agent": 0,
+          "file": "a0-t0.response.json",
+          "status": "incomplete",
+          "error": null,
+          "chars": 8483,
+          "replacement_chars": 0
+        },
+        {
+          "agent": 1,
+          "file": "a1-t1.response.json",
+          "status": "completed",
+          "error": null,
+          "chars": 14972,
+          "replacement_chars": 0
+        },
+        {
+          "agent": 2,
+          "file": "a2-t1.response.json",
+          "status": "incomplete",
+          "error": null,
+          "chars": 20511,
+          "replacement_chars": 0
+        }
+      ]
+    },
+    "B3": {
+      "aggregate_tps": 126.76666666666667,
+      "itl_p50_ms": 19.562959671020508,
+      "itl_p99_ms": 132.82418251037598,
+      "itl_max_ms": 400.76494216918945,
+      "gap_samples": 22783,
+      "append_ttft_samples": 22,
+      "append_ttft_p50_ms": 885.7278823852539,
+      "append_ttft_p99_ms": 4219.987154006958,
+      "prefill_s": 22.157757631949593,
+      "partial_prefill_s": 1.7659209999999999,
+      "partial_prefill_calls": 3,
+      "layer_slices": 162,
+      "thermal_seconds": {
+        "0": 0.0,
+        "1": 180.0,
+        "2": 0.0,
+        "unknown": 0.0
+      },
+      "arm_thermal_seconds": {
+        "0": 79.27788209915161,
+        "1": 270.5206468105316,
+        "2": 0.0,
+        "unknown": 0.0
+      },
+      "compile_overlapped": true,
+      "coherence_samples": [
+        {
+          "agent": 0,
+          "file": "a0-t0.response.json",
+          "status": "incomplete",
+          "error": null,
+          "chars": 8483,
+          "replacement_chars": 0
+        },
+        {
+          "agent": 1,
+          "file": "a1-t1.response.json",
+          "status": "completed",
+          "error": null,
+          "chars": 1852,
+          "replacement_chars": 0
+        },
+        {
+          "agent": 2,
+          "file": "a2-t1.response.json",
+          "status": "incomplete",
+          "error": null,
+          "chars": 19489,
+          "replacement_chars": 0
+        }
+      ]
+    }
+  },
+  "decision": {
+    "default_ms": 0,
+    "status": "inconclusive throughput gate; opt-in only",
+    "reason": "95% paired throughput CI includes losses greater than 2%; half-width 7.064 percentage points exceeds requested precision",
+    "coherence_reviewed": true,
+    "coherence_reviewed_samples": 18
+  }
+}

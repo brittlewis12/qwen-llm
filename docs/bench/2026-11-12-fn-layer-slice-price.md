@@ -1,97 +1,97 @@
-# Flash-Next layer-slice price
+# Flash-Next layer-slice price and implementation
 
-Fresh three-agent release baseline at `abc3ba1a3`, GSQ-RCO IQ3_S,49152 warm
-tokens per agent, real sampling,180 seconds: **127.111 tok/s**, ITL p50/p99/max
-**19.880/25.788/1885.943ms**. All180 measured seconds were at pressure1.
-Both pre-load and post-warm settling required continuous60 seconds<=1;
-measurement/warm-up permitted2 and aborted3. Raw baseline is under
-`2026-11-12-v41-layer-slice/protocol-v2/fn-price` on the M5.
+Native pricing supports a layer-slice implementation, and **60/60 paired
+regressions plus ten cancel/replay cases pass**. The sustained serve gate is
+inconclusive on throughput, so production remains **default off**, opt-in
+`QWEN_SERVE_FN_LAYER_SLICE_MS=200`, minimum predicted append wall 500 ms.
+See the [six-arm serve result](2026-11-12-fn-layer-slice-serve.md).
 
-The maximum is common to the two decoding peers while agent2 starts turn2:
-5479 new tokens after position50486, TTFT4586.9ms. The incumbent uses packed
-2048-row commands beyond the QSA dense-to-selected frontier. This episode
-therefore has two full commands and a1383-row tail. The stall clears the size
-threshold for further pricing. No Flash-Next production slicing code has been
-added yet.
+## Incumbent and component price
 
-`fn_append_price` (perf-ablations) measures the unchanged native forward's
-encode CPU, completed GPU, wait and wall time at a48K root. It records first
-and repeated appends at32/342/1383/1798/2048/5479 rows, with process disk-read
-bytes, so preparation or I/O is not silently attributed to layer GPU work.
-This follows the V4.1 finding that its worst live gap can occur before the
-first peer round despite exact layer-sliced GPU execution.
+Fresh three-agent release baseline at `abc3ba1a3`, GSQ-RCO IQ3_S, 49152 warm
+tokens per agent, release-default sampling and 180 s: **127.111 tok/s**, ITL
+p50/p99/max **19.880/25.788/1885.943 ms**. All measured seconds were at pressure 1.
+Both settling intervals required continuous 60 s at ≤1; warm-up/window allowed
+2 and aborted at 3. The maximum was common to two peers during a 5479-token
+append after position 50486, with TTFT 4586.9 ms. This clears the price gate.
 
-Flash-Next has a fused first-two-layer PLE stage followed by46 post-PLE layers.
-HC state remains in the packed hyper-residual/bridge scratch. GDN recurrence
-and QSA cache writes are per-layer/private to a runner. Native pending-command
-validation gates committed positions and snapshots. A port would need to keep
-that gate across slices, preserve the dense-to-selected row plan, and retain
-the first-two-layer dependency semantics. Decode's native feedback batch loop
-uses the shared Driver and needs the same slice/peer-round handoff as GLM.
+Beyond the QSA dense-to-selected frontier, the incumbent uses 2048-row commands:
+that append is 2048 + 2048 + 1383 rows. `fn_append_price` (perf-ablations)
+measures those unchanged native commands, including CPU encode, completed GPU,
+wait, wall and process disk-read bytes, from a 48K immutable checkpoint.
 
-The baseline's reported partial_prefill_s is0; the incumbent Flash-Next path
-lacks the newer complete/partial prefill accounting records, so this is not
-proof that no unfinished request paid prefill. A production port must address
-that accounting. Component pricing and the build/no-build decision follow.
+| rows | wall ms | GPU ms | CPU encode ms | commands |
+| ---: | ---: | ---: | ---: | ---: |
+| 32 | 230–238 | 227–234 | 1.8–1.9 | 1 |
+| 342 | 285–287 | 281–282 | 2.9–4.2 | 1 |
+| 1383 | 805–810 | 797–798 | 6–11 | 1 |
+| 1798 | 1018–1020 | 1010–1012 | 7–8 | 1 |
+| 2048 | 1063–1068 | 1054–1055 | 8–9 | 1 |
+| 5479 | 2941–2954 | 2909–2912 | 26–41 | 3 |
 
-## Component price and native checkpoint probe
+These first/repeated appends sampled pressure 0 and zero process disk reads.
+The large-command wall is GPU-dominated, unlike the preparation/I/O tail seen
+in the V4.1 live packet. This justified the native experiment.
 
-The unchanged native append at pressure0 is GPU-dominated.2048 rows takes
-1063–1068ms wall,1054–1055ms GPU and8ms CPU encode;5479 rows takes2941–2954ms
-wall over three commands,2909–2912ms GPU and26–41ms CPU encode.1383 rows is
-805–810ms wall /797–798ms GPU;1798 is1018–1020ms /1010–1012ms.32/342 rows
-are only230/286ms and should remain unsliced. First/repeated appends had zero
-recorded process disk reads. This clears a layer-scope experiment's price gate.
+## Exact dependency boundaries
 
-Native checkpoint work is isolated on `perf/fn-layer-sliced-prefill`, leaving
-the V4.1 branch's default-off decision intact. A packed command stages inputs
-and records its checkpoint lineage once. It parks the same hyper-residual and
-bridge, keeps pending length/snapshot/decode gating across completed commands,
-and publishes through the original child validation only after the last layer.
-The fused PLE0/1 stage is indivisible. Submitted commands drain on every yield
-and unwind path. No serve scheduling/default has been changed yet.
+Flash-Next has a fused PLE stage in layers 0/1, then 46 post-PLE layers with
+private GDN recurrence and QSA index/KV state. The first two layers remain
+indivisible. A command stages inputs and records checkpoint lineage once,
+parks its existing HC hyper-residual/bridge scratch, and keeps pending length
+and snapshot/decode gating across completed layer commands. The final slice
+publishes only through the original validation of every child state. No extra
+GPU activation allocation or per-layer stack is introduced; parked buffers
+were already allocated per runner. A 2048-row token identity copy adds 8 KiB
+of host storage while that command is pending.
 
-`fn_layer_slice_probe` compares1/2/4/8 cuts, complete-logit bits, snapshot payload
-and PLE-history digests, post-append decode, and two peers' logits/state. Peers
-run once between cuts; the control runs equal rounds afterward. Cancellation
-rejects provisional snapshots and replays a prior immutable checkpoint in a
-fresh runner. Native results are pending; CLI integration waits for this gate.
+Every submitted command drains before yielding, error disposal or unwind.
+Cancelled partial state cannot be published to a checkpoint or reuse pool;
+replay uses a fresh runner and a prior immutable checkpoint. Original ladder
+and transcript capture points remain at validated row-command boundaries.
+The original dense/selected frontier and scalar tails are preserved.
 
-## Native gate and selective serve adapter
+`fn_layer_slice_probe` at `a4fd2871a` passes **40 warm + 20 cold pairs**:
+32/342/1383/1798/2048 rows, 1/2/4/8 cuts. Its oracle checks complete finite
+logit bits, snapshot payload plus PLE-history digests, post-append decode, and
+two peers' logits/state. All ten cancel/dispose/replay cases are exact.
+Warm sampled pressure is 0–1; cold is 0. Mean equal-round GPU-duration ratios
+are **0.99993 warm / 0.99996 cold**, individual ranges 0.98450–1.00874 and
+0.98616–1.01329. Warm 2048-row worst peer gaps fall 1122/1140 → 170/170 ms;
+cold falls 918 → 156 ms. These are native observations, not a live stall bound.
 
-At `a4fd2871a`, **60/60 pairs are bitwise exact**: 40 warm and 20 cold,
-32/342/1383/1798/2048 rows, 1/2/4/8 cuts. All ten cancel/dispose/replay cases
-are exact. The oracle includes full finite logits, causal snapshot bytes plus
-PLE history, the next appender step and both peers' logits/state. Warm pressure
-is 0–1; cold is 0. Mean equal-round GPU ratios are 0.99993 warm and 0.99996
-cold (individual ranges 0.98450–1.00874 and 0.98616–1.01329). These are timing
-ratios, not a claim of less arithmetic. Warm 2048 rows at eight cuts reduces
-worst peer gap 1122/1140 ms to 170/170 ms; cold 918 ms becomes 156 ms.
+## Selective serve policy
 
-The serve adapter is opt-in at `QWEN_SERVE_FN_LAYER_SLICE_MS=200`, minimum
-predicted append wall 500 ms. Zero retains the original native calls, row plan
-and decode-percentage policy. The prediction is 225 + 0.42 × command rows ms,
-summed over the original command list. The nominal target chooses the next
-1/2/4/8 partition; 32/342-row appends remain on the original path. No extra
-row boundary is introduced, including the QSA dense-to-selected frontier.
+The adapter uses the existing shared Driver, with a scoped QoS guard. Only
+ready peers decode between slices; the appender remains exclusive until final
+validation. Driver supplies one peer round per yield, suppresses duplicate
+decode-percentage credit, and subsequently rejoins group feedback. Its existing
+cancellation and unequal-peer-geometry fallback tests cover this handoff.
 
-An incomplete native command stays exclusive and unavailable to snapshots or
-decode until all child states validate. Driver runs one ready-peer round per
-yield, excludes the appender from group feedback, and rejoins the complete
-batch afterward. A scoped QoS guard covers slices. Original ladder and
-transcript captures occur only at their original validated row-command points.
-Cancellation drops the private partial runner, with submitted work already
-drained. Completed and partial prefill records charge active work and exclude
-peer service, including when Driver cancels before the next callback.
+The prediction sums **225 + 0.42 × rows ms** over the append's original packed
+commands. Scalar commands are excluded: they already yield per token and retain
+the incumbent callback and decode credit. Slicing starts only with ready peers,
+a predicted append above 500 ms, packed scratch and the probed 48-layer model.
+Unprobed layer counts retain incumbent execution. A nominal 200 ms target chooses
+the next tested 1/2/4/8 partition; no row boundary is invented.
 
-The sustained serve gate is pending. Default remains zero; the native result
-alone does not establish the production throughput or latency gate.
+Single-command 32/342-row appends stay unsliced. Live body/header cuts can pay
+two floors and qualify at much smaller row counts. The coarse model has false
+positives near 500 ms: a live 245-row, two-command append was predicted at
+553 ms but measured 464 ms unsliced. Its slicing and extra peer service are
+included in the reported TTFT distribution. No policy was retuned mid-packet.
 
-Compatibility review found the loader admits additional layer counts. The serve
-policy now explicitly falls back to incumbent execution unless the artifact has
-the probed 48 layers. This guard is covered by the policy test; the 48-layer
-native result is unchanged. No sustained arm was measured before this guard.
+MS=0 restores original native calls, row/frontier planning and decode credit.
+Complete/partial prefill accounting is common to both arms, charges active
+work and excludes peer rounds, including cancellation before the next callback.
+The served maximum remains above the native bound during adjacent appends;
+that limitation is documented in the serve note. No workaround was added.
 
-- Scalar frontier commands retain the incumbent callback and decode credit;
-  they are excluded from packed-cost eligibility. The policy test covers a
-  scalar-only tail. No sustained arm preceded this correction.
+## Evidence
+
+Raw baseline `fn-price`, component `fn-append-price.jsonl`, native
+`fn-layer-warm.jsonl` / `fn-layer-cold.jsonl`, and serve `fn-serve/<arm>` are under
+`metagross:~/qwen-runs/2026-11-12-v41-layer-slice/protocol-v2/`. The two examples require
+`perf-ablations`. The frozen adapter passes 698 serve tests and repository
+contracts, with no new ignored tests. V4.1 remains separately default off after
+its [inconclusive sustained packet](2026-11-12-v41-layer-slice-sustained.md).

@@ -16,8 +16,11 @@ no slow turns or flagged arms were discarded. Flash-Next is priced next.
 
 Source/binary `abc3ba1a3`, release, nice10. Current GSQ-RCO IQ2_XS with IQ4_NL
 Engram; three clients, production max-active4 / three sampler workers,
-49152 warm tokens each, context196608, real agent sampling (no request sampling
-overrides), seed20261109 call draws, 15-second ramp and180-second window.
+49152 warm tokens each, context196608, release-default temperature/top-p
+without request overrides, fixed request seed20261109 and call-draw seed20261109,
+15-second ramp and180-second window.
+The fast sampler is opt-in and unset, so the fixed seed does not change the
+current production-default sampler path.
 MS0 versus MS200/minimum500ms. Same binary checksum verified before every arm.
 Order **A1 B1 B2 A2 A3 B3** (ABBAAB), pairs(A1,B1),(A2,B2),(A3,B3).
 

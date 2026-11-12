@@ -45354,3 +45354,24 @@ sustained serve evidence. See [price and native gate](bench/2026-11-12-fn-layer-
 - Scalar frontier commands retain the incumbent callback and decode credit;
   they are excluded from packed-cost eligibility. The policy test covers a
   scalar-only tail. No sustained arm preceded this correction.
+
+
+### 2026-11-12 — Flash-Next sustained layer slicing: latency improves, default off
+
+Six accepted 180 s release arms at 48K, order A1/B1/B2/A2/A3/B3, release sampling
+with fixed request seed, queued individual leases and continuous 60 s settling
+at ≤1 before load and after warming. Pressure 2 was allowed; all measured
+windows stayed at 0/1. Source 3218067d3, one binary. Worst gap 1754 → 670 ms
+(61.8% lower), pooled ITL p50 19.564 → 19.542 ms, p99 25.645 → 130.332 ms.
+Grand mean TPS 131.017 → 129.298; paired changes −0.228%, +0.865%, −4.515%,
+mean −1.293%, **95% CI [−8.357%, +5.771%]**, half-width 7.064 pp. This does
+not establish ≤2% throughput loss, so QWEN_SERVE_FN_LAYER_SLICE_MS stays 0
+(opt-in 200/minimum 500). No flagged arm was excluded or policy retuned.
+
+Pooled append TTFT p50/p99 977/4555 → 1009/4363 ms; partial-prefill means
+1.926 → 2.010 s per window. Native 60/60 warm/cold pairs and ten cancel/replay
+cases pass; 18 sampled completions are coherent. All 698 serve tests pass,
+42 existing ignored unchanged. Adjacent appends and two-floor short turns
+explain limits of the native price/bound; no workaround was added. See
+[sustained results](bench/2026-11-12-fn-layer-slice-serve.md) and
+[native price](bench/2026-11-12-fn-layer-slice-price.md).

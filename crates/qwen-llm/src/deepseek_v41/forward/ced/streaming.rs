@@ -112,6 +112,17 @@ impl Forward<'_> {
         cancel: Option<&AtomicBool>,
         max_rows: usize,
     ) -> std::result::Result<ColdPrefillSlice, StateError> {
+        self.cold_prefill_episode_slice_interleaved(state, tokens, cancel, max_rows, None)
+    }
+
+    pub(in super::super) fn cold_prefill_episode_slice_interleaved(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        cancel: Option<&AtomicBool>,
+        max_rows: usize,
+        mut interleave: Option<&mut prefill::LayerInterleave<'_>>,
+    ) -> std::result::Result<ColdPrefillSlice, StateError> {
         let mut progress = state.cold_prefill.take().ok_or("no CED episode")?;
         // Any exit before committing or returning the provisional owner poisons
         // the state. Existing immutable snapshots are never touched.
@@ -155,7 +166,7 @@ impl Forward<'_> {
         workspace
             .attention_mut()
             .record_ced_stream_chunk(start..end)?;
-        workspace.ced_stream_encoder(
+        workspace.ced_stream_encoder_interleaved(
             self,
             plan,
             start,
@@ -164,6 +175,7 @@ impl Forward<'_> {
             cancel,
             &mut progress.storage,
             &mut progress.counters,
+            interleave.as_deref_mut(),
         )?;
         progress.addresses = addresses;
         progress.next = end;
@@ -177,13 +189,20 @@ impl Forward<'_> {
                 logits: Vec::new(),
             });
         }
-        let logits = workspace.finish_ced_stream(
+        if let Some(slicing) = interleave.as_deref_mut() {
+            if slicing.ends.iter().any(|&l| l <= plan.encoder_layers.end) {
+                (slicing.between)()?;
+                cancelled(cancel)?;
+            }
+        }
+        let logits = workspace.finish_ced_stream_interleaved(
             self,
             plan,
             cancel,
             Arithmetic::Production,
             &mut progress.storage,
             &mut progress.counters,
+            interleave.as_deref_mut(),
         )?;
         progress.counters.validate(plan)?;
         workspace.attention().validate_snapshot_position(end)?;

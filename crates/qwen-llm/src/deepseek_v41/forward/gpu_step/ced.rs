@@ -916,6 +916,7 @@ impl Workspace {
         counters: &mut CedCounters,
         cancel: Option<&AtomicBool>,
         scope: &'scope std::thread::Scope<'scope, 'env>,
+        mut interleave: Option<&mut prefill::LayerInterleave<'_>>,
     ) -> Result<(
         PendingEncoder,
         Option<std::thread::ScopedJoinHandle<'scope, EngramValues>>,
@@ -930,91 +931,121 @@ impl Workspace {
         } else {
             self.attention.begin_ced_encoder(start, n)?;
         }
-        let pending = self.ced_submit(
-            model,
-            "ced_encoder_rows",
-            [start, n, plan.publication_layer, 0],
-            storage,
-            counters,
-            |this, enc| {
-                for id in plan.encoder_layers.clone() {
-                    cancelled(cancel)?;
-                    if chunk.late.is_some()
-                        && Some(id) != chunk.first
-                        && let Some((_, input, _)) =
+        let mut first = plan.encoder_layers.start;
+        let mut final_pending = None;
+        while first < plan.encoder_layers.end {
+            let end = interleave
+                .as_ref()
+                .and_then(|s| s.ends.iter().copied().find(|&l| l > first))
+                .unwrap_or(plan.encoder_layers.end)
+                .min(plan.encoder_layers.end);
+            let mut pending = self.ced_submit(
+                model,
+                "ced_encoder_rows",
+                [start, n, plan.publication_layer, 0],
+                storage,
+                counters,
+                |this, enc| {
+                    for id in first..end {
+                        cancelled(cancel)?;
+                        if chunk.late.is_some()
+                            && Some(id) != chunk.first
+                            && let Some((_, input, _)) =
+                                chunk.engrams.iter().find(|(id0, _, _)| *id0 == id)
+                        {
+                            let (got, values) = chunk
+                                .late
+                                .as_ref()
+                                .ok_or("CED Engram stream missing")?
+                                .recv()
+                                .map_err(|_| "CED Engram read failed")?;
+                            op::require(got == id, "CED Engram order")?;
+                            let join = profile::Wall(
+                                "ced_encoder_engram_late_join",
+                                [0; 4],
+                                profile::start(),
+                            );
+                            let values = values?;
+                            write(input, &values)?;
+                            drop(join);
+                        }
+                        if let Some((_, input, projected)) =
                             chunk.engrams.iter().find(|(id0, _, _)| *id0 == id)
-                    {
-                        let (got, values) = chunk
-                            .late
-                            .as_ref()
-                            .ok_or("CED Engram stream missing")?
-                            .recv()
-                            .map_err(|_| "CED Engram read failed")?;
-                        op::require(got == id, "CED Engram order")?;
-                        let join =
-                            profile::Wall("ced_encoder_engram_late_join", [0; 4], profile::start());
-                        let values = values?;
-                        write(input, &values)?;
-                        drop(join);
+                        {
+                            model.layers[id]
+                                .engram
+                                .as_ref()
+                                .unwrap()
+                                .projection
+                                .encode_rows(enc, input, projected, n)
+                                .map_err(|e| e.to_string())?;
+                            this.engrams
+                                .iter()
+                                .find(|slot| slot.layer == id)
+                                .unwrap()
+                                .gate
+                                .encode(ctx, enc, &chunk.x, projected, n)?;
+                        }
+                        this.ced_block(
+                            model,
+                            enc,
+                            id,
+                            start,
+                            &chunk.x,
+                            &chunk.incoming,
+                            &chunk.scratch,
+                        )?;
                     }
-                    if let Some((_, input, projected)) =
-                        chunk.engrams.iter().find(|(id0, _, _)| *id0 == id)
-                    {
-                        model.layers[id]
-                            .engram
-                            .as_ref()
-                            .unwrap()
-                            .projection
-                            .encode_rows(enc, input, projected, n)
+                    if end == plan.encoder_layers.end {
+                        #[cfg(test)]
+                        if super::super::ced::tests::take_status_poison(start) {
+                            this.attention.poison_ced_status_bit(4);
+                        }
+                        #[cfg(test)]
+                        super::super::ced::tests::checkpoint("ced_publication", cancel)?;
+                        chunk
+                            .scratch
+                            .hc
+                            .normalize_input(
+                                ctx,
+                                enc,
+                                c,
+                                &this.constants[plan.publication_layer][2],
+                                &chunk.x,
+                                &chunk.incoming,
+                            )
                             .map_err(|e| e.to_string())?;
-                        this.engrams
-                            .iter()
-                            .find(|slot| slot.layer == id)
-                            .unwrap()
-                            .gate
-                            .encode(ctx, enc, &chunk.x, projected, n)?;
+                        this.attention.publish_ced_rows(
+                            ctx,
+                            enc,
+                            plan.publication_layer,
+                            start,
+                            &model.layers[plan.publication_layer].attention,
+                            &chunk.scratch.hc.normalized,
+                            &chunk.publication,
+                        )?;
+                        storage.retain(ctx, enc, start, n, &chunk.x, &chunk.incoming)?;
                     }
-                    this.ced_block(
-                        model,
-                        enc,
-                        id,
-                        start,
-                        &chunk.x,
-                        &chunk.incoming,
-                        &chunk.scratch,
-                    )?;
+                    cancelled(cancel)
+                },
+            )?;
+            if end == plan.encoder_layers.end {
+                final_pending = Some(pending);
+            } else {
+                self.ced_wait(model, &mut pending, storage, counters)?;
+                cancelled(cancel)?;
+                if let Some(slicing) = interleave.as_deref_mut() {
+                    slicing.commands.push((
+                        end,
+                        (pending.command.GPUEndTime() - pending.command.GPUStartTime()) * 1000.0,
+                    ));
+                    (slicing.between)()?;
+                    cancelled(cancel)?;
                 }
-                #[cfg(test)]
-                if super::super::ced::tests::take_status_poison(start) {
-                    this.attention.poison_ced_status_bit(4);
-                }
-                #[cfg(test)]
-                super::super::ced::tests::checkpoint("ced_publication", cancel)?;
-                chunk
-                    .scratch
-                    .hc
-                    .normalize_input(
-                        ctx,
-                        enc,
-                        c,
-                        &this.constants[plan.publication_layer][2],
-                        &chunk.x,
-                        &chunk.incoming,
-                    )
-                    .map_err(|e| e.to_string())?;
-                this.attention.publish_ced_rows(
-                    ctx,
-                    enc,
-                    plan.publication_layer,
-                    start,
-                    &model.layers[plan.publication_layer].attention,
-                    &chunk.scratch.hc.normalized,
-                    &chunk.publication,
-                )?;
-                storage.retain(ctx, enc, start, n, &chunk.x, &chunk.incoming)?;
-                cancelled(cancel)
-            },
-        )?;
+            }
+            first = end;
+        }
+        let pending = final_pending.ok_or("empty CED encoder layers")?;
         // Own the committed command before the first fallible operation
         // after commit. A thread-spawn panic must not drop an unwaited
         // command or release the buffers it reads.
@@ -1111,6 +1142,36 @@ impl Workspace {
         storage: &mut Storage,
         counters: &mut CedCounters,
     ) -> Result<Option<Vec<(usize, Vec<f32>)>>> {
+        self.ced_encoder_rows_interleaved(
+            model,
+            plan,
+            start,
+            tokens,
+            hashes,
+            prefetched,
+            next_hashes,
+            cancel,
+            storage,
+            counters,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ced_encoder_rows_interleaved(
+        &mut self,
+        model: &Forward<'_>,
+        plan: &CedPlan,
+        start: usize,
+        tokens: &[u32],
+        hashes: &[engram::LayerRows],
+        prefetched: Option<Vec<(usize, Vec<f32>)>>,
+        next_hashes: Option<&[engram::LayerRows]>,
+        cancel: Option<&AtomicBool>,
+        storage: &mut Storage,
+        counters: &mut CedCounters,
+        interleave: Option<&mut prefill::LayerInterleave<'_>>,
+    ) -> Result<Option<Vec<(usize, Vec<f32>)>>> {
         std::thread::scope(|scope| -> Result<Option<Vec<(usize, Vec<f32>)>>> {
             let chunk = self.encoder_chunk_prepare(
                 model, plan, start, tokens, hashes, prefetched, storage, scope,
@@ -1125,6 +1186,7 @@ impl Workspace {
                 counters,
                 cancel,
                 scope,
+                interleave,
             )?;
             self.encoder_chunk_finish(model, plan, pending, storage, counters, cancel, true)?;
             Self::join_engram_prefetch(next)
@@ -1561,6 +1623,7 @@ impl Workspace {
                                 &mut counters,
                                 cancel,
                                 scope,
+                                None,
                             )?;
                             next = spawned;
                             // Own the new command before any subsequent
@@ -1710,6 +1773,19 @@ impl Workspace {
         storage: &mut Storage,
         counters: &mut CedCounters,
     ) -> Result<Vec<f32>> {
+        self.finish_ced_stream_interleaved(model, plan, cancel, arithmetic, storage, counters, None)
+    }
+
+    pub(in super::super) fn finish_ced_stream_interleaved(
+        &mut self,
+        model: &Forward<'_>,
+        plan: &CedPlan,
+        cancel: Option<&AtomicBool>,
+        arithmetic: Arithmetic,
+        storage: &mut Storage,
+        counters: &mut CedCounters,
+        mut interleave: Option<&mut prefill::LayerInterleave<'_>>,
+    ) -> Result<Vec<f32>> {
         let chunk_rows = if arithmetic.scalar() {
             1
         } else {
@@ -1723,7 +1799,15 @@ impl Workspace {
             backing: None,
         };
         if !arithmetic.scalar() && batch_selection(plan)?.layers != 0 {
-            self.ced_decoder_groups_pipelined(model, plan, cancel, storage, counters, &mut pool)?;
+            self.ced_decoder_groups_pipelined(
+                model,
+                plan,
+                cancel,
+                storage,
+                counters,
+                &mut pool,
+                interleave.as_deref_mut(),
+            )?;
         } else {
             for layer in &plan.decoder {
                 let mut fuse_seed = !arithmetic.scalar() && plan.fuse_seed(layer);
@@ -1805,6 +1889,14 @@ impl Workspace {
                         )
                     })?;
                 }
+                if layer.layer + 1 < model.layers.len() {
+                    if let Some(slicing) = interleave.as_deref_mut() {
+                        if slicing.ends.contains(&(layer.layer + 1)) {
+                            (slicing.between)()?;
+                            cancelled(cancel)?;
+                        }
+                    }
+                }
                 #[cfg(test)]
                 super::super::ced::qualification::decoder_layer(
                     &self.attention,
@@ -1846,13 +1938,31 @@ impl Workspace {
         storage: &mut Storage,
         counters: &mut CedCounters,
     ) -> Result<()> {
+        self.ced_stream_encoder_interleaved(
+            model, plan, start, tokens, hashes, cancel, storage, counters, None,
+        )
+    }
+
+    pub(in super::super) fn ced_stream_encoder_interleaved(
+        &mut self,
+        model: &Forward<'_>,
+        plan: &CedPlan,
+        start: usize,
+        tokens: &[u32],
+        hashes: &[engram::LayerRows],
+        cancel: Option<&AtomicBool>,
+        storage: &mut Storage,
+        counters: &mut CedCounters,
+        interleave: Option<&mut prefill::LayerInterleave<'_>>,
+    ) -> Result<()> {
         if tokens.len() == 1 {
             self.ced_encoder_scalar(
                 model, plan, start, tokens[0], &hashes[0], cancel, storage, counters,
             )
         } else {
-            self.ced_encoder_rows(
+            self.ced_encoder_rows_interleaved(
                 model, plan, start, tokens, hashes, None, None, cancel, storage, counters,
+                interleave,
             )
             .map(|_| ())
         }

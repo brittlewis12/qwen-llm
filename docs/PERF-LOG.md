@@ -45215,3 +45215,13 @@ reconstruction does not yield. Added a perf-only 48K Full layer-boundary
 probe with equal peer rounds, 1/2/4/8 cuts, complete causal-state digests
 and next-step comparisons. No serving default changed. See
 [the pricing note](bench/2026-11-12-v41-layer-slice.md).
+
+### V4.1 Full layer probe preliminary — 24/24 exact
+
+Same-artifact M5 iter paired probes at 48K: 32/342/1509 rows × 1/2/4/8
+slices × two alternating repetitions. Logits, complete causal payloads,
+next-step logits, peer logits and peer causal payloads all bitwise.
+At 1509 rows/eight slices worst peer gap 1387–1394 -> 217–218 ms;
+equal-round GPU ratio 0.9900–0.9902, thermal 0. Added CED encoder and
+original two-layer decoder-group boundaries for the next probe; still no
+serve default change. Details in the V4.1 layer-slice note.

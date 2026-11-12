@@ -350,6 +350,7 @@ impl Workspace {
         storage: &mut Storage,
         counters: &mut CedCounters,
         pool: &mut DecoderRowsPool,
+        mut interleave: Option<&mut prefill::LayerInterleave<'_>>,
     ) -> Result<()> {
         #[cfg(test)]
         let _outer_release = tests::unwind::Release::new("pool/storage", None);
@@ -386,6 +387,7 @@ impl Workspace {
             .collect::<Result<Vec<_>>>()?;
         let mut pending: std::collections::VecDeque<PendingGroup> =
             std::collections::VecDeque::new();
+        let mut last_yield = plan.decoder[0].layer;
         let result = (|| -> Result<()> {
             for (i, (layer_range, units)) in groups.into_iter().enumerate() {
                 cancelled(cancel)?;
@@ -554,6 +556,21 @@ impl Workspace {
                 }
                 self.attention
                     .retire_ced_group_speculative(generation, layer_range.clone())?;
+                let slice_end = layer_range.end;
+                let yield_now = interleave.as_ref().is_some_and(|s| {
+                    slice_end < model.layers.len()
+                        && s.ends.iter().any(|&l| last_yield < l && l <= slice_end)
+                });
+                if yield_now {
+                    while let Some(done) = pending.pop_front() {
+                        self.finish_ced_group(model, plan, done, storage, counters)?;
+                    }
+                    self.attention.checked_ced_status()?;
+                    cancelled(cancel)?;
+                    (interleave.as_deref_mut().unwrap().between)()?;
+                    cancelled(cancel)?;
+                    last_yield = slice_end;
+                }
                 if pending.len() > 1 {
                     let done = pending.pop_front().unwrap();
                     self.finish_ced_group(model, plan, done, storage, counters)?;

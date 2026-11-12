@@ -55,3 +55,14 @@ post-append decode logits, peer logits and peer snapshot digests. Profiling
 sums completed command GPU durations without counter sampling.
 
 Results and the production decision will be recorded after the probe.
+
+### Full preliminary result
+
+M5 iter, two paired repetitions at each of 32/342/1509 rows and 1/2/4/8
+slices: **24/24 bitwise**, including complete persistent-state digests and
+post-append decode. Pressure fell from 1 at load to 0 before measurements
+and remained 0. For 1509 rows and eight slices, the paired worst gaps were
+1387.0/1393.9 ms off and 217.7/216.6 ms sliced; equal-round GPU ratios were
+0.9900/0.9902. These are controlled probe gaps, not serve ITL statistics.
+The 32-row case confirms that unconditional slicing taxes TTFT. CED and
+cold cases are still under test; no serving policy has been enabled.

@@ -12,7 +12,7 @@ use qwen_llm::{
 };
 use serde_json::json;
 use std::{io::Write, sync::Arc, time::Instant};
-const DEPTH: usize = 48 * 1024;
+const WARM_DEPTH: usize = 48 * 1024;
 fn emit(v: serde_json::Value) {
     println!("{v}");
     std::io::stdout().flush().unwrap();
@@ -54,6 +54,9 @@ fn arm(
     n: usize,
     ends: &[usize],
     split: bool,
+    ced: bool,
+    depth: usize,
+    rounds_after: usize,
 ) -> Result<Arm> {
     let mut app = f.new_state(98_304)?;
     f.restore_snapshot(&mut app, root)?;
@@ -68,7 +71,7 @@ fn arm(
     let mut peer_logits = Vec::new();
     let mut last = Instant::now();
     let mut round = || -> std::result::Result<(), String> {
-        let tokens = vec![ids[DEPTH + count], ids[DEPTH + count + 64]];
+        let tokens = vec![ids[depth + count], ids[depth + count + 64]];
         let logits = f.step_batch(&mut peers.iter_mut().collect::<Vec<_>>(), &tokens, None)?;
         gaps.push(ms(last));
         last = Instant::now();
@@ -80,16 +83,40 @@ fn arm(
     let scope = profile::Scope::begin().map_err(anyhow::Error::msg)?;
     let started = Instant::now();
     let unsplit = [40];
-    let (logits, commands) = f.prefill_layer_sliced_probe(
-        &mut app,
-        &ids[DEPTH..DEPTH + n],
-        None,
-        if split { ends } else { &unsplit },
-        &mut round,
-    )?;
+    let boundaries = if split { ends } else { &unsplit };
+    let (logits, commands) = if ced {
+        ensure!(
+            f.begin_cold_prefill_episode(&mut app, n)
+                .map_err(anyhow::Error::msg)?,
+            "CED eligible"
+        );
+        let mut commands = Vec::new();
+        let logits = loop {
+            let (slice, work) = f.cold_prefill_layer_sliced_probe(
+                &mut app,
+                &ids[depth..depth + n],
+                None,
+                boundaries,
+                &mut round,
+            )?;
+            commands.extend(work);
+            if slice.complete {
+                break slice.logits;
+            }
+        };
+        (logits, commands)
+    } else {
+        f.prefill_layer_sliced_probe(
+            &mut app,
+            &ids[depth..depth + n],
+            None,
+            boundaries,
+            &mut round,
+        )?
+    };
     let ttft = ms(started);
     if !split {
-        for _ in 1..ends.len() {
+        for _ in 0..rounds_after {
             round().map_err(anyhow::Error::msg)?;
         }
     }
@@ -108,7 +135,7 @@ fn arm(
     let snapshot = f.capture_snapshot(&app)?;
     let digest = snapshot.diagnostic_digest();
     let next = f
-        .step(&mut app, ids[DEPTH + n], None)
+        .step(&mut app, ids[depth + n], None)
         .map_err(anyhow::Error::msg)?;
     let peer_digests = peers
         .iter()
@@ -137,6 +164,12 @@ fn main() -> Result<()> {
         .split(',')
         .map(str::parse)
         .collect::<std::result::Result<_, _>>()?;
+    let ced = args.get(5).map(String::as_str) == Some("ced");
+    let depth = if args.get(6).map(String::as_str) == Some("cold") {
+        0
+    } else {
+        WARM_DEPTH
+    };
     let ctx = MetalContext::new()?;
     let g = Arc::new(GgufFile::open(&args[1])?);
     let storage = resident_storage_plan_with_target(
@@ -150,7 +183,7 @@ fn main() -> Result<()> {
         .map_err(anyhow::Error::msg)?;
     let tok = NativeTokenizer::from_gguf(&g)?;
     let mut text = std::fs::read_to_string(&args[2])?;
-    while tok.encode(&text, false)?.len() < DEPTH + sizes.iter().max().unwrap() + 100 {
+    while tok.encode(&text, false)?.len() < depth + sizes.iter().max().unwrap() + 100 {
         let extra = text.clone();
         text.push_str(&extra);
     }
@@ -159,19 +192,21 @@ fn main() -> Result<()> {
         .into_iter()
         .map(|x| x as u32)
         .collect();
-    emit(json!({"kind":"load", "depth":DEPTH,"thermal":thermal(),"sizes":sizes}));
+    emit(json!({"kind":"load", "depth":depth,"ced":ced,"thermal":thermal(),"sizes":sizes}));
     let mut prefix = f.new_state(98_304)?;
-    ensure!(
-        f.begin_cold_prefill_episode(&mut prefix, DEPTH)
-            .map_err(anyhow::Error::msg)?,
-        "CED prefix"
-    );
-    loop {
-        if f.cold_prefill_episode_slice(&mut prefix, &ids[..DEPTH], None, 4096)
-            .map_err(anyhow::Error::msg)?
-            .complete
-        {
-            break;
+    if depth > 0 {
+        ensure!(
+            f.begin_cold_prefill_episode(&mut prefix, depth)
+                .map_err(anyhow::Error::msg)?,
+            "CED prefix"
+        );
+        loop {
+            if f.cold_prefill_episode_slice(&mut prefix, &ids[..depth], None, 4096)
+                .map_err(anyhow::Error::msg)?
+                .complete
+            {
+                break;
+            }
         }
     }
     let root = f.capture_snapshot(&prefix)?;
@@ -180,20 +215,48 @@ fn main() -> Result<()> {
     for n in sizes {
         let mut ordinary = f.new_state(98_304)?;
         f.restore_snapshot(&mut ordinary, &root)?;
-        let reference = f.prefill(&mut ordinary, &ids[DEPTH..DEPTH + n], None)?;
+        let reference = f.prefill(&mut ordinary, &ids[depth..depth + n], None)?;
         let reference_digest = f.capture_snapshot(&ordinary)?.diagnostic_digest();
         drop(ordinary);
         for s in [1, 2, 4, 8] {
             let ends: Vec<_> = (1..=s).map(|i| i * 40 / s).collect();
+            let rounds_after = if ced {
+                let mut state = f.new_state(98_304)?;
+                f.restore_snapshot(&mut state, &root)?;
+                ensure!(
+                    f.begin_cold_prefill_episode(&mut state, n)
+                        .map_err(anyhow::Error::msg)?,
+                    "CED eligible"
+                );
+                let mut count = 0;
+                loop {
+                    let (slice, _) = f.cold_prefill_layer_sliced_probe(
+                        &mut state,
+                        &ids[depth..depth + n],
+                        None,
+                        &ends,
+                        &mut || {
+                            count += 1;
+                            Ok(())
+                        },
+                    )?;
+                    if slice.complete {
+                        break;
+                    }
+                }
+                count
+            } else {
+                ends.len() - 1
+            };
             for rep in 0..reps {
                 let (a, b) = if rep % 2 == 0 {
                     (
-                        arm(&f, &root, &ids, n, &ends, false)?,
-                        arm(&f, &root, &ids, n, &ends, true)?,
+                        arm(&f, &root, &ids, n, &ends, false, ced, depth, rounds_after)?,
+                        arm(&f, &root, &ids, n, &ends, true, ced, depth, rounds_after)?,
                     )
                 } else {
-                    let b = arm(&f, &root, &ids, n, &ends, true)?;
-                    let a = arm(&f, &root, &ids, n, &ends, false)?;
+                    let b = arm(&f, &root, &ids, n, &ends, true, ced, depth, rounds_after)?;
+                    let a = arm(&f, &root, &ids, n, &ends, false, ced, depth, rounds_after)?;
                     (a, b)
                 };
                 let exact = same(&a.logits, &b.logits)
@@ -208,7 +271,7 @@ fn main() -> Result<()> {
                         .zip(b.peers.iter().flatten())
                         .all(|(x, y)| same(x, y));
                 emit(
-                    json!({"kind":"pair","rows":n,"slices":s,"rep":rep,"bitwise":exact,"thermal":thermal(),
+                    json!({"kind":"pair","ced":ced,"depth":depth,"rows":n,"slices":s,"rep":rep,"bitwise":exact,"thermal":thermal(),
                     "base_ttft_ms":a.ttft,"slice_ttft_ms":b.ttft,"base_wall_ms":a.wall,"slice_wall_ms":b.wall,
                     "base_gpu_ms":a.gpu,"slice_gpu_ms":b.gpu,"gpu_ratio":b.gpu/a.gpu,
                     "base_gaps_ms":a.gaps,"slice_gaps_ms":b.gaps,"commands":b.commands}),

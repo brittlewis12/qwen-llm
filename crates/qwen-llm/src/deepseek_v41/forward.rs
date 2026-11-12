@@ -988,6 +988,38 @@ impl<'a> Forward<'a> {
         Ok((logits, slicing.commands))
     }
 
+    /// Research-only CED cuts preserving encoder rows and decoder replay groups.
+    #[cfg(feature = "perf-ablations")]
+    pub fn cold_prefill_layer_sliced_probe(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        cancel: Option<&AtomicBool>,
+        ends: &[usize],
+        between: &mut dyn FnMut() -> Result<()>,
+    ) -> std::result::Result<(ColdPrefillSlice, Vec<(usize, f64)>), StateError> {
+        op::require(
+            !ends.is_empty()
+                && ends.last() == Some(&self.layers.len())
+                && ends[0] > 0
+                && ends.windows(2).all(|w| w[0] < w[1]),
+            "layer boundaries",
+        )?;
+        let mut slicing = prefill::LayerInterleave {
+            ends,
+            between,
+            commands: Vec::new(),
+        };
+        let progress = self.cold_prefill_episode_slice_interleaved(
+            state,
+            tokens,
+            cancel,
+            4096,
+            Some(&mut slicing),
+        )?;
+        Ok((progress, slicing.commands))
+    }
+
     /// Capture actual batched attention inputs and checkpoint outputs after GPU
     /// completion. Diagnostic copies do not change the prefill arithmetic path.
     pub fn prefill_with_capture(

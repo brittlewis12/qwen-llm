@@ -1,7 +1,13 @@
 //! Opt-in synchronous forward measurements. CPU intervals are inclusive wall
 //! times, not additive CPU work or claims about CPU/GPU overlap.
 use serde::Serialize;
-use std::{cell::RefCell, marker::PhantomData, rc::Rc, time::Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    cell::RefCell,
+    marker::PhantomData,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 /// Unsampled pair diagnostics: <=8192 rows, <=256 layers, one profile at a time.
 /// The producer inventory is bounded by chunks and decoder layers, not runs.
@@ -11,6 +17,83 @@ thread_local! {
     static ACTIVE: RefCell<Option<Vec<Operation>>> = const { RefCell::new(None) };
     static STAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static DISPATCHES: RefCell<Option<Dispatches>> = const { RefCell::new(None) };
+}
+
+/// Process-wide Engram source counters, sampled by profile scopes. They are
+/// incremented only while a scope is active, so production reads pay one TLS
+/// check and no atomics.
+#[derive(Default, Clone, Copy)]
+struct EngramCounters {
+    rows: u64,
+    bytes: u64,
+    page_bytes: u64,
+    wall_ns: u64,
+    advise_rows: u64,
+    advise_page_bytes: u64,
+    advise_wall_ns: u64,
+}
+static ENGRAM_ROWS: AtomicU64 = AtomicU64::new(0);
+static ENGRAM_BYTES: AtomicU64 = AtomicU64::new(0);
+static ENGRAM_PAGE_BYTES: AtomicU64 = AtomicU64::new(0);
+static ENGRAM_WALL_NS: AtomicU64 = AtomicU64::new(0);
+static ENGRAM_ADVISE_ROWS: AtomicU64 = AtomicU64::new(0);
+static ENGRAM_ADVISE_PAGE_BYTES: AtomicU64 = AtomicU64::new(0);
+static ENGRAM_ADVISE_WALL_NS: AtomicU64 = AtomicU64::new(0);
+
+fn engram_snapshot() -> EngramCounters {
+    EngramCounters {
+        rows: ENGRAM_ROWS.load(Ordering::Relaxed),
+        bytes: ENGRAM_BYTES.load(Ordering::Relaxed),
+        page_bytes: ENGRAM_PAGE_BYTES.load(Ordering::Relaxed),
+        wall_ns: ENGRAM_WALL_NS.load(Ordering::Relaxed),
+        advise_rows: ENGRAM_ADVISE_ROWS.load(Ordering::Relaxed),
+        advise_page_bytes: ENGRAM_ADVISE_PAGE_BYTES.load(Ordering::Relaxed),
+        advise_wall_ns: ENGRAM_ADVISE_WALL_NS.load(Ordering::Relaxed),
+    }
+}
+
+fn engram_delta(before: EngramCounters) -> EngramCounters {
+    let after = engram_snapshot();
+    EngramCounters {
+        rows: after.rows.saturating_sub(before.rows),
+        bytes: after.bytes.saturating_sub(before.bytes),
+        page_bytes: after.page_bytes.saturating_sub(before.page_bytes),
+        wall_ns: after.wall_ns.saturating_sub(before.wall_ns),
+        advise_rows: after.advise_rows.saturating_sub(before.advise_rows),
+        advise_page_bytes: after
+            .advise_page_bytes
+            .saturating_sub(before.advise_page_bytes),
+        advise_wall_ns: after.advise_wall_ns.saturating_sub(before.advise_wall_ns),
+    }
+}
+
+/// Whether a profiling scope is active on this thread. Engram source
+/// instrumentation checks this before touching global counters.
+pub(crate) fn active() -> bool {
+    ACTIVE.with(|slot| slot.borrow().is_some())
+}
+
+/// Record one Engram read operation's logical rows/bytes, page-touch upper
+/// bound and wall time. Callers only invoke this under [`active`].
+pub(crate) fn engram_read(rows: usize, bytes: u64, page_bytes: u64, wall: Duration) {
+    ENGRAM_ROWS.fetch_add(rows as u64, Ordering::Relaxed);
+    ENGRAM_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    ENGRAM_PAGE_BYTES.fetch_add(page_bytes, Ordering::Relaxed);
+    ENGRAM_WALL_NS.fetch_add(
+        u64::try_from(wall.as_nanos()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+}
+
+/// Record one Engram read-ahead advice operation. Advice is asynchronous; the
+/// wall time covers issuing the syscalls, not the device transfer.
+pub(crate) fn engram_advise(rows: usize, page_bytes: u64, wall: Duration) {
+    ENGRAM_ADVISE_ROWS.fetch_add(rows as u64, Ordering::Relaxed);
+    ENGRAM_ADVISE_PAGE_BYTES.fetch_add(page_bytes, Ordering::Relaxed);
+    ENGRAM_ADVISE_WALL_NS.fetch_add(
+        u64::try_from(wall.as_nanos()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
 }
 
 #[derive(Default)]
@@ -61,6 +144,19 @@ pub struct Report {
     /// Dispatches that exceeded the per-command sample capacity.
     #[serde(skip_serializing_if = "is_zero")]
     pub dispatch_overflow: usize,
+    /// Engram rows requested, logical pread bytes, and the upper bound on the
+    /// distinct 16 KiB pages they touch, over this scope. The page bound uses
+    /// one page per row unless a row crosses a boundary, so overlapping rows
+    /// can be counted more than once.
+    pub engram_read_rows: u64,
+    pub engram_read_bytes: u64,
+    pub engram_read_page_bytes: u64,
+    pub engram_read_wall_ms: f64,
+    /// Engram read-ahead advice issued over this scope. `advise_page_bytes` is
+    /// the same upper bound; `advise_wall_ms` is syscall-issue time only.
+    pub engram_advise_rows: u64,
+    pub engram_advise_page_bytes: u64,
+    pub engram_advise_wall_ms: f64,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -71,6 +167,7 @@ fn is_zero(n: &usize) -> bool {
 pub struct Scope {
     start: Instant,
     before: Option<crate::pid_metrics::PidSnapshot>,
+    engram_before: EngramCounters,
     _thread: PhantomData<Rc<()>>,
 }
 impl Scope {
@@ -95,6 +192,7 @@ impl Scope {
             *slot = Some(Vec::new());
             Ok(Self {
                 before: crate::pid_metrics::PidSnapshot::now().ok(),
+                engram_before: engram_snapshot(),
                 start: Instant::now(),
                 _thread: PhantomData,
             })
@@ -107,6 +205,7 @@ impl Scope {
         let dispatches = DISPATCHES
             .with(|d| d.borrow_mut().take())
             .unwrap_or_default();
+        let engram = engram_delta(self.engram_before);
         Report {
             token_wall_ms,
             process_pageins: delta
@@ -119,6 +218,13 @@ impl Scope {
             operations: ACTIVE.with(|slot| slot.borrow_mut().take().unwrap()),
             dispatches: dispatches.rows,
             dispatch_overflow: dispatches.overflow,
+            engram_read_rows: engram.rows,
+            engram_read_bytes: engram.bytes,
+            engram_read_page_bytes: engram.page_bytes,
+            engram_read_wall_ms: engram.wall_ns as f64 / 1e6,
+            engram_advise_rows: engram.advise_rows,
+            engram_advise_page_bytes: engram.advise_page_bytes,
+            engram_advise_wall_ms: engram.advise_wall_ns as f64 / 1e6,
         }
     }
 }

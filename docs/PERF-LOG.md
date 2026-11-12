@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 - V4.1 Engram Admission Prefetch: I/O Real, Stall Not; Deleted
+
+- **Measured `d8602c89`, branch `perf/v41-engram-prefetch`, M5 Ultra, three-agent
+  48K serve, production max-active4 / three sampler workers, release, 180 s
+  windows, three interleaved pairs A1 B1 B2 A2 A3 B3.** Artifact unchanged:
+  four IQ2_XS GSQ-RCO shards plus the disk-streamed IQ4_NL Engram companion.
+  Each arm settled to pressure<=1 for 60 s inside its lease; pressure 2 was
+  allowed during warm-up/window and 3 aborted.
+- **Attribution (prefetch off, 71 native calls):** active prefill wall 43.88 s,
+  GPU active 39.59 s, process disk 1.804 GB, Engram row-read 1.899 s and
+  advice issue 1.630 s. Wall correlates with rows (0.958) and GPU (0.969), not
+  disk (0.356) or Engram read (0.487). The largest 494 MB disk call spent
+  58 ms in the row-read loop; the first post-settle call was 2.15 s with only
+  21 MB disk and 1.05 s GPU. Engram I/O is real but is not the multi-second
+  stall. Whole-process rusage cannot split weight-shard bytes exactly; the
+  prefetch-on arm collapsed prefill disk to 8.14 MB over 68 calls, bounding
+  other sources there.
+- **Prototype:** admission-time row derivation plus one detached read-only
+  worker (`F_RDADVISE` default, background `pread` alternative), capped at
+  8,192 new tokens, bitwise by construction. **Gate failed:** paired tok/s
+  mean **-1.71%** (95% CI **[-9.48, +6.07]**, df2); worst gap changed
+  -0.939 / -0.740 / +2.206 s across pairs; append TTFT p95 changed
+  +1.34 / -5.66 / +8.78%. On-arm B3 at pressure 2 produced the packet's worst
+  5.53 s gap. Output samples were coherent (no replacement chars, no repeated
+  8-gram above 2). Thermal/background load differed between arms and is
+  recorded per arm.
+- **Decision:** delete the prefetch path and env knob; keep the opt-in Engram
+  source counters (`engram_read_*`, `engram_advise_*` in the existing prefill
+  profile), the harness settle ceiling/pressure-duration trace, and the
+  three-pair throughput CI helper. No default, routing, artifact or residency
+  change. Record: `docs/bench/2026-11-12-v41-engram-prefetch.md`; raw
+  `metagross:~/qwen-runs/2026-11-12-v41-engram/`.
+
 ## 2026-11-12 - GLM Tensor Expert Limiter Packet: K128 Staging Fails
 
 - **Decision: remove the K128/N8 candidate; no production change.** At 80K,

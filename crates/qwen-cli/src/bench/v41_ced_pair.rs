@@ -1590,6 +1590,13 @@ mod tests {
             operations,
             dispatches: Vec::new(),
             dispatch_overflow: 0,
+            engram_read_rows: 0,
+            engram_read_bytes: 0,
+            engram_read_page_bytes: 0,
+            engram_read_wall_ms: 0.0,
+            engram_advise_rows: 0,
+            engram_advise_page_bytes: 0,
+            engram_advise_wall_ms: 0.0,
         }
     }
 

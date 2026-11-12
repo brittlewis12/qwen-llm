@@ -225,11 +225,30 @@ impl DiskEngram {
         let Ok(stride) = row_stride(&table.tensor) else {
             return;
         };
+        let active = crate::deepseek_v41::forward::profile::active();
+        let started = active.then(std::time::Instant::now);
+        let mut offsets = Vec::new();
+        if active {
+            offsets.try_reserve(ids.len()).ok();
+        }
+        let mut advised = 0usize;
         for &id in ids.iter().filter(|&&id| id < table.row_count) {
             if let Ok(offset) = row_offset(table, stride, id) {
+                if active {
+                    offsets.push(offset);
+                }
                 self.source()
                     .advise_shard_read(table.tensor.shard_idx, offset, stride);
+                advised += 1;
             }
+        }
+        if let Some(started) = started {
+            let page_bytes = page_span_bytes(&offsets, stride);
+            crate::deepseek_v41::forward::profile::engram_advise(
+                advised,
+                page_bytes,
+                started.elapsed(),
+            );
         }
     }
     /// Any number of rows (prefill chunks), read in order in bounded blocks.
@@ -329,6 +348,8 @@ impl DiskEngram {
                 source.advise_shard_read(t.shard_idx, offset, stride);
             }
         }
+        let active = crate::deepseek_v41::forward::profile::active();
+        let page_bytes = active.then(|| page_span_bytes(&offsets, stride));
         let mut raw = Vec::new();
         raw.try_reserve_exact(stride)
             .map_err(|e| invalid(format!("Engram row allocation: {e}")))?;
@@ -346,6 +367,7 @@ impl DiskEngram {
             .try_reserve_exact(ids.len() * ROW_WIDTH)
             .map_err(|e| invalid(format!("Engram output allocation: {e}")))?;
         output.resize(ids.len() * ROW_WIDTH, 0.0);
+        let read_started = active.then(std::time::Instant::now);
         for ((&id, &offset), destination) in ids
             .iter()
             .zip(&offsets)
@@ -361,9 +383,35 @@ impl DiskEngram {
                 )));
             }
         }
+        if let (Some(started), Some(page_bytes)) = (read_started, page_bytes) {
+            crate::deepseek_v41::forward::profile::engram_read(
+                ids.len(),
+                (ids.len() as u64).saturating_mul(stride as u64),
+                page_bytes,
+                started.elapsed(),
+            );
+        }
         self.revalidate_sources()?;
         Ok(output)
     }
+}
+
+/// Upper bound on the distinct host pages touched by these rows: one page per
+/// row, two when a row crosses a page boundary, deduplicated within the call.
+fn page_span_bytes(offsets: &[u64], stride: usize) -> u64 {
+    let page = crate::metal::host_page_size_bytes().unwrap_or(16 * 1024) as u64;
+    if page == 0 {
+        return 0;
+    }
+    let mut pages = std::collections::BTreeSet::new();
+    for &offset in offsets {
+        let first = offset / page;
+        let last = offset.saturating_add(stride as u64).saturating_sub(1) / page;
+        for page in first..=last {
+            pages.insert(page);
+        }
+    }
+    (pages.len() as u64).saturating_mul(page)
 }
 
 /// Batched reads: first (probe) block, later blocks, and the mean per-row

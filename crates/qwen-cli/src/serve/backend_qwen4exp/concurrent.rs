@@ -659,11 +659,6 @@ impl<'a> Owner<'a> {
             )
             .into());
         }
-        if command.len() < 2 {
-            // Scalar/frontier tails retain the original forward. The Driver
-            // still counts the intervening round as this quantum's service.
-            return self.prefill_run(run, rows, sink);
-        }
         let boundary = self
             .config
             .layer_policy
@@ -1002,6 +997,11 @@ impl<'a> Runtime for Owner<'a> {
     ) -> Option<Result<Option<DecodeCursor>, BackendFailure>> {
         let policy = self.config.layer_policy;
         if policy.ms == 0 || (!peers && !run.layer_work.armed) {
+            return None;
+        }
+        // Scalar frontier tails keep both the incumbent forward and its
+        // decode-percentage credit, including inside an eligible append.
+        if run.commands.front().is_some_and(|c| c.len() < 2) {
             return None;
         }
         if !run.layer_work.armed

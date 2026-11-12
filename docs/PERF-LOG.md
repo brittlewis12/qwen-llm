@@ -45350,3 +45350,7 @@ sustained serve evidence. See [price and native gate](bench/2026-11-12-fn-layer-
 
 - Flash-Next compatibility follow-up: explicit incumbent fallback for unprobed
   layer counts, covered by the rollback policy test before the sustained packet.
+
+- Scalar frontier commands retain the incumbent callback and decode credit;
+  they are excluded from packed-cost eligibility. The policy test covers a
+  scalar-only tail. No sustained arm preceded this correction.

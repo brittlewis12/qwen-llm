@@ -49,7 +49,9 @@ impl Policy {
     }
 }
 fn predicted_ms(rows: usize) -> f64 {
-    if rows == 0 {
+    // Scalar commands already yield at a token. They cannot benefit from a
+    // layer cut and must not pay a packed weight-streaming floor in admission.
+    if rows < 2 {
         0.0
     } else {
         225.0 + 0.42 * rows as f64
@@ -114,6 +116,8 @@ mod tests {
             assert!(on.selects(&commands));
             assert!(!off.selects(&commands));
         }
+        let scalar_only = (2048..2080).map(|p| p..p + 1).collect();
+        assert!(!on.selects(&scalar_only));
     }
     #[test]
     fn cold_and_warm_slices_preserve_the_row_plan_and_fused_ple_boundary() {

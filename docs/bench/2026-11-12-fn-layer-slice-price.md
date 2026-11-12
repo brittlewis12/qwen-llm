@@ -91,3 +91,7 @@ Compatibility review found the loader admits additional layer counts. The serve
 policy now explicitly falls back to incumbent execution unless the artifact has
 the probed 48 layers. This guard is covered by the policy test; the 48-layer
 native result is unchanged. No sustained arm was measured before this guard.
+
+- Scalar frontier commands retain the incumbent callback and decode credit;
+  they are excluded from packed-cost eligibility. The policy test covers a
+  scalar-only tail. No sustained arm preceded this correction.

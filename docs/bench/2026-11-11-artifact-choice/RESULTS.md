@@ -109,15 +109,16 @@ interleaved pairs in `speed-v2/`, gives:
 | 1 | 14.052 ms/token | 16.358 ms/token | A is 2.305 ms/token faster |
 | 3 | 25.837 ms/round | 36.113 ms/round | A is 10.276 ms/round faster |
 
-B has no measurement in this production reference path. In the earlier
-`a2a1965fe` solo suite, D was 17.71 ms/token and E 18.22 ms/token at depth
-32K; there is no comparable current-build GLM width-3 result.
+B's production-path decode and serve measurements are in "B speed and serve"
+below. In the earlier `a2a1965fe` solo suite, D was 17.71 ms/token and E 18.22
+ms/token at depth 32K; there is no comparable current-build GLM width-3
+result.
 
 For the three-agent 48K serve, A2 completed at **84.006 tok/s** (15,121
 window tokens, 180 seconds, thermal max 1). A1 aborted at thermal level 2.
 C1 was rejected at preflight because thermal pressure was already level 2;
 C2 and C3-retry aborted at level 2. C serving is **not measured** because no
-attempt passed the thermal gate. B serving was not run.
+attempt passed the thermal gate. B serving is measured below.
 
 ### Route differences
 
@@ -315,3 +316,110 @@ the stated ~28 GiB. Probe outputs stayed under the requested run root. The
 external Aven annotation for V41-HFAB could not be posted because Aven is not
 available as a connected tool/plugin in this session; the result is recorded
 here and in PERF-LOG.
+
+## B speed and serve — 2026-11-12 (M5 UTC)
+
+This section closes the gap named in the correction above. B is
+`~/models/unsloth-DeepSeek-V4.1-Flash-1017/UD-IQ3_XXS/`. All GPU work ran under
+the canonical Metal lease; no model file was changed. The branch was rebased
+onto main `f6475cb2e` first; the M5 worktree used commit `3c3249b0`.
+
+### Production-path decode
+
+The `v41_batch_depth` example was rebuilt from the rebased tree with
+`--profile iter --features perf-ablations` and placed at the path the existing
+`speed-v2/` runner expects. The decode command is the same reference mode as
+`speed-v2/`: `MODEL 32768 WIDTH 32 bounds`. Three interleaved A/B pairs per
+width were run (`A B A B A B`); A was re-measured in every pair. Each arm
+contributes two Reference passes per run, six per arm.
+
+| Width | A mean | B mean | B − A | B / A |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 (ms/token) | 13.897 (SD 0.056, n=6) | 17.580 (SD 0.029, n=6) | +3.683 | +26.5% |
+| 3 (ms/round) | 25.603 (SD 0.108, n=6) | 39.621 (SD 0.072, n=6) | +14.018 | +54.8% |
+
+The width-1 pair means are A 13.854 / 13.899 / 13.939 and B 17.569 / 17.611 /
+17.560. The width-3 pair means are A 25.522 / 25.689 / 25.597 and B 39.658 /
+39.638 / 39.566. B is slower in all six pairs. At width 3, B's 39.621
+ms/round is 13.207 ms/token-equivalent versus A's 8.534. Every accepted arm
+sampled thermal level 1, never 2; one A pair waited 30 s for the thermal
+settle. The re-measured A is consistent with the earlier session: 13.897 vs
+14.052 ms/token and 25.603 vs 25.837 ms/round. The first attempt at this
+campaign aborted all six arms at ambient level 2; the `campaign-status.jsonl`
+begin/end rows retain those aborts, and the later pair runs reused the IDs.
+
+### Three-agent 48K serve
+
+Same settings as `serve-v2/`: `plan.json` seed 20261109, real agent sampling,
+180 s window, ramp 15, 48,000 warm tokens, context 196,608, warm-cool 45,
+cool 30, thermal gate 1. The only scheduling addition was a 240 s stable
+thermal-0 settle inside the lease before each arm; the harness flags and gate
+were unchanged. Raw runs and per-agent ITL are in `serve-v2/` and
+`serve-v2/itl-*.json`; the consolidated record is `b-measurement-summary.json`.
+
+| Arm | Pair / order | tok/s | Thermal max | prefill s | partial_prefill_s | ITL p50 s | ITL p99 s | Per-agent p99 s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| A `Ab2` | 1, second | 85.106 | 0 | 32.43 | 0.00 | 0.02764 | 0.05507 | 0.0573 / 0.0547 / 0.0549 |
+| A `Ab3` | 2, first | 81.856 | 1 | 34.10 | 0.00 | 0.02813 | 0.05577 | 0.0709 / 0.0543 / 0.0558 |
+| B `Bb1r` | 1, first | 48.806 | 0 | 41.21 | 0.00 | 0.04157 | 0.16194 | 0.1630 / 0.3738 / 0.1570 |
+| B `Bb2` | 2, second | 50.517 | 1 | 39.80 | 0.00 | 0.04225 | 0.15997 | 0.1580 / 0.1650 / 0.1580 |
+
+Means: A **83.481 tok/s**, B **49.661 tok/s**; aggregate ITL p99 **0.0554 s**
+for A and **0.1610 s** for B. Partial prefill is zero for all four arms; the
+round-budget prefill estimate is 32.4–34.1 s for A and 39.8–41.2 s for B. B's
+warm-up is longer: 202–220 s versus 169–173 s.
+
+Thermal history: in serve, the A1 attempt was a path collision (below), A
+`Ab1` aborted at level 2 at the end of its window, A `Ab1r` aborted at level 2
+during warm-up cooling, and B `Bb1` aborted at level 2 at the end of its
+window. With the 240 s settle, `Bb1r`, `Ab2`, `Ab3`, and `Bb2` all completed.
+B tripped the gate once, so the two-trip stop rule was not reached. The
+external load is not under this lease: `shadps4` processes from the ghost
+infrastructure ran at roughly 800–1160% CPU throughout and are the likely
+reason the same runs tripped without the settle. This is a shared-machine
+conflict, not a B property.
+
+### Memory and output
+
+B ran at the memory edge. During the two accepted B windows:
+
+| Run | Free pages min | Inactive min | Compressor max | Swap max |
+| --- | ---: | ---: | ---: | ---: |
+| B `Bb1r` | 0.78 GB | 7.77 GB | 10.53 GB | 180.5 MB |
+| B `Bb2` | 0.12 GB | 8.20 GB | 14.34 GB | 182.4 MB |
+
+A's corresponding free-page minima were 10.94 and 5.24 GB, with compressor
+maxima near 1.1 GB; swap max was 180.9 MB. Swap stayed within about 30 MB of
+the pre-campaign baseline (146–150 MB), so there was no swap growth, but B's
+free pages and compressor headroom are clearly narrower. These are live-window
+readings, not the earlier post-prefill fit headroom of 40.42 GB.
+
+B's outputs are coherent. Sampled non-warm responses contain ordinary English
+code-review prose, zero U+FFFD replacement characters, 0.84–0.97 alphabetic
+fraction, and no repeated 8-word shingle in the longest response (4,581
+characters). Example from `Bb2/a2-t14`: "The reader is serving the same fixed
+V4.1 header on every path... I will not call it again; the report continues
+against the supplied corpus."
+
+### Record collision
+
+A runner ID collided with the earlier lane: an aborted attempt used `A1` and
+overwrote the wrapper-level `A1.before`, `A1.after`, `A1.exit` and driver logs.
+The `serve-v2/A1/` run directory is intact (`failed.json` records
+`thermal_abort: true`, thermal max 2, no summary), and the overwritten wrapper
+files are retained with a `.collision-20261112T0325Z` suffix. The collision
+attempt did not load a model. Subsequent IDs use `Ab*`/`Bb*`.
+
+### Combined size/speed table
+
+| Candidate | Quality vs A (nats/token) | Width-1 ms/token | Width-3 ms/round | Serve tok/s | ITL p99 | Resident weights |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| A GSQ-RCO IQ2_XS | reference | 13.897 | 25.603 | 85.106 / 81.856 (mean 83.481) | 0.0554 s | 155.22 GB |
+| B Unsloth UD-IQ3_XXS | −0.02163 [−0.03104, −0.01286], p=0.0117 | 17.580 | 39.621 | 48.806 / 50.517 (mean 49.661) | 0.1610 s | 233.45 GB |
+| C Maya-S IQ2_XXS | −0.01560 [−0.02590, −0.00726], p=0.0654 | 16.358 | 36.113 | not measured (thermal gate) | not measured | 178.19 GB |
+
+C's speed row is from the earlier A/C session; the prior A row there was
+14.052 ms/token and 25.837 ms/round, so C is presented against that session.
+Resident weights are the retained backbone from the identity records; on-disk
+totals including the Engram companion are A 265.83 GB, B 394.74 GB, and C
+339.48 GB (Engram: A 110.60 GB, B and C 161.28 GB).

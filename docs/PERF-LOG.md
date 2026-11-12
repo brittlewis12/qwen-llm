@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 - V4.1 B (UD-IQ3_XXS) Speed And Serve Measured
+
+- **Updates the 2026-11-11 artifact-choice correction below with the missing B
+  production/serve side.** Branch `research/artifact-choice` rebased onto main
+  `f6475cb2e`; M5 worktree `3c3249b0`. No model file changed. All GPU work ran
+  under the canonical Metal lease.
+- **Production decode, 32K reference mode, three interleaved A/B pairs per
+  width:** width 1 **A 13.897 / B 17.580 ms/token** (+3.683, +26.5%); width 3
+  **A 25.603 / B 39.621 ms/round** (+14.018, +54.8%). B is slower in every
+  pair. Thermal max 1; the A remeasurement matches the earlier 14.052/25.837.
+- **Three-agent 48K serve, same plan as `serve-v2/`:** A **85.106 / 81.856
+  tok/s** (mean 83.481), B **48.806 / 50.517 tok/s** (mean 49.661). Aggregate
+  ITL p99 **0.0554 s A / 0.1610 s B**; per-agent B p99 is 0.157–0.374 s.
+  Round-budget prefill is **32.4–34.1 s A / 39.8–41.2 s B**; partial prefill is
+  zero.
+- **Thermal:** a 240 s stable-0 settle inside the lease was needed because
+  non-lease `shadps4` ghost load ran at 800–1160% CPU. Four arms then completed
+  at thermal max 0–1. B tripped level 2 once; the two-trip stop rule was not
+  reached. A tripped twice (end of window and warm-up cooling).
+- **Memory:** B free pages fell to 0.12–0.78 GB and compressor to 14.34 GB, but
+  swap stayed at 180–182 MB (baseline 146–150 MB). B is at the memory edge.
+  Outputs are coherent: no replacement characters and no repeated 8-word
+  shingles.
+- **Record:** `docs/bench/2026-11-11-artifact-choice/RESULTS.md`; raw
+  `metagross:~/qwen-runs/2026-11-11-artifact-choice/{speed-v2,serve-v2}/` plus
+  `b-measurement-summary.json`. A1 wrapper logs were overwritten by an ID
+  collision; the A1 run directory and thermal-abort evidence remain.
+
 ## 2026-11-11 - Two-Queue Causal Branches: Ceiling Passes, Isolation Does Not
 
 - **Negative stage-2 gate; no production default changed.** M5 GLM's optimal
@@ -125,8 +153,9 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   **25.837/36.113 ms/round**. A2's 180-second three-agent serve delivered
   **84.006 tok/s** (thermal max 1). A1 aborted at thermal 2; C1 was blocked
   at preflight at thermal 2, and C2/C3-retry aborted at thermal 2. C serve is
-  not measured; B production timing/serve were not run. Current-build A suite
-  rerun is **14.63–15.23 ms/token**; the old 30.24 row did not reproduce.
+  not measured; B production timing and serve are measured in the 2026-11-12
+  entry above. Current-build A suite rerun is **14.63–15.23 ms/token**; the old
+  30.24 row did not reproduce.
 - **V4.1 call:** no single candidate dominates. B has the quality-first
   signal, while measured production and serving favor A. Britt chooses which
   tradeoff matters; the report lists exact conditional deletable directories.

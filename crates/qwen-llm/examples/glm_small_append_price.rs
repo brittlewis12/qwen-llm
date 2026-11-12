@@ -38,8 +38,8 @@ mod probe {
         glm5_next::FfnTensors,
         glm5_next_metal::{
             GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch, Glm5NextCapturedRows, Glm5NextExpertRoute,
-            Glm5NextRowBank, Glm5NextRowBankPlan, Glm5NextSession, Glm5NextStageReport,
-            Glm5NextWeights, set_expert_packet_max_rows, set_expert_route,
+            Glm5NextRowBank, Glm5NextRowBankPlan, Glm5NextSession, Glm5NextSnapshot,
+            Glm5NextStageReport, Glm5NextWeights, set_expert_packet_max_rows, set_expert_route,
         },
         metal::*,
         tokenizer::Tokenizer,
@@ -785,6 +785,8 @@ mod probe {
 
             let mut walls: Vec<Vec<f64>> = arms.iter().map(|_| Vec::new()).collect();
             let mut last_logits: Vec<Option<Vec<f32>>> = arms.iter().map(|_| None).collect();
+            let mut last_states: Vec<Option<Glm5NextSnapshot>> =
+                arms.iter().map(|_| None).collect();
             for rep in 0..3 {
                 let n = arms.len();
                 let shift = (rep + width_index) % n;
@@ -799,11 +801,13 @@ mod probe {
                     anyhow::ensure!(out.iter().all(|v| v.is_finite()), "non-finite logits");
                     if rep == 2 {
                         last_logits[index] = Some(out);
+                        last_states[index] = Some(session.capture_snapshot()?);
                     }
                 }
             }
 
             let incumbent = last_logits[0].clone().expect("incumbent logits");
+            let incumbent_state = last_states[0].as_ref().expect("incumbent state");
             let next = ids[depth + width];
             for (index, &arm) in arms.iter().enumerate() {
                 arm.apply();
@@ -852,6 +856,9 @@ mod probe {
                     "routed_experts_ms": routed_ms,
                     "stages": stages,
                     "max_abs_logit_diff": max_abs,
+                    "state_bitwise": last_states[index]
+                        .as_ref()
+                        .is_some_and(|state| state.same_state(incumbent_state)),
                     "top1_incumbent": top1(&incumbent), "top1_arm": top1(logits),
                     "top1_agree": top1(&incumbent) == top1(logits),
                     "kl_incumbent_arm": kl(&incumbent, logits),

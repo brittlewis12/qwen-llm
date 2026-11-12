@@ -249,6 +249,9 @@ fn execute(
     tokenizer: &dyn Tokenize,
     sink: &mut dyn GenerationSink,
 ) -> Result<(GenerationResult, f64), BackendFailure> {
+    // Capture-prefill and every speculative step commit and wait on this
+    // thread; keep it user-initiated for the whole packet burst.
+    let _qos = qwen_llm::metal::GpuThreadQos::enter();
     let started = Instant::now();
     // The adapter polls transport between capture-prefill chunks as well as at
     // packet boundaries, preserving heartbeat and typed cancellation.

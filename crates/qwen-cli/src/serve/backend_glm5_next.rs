@@ -833,6 +833,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         tokens: Option<&[u32]>,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        // The serial path owns the feeding thread for the whole request: hold
+        // user-initiated across prefill, the GPU token loop and single forwards.
+        let _qos = qwen_llm::metal::GpuThreadQos::enter();
         let mut run = match self.begin_generation(request, prompt, boundaries, tokens, sink)? {
             execution::Begun::Complete(outcome) => return Ok(outcome),
             execution::Begun::Run(run) => run,

@@ -636,6 +636,11 @@ impl<R> Driver<R> {
     }
 
     pub(crate) fn pump<E: Runtime<Run = R>>(&mut self, runtime: &mut E) -> bool {
+        // One scheduler round covers admission (live-session restore), plain
+        // and sliced prefill, and the nested decode/advance scopes. Keeping the
+        // feeding thread user-initiated for the whole round closes the plain
+        // prefill gap while leaving the existing nested guards as no-ops.
+        let _qos = qwen_llm::metal::GpuThreadQos::enter();
         let mut progress = false;
         for i in (0..self.active.len()).rev() {
             if let Err(e) = self.active[i].sink.check() {

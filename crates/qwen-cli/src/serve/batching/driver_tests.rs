@@ -18,6 +18,22 @@ use std::{
 };
 
 struct Bytes;
+unsafe extern "C" {
+    fn pthread_get_qos_class_np(
+        thread: libc::pthread_t,
+        qos_class: *mut u32,
+        relative_priority: *mut i32,
+    ) -> i32;
+}
+
+/// Whether the calling (GPU-feeding) thread is at user-initiated or higher.
+fn thread_qos_raised() -> bool {
+    const USER_INITIATED: u32 = 0x19;
+    let (mut class, mut relative) = (0, 0);
+    // SAFETY: both out-pointers are valid for the call.
+    let rc = unsafe { pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut relative) };
+    rc == 0 && class >= USER_INITIATED
+}
 impl Tokenize for Bytes {
     fn encode(&self, s: &str, _: bool) -> Result<Vec<i32>, TokError> {
         Ok(s.bytes().map(i32::from).collect())
@@ -84,6 +100,8 @@ struct Fake {
     cancel_during: Option<Arc<AtomicBool>>,
     sampler_draws: Vec<usize>,
     sampling: Option<SamplingConfig>,
+    /// Whether each GPU-feeding call ran at user-initiated QoS.
+    qos: Vec<bool>,
 }
 fn logits(s: &State) -> Vec<f32> {
     let mut v = vec![-100.; 256];
@@ -136,6 +154,7 @@ impl Runtime for Fake {
         if let Some(c) = &mut self.clock {
             *c += self.prefill_service;
         }
+        self.qos.push(thread_qos_raised());
         let n = rows.min(r.left);
         self.prefills.push(n);
         self.reserves.push(reserve);
@@ -297,6 +316,7 @@ impl Runtime for Fake {
         if let Some(c) = &mut self.clock {
             *c += self.decode_service;
         }
+        self.qos.push(thread_qos_raised());
         self.steps.push(1);
         if !self.can_step(s) {
             return Err("unready state".into());
@@ -313,6 +333,7 @@ impl Runtime for Fake {
         if let Some(c) = &mut self.clock {
             *c += self.decode_service;
         }
+        self.qos.push(thread_qos_raised());
         self.steps.push(states.len());
         if self.refuse > 0 {
             self.refuse -= 1;
@@ -346,6 +367,7 @@ impl Runtime for Fake {
         if !self.token_batch {
             return None;
         }
+        self.qos.push(thread_qos_raised());
         self.token_batches += 1;
         let mut out = Vec::with_capacity(runs.len());
         for (run, &token) in runs.iter_mut().zip(tokens) {
@@ -494,6 +516,23 @@ fn scheduler_batches_independent_streams_without_changing_token_lifecycle() {
     assert_eq!(e.commits.len(), 3);
     assert!(e.reserves.contains(&307));
 }
+#[test]
+fn pump_holds_user_initiated_qos_across_prefill_and_decode() {
+    if !qwen_llm::env_flag::read_default_on("QWEN_GPU_THREAD_QOS") {
+        return;
+    }
+    let mut d = Driver::new(3);
+    let mut e = Fake::default();
+    let _cs: Vec<_> = (0..3).map(|_| submit(&mut d, 5, true, 100)).collect();
+    finish(&mut d, &mut e);
+    assert!(!e.qos.is_empty());
+    assert!(
+        e.qos.iter().all(|&raised| raised),
+        "a prefill or step ran without user-initiated QoS: {:?}",
+        e.qos
+    );
+}
+
 #[test]
 fn scheduler_serial_limit_keeps_one_forward_per_transition() {
     let mut d = Driver::new(1);

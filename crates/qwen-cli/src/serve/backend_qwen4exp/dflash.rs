@@ -96,6 +96,9 @@ pub(super) fn generate_cold(
     sink: &mut dyn GenerationSink,
     cpu_reserve: u64,
 ) -> Result<(crate::GenerationResult, Qwen4ExpDFlashStats), BackendFailure> {
+    // Cold packet prefill and every speculative step feed and wait on this
+    // thread; keep it user-initiated for the whole packet burst.
+    let _qos = qwen_llm::metal::GpuThreadQos::enter();
     let mut abort = None;
     let started = Qwen4ExpDFlashAdapter::start_with_checkpoint(
         runner,

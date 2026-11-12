@@ -10,6 +10,23 @@ use std::sync::Arc;
 
 const VOCAB: usize = 258;
 
+unsafe extern "C" {
+    fn pthread_get_qos_class_np(
+        thread: libc::pthread_t,
+        qos_class: *mut u32,
+        relative_priority: *mut i32,
+    ) -> i32;
+}
+
+/// Whether the calling (GPU-feeding) thread is at user-initiated or higher.
+fn thread_qos_raised() -> bool {
+    const USER_INITIATED: u32 = 0x19;
+    let (mut class, mut relative) = (0, 0);
+    // SAFETY: both out-pointers are valid for the call.
+    let rc = unsafe { pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut relative) };
+    rc == 0 && class >= USER_INITIATED
+}
+
 /// A sequence whose next token is a pure function of its consumed tokens, so
 /// batched and serial execution must agree exactly.
 #[derive(Debug)]
@@ -69,6 +86,8 @@ struct Log {
     batch_flags_are_shutdown: Vec<bool>,
     /// Per sampled step, each member's explicit-seed intent, in batch order.
     sampled_explicit: Vec<Vec<bool>>,
+    /// Whether each GPU-feeding call ran with the thread at user-initiated QoS.
+    qos: Vec<bool>,
     reserves: Vec<u64>,
     events: Vec<String>,
 }
@@ -125,6 +144,7 @@ impl execution::Engine<Seq> for StubEngine {
         with_logits: bool,
     ) -> std::result::Result<Vec<f32>, ServeError> {
         let mut log = self.log.borrow_mut();
+        log.qos.push(thread_qos_raised());
         log.prefill.push((tokens.len(), state.tokens.len()));
         self.clock += Duration::from_millis(tokens.len() as u64);
         log.events.push(format!("prefill {}", tokens.len()));
@@ -225,7 +245,9 @@ impl execution::Engine<Seq> for StubEngine {
         let rows = max_rows.min(tokens.len() - self.cold_encoded);
         self.cold_encoded += rows;
         self.clock += Duration::from_millis(rows as u64);
-        self.log.borrow_mut().events.push(format!("ced {rows}"));
+        let mut log = self.log.borrow_mut();
+        log.qos.push(thread_qos_raised());
+        log.events.push(format!("ced {rows}"));
         let complete = self.cold_encoded == tokens.len();
         let logits = if complete {
             state.tokens.extend_from_slice(tokens);
@@ -247,8 +269,11 @@ impl execution::Engine<Seq> for StubEngine {
         token: u32,
         _: &AtomicBool,
     ) -> std::result::Result<Vec<f32>, String> {
-        self.log.borrow_mut().steps.push(1);
-        self.log.borrow_mut().events.push("step 1".into());
+        let mut log = self.log.borrow_mut();
+        log.qos.push(thread_qos_raised());
+        log.steps.push(1);
+        log.events.push("step 1".into());
+        drop(log);
         self.clock += Duration::from_millis(self.step_ms.max(1));
         if state.unready || state.poisoned {
             return Err("sequence is provisional or poisoned by partial execution".into());
@@ -270,6 +295,7 @@ impl BatchEngine<Seq> for StubEngine {
     ) -> std::result::Result<Vec<Vec<f32>>, String> {
         {
             let mut log = self.log.borrow_mut();
+            log.qos.push(thread_qos_raised());
             log.steps.push(states.len());
             log.events.push(format!("step {}", states.len()));
             log.batch_flags_are_shutdown
@@ -315,6 +341,7 @@ impl BatchEngine<Seq> for StubEngine {
     ) -> std::result::Result<Vec<u32>, String> {
         {
             let mut log = self.log.borrow_mut();
+            log.qos.push(thread_qos_raised());
             log.steps.push(states.len());
             log.events.push(format!("sampled {}", states.len()));
             log.sampled_explicit.push(explicit_seeds.to_vec());
@@ -654,6 +681,38 @@ fn batched_requests_match_serial_outputs_and_report_batch_fields() {
         assert_eq!(batch["prefill_loaded_rows"], LOADED_PREFILL_ROWS);
         assert_eq!(phases["family"], "deepseek_v41");
         assert!(phases["process_token_io"].is_object());
+    }
+}
+
+#[test]
+fn serve_rounds_hold_user_initiated_qos_for_every_gpu_phase() {
+    if !qwen_llm::env_flag::read_default_on("QWEN_GPU_THREAD_QOS") {
+        // The global rollback is in force for this process; there is no raise
+        // to observe and the scheduler must behave exactly as before.
+        return;
+    }
+    for sampled_step in [false, true] {
+        let mut settings = settings();
+        settings.gpu_sample = sampled_step;
+        let inputs = ["first prompt", "a second, longer prompt", "third"];
+        let mut scheduler = Scheduler::new(3);
+        let mut engine = StubEngine {
+            sampled_step,
+            ..Default::default()
+        };
+        let mut reuse = Recording::default();
+        for input in inputs {
+            submit(&mut scheduler, prepared(&settings, input, true));
+        }
+        drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+        let log = engine.log.borrow();
+        assert!(log.prefill.len() >= inputs.len(), "{:?}", log.prefill);
+        assert!(!log.qos.is_empty());
+        assert!(
+            log.qos.iter().all(|&raised| raised),
+            "sampled_step={sampled_step}: a prefill or step ran without user-initiated QoS: {:?}",
+            log.qos
+        );
     }
 }
 

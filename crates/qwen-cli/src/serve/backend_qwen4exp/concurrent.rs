@@ -170,6 +170,9 @@ impl<'a> Owner<'a> {
             match factory.create_runner(&base.ctx) {
                 Ok(mut second) => {
                     let first = &mut idle[0].state.runner;
+                    // The warm step feeds and waits on the GPU before any lease
+                    // client runs; keep the boot thread user-initiated.
+                    let _qos = qwen_llm::metal::GpuThreadQos::enter();
                     let result = native
                         .as_mut()
                         .unwrap()
@@ -1432,6 +1435,9 @@ impl GenerationBackend for Owner<'_> {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
+        // The serial path owns the feeding thread for the whole request: hold
+        // user-initiated across prefill and every single-token forward.
+        let _qos = qwen_llm::metal::GpuThreadQos::enter();
         self.residency.before_request();
         let mut run = self.begin_run(request, prompt, sink)?;
         while !self.prefill_run(&mut run, usize::MAX, sink)? {}

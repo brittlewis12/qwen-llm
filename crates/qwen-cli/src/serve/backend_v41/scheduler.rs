@@ -395,6 +395,11 @@ impl<S> Scheduler<S> {
         engine: &mut impl BatchEngine<S>,
         reuse: &mut impl reuse::Reuse<S>,
     ) -> bool {
+        // Every GPU-feeding call in this round (plain and sliced prefill, CED,
+        // serial and batched steps, device sampling) commits and then blocks on
+        // command completion on this thread. One scope per round keeps it
+        // user-initiated across all of them and restores it when the round ends.
+        let _qos = qwen_llm::metal::GpuThreadQos::enter();
         let mut progressed = self.reap();
         progressed |= self.deliver();
         if self.active.len() < self.max_active

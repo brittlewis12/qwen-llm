@@ -89,6 +89,10 @@ impl Settings {
         engine: &mut impl Engine<S>,
         reuse: &mut impl reuse::Reuse<S>,
     ) -> std::result::Result<GenerationOutcome, BackendFailure> {
+        // The serial path owns the feeding thread for the whole request: keep
+        // it user-initiated across prefill, CED and the token-at-a-time decode
+        // instead of raising and restoring it at every step.
+        let _qos = qwen_llm::metal::GpuThreadQos::enter();
         let mut run = self.begin(
             ceiling, request, prompt, boundaries, tokens, sink, 0, engine, reuse,
         )?;

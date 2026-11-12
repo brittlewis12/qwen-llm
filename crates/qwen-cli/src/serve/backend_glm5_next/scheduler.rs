@@ -157,6 +157,9 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             .tokenizer()
             .encode("[gMASK]<sop>", false)?;
         let token = u32::try_from(tokens[0])?;
+        // Startup warm-up also compiles and waits on the GPU; keep the boot
+        // thread user-initiated like every later round.
+        let _qos = qwen_llm::metal::GpuThreadQos::enter();
         batch.step(self.ctx, &mut [&mut a, &mut b], &[token, token])?;
         a.forward(self.ctx, token)?;
         self.batch = Some(batch);

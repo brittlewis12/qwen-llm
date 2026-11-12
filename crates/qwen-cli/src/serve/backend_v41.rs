@@ -248,6 +248,7 @@ pub(super) fn start(
 /// and the states dropped.
 fn warm_batched_decode(forward: &Forward<'_>, width: usize, token: u32) -> Result<()> {
     let started = Instant::now();
+    let _qos = qwen_llm::metal::GpuThreadQos::enter();
     let width = width.clamp(2, 8);
     let cancel = Some(crate::shutdown::cancellation_flag());
     let mut states = (0..=width)

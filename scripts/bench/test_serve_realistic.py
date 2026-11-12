@@ -96,6 +96,26 @@ class SteadyTests(unittest.TestCase):
             self.assertEqual(r['order_effect_spread_percent'],0)
             self.assertTrue(all(p['thermal_flagged'] and p['compile_overlapped'] for p in r['pairs']))
 
+    def test_sustained_serve_settles_to_one_then_allows_two(self):
+        from types import SimpleNamespace
+        args = SimpleNamespace(max_thermal_pressure=2,settle_max_thermal_pressure=1)
+        self.assertEqual(bench.settle_limit(args),1)
+        settle=bench.ThermalSettle(60,bench.settle_limit(args))
+        self.assertFalse(settle.ready(2,0))
+        self.assertFalse(settle.ready(1,1))
+        self.assertTrue(settle.ready(1,61))
+        self.assertFalse(bench.thermal_exceeds_limit(2,args.max_thermal_pressure))
+        self.assertTrue(bench.thermal_exceeds_limit(3,args.max_thermal_pressure))
+        self.assertEqual(bench.settle_limit(SimpleNamespace(max_thermal_pressure=1)),1)
+
+    def test_thermal_seconds_clips_boundaries_and_accounts_for_unknown_time(self):
+        samples=[dict(time=8,thermal=0),dict(time=12,thermal=1),dict(time=15,thermal=2),dict(time=24,thermal=0)]
+        self.assertEqual(bench.thermal_seconds(samples,10,20),{'0':2.,'1':3.,'2':5.,'unknown':0.})
+        self.assertEqual(bench.thermal_seconds(samples[1:],10,20),{'0':0.,'1':3.,'2':5.,'unknown':2.})
+        self.assertEqual(sum(bench.thermal_seconds(samples,10,20).values()),10.)
+        self.assertTrue(bench.timing_flags(samples,10,20)['thermal_flagged'])
+        self.assertEqual(bench.timing_flags(samples,10,20)['timing_thermal_seconds']['2'],5.)
+
     def population(self):
         return [dict(model='glm',purpose='primary',reused='48000',reuse_source='live',
                      call=f'glm/{i}',new=str(5+i),generated=str(20+i),tool_union_ms=str(i*10))

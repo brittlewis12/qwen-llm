@@ -45275,3 +45275,13 @@ Full append at position 63471, confirming warm-append responsiveness ROI.
   [Bench note](bench/2026-11-12-v41-layer-slice.md) and compact results record
   all evidence/limitations. Raw M5 output retained; lane worktree, build output
   and bundles removed. No artifact or roadmap change; no merge.
+
+## 2026-11-12 — Sustained serve thermal protocol for V4.1 gate
+
+Lead authorized measured pressure2 for sustained three-agent serving; pressure3
+aborts. Added opt-in independent settling ceiling before model load and after
+warm-up, leaving harness defaults unchanged. This lane uses continuous60s at
+pressure<=1, then180s at measurement ceiling2. Raw settling and sample-and-hold
+thermal durations are retained. Six arms follow ABBAAB (off/on/on/off/off/on),
+with paired differences and a95% paired-t CI; width beyond +/-2 percentage
+points is inconclusive. Slicing remains default-off pending this packet.

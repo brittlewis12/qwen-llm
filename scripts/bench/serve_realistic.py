@@ -186,10 +186,36 @@ def compiler_snapshot():
     return parse_compilers(subprocess.check_output(['ps','-ww','-axo','pid=,pcpu=,comm='],text=True))
 
 
+def thermal_seconds(samples, begin, end):
+    """Sample-and-hold pressure trace clipped to a phase's wall interval."""
+    result = {str(level): 0.0 for level in (0, 1, 2)}
+    result['unknown'] = 0.0
+    cursor, level = begin, 'unknown'
+    for sample in sorted(samples, key=lambda row: row['time']):
+        stamp = sample['time']
+        if stamp <= begin:
+            level = str(sample['thermal']) if sample['thermal'] >= 0 else 'unknown'
+            continue
+        if stamp >= end:
+            break
+        result[level] = result.get(level, 0.0) + stamp-cursor
+        cursor = stamp
+        level = str(sample['thermal']) if sample['thermal'] >= 0 else 'unknown'
+    if end > cursor:
+        result[level] = result.get(level, 0.0) + end-cursor
+    return result
+
+
+def settle_limit(args):
+    explicit = getattr(args, 'settle_max_thermal_pressure', None)
+    return args.max_thermal_pressure if explicit is None else explicit
+
+
 def timing_flags(samples, begin, end):
     window=[s for s in samples if begin <= s['time'] < end]
-    return dict(thermal_flagged=any(s['thermal']==1 for s in samples),
+    return dict(thermal_flagged=any(s['thermal']>0 for s in samples),
                 timing_thermal_max=max((s['thermal'] for s in window),default=0),
+                timing_thermal_seconds=thermal_seconds(samples,begin,end),
                 compile_observed=any(s.get('compilers') for s in samples),
                 compile_overlapped=any(s.get('compilers') for s in window))
 
@@ -256,6 +282,7 @@ class Arm:
         self.lock = threading.Lock()
         self.window_begin = self.window_end = None
         self.warm_settle_s = 0.0
+        self.settle_phases = []
         self.deadline = time.monotonic() + args.timeout
 
     def emit(self, **row):
@@ -290,21 +317,27 @@ class Arm:
             if self.server.poll() is None:
                 self.server.send_signal(signal.SIGINT)
 
-    def settle_after_warm(self):
+    def settle_after_warm(self, phase='after_warm'):
         seconds = getattr(self.args, 'settle_thermal_seconds', 0)
         if seconds <= 0:
             return
         started = time.monotonic()
-        settle = ThermalSettle(seconds, self.args.max_thermal_pressure)
-        self.emit(event='thermal_settle_begin', seconds=seconds,
-                  maximum=self.args.max_thermal_pressure)
+        settle = ThermalSettle(seconds, settle_limit(self.args))
+        trace = []
+        wall_start = time.time()
+        self.emit(event='thermal_settle_begin', phase=phase, seconds=seconds,
+                  maximum=settle_limit(self.args))
         while True:
             self.check()
-            if settle.ready(pressure(), time.monotonic()):
+            level = pressure()
+            trace.append(dict(time=time.time(),thermal=level))
+            if settle.ready(level, time.monotonic()):
                 break
             self.finish.wait(1)
         self.warm_settle_s = time.monotonic()-started
-        self.emit(event='thermal_settle_done', waited_s=self.warm_settle_s, thermal=pressure())
+        self.settle_phases.append(dict(phase=phase,start=wall_start,end=time.time(),maximum=settle_limit(self.args),required_s=seconds,samples=trace))
+        dump(self.out/'settle.json',self.settle_phases)
+        self.emit(event='thermal_settle_done', phase=phase, waited_s=self.warm_settle_s, thermal=pressure())
 
     def readlog(self):
         for line in self.server.stdout:
@@ -398,6 +431,8 @@ class Arm:
         warm, suffix = self.prepare()
         dump(self.out/'plan.json', self.plan)
         time.sleep(args.cool)
+        if getattr(args, 'settle_max_thermal_pressure', None) is not None:
+            self.settle_after_warm(phase='before_load')
         preflight=[]
         for _ in range(3):
             level=pressure();preflight.append(dict(time=time.time(),thermal=level))
@@ -422,7 +457,8 @@ class Arm:
              preflight_thermal=preflight,max_thermal_pressure=args.max_thermal_pressure,
              warmup_max_thermal_pressure=args.warmup_max_thermal_pressure,
              settle_thermal_seconds=args.settle_thermal_seconds,
-             thermal_policy='ramp/window limit unchanged; optional warm-up limit and pre-ramp settle',
+             settle_max_thermal_pressure=getattr(args, 'settle_max_thermal_pressure', None),
+             thermal_policy='explicit settling ceiling before load and after warming; independent ramp/window ceiling',
              runtime_env={k:v for k,v in env.items() if k.startswith('QWEN_')},
              corpus_sha256=digest(args.corpus), protocol='steady-own-history-v2'))
         started = time.time()
@@ -523,6 +559,7 @@ class Arm:
                       metric='delivered text+reasoning tokens retokenized; excludes EOS/format control')
         result.update(timing_flags(self.samples,self.window_begin,self.window_end))
         result['max_thermal_pressure']=args.max_thermal_pressure
+        result['arm_thermal_seconds']=thermal_seconds(self.samples,self.samples[0]['time'],self.samples[-1]['time']) if self.samples else {}
         detailed=result.pop('rows')
         dump(self.out/'summary.json',result)
         with (self.out/'calls.jsonl').open('w') as f:
@@ -809,12 +846,14 @@ def main():
                    help='extra environment for this arm (repeatable), e.g. a rollback knob')
     p.add_argument('--timeout',type=float,default=900);p.add_argument('--keep-bulk',action='store_true')
     p.add_argument('--harness-commit',default='working-tree')
-    p.add_argument('--max-thermal-pressure',type=int,choices=(0,1),default=1,
-                   help='retain level1 arms with flags by default; 0 restores strict pressure0')
+    p.add_argument('--max-thermal-pressure',type=int,choices=(0,1,2),default=1,
+                   help='measurement/ramp ceiling; default 1 unchanged; 2 permits sustained serve and aborts at 3')
     p.add_argument('--warmup-max-thermal-pressure',type=int,choices=(0,1,2),default=None,
                    help='optional warm-up-only limit; ramp/window retain --max-thermal-pressure')
     p.add_argument('--settle-thermal-seconds',type=float,default=0,
-                   help='require this many continuous seconds at the measurement thermal limit after warming')
+                   help='require this many continuous seconds at the settling thermal limit after warming')
+    p.add_argument('--settle-max-thermal-pressure',type=int,choices=(0,1,2),default=None,
+                   help='optional independent settling ceiling; also settles before model load; default uses the measurement ceiling only after warming')
     p=sub.add_parser('analyze');p.add_argument('directory',type=Path)
     p=sub.add_parser('compare');p.add_argument('reference',type=Path);p.add_argument('candidate',type=Path)
     args=parser.parse_args()

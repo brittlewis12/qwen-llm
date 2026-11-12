@@ -1,10 +1,12 @@
 //! Selective layer scheduling over the native packed row plan.
 use anyhow::Context as _;
 
-/// Nominal GPU milliseconds per Flash-Next layer slice with ready peers (default 0, opt-in 200). Zero restores the original native commands and decode-percentage policy.
+/// Nominal GPU milliseconds per Flash-Next layer slice with ready peers (default 200). Zero restores the original native commands and decode-percentage policy.
 const MS: &str = "QWEN_SERVE_FN_LAYER_SLICE_MS";
 /// Slice only Flash-Next appends whose predicted original prefill wall exceeds this many milliseconds (default 500).
 const MIN_MS: &str = "QWEN_SERVE_FN_LAYER_SLICE_MIN_MS";
+const DEFAULT_MS: usize = 200;
+const DEFAULT_MIN_MS: usize = 500;
 pub(super) const LAYERS: usize = 48;
 
 #[derive(Clone, Copy)]
@@ -28,8 +30,12 @@ impl Policy {
     }
     pub fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
-            ms: parse(MS, std::env::var(MS).ok().as_deref(), 0)?,
-            minimum: parse(MIN_MS, std::env::var(MIN_MS).ok().as_deref(), 500)?,
+            ms: parse(MS, std::env::var(MS).ok().as_deref(), DEFAULT_MS)?,
+            minimum: parse(
+                MIN_MS,
+                std::env::var(MIN_MS).ok().as_deref(),
+                DEFAULT_MIN_MS,
+            )?,
         })
     }
     pub fn selects(&self, commands: &std::collections::VecDeque<std::ops::Range<usize>>) -> bool {
@@ -91,7 +97,9 @@ mod tests {
     use super::*;
     #[test]
     fn rollback_and_selective_policy_preserve_small_appends() {
-        assert_eq!(parse(MS, None, 0).unwrap(), 0);
+        assert_eq!(parse(MS, None, DEFAULT_MS).unwrap(), DEFAULT_MS);
+        assert_eq!(DEFAULT_MS, 200);
+        assert_eq!(parse(MIN_MS, None, DEFAULT_MIN_MS).unwrap(), 500);
         for value in ["-1", "10001", "bad", ""] {
             assert!(parse(MS, Some(value), 0).is_err());
         }

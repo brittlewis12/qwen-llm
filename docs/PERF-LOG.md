@@ -6,6 +6,215 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 - Flash-Next Selective Layer Slicing Becomes The Default
+
+- **Decision: ship the selective 200ms/500ms layer policy on by default for
+  Flash-Next.** `QWEN_SERVE_FN_LAYER_SLICE_MS` now defaults to **200**; appends
+  whose predicted original prefill wall exceeds
+  `QWEN_SERVE_FN_LAYER_SLICE_MIN_MS` (default **500**) are split at layer
+  boundaries with the original row partition, and one ready-peer decode round
+  runs between slices. Appends predicted under 500ms keep the unsliced path.
+  `QWEN_SERVE_FN_LAYER_SLICE_MS=0` is the exact rollback to the original native
+  commands and decode-percentage policy. This supersedes the branch's
+  opt-in-only conclusion.
+- **Three-agent serve A/B (180s release arms):** the worst observed gap fell
+  **61.8%** (1754 -> 670ms) and every pair improved (1.55-1.75s ->
+  0.36-0.67s); paired throughput is **-1.29%, 95% CI [-8.4%, +5.8%]**,
+  crossing zero. Pooled ITL p99 rose **26 -> 130ms** by construction: one long
+  stall becomes several slice-sized gaps while total stall time is unchanged,
+  so the worst gap is the gate metric, as with GLM.
+- **V4.1 remains default-off.** `QWEN_SERVE_V41_LAYER_SLICE_MS` stays **0**
+  (opt-in 200/minimum 500): its worst serve gap did not move consistently, and
+  the remaining multi-second stalls look like append I/O, which a separate
+  lane is investigating. Revisit only after that lane reports.
+- Cancellation between slices disposes the partial session and keeps
+  checkpoint/snapshot capture consistent; native pair/cancel regressions pass
+  for both families. `MS=0` retains the prior path exactly, including scalar
+  frontier tails and unshaped layer counts (only the probed 48-layer layout
+  selects).
+- Evidence: `docs/bench/2026-11-12-fn-layer-slice-serve.md` and
+  `docs/bench/2026-11-12-fn-layer-slice-price.md`; V4.1 sustained record
+  `docs/bench/2026-11-12-v41-layer-slice-sustained.md`.
+
+### 2026-11-12 — V4.1 sustained packet sampling clarification
+
+The six-arm packet used release-default temperature/top-p with fixed request
+seed 20261109, as the harness has always supplied. QWEN_FAST_SAMPLER is opt-in
+and was unset; explicit seed intent therefore does not alter the current
+production-default sampler path. Numbers and the default-off decision are
+unchanged: paired +0.206%, 95% CI [−25.117%, +25.529%]. See the
+[sustained note](bench/2026-11-12-v41-layer-slice-sustained.md).
+
+### 2026-11-12 — Flash-Next sustained layer slicing: latency improves, default off
+
+Six accepted 180 s release arms at 48K, order A1/B1/B2/A2/A3/B3, release sampling
+with fixed request seed, queued individual leases and continuous 60 s settling
+at ≤1 before load and after warming. Pressure 2 was allowed; all measured
+windows stayed at 0/1. Source 3218067d3, one binary. Worst gap 1754 → 670 ms
+(61.8% lower), pooled ITL p50 19.564 → 19.542 ms, p99 25.645 → 130.332 ms.
+Grand mean TPS 131.017 → 129.298; paired changes −0.228%, +0.865%, −4.515%,
+mean −1.293%, **95% CI [−8.357%, +5.771%]**, half-width 7.064 pp. This does
+not establish ≤2% throughput loss, so QWEN_SERVE_FN_LAYER_SLICE_MS stays 0
+(opt-in 200/minimum 500). No flagged arm was excluded or policy retuned.
+
+Pooled append TTFT p50/p99 977/4555 → 1009/4363 ms; partial-prefill means
+1.926 → 2.010 s per window. Native 60/60 warm/cold pairs and ten cancel/replay
+cases pass; 18 sampled completions are coherent. All 698 serve tests pass,
+42 existing ignored unchanged. Adjacent appends and two-floor short turns
+explain limits of the native price/bound; no workaround was added. See
+[sustained results](bench/2026-11-12-fn-layer-slice-serve.md) and
+[native price](bench/2026-11-12-fn-layer-slice-price.md).
+
+### 2026-11-12 — Flash-Next native layer gate and selective serve adapter
+
+60/60 warm/cold paired probes at 48K are bitwise exact, including causal state,
+next decode and both peers; ten cancel/dispose/replay cases pass. Warm 2048-row
+worst peer gap is 1.12–1.14 s unsplit versus 0.170 s at eight cuts. Equal-round
+GPU-duration ratios average 0.99993 warm / 0.99996 cold. The selective adapter
+uses the existing Driver, row/frontier plan and validated checkpoint points;
+MS=0 preserves incumbent scheduling. It remains default-off pending six-arm
+sustained serve evidence. See [price and native gate](bench/2026-11-12-fn-layer-slice-price.md).
+
+- Flash-Next compatibility follow-up: explicit incumbent fallback for unprobed
+  layer counts, covered by the rollback policy test before the sustained packet.
+
+- Scalar frontier commands retain the incumbent callback and decode credit;
+  they are excluded from packed-cost eligibility. The policy test covers a
+  scalar-only tail. No sustained arm preceded this correction.
+
+## 2026-11-12 — Flash-Next append price clears GPU layer experiment
+
+- Iter original forward at48K, pressure0:2048 rows1063–1068ms wall /
+  1054–1055ms GPU /8ms encode CPU;5479 rows2941–2954ms wall /
+  2909–2912ms GPU over three commands.32/342 rows230/286ms stay unsliced.
+  First/repeated reads0. Strong GPU bound, unlike V4.1's live pre-cut I/O.
+- Isolated `perf/fn-layer-sliced-prefill` stages native row-preserving layer
+  checkpoints with fused first-two PLE semantics, pending-state publication
+  gated through original validation, and terminal command guards. Added
+  perf-only1/2/4/8 pair/cancel regression. No CLI/default changes before gate.
+
+## 2026-11-12 — Flash-Next fresh stall price and native wall/GPU probe
+
+- Same release binary `abc3ba1a3`, GSQ-RCO IQ3_S, three real-sampling agents,
+  49,152 warm tokens,180s:127.111tok/s; ITL19.880/25.788/1885.943ms
+  p50/p99/max. Pressure1 for180s under the new2-ceiling method, both60s<=1
+  settles verified. Largest stall accompanies a5479-token append after50486,
+  two2048-row commands plus1383 tail. Size gate clears; no production port yet.
+- Added perf-only `fn_append_price`: unchanged native forward CPU/GPU/wait/wall,
+  first/repeated appends and process read bytes. Price host preparation before
+  assuming layer cuts remove the stall. Fused first-two-layer PLE, HC, GDN and
+  QSA pending-state semantics are mapped in the
+  [price note](bench/2026-11-12-fn-layer-slice-price.md).
+
+## 2026-11-12 — V4.1 sustained six-arm gate: throughput inconclusive; keep off
+
+- Six valid release arms, ABBAAB,180s each,49,152 warm tokens, real sampling,
+  MS0 vs200/min500. Continuous60s<=1 before load and after warming; permit2
+  in-window, abort3. Same binary `abc3ba1a3`, one queued lease per arm.
+- Paired changes **-2.624%,+11.515%,-8.275%**. Mean **+0.206%,95% CI
+  [-25.117%,+25.529%]**. Width greatly exceeds+/-2pp; no non-inferiority claim
+  or forced default-on. Grand means86.502 off /86.400 on tok/s are misleading
+  without paired uncertainty. **Default stays0.**
+- Worst across windows3.437->2.874s (inconsistent across pairs); p99
+  30–55->191–220ms. Remaining long gap precedes first peer service; same1798-row
+  append disk reads vary6–883MB. Reported contradiction before any workaround;
+  none added. Peer rounds99/99/141; sampled completions coherent.
+- Per-arm delivered rates, all ITL/TTFT quantiles, partial-prefill seconds,
+  pressure0/1/2 durations and limitations are in the
+  [sustained note](bench/2026-11-12-v41-layer-slice-sustained.md). A3/B3 retain
+  69.5/93.7 seconds at pressure2. Compiler flags retained. Flash-Next price next.
+
+## 2026-11-12 — Sustained serve thermal protocol for V4.1 gate
+
+Lead authorized measured pressure2 for sustained three-agent serving; pressure3
+aborts. Added opt-in independent settling ceiling before model load and after
+warm-up, leaving harness defaults unchanged. This lane uses continuous60s at
+pressure<=1, then180s at measurement ceiling2. Raw settling and sample-and-hold
+thermal durations are retained. Six arms follow ABBAAB (off/on/on/off/off/on),
+with paired differences and a95% paired-t CI; width beyond +/-2 percentage
+points is inconclusive. Slicing remains default-off pending this packet.
+
+### Three-pair throughput uncertainty
+
+Added a paired Student-t95% interval over three arm-level differences, reporting
+both tok/s and relative percentage changes. The two-degree-of-freedom critical
+value is analytic. Tests retain zero-variance agreement and mark a wide/noisy
+interval as inconclusive; individual tokens are not statistical replicates.
+All20 CPU harness tests pass. The measured harness/binary stay frozen at
+`abc3ba1a3` for the six-arm sustained-serve packet.
+
+## 2026-11-12 — V4.1 layer slices exact; serve thermal gate unmet, default off
+
+- Staged selective row-preserving Full/CED layer interleaving from main
+  `932f3b729`. Opt-in MS=200, minimum predicted 500 ms; MS=0 restores incumbent
+  native calls and decode budgeting. **Default remains 0; no default-on ship.**
+- **75/75 native pairs exact**, including logits, complete causal state,
+  subsequent decode and peers, plus five native cancel/restore cases.
+  Warm Full 1509-row/eight-cut probe: worst 1.39 s -> 0.217 s, equal-round GPU
+  duration ratio 0.990 at pressure 0. CED timing varies; hot timing excluded.
+- Both release three-agent control attempts hit thermal 2 before completing
+  the requested 180 s window. The corrected attempt used production max-active 4,
+  three sampler workers and longer cooling. No accepted summary or sliced
+  serve arm; aggregate throughput, live ITL and partial-prefill comparison
+  are unproven. Stopped at this gate before Flash-Next.
+- CPU: V4.1 95, Driver 23 and full serve 695 pass; 42 pre-existing ignored,
+  none added. Contracts pass and ENV is regenerated. Active/partial prefill
+  accounting and peer-round diagnostics are included under both arms.
+- Branch `perf/v41-layer-sliced-prefill`; measured source `25cde3c75`.
+  [Bench note](bench/2026-11-12-v41-layer-slice.md) and compact results record
+  all evidence/limitations. Raw M5 output retained; lane worktree, build output
+  and bundles removed. No artifact or roadmap change; no merge.
+
+## 2026-11-12 — V4.1 layer-sliced append price gate
+
+Research from main `932f3b729`, branch `perf/v41-layer-sliced-prefill`.
+The latest 180 s production-artifact packet reports 84.006 delivered tok/s,
+ITL p50/p99 27.921/55.938 ms and max 2097.924 ms (14,973 intervals,
+thermal 1). This clears the responsiveness price gate. Most warm appends
+use fixed-row Full; eligible large episodes use CED, whose final decoder
+reconstruction does not yield. Added a perf-only 48K Full layer-boundary
+probe with equal peer rounds, 1/2/4/8 cuts, complete causal-state digests
+and next-step comparisons. No serving default changed. See
+[the pricing note](bench/2026-11-12-v41-layer-slice.md).
+
+### V4.1 Full layer probe preliminary — 24/24 exact
+
+Same-artifact M5 iter paired probes at 48K: 32/342/1509 rows × 1/2/4/8
+slices × two alternating repetitions. Logits, complete causal payloads,
+next-step logits, peer logits and peer causal payloads all bitwise.
+At 1509 rows/eight slices worst peer gap 1387–1394 -> 217–218 ms;
+equal-round GPU ratio 0.9900–0.9902, thermal 0. Added CED encoder and
+original two-layer decoder-group boundaries for the next probe; still no
+serve default change. Details in the V4.1 layer-slice note.
+
+### V4.1 CED/cold slice checkpoint probe — 48/48 exact, placement-sensitive price
+
+Warm Full 24, cold Full 12, warm CED 8 and cold CED 4 paired cases all
+bitwise in logits and persistent state. Eight-slice CED GPU ratios were
+0.9951/0.9967 warm and 0.9933 cold, while coarse cuts cost 12–19% more.
+Reported this contradiction to the equal-GPU-cost assumption before serve
+integration. Correcting CED gap pricing to include the incumbent opportunity
+between encoder calls. Staged selective 200/500 ms serve integration remains
+default-off pending exact/cancellation regression and the four-arm serve gate.
+
+### V4.1 integration CPU checks
+
+95/95 V4.1 and 23/23 shared Driver tests pass, including model-free Full/CED
+mid-layer cancellation and active-prefill accounting. Slice-policy geometry
+unit passes. The native policy/cancellation probe and release serve build are
+queued behind the GLM append-route lane; serving default remains off until
+the measured gate. No row partition or CED replay group was changed.
+
+### V4.1 policy regression — 71/71 exact; hot timing excluded
+
+Corrected encoder-return sharing and nominal-policy cuts add 23 exact pairs
+(total 71) and four native cancel/restore checks. All pass logits and complete
+persistent-state comparisons. The sustained probe reached thermal pressure 2;
+its timing is excluded. Added a pressure-gated short re-price and peer-round
+diagnostics before serve A/B. Release serve binary built successfully under
+the 10m05s lease; default remains off. Frozen incumbent max is a 1959-row
+Full append at position 63471, confirming warm-append responsiveness ROI.
+
 ## 2026-11-12 - GLM Small-Row IQ Route Re-Gated: Qualifies On The Real Schedule
 
 - **Re-applied and default-on behind `QWEN_GLM53_PREFILL_IQ_SMALL_ROWS`.** The
@@ -45203,184 +45412,3 @@ This does not close the full prompt gap, but it narrows it substantially.
 ```text
 v0.81: tune dense packed prefill chunk size
 ```
-
-## 2026-11-12 — V4.1 layer-sliced append price gate
-
-Research from main `932f3b729`, branch `perf/v41-layer-sliced-prefill`.
-The latest 180 s production-artifact packet reports 84.006 delivered tok/s,
-ITL p50/p99 27.921/55.938 ms and max 2097.924 ms (14,973 intervals,
-thermal 1). This clears the responsiveness price gate. Most warm appends
-use fixed-row Full; eligible large episodes use CED, whose final decoder
-reconstruction does not yield. Added a perf-only 48K Full layer-boundary
-probe with equal peer rounds, 1/2/4/8 cuts, complete causal-state digests
-and next-step comparisons. No serving default changed. See
-[the pricing note](bench/2026-11-12-v41-layer-slice.md).
-
-### V4.1 Full layer probe preliminary — 24/24 exact
-
-Same-artifact M5 iter paired probes at 48K: 32/342/1509 rows × 1/2/4/8
-slices × two alternating repetitions. Logits, complete causal payloads,
-next-step logits, peer logits and peer causal payloads all bitwise.
-At 1509 rows/eight slices worst peer gap 1387–1394 -> 217–218 ms;
-equal-round GPU ratio 0.9900–0.9902, thermal 0. Added CED encoder and
-original two-layer decoder-group boundaries for the next probe; still no
-serve default change. Details in the V4.1 layer-slice note.
-
-### V4.1 CED/cold slice checkpoint probe — 48/48 exact, placement-sensitive price
-
-Warm Full 24, cold Full 12, warm CED 8 and cold CED 4 paired cases all
-bitwise in logits and persistent state. Eight-slice CED GPU ratios were
-0.9951/0.9967 warm and 0.9933 cold, while coarse cuts cost 12–19% more.
-Reported this contradiction to the equal-GPU-cost assumption before serve
-integration. Correcting CED gap pricing to include the incumbent opportunity
-between encoder calls. Staged selective 200/500 ms serve integration remains
-default-off pending exact/cancellation regression and the four-arm serve gate.
-
-### V4.1 integration CPU checks
-
-95/95 V4.1 and 23/23 shared Driver tests pass, including model-free Full/CED
-mid-layer cancellation and active-prefill accounting. Slice-policy geometry
-unit passes. The native policy/cancellation probe and release serve build are
-queued behind the GLM append-route lane; serving default remains off until
-the measured gate. No row partition or CED replay group was changed.
-
-### V4.1 policy regression — 71/71 exact; hot timing excluded
-
-Corrected encoder-return sharing and nominal-policy cuts add 23 exact pairs
-(total 71) and four native cancel/restore checks. All pass logits and complete
-persistent-state comparisons. The sustained probe reached thermal pressure 2;
-its timing is excluded. Added a pressure-gated short re-price and peer-round
-diagnostics before serve A/B. Release serve binary built successfully under
-the 10m05s lease; default remains off. Frozen incumbent max is a 1959-row
-Full append at position 63471, confirming warm-append responsiveness ROI.
-
-## 2026-11-12 — V4.1 layer slices exact; serve thermal gate unmet, default off
-
-- Staged selective row-preserving Full/CED layer interleaving from main
-  `932f3b729`. Opt-in MS=200, minimum predicted 500 ms; MS=0 restores incumbent
-  native calls and decode budgeting. **Default remains 0; no default-on ship.**
-- **75/75 native pairs exact**, including logits, complete causal state,
-  subsequent decode and peers, plus five native cancel/restore cases.
-  Warm Full 1509-row/eight-cut probe: worst 1.39 s -> 0.217 s, equal-round GPU
-  duration ratio 0.990 at pressure 0. CED timing varies; hot timing excluded.
-- Both release three-agent control attempts hit thermal 2 before completing
-  the requested 180 s window. The corrected attempt used production max-active 4,
-  three sampler workers and longer cooling. No accepted summary or sliced
-  serve arm; aggregate throughput, live ITL and partial-prefill comparison
-  are unproven. Stopped at this gate before Flash-Next.
-- CPU: V4.1 95, Driver 23 and full serve 695 pass; 42 pre-existing ignored,
-  none added. Contracts pass and ENV is regenerated. Active/partial prefill
-  accounting and peer-round diagnostics are included under both arms.
-- Branch `perf/v41-layer-sliced-prefill`; measured source `25cde3c75`.
-  [Bench note](bench/2026-11-12-v41-layer-slice.md) and compact results record
-  all evidence/limitations. Raw M5 output retained; lane worktree, build output
-  and bundles removed. No artifact or roadmap change; no merge.
-
-## 2026-11-12 — Sustained serve thermal protocol for V4.1 gate
-
-Lead authorized measured pressure2 for sustained three-agent serving; pressure3
-aborts. Added opt-in independent settling ceiling before model load and after
-warm-up, leaving harness defaults unchanged. This lane uses continuous60s at
-pressure<=1, then180s at measurement ceiling2. Raw settling and sample-and-hold
-thermal durations are retained. Six arms follow ABBAAB (off/on/on/off/off/on),
-with paired differences and a95% paired-t CI; width beyond +/-2 percentage
-points is inconclusive. Slicing remains default-off pending this packet.
-
-### Three-pair throughput uncertainty
-
-Added a paired Student-t95% interval over three arm-level differences, reporting
-both tok/s and relative percentage changes. The two-degree-of-freedom critical
-value is analytic. Tests retain zero-variance agreement and mark a wide/noisy
-interval as inconclusive; individual tokens are not statistical replicates.
-All20 CPU harness tests pass. The measured harness/binary stay frozen at
-`abc3ba1a3` for the six-arm sustained-serve packet.
-
-## 2026-11-12 — V4.1 sustained six-arm gate: throughput inconclusive; keep off
-
-- Six valid release arms, ABBAAB,180s each,49,152 warm tokens, real sampling,
-  MS0 vs200/min500. Continuous60s<=1 before load and after warming; permit2
-  in-window, abort3. Same binary `abc3ba1a3`, one queued lease per arm.
-- Paired changes **-2.624%,+11.515%,-8.275%**. Mean **+0.206%,95% CI
-  [-25.117%,+25.529%]**. Width greatly exceeds+/-2pp; no non-inferiority claim
-  or forced default-on. Grand means86.502 off /86.400 on tok/s are misleading
-  without paired uncertainty. **Default stays0.**
-- Worst across windows3.437->2.874s (inconsistent across pairs); p99
-  30–55->191–220ms. Remaining long gap precedes first peer service; same1798-row
-  append disk reads vary6–883MB. Reported contradiction before any workaround;
-  none added. Peer rounds99/99/141; sampled completions coherent.
-- Per-arm delivered rates, all ITL/TTFT quantiles, partial-prefill seconds,
-  pressure0/1/2 durations and limitations are in the
-  [sustained note](bench/2026-11-12-v41-layer-slice-sustained.md). A3/B3 retain
-  69.5/93.7 seconds at pressure2. Compiler flags retained. Flash-Next price next.
-
-## 2026-11-12 — Flash-Next fresh stall price and native wall/GPU probe
-
-- Same release binary `abc3ba1a3`, GSQ-RCO IQ3_S, three real-sampling agents,
-  49,152 warm tokens,180s:127.111tok/s; ITL19.880/25.788/1885.943ms
-  p50/p99/max. Pressure1 for180s under the new2-ceiling method, both60s<=1
-  settles verified. Largest stall accompanies a5479-token append after50486,
-  two2048-row commands plus1383 tail. Size gate clears; no production port yet.
-- Added perf-only `fn_append_price`: unchanged native forward CPU/GPU/wait/wall,
-  first/repeated appends and process read bytes. Price host preparation before
-  assuming layer cuts remove the stall. Fused first-two-layer PLE, HC, GDN and
-  QSA pending-state semantics are mapped in the
-  [price note](bench/2026-11-12-fn-layer-slice-price.md).
-
-## 2026-11-12 — Flash-Next append price clears GPU layer experiment
-
-- Iter original forward at48K, pressure0:2048 rows1063–1068ms wall /
-  1054–1055ms GPU /8ms encode CPU;5479 rows2941–2954ms wall /
-  2909–2912ms GPU over three commands.32/342 rows230/286ms stay unsliced.
-  First/repeated reads0. Strong GPU bound, unlike V4.1's live pre-cut I/O.
-- Isolated `perf/fn-layer-sliced-prefill` stages native row-preserving layer
-  checkpoints with fused first-two PLE semantics, pending-state publication
-  gated through original validation, and terminal command guards. Added
-  perf-only1/2/4/8 pair/cancel regression. No CLI/default changes before gate.
-
-
-### 2026-11-12 — Flash-Next native layer gate and selective serve adapter
-
-60/60 warm/cold paired probes at 48K are bitwise exact, including causal state,
-next decode and both peers; ten cancel/dispose/replay cases pass. Warm 2048-row
-worst peer gap is 1.12–1.14 s unsplit versus 0.170 s at eight cuts. Equal-round
-GPU-duration ratios average 0.99993 warm / 0.99996 cold. The selective adapter
-uses the existing Driver, row/frontier plan and validated checkpoint points;
-MS=0 preserves incumbent scheduling. It remains default-off pending six-arm
-sustained serve evidence. See [price and native gate](bench/2026-11-12-fn-layer-slice-price.md).
-
-- Flash-Next compatibility follow-up: explicit incumbent fallback for unprobed
-  layer counts, covered by the rollback policy test before the sustained packet.
-
-- Scalar frontier commands retain the incumbent callback and decode credit;
-  they are excluded from packed-cost eligibility. The policy test covers a
-  scalar-only tail. No sustained arm preceded this correction.
-
-
-### 2026-11-12 — Flash-Next sustained layer slicing: latency improves, default off
-
-Six accepted 180 s release arms at 48K, order A1/B1/B2/A2/A3/B3, release sampling
-with fixed request seed, queued individual leases and continuous 60 s settling
-at ≤1 before load and after warming. Pressure 2 was allowed; all measured
-windows stayed at 0/1. Source 3218067d3, one binary. Worst gap 1754 → 670 ms
-(61.8% lower), pooled ITL p50 19.564 → 19.542 ms, p99 25.645 → 130.332 ms.
-Grand mean TPS 131.017 → 129.298; paired changes −0.228%, +0.865%, −4.515%,
-mean −1.293%, **95% CI [−8.357%, +5.771%]**, half-width 7.064 pp. This does
-not establish ≤2% throughput loss, so QWEN_SERVE_FN_LAYER_SLICE_MS stays 0
-(opt-in 200/minimum 500). No flagged arm was excluded or policy retuned.
-
-Pooled append TTFT p50/p99 977/4555 → 1009/4363 ms; partial-prefill means
-1.926 → 2.010 s per window. Native 60/60 warm/cold pairs and ten cancel/replay
-cases pass; 18 sampled completions are coherent. All 698 serve tests pass,
-42 existing ignored unchanged. Adjacent appends and two-floor short turns
-explain limits of the native price/bound; no workaround was added. See
-[sustained results](bench/2026-11-12-fn-layer-slice-serve.md) and
-[native price](bench/2026-11-12-fn-layer-slice-price.md).
-
-### 2026-11-12 — V4.1 sustained packet sampling clarification
-
-The six-arm packet used release-default temperature/top-p with fixed request
-seed 20261109, as the harness has always supplied. QWEN_FAST_SAMPLER is opt-in
-and was unset; explicit seed intent therefore does not alter the current
-production-default sampler path. Numbers and the default-off decision are
-unchanged: paired +0.206%, 95% CI [−25.117%, +25.529%]. See the
-[sustained note](bench/2026-11-12-v41-layer-slice-sustained.md).

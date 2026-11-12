@@ -1,5 +1,12 @@
 # Flash-Next sustained layer-slice gate: opt-in only
 
+> **Landed default-on 2026-11-12.** The lead reviewed the same packet and chose
+> the worst-gap metric: every pair improved and the throughput interval crosses
+> zero. `QWEN_SERVE_FN_LAYER_SLICE_MS` now defaults to **200** with minimum
+> **500**; `=0` is the exact rollback. See the [PERF-LOG decision](../PERF-LOG.md)
+> and [SERVE.md](../SERVE.md). The measurements, protocol and opt-in-only
+> conclusion below are retained as the pre-decision record.
+
 **Do not enable by default.** The worst observed peer gap drops **1754 → 670 ms
 (61.8%)**, but throughput non-inferiority is unproven: mean paired difference
 **−1.29%, 95% CI [−8.36%, +5.77%]**. The half-width is 7.06 percentage points,

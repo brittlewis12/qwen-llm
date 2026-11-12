@@ -701,6 +701,14 @@ batched throwaway decode step at startup, so the batched kernels' pipelines
   deadline or preemption guarantee. `QWEN_SERVE_V41_PREFILL_FAIR=0` restores
   the previous alternation of one decode step with a 512-row loaded Full
   call, including its CED-start restriction and prefill partition.
+- **Layer-sliced prefill (opt-in).** `QWEN_SERVE_V41_LAYER_SLICE_MS` stays
+  **0** pending the append-I/O lane: the sustained three-agent A/B did not
+  move the worst serve gap consistently, and the remaining multi-second stalls
+  look like append I/O. Opt in with **200** and
+  `QWEN_SERVE_V41_LAYER_SLICE_MIN_MS` (default 500, minimum predicted original
+  append wall); appends above the threshold are split at layer boundaries and
+  runnable decoders service the peers between slices. `=0` is the exact
+  rollback to the incumbent native calls and decode-percentage policy.
 - **Arithmetic.** `step_batch` runs each layer's dense projections once over
   all sequences: the FFN shared expert, the q_a/kv rank pair, q_b, output_a
   and output_b, the Engram projections and the head (skinny Q5_K/Q8_0
@@ -815,6 +823,17 @@ It keeps its normal admitted row capacity under load. After a mixed-load prefill
 command, decoding earns measured service credit at
 `QWEN_SERVE_FN_DECODE_PERCENT` (default 10, range 1..=90); commands remain
 nonpreemptible. No fixed 512-row reblocking is introduced.
+
+**Layer-sliced prefill.** `QWEN_SERVE_FN_LAYER_SLICE_MS` defaults to **200**:
+an append whose predicted original prefill wall exceeds
+`QWEN_SERVE_FN_LAYER_SLICE_MIN_MS` (default 500) is split at layer boundaries
+with the original row partition, and one ready-peer decode round runs between
+slices. Smaller appends, scalar frontier tails and layouts other than the
+probed 48-layer model keep the native command and decode-credit path.
+`QWEN_SERVE_FN_LAYER_SLICE_MS=0` is the exact rollback to the incumbent
+commands and decode-percentage policy; `QWEN_SERVE_FN_LAYER_SLICE_MIN_MS=0`
+slices every eligible appended request. Cancellation between slices discards
+the partial session and keeps snapshots/checkpoints consistent.
 
 `QWEN_SERVE_FN_NATIVE_BATCH=0` keeps the fair owner while using ordinary
 member forwards. The native path shares HC, exact Q6 projections and the Q6 head;

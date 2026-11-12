@@ -55,7 +55,8 @@ const PREFILL_FAIR_ENV: &str = "QWEN_SERVE_V41_PREFILL_FAIR";
 /// earns at most one second of service; idle service earns no credit.
 const DECODE_PERCENT_ENV: &str = "QWEN_SERVE_V41_DECODE_PERCENT";
 /// Target GPU milliseconds for selective row-preserving layer slices. Zero
-/// restores the incumbent native calls and decode budget. Default 0 pending A/B.
+/// restores the incumbent native calls and decode budget. Default 0 (opt-in)
+/// pending the append-I/O lane; the worst serve gap did not move consistently.
 const LAYER_SLICE_MS_ENV: &str = "QWEN_SERVE_V41_LAYER_SLICE_MS";
 /// Minimum predicted original append wall before layer slicing (default 500 ms).
 const LAYER_SLICE_MIN_MS_ENV: &str = "QWEN_SERVE_V41_LAYER_SLICE_MIN_MS";

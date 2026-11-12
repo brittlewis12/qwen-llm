@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 - GLM Tensor Expert Limiter Packet: K128 Staging Fails
+
+- **Decision: remove the K128/N8 candidate; no production change.** At 80K,
+  three paired blocks (six samples/arm, same `iter` binary) give routed-stage
+  speedups **0.954x / 0.909x / 0.843x** at 161 / 256 / 512 rows, below the
+  required 1.25x. The 32-row result is 1.047x. All 336 synthetic candidate
+  kernel comparisons were bitwise; promotion stopped at the performance gate.
+  No ordinary wall, paired NLL or three-agent serve campaign was run.
+- **Limiter: active-tile dequant/staging and padding.** Corrected gate/up
+  bandwidth is 367 / 361 / 287 GB/s at 32 / 161 / 512, down 393 / 410 / 324.
+  Empty-grid cost is only 1-6%; removing MMA saves 22-29% against its matched
+  control, constants save 37-56%, and resident quant blocks save only 6-16%.
+  Metal exposes timestamps and static capacities, not live occupancy. The
+  candidate staged K128 once for four ordered K32 MMAs, with N8/N32 count bands.
+- **Two probe/policy findings:** the earlier bandwidth tally assigned the gate
+  pass to down because its pipeline is named `moe_down`. At 161-512 rows the
+  explicit adapter also declines `Iq3STensorOrSmallCounts`, leaving 39 layers
+  on the F32-storage tensor composition. That route mismatch is recorded,
+  not changed by this lane. Measurement tools remain; candidate code is deleted.
+- Packet: [limiter measurements and gate](bench/2026-11-12-glm-tensor-experts.md).
+  Raw: `metagross:~/qwen-runs/2026-11-12-glm-tensor-experts/`. Branch
+  `perf/glm-tensor-experts`; not merged. M4 synthetic IQ2_S gate/up and IQ3_S
+  down tests pass. Final contract and cleanup results are in the packet.
+
 ## 2026-11-12 — Flash-Next HC Persistent Site: Sync Passes, Kernel Gate Fails
 
 - MSL 3.2 device-scope phase handoff is cheaper than a dependent dispatch on

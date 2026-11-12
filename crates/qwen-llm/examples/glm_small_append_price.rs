@@ -691,7 +691,7 @@ mod probe {
                     down_union_bytes += down_bytes;
                     all_counts.extend_from_slice(&counts);
                     per_layer.push(json!({
-                        "block": block, "distribution": distribution(&counts),
+                        "block": block, "counts": counts, "distribution": distribution(&counts),
                         "gate_up_bytes_per_expert": gate_up_per_expert,
                         "down_bytes_per_expert": down_per_expert,
                         "gate_up_union_bytes": gate_up_bytes,
@@ -715,13 +715,21 @@ mod probe {
                 let mut down_ms = 0.0;
                 for row in &report.rows {
                     let ms = row.gpu_ns.unwrap_or(0) as f64 / 1e6;
-                    if row.kernel.contains("iq2_s")
-                        && (row.kernel.contains("moe_swiglu") || row.kernel.contains("moe_up"))
-                    {
+                    // The gate pass uses a "moe_down" pipeline name. Classify
+                    // projection roles rather than assigning it to down.
+                    let name = row.kernel.as_str();
+                    let is_gate_up = name.contains("gate_up")
+                        || name.contains("moe_swiglu")
+                        || name.contains("moe_up_")
+                        || name.contains("moe_wide_probe")
+                        || name.contains("moe_down_iq2_s_")
+                        || name.contains("moe_down_iq3_s_f16act");
+                    if is_gate_up {
                         gate_up_ms += ms;
-                    }
-                    if row.kernel.contains("moe_down")
-                        && (row.kernel.contains("iq3_s") || row.kernel.contains("iq2_s"))
+                    } else if name.contains("moe_down_")
+                        || name.contains("glm_iq3_down")
+                        || name.contains("expert_native_down")
+                        || name.contains("glm_batch_down")
                     {
                         down_ms += ms;
                     }
@@ -741,6 +749,7 @@ mod probe {
                     "gate_up_kernel_ms": gate_up_ms,
                     "down_kernel_ms": down_ms,
                     "dispatches": dispatches, "kernels": kernels,
+                    "expert_dispatches": report.rows.iter().filter(|r| r.kernel.contains("moe_") || r.kernel.contains("glm_iq3_down")).collect::<Vec<_>>(),
                     "pressure": pressure(), "loadavg": loadavg(),
                 }));
             }

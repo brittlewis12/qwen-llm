@@ -45312,3 +45312,16 @@ All20 CPU harness tests pass. The measured harness/binary stay frozen at
   pressure0/1/2 durations and limitations are in the
   [sustained note](bench/2026-11-12-v41-layer-slice-sustained.md). A3/B3 retain
   69.5/93.7 seconds at pressure2. Compiler flags retained. Flash-Next price next.
+
+## 2026-11-12 — Flash-Next fresh stall price and native wall/GPU probe
+
+- Same release binary `abc3ba1a3`, GSQ-RCO IQ3_S, three real-sampling agents,
+  49,152 warm tokens,180s:127.111tok/s; ITL19.880/25.788/1885.943ms
+  p50/p99/max. Pressure1 for180s under the new2-ceiling method, both60s<=1
+  settles verified. Largest stall accompanies a5479-token append after50486,
+  two2048-row commands plus1383 tail. Size gate clears; no production port yet.
+- Added perf-only `fn_append_price`: unchanged native forward CPU/GPU/wait/wall,
+  first/repeated appends and process read bytes. Price host preparation before
+  assuming layer cuts remove the stall. Fused first-two-layer PLE, HC, GDN and
+  QSA pending-state semantics are mapped in the
+  [price note](bench/2026-11-12-fn-layer-slice-price.md).

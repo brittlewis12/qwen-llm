@@ -221,7 +221,10 @@ fn load_prompts(
                 .with_context(|| format!("read cohort prompt {}", path.display()))?;
             let utf8_sha256 = sha256(text.as_bytes());
             if let Some(expected) = entry["source_utf8_sha256"].as_str() {
-                ensure!(utf8_sha256 == expected, "{id} source hash differs from manifest");
+                ensure!(
+                    utf8_sha256 == expected,
+                    "{id} source hash differs from manifest"
+                );
             }
             let ids = tokenizer.encode(&text, false)?;
             ensure!(
@@ -235,7 +238,10 @@ fn load_prompts(
                     id,
                     stratum,
                     language: entry["language"].as_str().map(str::to_owned),
-                    source_label: entry["source"].as_str().map(str::to_owned).unwrap_or_else(|| filename.to_owned()),
+                    source_label: entry["source"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| filename.to_owned()),
                     path,
                     utf8_sha256,
                     ids,

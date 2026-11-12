@@ -45325,3 +45325,14 @@ All20 CPU harness tests pass. The measured harness/binary stay frozen at
   assuming layer cuts remove the stall. Fused first-two-layer PLE, HC, GDN and
   QSA pending-state semantics are mapped in the
   [price note](bench/2026-11-12-fn-layer-slice-price.md).
+
+## 2026-11-12 — Flash-Next append price clears GPU layer experiment
+
+- Iter original forward at48K, pressure0:2048 rows1063–1068ms wall /
+  1054–1055ms GPU /8ms encode CPU;5479 rows2941–2954ms wall /
+  2909–2912ms GPU over three commands.32/342 rows230/286ms stay unsliced.
+  First/repeated reads0. Strong GPU bound, unlike V4.1's live pre-cut I/O.
+- Isolated `perf/fn-layer-sliced-prefill` stages native row-preserving layer
+  checkpoints with fused first-two PLE semantics, pending-state publication
+  gated through original validation, and terminal command guards. Added
+  perf-only1/2/4/8 pair/cancel regression. No CLI/default changes before gate.

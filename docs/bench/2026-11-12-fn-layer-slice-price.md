@@ -33,3 +33,26 @@ The baseline's reported partial_prefill_s is0; the incumbent Flash-Next path
 lacks the newer complete/partial prefill accounting records, so this is not
 proof that no unfinished request paid prefill. A production port must address
 that accounting. Component pricing and the build/no-build decision follow.
+
+## Component price and native checkpoint probe
+
+The unchanged native append at pressure0 is GPU-dominated.2048 rows takes
+1063–1068ms wall,1054–1055ms GPU and8ms CPU encode;5479 rows takes2941–2954ms
+wall over three commands,2909–2912ms GPU and26–41ms CPU encode.1383 rows is
+805–810ms wall /797–798ms GPU;1798 is1018–1020ms /1010–1012ms.32/342 rows
+are only230/286ms and should remain unsliced. First/repeated appends had zero
+recorded process disk reads. This clears a layer-scope experiment's price gate.
+
+Native checkpoint work is isolated on `perf/fn-layer-sliced-prefill`, leaving
+the V4.1 branch's default-off decision intact. A packed command stages inputs
+and records its checkpoint lineage once. It parks the same hyper-residual and
+bridge, keeps pending length/snapshot/decode gating across completed commands,
+and publishes through the original child validation only after the last layer.
+The fused PLE0/1 stage is indivisible. Submitted commands drain on every yield
+and unwind path. No serve scheduling/default has been changed yet.
+
+`fn_layer_slice_probe` compares1/2/4/8 cuts, complete-logit bits, snapshot payload
+and PLE-history digests, post-append decode, and two peers' logits/state. Peers
+run once between cuts; the control runs equal rounds afterward. Cancellation
+rejects provisional snapshots and replays a prior immutable checkpoint in a
+fresh runner. Native results are pending; CLI integration waits for this gate.

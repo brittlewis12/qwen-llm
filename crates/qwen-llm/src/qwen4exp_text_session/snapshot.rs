@@ -21,6 +21,16 @@ pub struct Qwen4ExpTextSnapshot {
 }
 
 impl Qwen4ExpTextSnapshot {
+    /// Exact causal-state digest for paired numerical probes.
+    #[cfg(any(test, feature = "perf-ablations"))]
+    pub fn diagnostic_digest(&self) -> String {
+        let mut h = blake3::Hasher::new();
+        h.update(&self.length.to_le_bytes());
+        h.update(format!("{:?}", self.history).as_bytes());
+        h.update(&self.arena);
+        h.finalize().to_hex().to_string()
+    }
+
     /// Committed tokens the snapshot continues from.
     pub fn length(&self) -> usize {
         self.length

@@ -1702,6 +1702,45 @@ impl Qwen4ExpTextRunner<'_, '_, '_> {
         Ok(())
     }
 
+    /// Resume a fixed-row packed command at a completed layer boundary.
+    /// The fused first two PLE layers remain indivisible. Pending state is
+    /// unavailable to decode/snapshot until the final native validation.
+    pub fn prefill_layer_slice(
+        &mut self,
+        token_ids: &[u32],
+        end_layer: usize,
+    ) -> Result<(bool, f64), Qwen4ExpRuntimeError> {
+        if !self.workspace.layer_prefill_active() {
+            self.validate_prefill_request(token_ids)?;
+            let start = self.next_position();
+            let ranges = self.prefill_command_ranges(start..start + token_ids.len())?;
+            if ranges.len() != 1
+                || ranges[0] != (start..start + token_ids.len())
+                || token_ids.len() < 2
+            {
+                return invalid("layer slicing requires one original packed command");
+            }
+        }
+        self.workspace
+            .packed_layer_slice(
+                self.ctx,
+                token_ids,
+                self.ple_table,
+                &self.weights,
+                end_layer,
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn layer_prefill_active(&self) -> bool {
+        self.workspace.layer_prefill_active()
+    }
+
+    /// Cancelled partial state must be disposed; immutable checkpoints survive.
+    pub fn cancel_layer_prefill(&mut self) {
+        self.workspace.cancel_layer_prefill();
+    }
+
     pub fn prefill_packed_profiled(
         &mut self,
         token_ids: &[u32],

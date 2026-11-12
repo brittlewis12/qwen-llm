@@ -148,3 +148,7 @@ required-features = ["perf-ablations"]
 [[example]]
 name = "fn_append_price"
 required-features = ["perf-ablations"]
+
+[[example]]
+name = "fn_layer_slice_probe"
+required-features = ["perf-ablations"]

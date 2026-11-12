@@ -1265,7 +1265,35 @@ pub(super) fn run_captured(
     cancel: Option<&AtomicBool>,
     chunk_rows: usize,
     with_logits: bool,
+    capture: Option<&mut dyn capture::Capture>,
+) -> std::result::Result<Vec<f32>, StateError> {
+    run_interleaved(
+        model,
+        state,
+        tokens,
+        cancel,
+        chunk_rows,
+        with_logits,
+        capture,
+        None,
+    )
+}
+
+pub(super) struct LayerInterleave<'a> {
+    pub ends: &'a [usize],
+    pub between: &'a mut dyn FnMut() -> Result<()>,
+    pub commands: Vec<(usize, f64)>,
+}
+
+pub(super) fn run_interleaved(
+    model: &Forward<'_>,
+    state: &mut State,
+    tokens: &[u32],
+    cancel: Option<&AtomicBool>,
+    chunk_rows: usize,
+    with_logits: bool,
     mut capture: Option<&mut dyn capture::Capture>,
+    mut interleave: Option<&mut LayerInterleave<'_>>,
 ) -> std::result::Result<Vec<f32>, StateError> {
     let admission = profile::Wall("prefill_admission", [0; 4], profile::start());
     op::require(!tokens.is_empty(), "empty prefill suffix")?;
@@ -1419,6 +1447,7 @@ pub(super) fn run_captured(
                     .as_mut()
                     .map(|sink| &mut **sink as &mut dyn capture::Capture),
                 chunk_scratch,
+                interleave.as_deref_mut(),
             )?;
             state.addresses = next;
             state.phase = StatePhase::Ready;

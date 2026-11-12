@@ -945,6 +945,49 @@ impl<'a> Forward<'a> {
         prefill::run(self, state, tokens, cancel, rows, true)
     }
 
+    /// Research-only row-preserving layer boundaries with drained peer callbacks.
+    #[cfg(feature = "perf-ablations")]
+    pub fn prefill_layer_sliced_probe(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        cancel: Option<&AtomicBool>,
+        ends: &[usize],
+        between: &mut dyn FnMut() -> Result<()>,
+    ) -> std::result::Result<(Vec<f32>, Vec<(usize, f64)>), StateError> {
+        op::require(
+            !ends.is_empty()
+                && ends.last() == Some(&self.layers.len())
+                && ends[0] > 0
+                && ends.windows(2).all(|w| w[0] < w[1]),
+            "layer boundaries",
+        )?;
+        let rows = self
+            .select_prefill(
+                state,
+                tokens.len(),
+                state.caller_cpu_reserve,
+                state.prefill_rows,
+            )?
+            .selected_rows;
+        let mut slicing = prefill::LayerInterleave {
+            ends,
+            between,
+            commands: Vec::new(),
+        };
+        let logits = prefill::run_interleaved(
+            self,
+            state,
+            tokens,
+            cancel,
+            rows,
+            true,
+            None,
+            Some(&mut slicing),
+        )?;
+        Ok((logits, slicing.commands))
+    }
+
     /// Capture actual batched attention inputs and checkpoint outputs after GPU
     /// completion. Diagnostic copies do not change the prefill arithmetic path.
     pub fn prefill_with_capture(

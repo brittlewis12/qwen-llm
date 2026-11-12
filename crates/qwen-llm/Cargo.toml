@@ -140,3 +140,7 @@ required-features = ["perf-ablations"]
 [[example]]
 name = "spec_verify_cost"
 required-features = ["perf-ablations"]
+
+[[example]]
+name = "v41_layer_slice_probe"
+required-features = ["perf-ablations"]

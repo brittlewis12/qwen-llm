@@ -571,6 +571,7 @@ impl Workspace {
         with_logits: bool,
         mut capture: Option<&mut dyn capture::Capture>,
         scratch: &ChunkScratch,
+        mut interleave: Option<&mut prefill::LayerInterleave<'_>>,
     ) -> Result<Vec<f32>> {
         let ctx = model.ctx;
         let c = &model.config;
@@ -629,7 +630,7 @@ impl Workspace {
         };
         let mut segment_start = 0;
         while segment_start < model.layers.len() {
-            let segment_end = if overlap {
+            let mut segment_end = if overlap {
                 engrams
                     .iter()
                     .find(|(layer, _, _)| *layer > segment_start)
@@ -637,6 +638,15 @@ impl Workspace {
             } else {
                 model.layers.len()
             };
+            if let Some(slicing) = &interleave {
+                segment_end = segment_end.min(
+                    *slicing
+                        .ends
+                        .iter()
+                        .find(|&&end| end > segment_start)
+                        .ok_or("missing layer boundary")?,
+                );
+            }
             // Drain this segment and its autoreleased encoder/driver objects
             // before creating the next. Peak live scratch/commands stays one.
             objc2::rc::autoreleasepool(|_| -> Result<()> {
@@ -878,7 +888,7 @@ impl Workspace {
                     started,
                 );
                 self.commands += 1;
-                if overlap && segment_end < model.layers.len() {
+                if overlap && engrams.iter().any(|(layer, _, _)| *layer == segment_end) {
                     cancelled(cancel)?;
                     let (_, input, _) = engrams
                         .iter()
@@ -895,8 +905,20 @@ impl Workspace {
                 }
                 // On a read/cancellation/encode error the guard drains before
                 // this pool or the caller's chunk resources can be released.
-                pending.wait()?;
+                let gpu_ms = if interleave.is_some() {
+                    pending.wait_timed()?
+                } else {
+                    pending.wait()?;
+                    0.0
+                };
                 cancelled(cancel)?;
+                if let Some(slicing) = interleave.as_deref_mut() {
+                    slicing.commands.push((segment_end, gpu_ms));
+                    if segment_end < model.layers.len() && slicing.ends.contains(&segment_end) {
+                        (slicing.between)()?;
+                        cancelled(cancel)?;
+                    }
+                }
                 Ok(())
             })?;
             segment_start = segment_end;

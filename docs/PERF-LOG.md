@@ -45203,3 +45203,15 @@ This does not close the full prompt gap, but it narrows it substantially.
 ```text
 v0.81: tune dense packed prefill chunk size
 ```
+
+## 2026-11-12 — V4.1 layer-sliced append price gate
+
+Research from main `932f3b729`, branch `perf/v41-layer-sliced-prefill`.
+The latest 180 s production-artifact packet reports 84.006 delivered tok/s,
+ITL p50/p99 27.921/55.938 ms and max 2097.924 ms (14,973 intervals,
+thermal 1). This clears the responsiveness price gate. Most warm appends
+use fixed-row Full; eligible large episodes use CED, whose final decoder
+reconstruction does not yield. Added a perf-only 48K Full layer-boundary
+probe with equal peer rounds, 1/2/4/8 cuts, complete causal-state digests
+and next-step comparisons. No serving default changed. See
+[the pricing note](bench/2026-11-12-v41-layer-slice.md).

@@ -68,6 +68,16 @@ impl Submitted {
         self.retire()
     }
 
+    pub(super) fn wait_timed(mut self) -> Result<f64> {
+        let command = self
+            .command
+            .as_ref()
+            .ok_or("missing pending command")?
+            .clone();
+        self.retire()?;
+        Ok((command.GPUEndTime() - command.GPUStartTime()) * 1000.0)
+    }
+
     fn retire(&mut self) -> Result<()> {
         let Some(command) = self.command.take() else {
             return Ok(());

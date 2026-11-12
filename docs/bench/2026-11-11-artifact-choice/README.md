@@ -35,7 +35,7 @@ treating thousands of target positions as independent samples.
 ## Run paths
 
 Build only `qwen-bench`, with Cargo output rooted in
-`~/qwen-runs/2026-11-11-artifact-choice/target`. The cohort text files, identity
+`metagross:~/qwen-runs/2026-11-11-artifact-choice/target`. The cohort text files, identity
 reports, raw scores, speed rows and fit reports are all stored below that run
 directory. Each model's GPU packet is held through
 `scripts/bench/with-metal-lease` for at most 14 minutes. Build outside the GPU

@@ -311,7 +311,7 @@ The request also said GLM D/E had not been compared for quality. PERF-LOG's
 artifacts and found no clear quality winner. It was not teacher-forced NLL; the
 new run supplies that missing metric.
 
-The M5 snapshot reported 1.8 TiB available under `~/qwen-runs`, rather than
+The M5 snapshot reported 1.8 TiB available under `metagross:~/qwen-runs`, rather than
 the stated ~28 GiB. Probe outputs stayed under the requested run root. The
 external Aven annotation for V41-HFAB could not be posted because Aven is not
 available as a connected tool/plugin in this session; the result is recorded

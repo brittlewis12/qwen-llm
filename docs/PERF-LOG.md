@@ -34,6 +34,94 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `b-measurement-summary.json`. A1 wrapper logs were overwritten by an ID
   collision; the A1 run directory and thermal-abort evidence remain.
 
+## 2026-11-11 - Artifact Choice Correction: Deep Cohort Changes V4.1 Tradeoff
+
+- **Supersedes the initial V4.1 keep-C decision in the entry below.** The
+  four-prompt packet remains as history; the correction is in
+  `docs/bench/2026-11-11-artifact-choice/RESULTS.md`. Runs used the clean M5
+  worktree at `bba889ccf`. No model files were changed.
+- **V4.1 wide cohort:** 11 natural prompts (10 code, one prose), 49,152-token
+  prefix and 512 targets each. B−A **−0.02163** (90% CI [−0.03104, −0.01286];
+  sign p=0.0117) and C−A **−0.01560** ([−0.02590, −0.00726]; p=0.0654).
+  B−C **−0.00603** ([−0.01260, +0.00064]; p=0.5488); code-only B−C
+  **−0.00763** ([−0.01426, −0.00065]; p=0.3438). The all-prompt evidence
+  does not distinguish B/C. Code-only mean favors B, with a nonsignificant
+  prompt sign test.
+- Quality packet thermal start→end: V4.1 A **0→2**, C **2→1**, B **1→1**;
+  GLM D **0→2**, E **2→1**. Held A/B/C were **0→0**. Boundary readings only.
+- **Held October packet:** all six source and 18 prefix-plus-target ID hashes
+  match the frozen expected file. Current C−B is **+0.06320** (90% CI
+  [+0.01989, +0.10657]), in the same direction as the old **+0.079659**;
+  sign p=0.6875. The 48K-prefix wide cohort answers a different
+  long-context/code-heavy question and reduces B−C to −0.00603 overall.
+- **Production V4.1 A/C:** width 1 A/C **14.052/16.358 ms/token**; width 3
+  **25.837/36.113 ms/round**. A2's 180-second three-agent serve delivered
+  **84.006 tok/s** (thermal max 1). A1 aborted at thermal 2; C1 was blocked
+  at preflight at thermal 2, and C2/C3-retry aborted at thermal 2. C serve is
+  not measured; B production timing and serve are measured in the 2026-11-12
+  entry above. Current-build A suite rerun is **14.63–15.23 ms/token**; the old
+  30.24 row did not reproduce.
+- **V4.1 call:** no single candidate dominates. B has the quality-first
+  signal, while measured production and serving favor A. Britt chooses which
+  tradeoff matters; the report lists exact conditional deletable directories.
+  A/B/C on-disk totals are 265.83 GB (backbone plus Engram), 394.74 GB and
+  339.48 GB, respectively.
+- **GLM wide cohort:** E−D **−0.00217** (90% CI [−0.01278, +0.00845];
+  sign p=0.5488); code-only **−0.00624** ([−0.01563, +0.00281]; p=0.3438).
+  Keep D; E is 4.36 GB smaller, while the first-packet `a2a1965fe` suite
+  measured D/E at 17.71/18.22 ms/token. No current-build GLM width-3 timing
+  or GLM serving result is recorded.
+- Raw scores and prompt-cluster analyses are under
+  `metagross:~/qwen-runs/2026-11-11-artifact-choice/`. Route packets completed
+  with no reported fallback (width-1 overflow zero; width-3 capture has no
+  fallback counter).
+
+## 2026-11-11 - Artifact Choice: Keep V4.1 Maya-S And GLM Stock IQ3 (Superseded)
+
+- **Superseded by the correction above and the 2026-11-12 B speed and
+  serve entry. This is the historical first-packet decision; do not apply
+  its keep/delete calls or decode numbers as current.**
+
+- Clean M5 Ultra `qwen-bench` iter build **`a2a1965fe`**. DeepSeek V4.1
+  Flash 1017 A/B/C share the same complete tokenizer fingerprint; GLM D/E
+  share theirs. D/E's GGUF architecture labels differ (`glm5next` /
+  `glm5-next`), while the full tokenizer fields and IDs match. No model files
+  were moved or deleted.
+- Four full-source prompts, three code plus a prose control; each candidate
+  used a 49,152-token prefix and **1,024 real teacher-forced targets** per
+  prompt. Per-position NLL and top-1 rows retained; equal-prompt bootstrap over
+  20,000 prompt-cluster resamples (central 90% CI; code-only also reported).
+  Candidate-minus-reference dNLL is negative when the candidate is better.
+- V4.1: B−A **−0.02001** (90% CI [−0.04013, −0.00460]); C−A **−0.01789**
+  ([−0.03392, −0.00356]); both separate from A on all prompts and code-only.
+  B−C **−0.00212** ([−0.00621, +0.00204]); code-only **−0.000073**
+  ([−0.00293, +0.00278]); top-1 agreement **95.95%**. B and C are
+  indistinguishable on this instrument; keep **C, Maya-S IQ2_XXS**, which
+  decodes at **17.11 ms/token** versus B's **57.07** at depth 32K. Delete A
+  GSQ-RCO IQ2_XS + IQ4_NL and B Unsloth UD-IQ3_XXS.
+- GLM: E−D **−0.00615** (90% CI [−0.01151, +0.00011]); code-only
+  **−0.00466** ([−0.00946, +0.00014]); top-1 agreement **95.39%**. The
+  artifacts remain indistinguishable on this instrument. D decodes at
+  **17.71 ms/token** versus E's **18.22** at depth 32K; keep **D, stock
+  UD-IQ3_XXS** and delete E Maya-M IQ2_S.
+- All five loaded and passed three live 48K sessions plus three actual 48K
+  code prefills with sessions retained. V4.1 A/B/C use disk Engram readers
+  (110.60 / 161.28 / 161.28 GB); GLM has no separate Engram. B's measured
+  post-session allocation is **234.46 GB**, with **40.42 GB** host headroom.
+- Historical conflicts: Maya-S already had a six-document/384-target NLL
+  comparison against IQ3 in `docs/bench/2026-10-22-maya-s-eval.md`; GLM D/E
+  had an eight-case blinded generated-answer comparison in the 2026-10-17
+  entry below. Those smaller/different-instrument results are not treated as
+  nonexistent; this packet adds long code-at-depth NLL evidence.
+- B=3 decode timing was not run; the maintained suite provides only B=1. The
+  fit packet does not claim concurrent decode throughput. Thermal pressure is
+  recorded at packet endpoints, not continuously. The M5 run directory showed
+  1.8 TiB free rather than the stated ~28 GiB. Aven V41-HFAB could not be
+  annotated from this session because no Aven connector is available.
+- Full method, decisions, shard identities, token hashes, per-prompt means and
+  all pairwise CIs: `docs/bench/2026-11-11-artifact-choice/RESULTS.md` and
+  `metagross:~/qwen-runs/2026-11-11-artifact-choice/`.
+
 ## 2026-11-11 - Two-Queue Causal Branches: Ceiling Passes, Isolation Does Not
 
 - **Negative stage-2 gate; no production default changed.** M5 GLM's optimal
@@ -129,89 +217,6 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `experts` arm when QSA status was 0/count 0 instead of 512. The targeted
   `hc-band` pair avoids that invalid late hold. Raw B=1 graph/profile and
   probe output: `metagross:~/qwen-runs/2026-11-11-hc-fuse/`.
-## 2026-11-11 - Artifact Choice Correction: Deep Cohort Changes V4.1 Tradeoff
-
-- **Supersedes the initial V4.1 keep-C decision in the entry below.** The
-  four-prompt packet remains as history; the correction is in
-  `docs/bench/2026-11-11-artifact-choice/RESULTS.md`. Runs used the clean M5
-  worktree at `bba889ccf`. No model files were changed.
-- **V4.1 wide cohort:** 11 natural prompts (10 code, one prose), 49,152-token
-  prefix and 512 targets each. B−A **−0.02163** (90% CI [−0.03104, −0.01286];
-  sign p=0.0117) and C−A **−0.01560** ([−0.02590, −0.00726]; p=0.0654).
-  B−C **−0.00603** ([−0.01260, +0.00064]; p=0.5488); code-only B−C
-  **−0.00763** ([−0.01426, −0.00065]; p=0.3438). The all-prompt evidence
-  does not distinguish B/C. Code-only mean favors B, with a nonsignificant
-  prompt sign test.
-- Quality packet thermal start→end: V4.1 A **0→2**, C **2→1**, B **1→1**;
-  GLM D **0→2**, E **2→1**. Held A/B/C were **0→0**. Boundary readings only.
-- **Held October packet:** all six source and 18 prefix-plus-target ID hashes
-  match the frozen expected file. Current C−B is **+0.06320** (90% CI
-  [+0.01989, +0.10657]), in the same direction as the old **+0.079659**;
-  sign p=0.6875. The 48K-prefix wide cohort answers a different
-  long-context/code-heavy question and reduces B−C to −0.00603 overall.
-- **Production V4.1 A/C:** width 1 A/C **14.052/16.358 ms/token**; width 3
-  **25.837/36.113 ms/round**. A2's 180-second three-agent serve delivered
-  **84.006 tok/s** (thermal max 1). A1 aborted at thermal 2; C1 was blocked
-  at preflight at thermal 2, and C2/C3-retry aborted at thermal 2. C serve is
-  not measured; B production timing and serve are measured in the 2026-11-12
-  entry above. Current-build A suite rerun is **14.63–15.23 ms/token**; the old
-  30.24 row did not reproduce.
-- **V4.1 call:** no single candidate dominates. B has the quality-first
-  signal, while measured production and serving favor A. Britt chooses which
-  tradeoff matters; the report lists exact conditional deletable directories.
-  A/B/C on-disk totals are 265.83 GB (backbone plus Engram), 394.74 GB and
-  339.48 GB, respectively.
-- **GLM wide cohort:** E−D **−0.00217** (90% CI [−0.01278, +0.00845];
-  sign p=0.5488); code-only **−0.00624** ([−0.01563, +0.00281]; p=0.3438).
-  Keep D; E is 4.36 GB smaller, while the first-packet `a2a1965fe` suite
-  measured D/E at 17.71/18.22 ms/token. No current-build GLM width-3 timing
-  or GLM serving result is recorded.
-- Raw scores and prompt-cluster analyses are under
-  `metagross:~/qwen-runs/2026-11-11-artifact-choice/`. Route packets completed
-  with no reported fallback (width-1 overflow zero; width-3 capture has no
-  fallback counter).
-
-## 2026-11-11 - Artifact Choice: Keep V4.1 Maya-S And GLM Stock IQ3
-
-- Clean M5 Ultra `qwen-bench` iter build **`a2a1965fe`**. DeepSeek V4.1
-  Flash 1017 A/B/C share the same complete tokenizer fingerprint; GLM D/E
-  share theirs. D/E's GGUF architecture labels differ (`glm5next` /
-  `glm5-next`), while the full tokenizer fields and IDs match. No model files
-  were moved or deleted.
-- Four full-source prompts, three code plus a prose control; each candidate
-  used a 49,152-token prefix and **1,024 real teacher-forced targets** per
-  prompt. Per-position NLL and top-1 rows retained; equal-prompt bootstrap over
-  20,000 prompt-cluster resamples (central 90% CI; code-only also reported).
-  Candidate-minus-reference dNLL is negative when the candidate is better.
-- V4.1: B−A **−0.02001** (90% CI [−0.04013, −0.00460]); C−A **−0.01789**
-  ([−0.03392, −0.00356]); both separate from A on all prompts and code-only.
-  B−C **−0.00212** ([−0.00621, +0.00204]); code-only **−0.000073**
-  ([−0.00293, +0.00278]); top-1 agreement **95.95%**. B and C are
-  indistinguishable on this instrument; keep **C, Maya-S IQ2_XXS**, which
-  decodes at **17.11 ms/token** versus B's **57.07** at depth 32K. Delete A
-  GSQ-RCO IQ2_XS + IQ4_NL and B Unsloth UD-IQ3_XXS.
-- GLM: E−D **−0.00615** (90% CI [−0.01151, +0.00011]); code-only
-  **−0.00466** ([−0.00946, +0.00014]); top-1 agreement **95.39%**. The
-  artifacts remain indistinguishable on this instrument. D decodes at
-  **17.71 ms/token** versus E's **18.22** at depth 32K; keep **D, stock
-  UD-IQ3_XXS** and delete E Maya-M IQ2_S.
-- All five loaded and passed three live 48K sessions plus three actual 48K
-  code prefills with sessions retained. V4.1 A/B/C use disk Engram readers
-  (110.60 / 161.28 / 161.28 GB); GLM has no separate Engram. B's measured
-  post-session allocation is **234.46 GB**, with **40.42 GB** host headroom.
-- Historical conflicts: Maya-S already had a six-document/384-target NLL
-  comparison against IQ3 in `docs/bench/2026-10-22-maya-s-eval.md`; GLM D/E
-  had an eight-case blinded generated-answer comparison in the 2026-10-17
-  entry below. Those smaller/different-instrument results are not treated as
-  nonexistent; this packet adds long code-at-depth NLL evidence.
-- B=3 decode timing was not run; the maintained suite provides only B=1. The
-  fit packet does not claim concurrent decode throughput. Thermal pressure is
-  recorded at packet endpoints, not continuously. The M5 run directory showed
-  1.8 TiB free rather than the stated ~28 GiB. Aven V41-HFAB could not be
-  annotated from this session because no Aven connector is available.
-- Full method, decisions, shard identities, token hashes, per-prompt means and
-  all pairwise CIs: `docs/bench/2026-11-11-artifact-choice/RESULTS.md` and
-  `metagross:~/qwen-runs/2026-11-11-artifact-choice/`.
 
 ## 2026-11-11 - GLM Selective Layer Slicing Becomes The Default
 
@@ -236,6 +241,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   predicted under 500ms take the unsliced path.
 - Branch `perf/glm-layer-sliced-prefill`; evidence:
   `docs/bench/2026-11-11-glm-selective-layer-serve.md`.
+
 ## 2026-11-11 - GLM Q6 Solo Band: Split-K Fusion Ships 0.51 ms At B=1
 
 - **Shipped default-on `QWEN_GLM53_Q6_SOLO`** (`=0` restores the incumbent)
@@ -346,6 +352,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   holds through the real GPU loops; `fn_hc_up_regrid` is an isolated
   research probe. Evidence `metagross:~/qwen-runs/2026-11-11-solo-b1/`.
   No merge; M5 worktree removed.
+
 ## 2026-11-11 - GLM Fast/Half Append Numerics: Code Routes Diverge at Sparse MLA
 
 - **Probe only; no production behavior change.** M5 Ultra, GLM-5.3-Flash
@@ -401,6 +408,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Fast packet pressure peaked at 2 for Metal/prose and yielded until 1; Rust
   observed 0, Python 1, and the packet finished at 1.
   Branch `research/glm-prefill-numerics`; no merge; M5 worktree removed.
+
 ## 2026-11-11 - Selective GLM 500ms/200ms Packet: Still Opt-In
 
 - One requested variant, one attempted 30s real-sampling ABBA: **>500ms**
@@ -638,6 +646,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   reports `partial_prefill_s` / `partial_prefill_calls` inside `prefill_s`.
   Unit-tested; no arithmetic change.
 - Branch `perf/serve-chunked-prefill`; no merge; M5 worktree removed.
+
 ## 2026-11-11 - GLM Append Audit: Neither Expert Path Is Off; Chunk Schedule Is Shared
 
 - **Correctness audit only; no fix, no default change.** New
@@ -1045,6 +1054,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - **Next:** a clean GLM BA morning when the 48K arm can stay below level 2, and
   a load-matched V4.1 repeat to resolve whether its small negative is order
   effect or real.
+
 ## 2026-11-10 - GLM Batched One-Ahead Loop Shipped; 6-7% At B=2..4
 
 - Shipped default-on **`QWEN_SERVE_GLM_BATCH_GPU_LOOP`** (`0` restores serial
@@ -1074,6 +1084,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   shared stride path and the per-member path.
 - Raw: `~/qwen-runs/2026-11-10-glm-loop/{loop-ab-32k-final,loop-ab-48k-final,loop-smoke,loop-smoke2}.json*`;
   serve `~/qwen-runs/2026-11-10-serve-loop/glm-loop-{pair-25s,pair-light,smoke,smoke2}`.
+
 ## 2026-11-10 - V4.1 Batched GPU Sampling Shipped: +7-9% Native, Serve Bubble Gone
 
 - **Shipped default-on.** Batches of width >= 2 in `qwen serve` now call
@@ -1216,6 +1227,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - **Hygiene.** Thermal 0-1 on every accepted arm; thermal-2 arms (one 32K
   default probe, one B1 loop per depth) were rerun or replaced by the clean
   replicate. `check-contracts.sh` passes.
+
 ## 2026-11-11 - GLM Index Chain Batched; +0.80% B4; Final Width Ledger
 
 - Base **`8b3cabc8`**; branch **`perf/glm-width`**; M5 Ultra, stock
@@ -1333,6 +1345,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   tests `selected_member_attention_matches_independent_dispatches_bitwise` and
   `selected_member_attention_rejects_shared_and_windowed_shapes` pass. No new
   ignored tests. No merge.
+
 ## 2026-11-10 - Batched One-Ahead Loop Was Host-Scheduling Starved, Not Metal
 
 - **Base main `8132edc97`.** Ported the pipelined `generate` loop onto main and
@@ -1423,6 +1436,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - **Hygiene.** Thermal 0-1 on accepted arms; several arms were aborted at
   thermal 2 by concurrent external compiles and rerun. `check-contracts.sh`
   passes.
+
 ## 2026-11-10 - Fast top_k=0 GPU Sampler: 38 -> ~1 ms; Batched V4.1/GLM Break-Even
 
 - **Host semantics first.** Sampler-v1 always orders candidates by descending
@@ -1558,6 +1572,7 @@ cooperative accumulator, weights dequantized to half in threadgroup memory),
 then the Flash-Next fewrow and GLM Q6 ports. The census says the remaining
 band is q_b/output_b/output_a near 620-690 GB/s and shared near 380, so the
 tensor tile must lift the medium-`n_out` shapes, not just the head.
+
 ## 2026-11-10 - Flash-Next GPU Sampling Shipped; V4.1/GLM Blocked At top_k=0
 
 - **Flash-Next shipped default on.** At the end of each B>=2 round the per-member
@@ -1711,6 +1726,7 @@ tensor tile must lift the medium-`n_out` shapes, not just the head.
   K=1 first, success bar **>=1.15x delivered inter-token**. Do not build M4
   first. Details: `bench/2026-11-09-fn-mtp/README.md`; raw headers
   `header-audit.json` and `mtp-head-inventory.json`.
+
 ## 2026-11-10 - Flash-Next Shared-Expert And Bootstrap HC Batches
 
 - Ship default-on **`QWEN_FN_MOE_BATCH_SHARED`**; set 0 to restore per-member
@@ -1976,6 +1992,7 @@ tensor tile must lift the medium-`n_out` shapes, not just the head.
   `scripts/bench/with-metal-lease`:
   `fn_native_batch_check MODEL CODE PROSE 32768 16 1,4 census`; the A/B uses
   `fn_batch_counterfactual MODEL CODE PROSE 32768 128 4 pair-members`.
+
 ## 2026-11-09 - Flash-Next M4 Single-Stream: Final Standing And Practical Bound
 
 - Branch **`perf/fn-m4-decode`**, M4 Max laptop, GSQ-RCO IQ3_S. Release build,
@@ -2268,6 +2285,7 @@ tensor tile must lift the medium-`n_out` shapes, not just the head.
   `fn_native_batch_check MODEL CODE PROSE 32768 64 1,2,3,4` (also `4,3,2,1`)
   or `... 48000 32 1,2,3,4 both`, and `dispatch_deadtime` with no arguments.
   Compact evidence: `~/qwen-runs/2026-11-09-fn-widths-deadtime/` on M5.
+
 ## 2026-11-10 - V4.1 Combine Restructure Fails; Encode Is Mostly Metal Encoding
 
 - **Report only; no runtime change.** Source **`00cfac16`** adds a `hostgap`
@@ -2607,6 +2625,7 @@ tensor tile must lift the medium-`n_out` shapes, not just the head.
   this session **14 s**; the prior session's overlapping requests waited
   17-41 min each. Compact evidence (M5):
   `~/qwen-runs/2026-11-09-v41-waves-widths-final/summary.json`.
+
 ## 2026-11-09 - GLM Batch IQ: Two-Simdgroup Geometry Ships, Decoder Rewrites Killed
 
 - **Keep, default on for GLM batch decode**, rollback
@@ -2649,6 +2668,7 @@ tensor tile must lift the medium-`n_out` shapes, not just the head.
   10, then the `glm-batch-next/run.py` IQ mode with `--variants 0,1 --width N`
   and `summarize_iq.py`. Raw packets under
   `~/qwen-runs/2026-11-09-glm-batch-28/` on the M5. No merge or push.
+
 ## 2026-11-09 - GLM NextN Head Cost And T=1 Acceptance Measured
 
 - **Follow-up; research only.** M5 Ultra, stock GLM UD-IQ3_XXS at 48K
@@ -2747,6 +2767,7 @@ tensor tile must lift the medium-`n_out` shapes, not just the head.
   and remove the serial retained-prefix replay before any drafter, and price
   against B=3.
 - [Protocol, measured tables, availability matrix and limits](bench/2026-11-09-spec-econ/README.md).
+
 ## 2026-11-10 - Serve Owner Host: Pooled Sampling, Worker Tokenization, B2 Waves
 
 - **Default on**, all with rollbacks: GLM members of a batched step sample on
@@ -2900,6 +2921,7 @@ tensor tile must lift the medium-`n_out` shapes, not just the head.
   `~/qwen-runs/2026-11-09-v41-batch-wave/summary.json`.
   Regenerable run bulk deleted; normal Cargo cache retained. No merge or
   owned process remains.
+
 ## 2026-11-09 - GLM GPU Feedback Clears The Ship Gate
 
 - **Keep, default on for M5** in run, serial serve and bounded lone-owner
@@ -2940,6 +2962,7 @@ tensor tile must lift the medium-`n_out` shapes, not just the head.
   and validation: **`~/qwen-runs/2026-11-09-glm-loop-qualify/`**, especially
   `qualification.json` and `lease-waits.json`. Reproduce with
   `glm_gpu_loop_check MODEL DEPTH 128` and the recorded frontend commands.
+
 ## 2026-11-09 - Ignored-test cleanup, batch 3
 
 Remove 19 ignored tests (eight model/artifact, three other-GPU, eight timing)
@@ -2951,6 +2974,7 @@ Review all 13 new lease-fix ignores: delete the load stopwatch; retain twelve
 actual artifact checks or inventoried timing probes for runner migration.
 No GPU execution or timing. Fixed base a95456865; no main refresh.
 [Decisions, exact deletions, 13-test migration list and validation](bench/2026-11-09-ignored-sweep-batch3.md).
+
 ## 2026-11-09 - GLM Causal Batch Waves: 3.0-3.4 ms Per B=4 Round
 
 - Default-on **`QWEN_GLM53_BATCH_WAVES`**, rollback **`=0`**. Reuse the
@@ -3108,7 +3132,9 @@ No GPU execution or timing. Fixed base a95456865; no main refresh.
   **348 s**, queue **169 s**, active **53.4 s**, thermal rejection. MLA build
   **233 s**, queue **0.094 s**, active **50.5 s**, thermal 0. No build locks,
   frozen binaries, disk snapshots or new ignored tests.
+
 ## 2026-11-09 - GLM Q6 Bounded Stores: Small Win, Qualification Pending
+
 ## 2026-11-09 - GLM IQ3_S Down Count-Adaptive Panels: SHIP (~1%, bitwise)
 
 - Fixed base **`2c4e6d2d9`**, branch `perf/glm-append-next`, unmerged. UD-IQ3_XXS,
@@ -3195,7 +3221,6 @@ No GPU execution or timing. Fixed base a95456865; no main refresh.
   steady TTFT remain pending the shared GPU. The suite binaries built once
   on this fixed base: lib **6m28s**, CLI **4m00s**. Contracts and detailed
   queue/build accounting are recorded in the raw campaign; no new ignored tests.
-
 
 ## 2026-11-09 - GLM Append Counterfactuals: Q6 First; K64 Killed
 
@@ -3300,6 +3325,7 @@ No GPU execution or timing. Fixed base a95456865; no main refresh.
   overlapping each other. GPU queue wait **229 s**, build-lock wait **0**.
   Next priced remainder is attention's **1.284-ms** bound. No further kernel
   experiment this turn; regenerable run bulk removed, no merge or running jobs.
+
 ## 2026-11-09 - Flash-Next Shape-Complete Appends: 400 Rows 580 → 313 ms
 
 - **Default-on candidate**, source **`76cce044`**, main base **`fe0df5796`**,
@@ -3397,6 +3423,7 @@ No GPU execution or timing. Fixed base a95456865; no main refresh.
   retained for unfinished qualification; regenerable run bulk is deleted.
   **Nothing left running.** Next: finish cached qualification (~5–10 min,
   plus any lease wait), then the bounded executor screen.
+
 ## 2026-11-09 - Retire ignored witnesses and closed prototypes, batch 2
 
 Remove 27 ignored tests plus four ordinary tests of exclusive unshipped
@@ -3407,8 +3434,6 @@ raw-byte snapshot spike. Keep registered/inventoried/current-lane witnesses,
 default precision/embedding/MTP checks, the product selected-value oracle,
 last-expert regressions and shared state hashing. No GPU timing or inference.
 [Exact deletions, retained cases and validation protocol](bench/2026-11-09-ignored-sweep-batch2.md).
-
-
 
 ## 2026-11-09 - Flash-Next Direct Outputs And Steady Concurrent Serve: +25%
 
@@ -3644,6 +3669,7 @@ last-expert regressions and shared state hashing. No GPU timing or inference.
   `target/release/examples/fn_batch_counterfactual "$MODEL" "$CODE" "$PROSE" 8192 128 4 pair`
   (also 32768); pricing uses `8192 24 4 fine` (also 32768).
   Compact metrics/commands: **`~/qwen-runs/2026-11-09-fn-batch-next/`**.
+
 ## 2026-11-09 - GPU Loop Family Census: GLM First, Prototype Not Shipped
 
 - Branch **`perf/gpu-loop-families`**, census **`ff598d1a`** on **`b3fbf7a1`**.
@@ -3685,6 +3711,7 @@ last-expert regressions and shared state hashing. No GPU timing or inference.
   **`~/qwen-runs/2026-11-09-gpu-loop-families/`**, especially
   `corrected-summary.json`, `census/` and `census-stock/`. Coordination is
   recorded on **GLM-PYH3 / V41-ZPX6**. Flash-Next QSA stays banked.
+
 ## 2026-11-09 - Flash-Next M4: GPU Loop And Executor Carry Over
 
 - Current-main base **`fdd087b74`**, probe **`6a70ed3c4`** on
@@ -3751,6 +3778,7 @@ last-expert regressions and shared state hashing. No GPU timing or inference.
   Compact commit/command results, actual memory/IO summaries and excluded
   superseded attempts: **`~/qwen-runs/2026-11-09-m4-glm-peak-first/summary.json`**.
   Regenerable run bulk removed; no merge or owned worker remains.
+
 ## 2026-11-09 - Flash-Next Combined Batch Handoff Passes; Keep The Executor
 
 - Tested **unmodified `d01b5aa8`**, including native expert/causal batching
@@ -3783,6 +3811,7 @@ last-expert regressions and shared state hashing. No GPU timing or inference.
   **`~/qwen-runs/2026-11-09-fn-combined-interop/`**, mirrored locally.
   Combined unit suites remain the landing lane's check; not duplicated here.
   Verification only, **no merge**; QSA follow-up remains unstarted.
+
 ## 2026-11-09 - GLM Append F32 Attention: Native Win, Steady Pair Thermal-Blocked
 
 - Code **`46da45cfd`**, rebased on **`d206b6edd`**. Default-on
@@ -3836,6 +3865,7 @@ last-expert regressions and shared state hashing. No GPU timing or inference.
   lease-wrap **`target/release/examples/glm_append_attention`**. Models resolve
   through **`QWEN_MODEL_SEARCH_PATH`**. Regenerable binaries, targets and full
   dispatch traces pruned; compact census and raw append/quality rows retained.
+
 ## 2026-11-09 - Retire ignored timing/research probes, batch 1
 
 Remove 61 ignored entry points (59 old timing/attribution probes plus two
@@ -3884,6 +3914,7 @@ artifacts remain; dated recipes now point to their historical source.
   `analyze_operator.py` regenerates the table from **`operator-3`**. Retain
   invalid preflight/checker attempts as rejected evidence; prototype full-test
   build was interrupted, not a passing qualification. Regenerable bulk deleted.
+
 ## 2026-11-09 - GLM M4 Residency Attribution: First-Use Weight Paging
 
 - **`perf/m4-glm-residency`**, base **`74f6709ae`**, release **`bd8c9b20`**,
@@ -3921,6 +3952,7 @@ artifacts remain; dated recipes now point to their historical source.
   were not rerun for this attribution-only packet. Opt-in diagnostics,
   exact commands, host/cache/I/O summaries and exclusions:
   **`~/qwen-runs/2026-11-09-m4-glm-residency/summary.json`**.
+
 ## 2026-11-09 - V4.1 Whole-Round Bounds Rule Out Standalone I/O And HC Fusion
 
 - Diagnostic **`6f3436bb`**, M5, production GSQ-RCO IQ2_XS, B=3/32K.
@@ -3968,8 +4000,6 @@ artifacts remain; dated recipes now point to their historical source.
   test callers needed signature updates. Move metadata tests to a small target to
   avoid monolithic linking. Compact evidence only:
   **`~/qwen-runs/2026-11-09-v41-batch-bounds/`**. No merge or owned worker remains.
-
-
 
 ## 2026-11-09 - Flash-Next Measured-Only Batch Candidate: Laptop Validation Complete
 
@@ -4415,6 +4445,7 @@ artifacts remain; dated recipes now point to their historical source.
   `$HOME/qwen-runs/2026-11-09-append-roofline/` on both hosts. M5 worktree,
   target, bundle and regenerable dispatch bulk removed; no owned worker,
   merge or client/server changes. V4.1 deferred for its separate Engram roof.
+
 ## 2026-11-09 - GLM B=4: 33.84 / 34.25 / 35.35 ms, 624 Fewer Dispatches
 
 - Engine **`45687e25`**, base **`22046c76`**, M5 Ultra, stock **UD-IQ3_XXS**.
@@ -4602,7 +4633,6 @@ artifacts remain; dated recipes now point to their historical source.
   `scripts/research/glm-batch-q6/` summarize packets and run the steady ABBA;
   corpus is the first >=3 MB of sorted tracked Rust source at **`9b193b38`**.
 
-
 ## 2026-11-09 - Flash-Next Native Independent Decode And Concurrent Serve
 
 - **Default on for M5 ordinary serving**, base `0bdb9ca5`, native core
@@ -4745,6 +4775,7 @@ artifacts remain; dated recipes now point to their historical source.
   thermal samples **0**. Compact JSON under
   `$HOME/qwen-runs/2026-11-08-realistic-steady/` on both hosts; regenerable
   M5 worktree/target/bundle removed, no owned processes remain. No merge/push.
+
 ## 2026-11-08 - Flash-Next Decode Integration: Executor And Device Feedback In Progress
 
 - Rebased this lane onto **`9b193b38`**. Integrating the causal-wave executor
@@ -5002,6 +5033,7 @@ artifacts remain; dated recipes now point to their historical source.
   Raw packet, thermal/controller/build logs, exact capture patch, frozen source
   hashes and binary: **`~/qwen-runs/2026-11-09-fn-decode-roofline/`**, mirrored
   locally. Branch unmerged; no owned work left running.
+
 ## 2026-11-08 - Warm Agent Concurrency: Observed Capacity, EOS Fails Exact-Work Gate
 
 - Clean engine **`09a3a521`**, M5 Ultra **256 GiB**, unchanged tier-1 artifacts
@@ -5141,7 +5173,6 @@ artifacts remain; dated recipes now point to their historical source.
   retained arms, conditions and test receipts:
   **`$HOME/qwen-runs/2026-11-08-glm-batch-dispatch/`** on both machines.
 
-
 ## 2026-11-08 - GLM M4 Decode Decision: Quant Work And Workspace Lifetime
 
 - **Diagnosis/design only**, base **`09a3a521`**, 128-GiB M4 Max,
@@ -5184,7 +5215,6 @@ artifacts remain; dated recipes now point to their historical source.
   full lib/CLI/contracts were not rerun for this report.
   Exact binaries, patches, all attempts, thermal/I/O traces and **`summary.json`**:
   **`~/qwen-runs/2026-11-08-glm-m4-roofline/`**. No merge or owned worker remains.
-
 
 ## 2026-11-08 - Flash-Next Concurrency: Current Few-Row Vehicle Killed
 
@@ -5323,7 +5353,6 @@ artifacts remain; dated recipes now point to their historical source.
   match the checked Rust sources; identities and prototype patch are sealed
   with the exact binaries. Complete evidence:
   **`~/qwen-runs/2026-11-08-glm-batch-16k/`** on both machines.
-
 
 ## 2026-11-08 - GLM Independent Decode Batching And Concurrent Serve
 
@@ -6598,7 +6627,6 @@ rollback controls remain. Both hosts used build lock + Metal lease, thermal 0.
 - Validation at **`cb0cee32`**: M5 full **`cargo test --release -p qwen-llm --lib`**, **2457 passed / 0 failed / 739 ignored**, **124.39 s**, thermal 0. **`scripts/check-contracts.sh` passes** on M4 CPU only: **552 acceptance tests**, no skips, plus **10 comparison tripwires**. The corrected profile-default assertion is included in the single implementation commit. Qualified source preserved on **`perf/v41-serve-append-integration`**.
 - Final rebase onto GLM-only main **`896ece2f`**: all feature Rust files and the acceptance inventory are **byte-identical to `cb0cee32`**; the V4.1 engine folder and **all kernel sources are unchanged**. Final M5 **`cargo check --release -p qwen-cli --bin qwen --tests`** passes (**19.62 s**), as do formatting and the generated environment reference. The full-test/serve receipts above remain attributed to `cb0cee32`; no prototype/revert pairs remain.
 - Builds and timing hold the build lock, nice 10; every GPU packet uses the canonical Metal lease with wait enabled. Numeric-only pairs may overlap CPU compilation; their timing fields make no performance claim. Sampled thermal pressure **0 before/during/after** accepted GPU packets. Raw requests/responses/events, all samples and failed checks, complete profiles, source/binary identities and frozen probes: **`$HOME/qwen-runs/2026-11-07-v41-serve-append`** on metagross.
-
 
 ## 2026-11-07 - Tier-1 Serve Checkpoint Ladder: Older-Message Forks
 
@@ -8435,7 +8463,6 @@ rollback controls remain. Both hosts used build lock + Metal lease, thermal 0.
   caught the test-only profile literal, fixed before this final pass.
   Raw source, plans, all samples, profiles, quality and validation receipts:
   `metagross:~/qwen-runs/2026-11-06-v41-roofline3/`. No merge.
-
 
 ## 2026-11-06 - GLM M5 Sparse Prefill: Tensor QK/PV in Existing Scratch
 
@@ -11502,7 +11529,6 @@ rollback controls remain. Both hosts used build lock + Metal lease, thermal 0.
   [Packet](bench/2026-10-29-v41-dense-preweight.md). Raw:
   `~/qwen-runs/2026-10-29-v41-encoder-depth/dense-ab-*.json`.
 
-
 ## 2026-10-29 - V4.1 Q5_K F16 Dequant Kernel: Bitwise
 
 - `v41_dequant_q5_k_f16` writes the natural row-major `block*256 + il*16`
@@ -14228,6 +14254,7 @@ and the `qwen-bench integrated-grammar-row` subcommand were removed from the
 live workspace. The last commit containing the live implementation is
 `66c4be5785307c8eb616e12278c6c55e933ebbd4`; recover it from git if needed.
 The KILL result and protocol remain under `docs/bench/` as historical evidence.
+
 ## 2026-10-17 - Three-Way GLM Pilot Finds No Q4 Quality Advantage
 
 - Preregistered eight public engineering cases, including two approximately
@@ -14867,7 +14894,6 @@ The KILL result and protocol remain under `docs/bench/` as historical evidence.
   expert/head native policies remain unchanged. No whole-speedup/quality claim.
 - Raw v2 evidence and limits: `docs/bench/2026-10-08-native-iq-capacity/README.md`.
 
-
 ## 2026-10-08 - Native Dense IQ2 Cuts Saluki Logical Weights by 39.533 GiB
 
 - Role-aware IQ2_XS/IQ2_XXS projection residency replaces persistent F32
@@ -14889,7 +14915,6 @@ The KILL result and protocol remain under `docs/bench/` as historical evidence.
 - Next: IQ1_M matrices/embedding and IQ1_S matrices; remaining expansion
   ~19.194 GiB. Shared session-pricer undercount595,168 bytes is tracked
   separately; the existing2GiB reserve covered it in qualification.
-
 
 ## 2026-10-08 - #12/#15 Fast Shared-Prefix Split: INCONCLUSIVE; Fast Snapshots Stay Opt-In
 
@@ -32761,7 +32786,6 @@ Validation:
   (hermetic to this change)
 
 ## 2026-07-03 - v0.448 Close Decode-Glue Bundle (Skip Option)
-
 
 ## 2026-07-03 - v0.452 Close Decode-Glue Bundle (Skip Option)
 

@@ -15,7 +15,10 @@
 //! `--resource-barriers [reps] [long_us]` instead runs the long-kernel/short-chain
 //! overlap probe. See the sibling module for controls and timestamp semantics.
 //! `--event-sync [reps] [event|shared|both]` prices a cross-queue handoff and join.
+//! `--phase-sync [reps] [tasks]` prices device-scope task handoffs against
+//! dependent dispatch boundaries, with and without a second-queue load.
 mod event_sync;
+mod phase_sync;
 mod resource_barriers;
 use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLSize};
 use qwen_llm::metal::{
@@ -281,6 +284,9 @@ fn profile_window_us(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some("--event-sync") {
         return event_sync::run();
+    }
+    if std::env::args().nth(1).as_deref() == Some("--phase-sync") {
+        return phase_sync::run();
     }
     if std::env::args().nth(1).as_deref() == Some("--resource-barriers") {
         return resource_barriers::run();

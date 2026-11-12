@@ -78,6 +78,10 @@ name = "fn_hc_up_regrid"
 required-features = ["perf-ablations"]
 
 [[example]]
+name = "fn_hc_persistent"
+required-features = ["perf-ablations"]
+
+[[example]]
 name = "glm_solo_bounds"
 required-features = ["perf-ablations"]
 

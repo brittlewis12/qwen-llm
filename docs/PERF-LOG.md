@@ -6,6 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 — Flash-Next HC Persistent Site: Sync Passes, Kernel Gate Fails
+
+- MSL 3.2 device-scope phase handoff is cheaper than a dependent dispatch on
+  both devices: unloaded **0.808 vs 1.619 us** on M4 Max and **1.012 vs
+  1.439 us** on M5 Ultra; under contention **1.049 vs 2.190 us** and **1.026
+  vs 1.568 us**. M5 checked 63,426 exact cross-threadgroup edges. Physical die
+  placement is not exposed by the Metal device, so individual cross-die edges
+  could not be identified.
+- Real block-0 persistent site fails the price gate on M5: **18.875 -> 51.625
+  us** incumbent/candidate; repeated 47-site chain **0.786 -> 2.355 ms**.
+  Intermediates, mixed output, and residual remain bitwise exact. M4's 64- and
+  256-worker variants also regress. No full-wall A/B, serve, production path,
+  rollback switch, or family port was entered.
+- Bench-only probe commits: phase stress `92e608d43`, site `050ceeb15` on
+  `research/hc-persistent`. Reproduction and limits:
+  `docs/bench/2026-11-12-hc-persistent.md`; raw output is in
+  `qwen-runs/2026-11-12-hc-persistent/` on M4 and
+  `metagross:~/qwen-runs/2026-11-12-hc-persistent/` on M5.
+
 ## 2026-11-12 - Flash-Next Selective Layer Slicing Becomes The Default
 
 - **Decision: ship the selective 200ms/500ms layer policy on by default for

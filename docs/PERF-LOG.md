@@ -123,39 +123,43 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `metagross:~/qwen-runs/2026-11-11-artifact-choice/`.
 
 ## 2026-11-11 - Two-Queue Causal Branches: Ceiling Passes, Isolation Does Not
+## 2026-11-12 - GLM Small-Row IQ Route Re-Gated: Qualifies On The Real Schedule
 
-- **Negative stage-2 gate; no production default changed.** M5 GLM's optimal
-  scope-preserving two-queue ceiling is **1.111 ms/token / 6.65% of wall**.
-  A research-only prototype is bitwise for logits and persistent state, but
-  48 affected fork groups reach only **1.112x** isolated GPU speedup
-  (**4.813 -> 4.328 ms**), below 1.25x. Nine rotated interleaved sweeps;
-  every written byte matches. KDA controls 1.248x, MLA query/index 0.970x,
-  shared/routed FFN 0.979x. The conditional wall A/B and serve gates were not
-  entered; no token-wall win is claimed.
-- **Sync price:** device-local `MTLEvent` adds **4.6 us/handoff on M5** and
-  **4.4 on M4**, including the return join. Shared events are much costlier
-  (initial campaign 222/71 us). `dispatch_deadtime --event-sync` validates
-  dependent data through both queues; 121 reps at five chain depths.
-- **Measured-node graph, four forward rounds near 32K:** Flash-Next wave sum
-  **12.024 -> 11.616 ms**, 0.408 ms/3.39% of wall; V4.1 B=1
-  **13.211 -> 12.737**, 0.474 ms/3.39%; V4.1 B=3
-  **22.802 -> 21.447 ms/round**, 1.355 ms/4.91% (0.452 ms/output token).
-  These are static-duration scheduling prices with events, not measured
-  model wins. Global span-DAG bounds also remove artificial scope joins.
-  GLM B=1 is currently serial, so its wave baseline is a diagnostic retrofit
-  of the exact solo kernels, with serial and single-queue controls retained.
-- Per-node timestamps now use explicit same-queue completion events; encoder
-  boundaries alone allowed overlapping windows in the initial capture, which
-  is excluded. A landed GPU regression checks node isolation; the prototype
-  branch also carries fork/join and queue-certificate checks. Final model
-  preflights reject other model executables regardless of RSS and defer hot
-  loads. M5 builds and GPU work were queued under holds of ten minutes or less.
-- Branch `research/two-queue-causal`, rebased onto main `932f3b729`; final
-  prototype code `25a35a756`. Main keeps the record, CPU analyzer and capture
-  tooling; the execution prototype remains only on that branch. Evidence and
-  reproduction: `docs/bench/2026-11-11-two-queue-causal.md`; raw
-  `metagross:~/qwen-runs/2026-11-11-two-queue/`. Lane bundles, M5 worktree and
-  build output removed after verification.
+- **Re-applied and default-on behind `QWEN_GLM53_PREFILL_IQ_SMALL_ROWS`.** The
+  admission follows the fine grid: rows 1-19 keep the per-slot Half packet,
+  rows 20-1023 use explicit tensor gate/up and IQ3_S tensor down, and `=0`
+  restores the exact incumbent 8-row packet and grouped/expanded routes. The
+  down policy keeps the production geometry guard. Candidate commit
+  **`3afa59d33`**, branch `perf/glm-append-routes`, rebased on main
+  **`f6475cb2e`**; not merged.
+- **Real-schedule gate passes.** Four interleaved pairs through the standing
+  three-agent harness at 48K, 180 s windows, release build, real sampling.
+  Matched same-label/same-width appends: pooled median TTFT **-57.7 ms**
+  (90% CI **[-116.9, -20.5]**, n=117) and prefill **-47.2 ms**
+  (**[-83.7, -18.1]**, n=107); every pair has a negative median for both.
+  That is **5.9%** lower append TTFT and **9.0%** lower prefill on roughly
+  880 ms / 523 ms medians.
+- **Throughput and ITL p99 are not worse beyond noise.** Aggregate TPS is
+  **1.19 tok/s lower** on average (candidate/incumbent 0.986) but the 90% CI
+  crosses zero **[-0.45, +3.02]**; ITL p99 is **+1.08 ms (0.6%)** with CI
+  **[-0.82, +3.22]**. The worst content gap improves in all four pairs (mean
+  **-392 ms**). Per-pair TPS off-on: +2.89, -0.14, +3.38, -1.37.
+- **Shared-host limits retained.** All eight timing windows recorded thermal
+  1; thermal 2 occurs only outside windows. Six of eight windows carry a
+  compiler-overlap flag, so this is not an isolated-host claim. Twenty-three
+  lease acquisitions waited up to **1269 s** (total **10,076 s**); every hold
+  was <=15 min. A session-cache reuse miss on a 45/56-row append reprocessed
+  6.6-7.1K tokens in several arms, including incumbent `off-4`; it inflates
+  unmatched TTFT p99 but is not route-specific.
+- **Verification.** Full lib **2492 passed / 678 ignored** and CLI **1722
+  passed / 73 ignored** in the test profile; `check-contracts.sh` and
+  `cargo fmt --all --check` pass; no new `#[ignore]`. Guarded-tail GPU
+  witnesses at 20/33/97/161/1023 rows pass in the existing down and
+  gate/up tests. Binary `qwen` sha256 `2c2d77b2ad94...`.
+- Evidence: `docs/bench/2026-11-12-glm-append-routes.md` §6; raw
+  `metagross:~/qwen-runs/2026-11-12-glm-append-routes/regate/`. The original
+  2026-11-12 traffic-gate record follows and is unchanged.
+
 ## 2026-11-12 - GLM Append Routes: Tensor IQ Wins The Cliffs, Traffic Gate Fails
 
 - **Probe and decision; no production change.** A `perf-ablations` route
@@ -191,6 +195,40 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `metagross:~/qwen-runs/2026-11-12-glm-append-routes/`. No merge; M5
   worktree and bundles removed.
 
+## 2026-11-11 - Two-Queue Causal Branches: Ceiling Passes, Isolation Does Not
+
+- **Negative stage-2 gate; no production default changed.** M5 GLM's optimal
+  scope-preserving two-queue ceiling is **1.111 ms/token / 6.65% of wall**.
+  A research-only prototype is bitwise for logits and persistent state, but
+  48 affected fork groups reach only **1.112x** isolated GPU speedup
+  (**4.813 -> 4.328 ms**), below 1.25x. Nine rotated interleaved sweeps;
+  every written byte matches. KDA controls 1.248x, MLA query/index 0.970x,
+  shared/routed FFN 0.979x. The conditional wall A/B and serve gates were not
+  entered; no token-wall win is claimed.
+- **Sync price:** device-local `MTLEvent` adds **4.6 us/handoff on M5** and
+  **4.4 on M4**, including the return join. Shared events are much costlier
+  (initial campaign 222/71 us). `dispatch_deadtime --event-sync` validates
+  dependent data through both queues; 121 reps at five chain depths.
+- **Measured-node graph, four forward rounds near 32K:** Flash-Next wave sum
+  **12.024 -> 11.616 ms**, 0.408 ms/3.39% of wall; V4.1 B=1
+  **13.211 -> 12.737**, 0.474 ms/3.39%; V4.1 B=3
+  **22.802 -> 21.447 ms/round**, 1.355 ms/4.91% (0.452 ms/output token).
+  These are static-duration scheduling prices with events, not measured
+  model wins. Global span-DAG bounds also remove artificial scope joins.
+  GLM B=1 is currently serial, so its wave baseline is a diagnostic retrofit
+  of the exact solo kernels, with serial and single-queue controls retained.
+- Per-node timestamps now use explicit same-queue completion events; encoder
+  boundaries alone allowed overlapping windows in the initial capture, which
+  is excluded. A landed GPU regression checks node isolation; the prototype
+  branch also carries fork/join and queue-certificate checks. Final model
+  preflights reject other model executables regardless of RSS and defer hot
+  loads. M5 builds and GPU work were queued under holds of ten minutes or less.
+- Branch `research/two-queue-causal`, rebased onto main `932f3b729`; final
+  prototype code `25a35a756`. Main keeps the record, CPU analyzer and capture
+  tooling; the execution prototype remains only on that branch. Evidence and
+  reproduction: `docs/bench/2026-11-11-two-queue-causal.md`; raw
+  `metagross:~/qwen-runs/2026-11-11-two-queue/`. Lane bundles, M5 worktree and
+  build output removed after verification.
 ## 2026-11-11 - Resource-Scoped Barriers Do Not Release The Wave Floor
 
 - **Probe 3a closes the direct barrier replacement class.** A single

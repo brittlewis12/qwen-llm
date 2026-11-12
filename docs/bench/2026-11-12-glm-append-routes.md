@@ -1,11 +1,13 @@
 # 2026-11-12 — GLM append route sweep: IQ tensor below 1024 wins the expert cliffs, the traffic gate fails
 
-Status: probe + decision. **No production change shipped.** The default-on
-candidate was implemented and then reverted on the gate failure
-(`46911dd35`, reverted at `aa83b92c0`). The route wins the isolated and wall
-comparisons and passes the paired non-inferiority protocol; it does not reach
-the required 20% traffic-weighted append-wall reduction on the archived
-three-agent serve distributions.
+Status: probe + decision, re-gated. **The reverted candidate is re-applied and
+default-on behind `QWEN_GLM53_PREFILL_IQ_SMALL_ROWS`; it qualifies under the
+standing real-schedule gate and remains unmerged.** The original traffic gate
+below still stands as a record: the default-on candidate was implemented and
+reverted because it reached only 10-13% traffic-weighted append-wall reduction
+against the lead's 20% requirement (`46911dd35`, reverted at `aa83b92c0`). The
+lead replaced that by-construction gate with the standing isolated 1.25x /
+real-schedule rule; §6 records the re-gate.
 
 GLM-5.3-Flash UD-IQ3_XXS, M5 Ultra, `--profile iter`, `code.txt` corpus
 (150,243 tokens), capacity 98,304, 2,048 prefill rows. Depths **49,152** and
@@ -147,6 +149,81 @@ same bound. No `#[ignore]` test was added.
 - The serve validation (three-agent, interleaved pairs) was not run because
   the gate failed before it.
 
+## 6. Re-gated on the real schedule
+
+**Policy:** the admitted band now follows the fine grid instead of the
+original 9-row floor. Rows 1..=19 keep the per-slot Half packet; rows
+20..=1023 use the explicit tensor gate/up and IQ3_S tensor down. The packet cap
+is tied to the same admission, so `QWEN_GLM53_PREFILL_IQ_SMALL_ROWS=0` restores
+the exact incumbent 8-row packet and grouped/expanded routes. The down policy
+keeps the production `(2048,4096,288,top-8)` geometry guard, matching the
+gate/up shape gate. `tests/tensor_down.rs` and `tests/tensor_gate_up.rs` add
+guarded-tail witnesses at 20, 33, 97, 161 and 1023 rows; existing ignored GPU
+tests were extended, not added.
+
+The packet is row-independent up to its hard cap, so extending its shipped
+1..=8 arithmetic to 9..=19 introduces no new kernel or operand change. The
+tensor route numerics are the original §4 cohort; no kernel arithmetic
+changed.
+
+**Protocol:** M5 Ultra, release `qwen`/`qwen-tok` at `56b777ae7`, GLM-5.3-Flash
+UD-IQ3_XXS, three real agents, 48,000-token roots, 196,608 capacity, released
+agent sampling defaults, 15 s ramp, 25 s pre-arm cool, 15 s pre-ramp thermal
+settle and **180 s** measurement windows. Four interleaved pairs: on/off,
+off/on, on/off, on/off. Each campaign held the canonical Metal lease and waited
+outside the lease until thermal pressure was <=1 and no compiler was active.
+All GPU holds were <=15 min. Timing windows recorded thermal 1; thermal 2
+occurred only outside the measurement windows. Six of eight windows had a
+compiler overlap flag; there is no isolated-host claim.
+
+| arm | tok/s | gap p50 / p99 / max ms | append TTFT p50 / p99 ms | TTFT n | prefill s | partial s | thermal | compile |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| on-1 | 84.28 | 27.8 / 174.3 / 639.1 | 937 / 9432 | 31 | 34.042 | 3.0009 | 1 | yes |
+| off-1 | 87.17 | 28.4 / 173.6 / 1260.4 | 900 / 5163 | 32 | 26.444 | 3.5840 | 2 | yes |
+| on-2 | 88.03 | 27.9 / 173.7 / 750.9 | 893 / 8787 | 29 | 31.296 | 2.0614 | 2 | no |
+| off-2 | 87.89 | 28.0 / 172.8 / 1240.5 | 896 / 5161 | 33 | 26.828 | 3.5524 | 2 | yes |
+| on-3 | 82.38 | 28.1 / 174.3 / 594.3 | 887 / 9424 | 31 | 38.675 | 2.8839 | 2 | yes |
+| off-3 | 85.76 | 28.0 / 169.2 / 779.0 | 886 / 4994 | 38 | 35.890 | 4.9486 | 2 | no |
+| on-4 | 83.42 | 28.1 / 174.9 / 657.1 | 895 / 9501 | 30 | 34.443 | 3.5131 | 2 | yes |
+| off-4 | 82.06 | 28.9 / 177.2 / 930.4 | 969 / 10174 | 29 | 40.282 | 2.6258 | 2 | yes |
+
+Raw per-arm totals are not comparable across arms: natural sampling completes
+different turn counts and one arm can pay a larger uncached prefix. The gate
+uses the same-label, same-append-width calls below.
+
+**Matched append calls.** Each pair matches calls with identical
+`spec.append_tokens`; deltas are on - off, so negative TTFT/prefill is a
+candidate win. CIs are 90% call-bootstrap (20,000 resamples).
+
+| pair | matched n | TTFT median ms [CI] | prefill median ms [CI] | TPS off-on | ITL p99 on-off ms | max gap on-off ms |
+|---|---:|---:|---:|---:|---:|---:|
+| p1 | 30 | **-56.96** [-125.68, -4.53] | **-20.93** [-75.93, -3.12] | +2.89 | +0.68 | -621.2 |
+| p2 | 27 | -57.67 [-124.30, +1.65] | **-26.59** [-123.53, -11.44] | -0.14 | +0.90 | -489.5 |
+| p3 | 31 | -30.82 [-116.88, +5.32] | -52.12 [-105.46, +6.10] | +3.38 | +5.07 | -184.7 |
+| p4 | 29 | **-115.40** [-175.29, -32.70] | **-78.69** [-138.05, -19.53] | -1.37 | -2.31 | -273.3 |
+| **pooled** | **117** | **-57.67** [-116.88, -20.46] | **-47.23** [-83.65, -18.08] | +1.19 [-0.45, +3.02] | +1.08 [-0.82, +3.22] | -392.2 mean |
+
+All four pairs have a negative matched TTFT and prefill median. The pooled
+median append TTFT is **5.9% below** the incumbent (`-57.67 ms` on an ~880 ms
+median) and pooled prefill is **9.0% below** (`-47.23 ms` on ~523 ms). TPS is
+**1.19 tok/s lower** on average (candidate/incumbent ratio 0.986) but the 90%
+CI crosses zero; ITL p99 is **+1.08 ms** (0.6%) with a CI crossing zero. The
+worst content gap improves in all four pairs (mean -392 ms).
+
+**Checkpoint-reuse outliers.** The unmatched per-arm TTFT p99 is inflated by
+one call per candidate arm (`a0-t7` at spec 45 rows, or `a2-t4` at spec 56)
+where the server reused about 48K/55K tokens instead of 55K and reprocessed
+6.6-7.1K tokens. The same event occurs in incumbent `off-4`, so it is a
+session/cache-state artifact rather than a route regression; it dominates the
+unmatched mean and p99 but not the matched medians. It is retained in the raw
+table rather than filtered.
+
+**Gate:** append latency and prefill both improve beyond noise; aggregate TPS
+and ITL p99 are not worse beyond noise; the worst gap improves. **The re-gated
+candidate qualifies for landing** under the standing rule. Caveats: the TPS
+point estimate is 1.4% lower, the host was not quiet (compiler overlap in 6/8
+windows), and the outlier tails need a session-cache follow-up.
+
 ## Reproduction and raw records
 
 Probe: `crates/qwen-llm/examples/glm_small_append_price.rs` (`routes`,
@@ -169,8 +246,32 @@ GLM_ROUTE_QUALITY_WIDTHS=16,32,64,96,161,512,768,1023 \
   target/iter/examples/glm_small_append_price <prompt> route-quality 81920
 ```
 
-Raw: `metagross:~/qwen-runs/2026-11-12-glm-append-routes/`
+Raw probe: `metagross:~/qwen-runs/2026-11-12-glm-append-routes/`
 (`routes-48k.jsonl`, `routes-80k.jsonl`, `routes-fine-{48k,80k}.jsonl`,
-`quality-{code,metal,python,prose}-80k.jsonl`, `build*.log`). Branch
-`perf/glm-append-routes`; not merged. M5 worktree and bundles removed after
-the packet.
+`quality-{code,metal,python,prose}-80k.jsonl`, `build*.log`).
+
+**Re-gate reproduction.** Release `qwen`/`qwen-tok` at `56b777ae7` (Rust tree
+unchanged by the later harness commit), model
+`glm-stock-iq3-download/UD-IQ3_XXS/...-00001-of-00004.gguf`, corpus
+`~/qwen-runs/2026-11-07-serve-agents/code.txt`. Each arm:
+
+```sh
+python3 scripts/bench/serve_realistic.py run \
+  --binary target/release/qwen --tokenizer target/release/qwen-tok \
+  --model "$MODEL" --corpus "$CORPUS" --plan plan-48k-180.json --out "$OUT" \
+  --arm default --ramp 15 --warm-tokens 48000 --context 196608 --cool 25 \
+  --sampling agent --port 18742 --max-thermal-pressure 1 \
+  --warmup-max-thermal-pressure 2 --settle-thermal-seconds 15 \
+  --env QWEN_GLM53_PREFILL_IQ_SMALL_ROWS=1
+```
+
+The incumbent arm uses `=0`; every run is lease-wrapped. `serve_realistic.py`
+now retains nearest-rank `gap_p99_s` and per-call token events so the packet
+can report ITL p99 and coherence without bulk responses. Raw:
+`metagross:~/qwen-runs/2026-11-12-glm-append-routes/regate/`
+(`serve/{on,off}-{1..4}`, `analysis.json`, `pooled-analysis.json`,
+`campaign-status.log`, `quiet-waits.log`, `gpu-tests-final.log`,
+`build-final3.log`). `qwen` sha256
+`2c2d77b2ad94cf88982647e70a3afd8a5341bc028169fc948b5b7899456f8eba`.
+Branch `perf/glm-append-routes`; not merged. M5 worktree, bundles and build
+output removed after the packet.

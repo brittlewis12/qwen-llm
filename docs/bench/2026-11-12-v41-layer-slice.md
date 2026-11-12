@@ -1,5 +1,11 @@
 # V4.1 layer-sliced prefill: exact native port, serve gate unmet
 
+Follow-up: the lead-approved sustained thermal method completed six valid
+180-second arms. Paired throughput is **+0.21%, 95% CI -25.12% to +25.53%**;
+the gate is inconclusive and the default remains off. See the
+[sustained packet](2026-11-12-v41-layer-slice-sustained.md) for the current
+result. The strict-thermal attempts below are retained as earlier evidence.
+
 The port is staged on `perf/v41-layer-sliced-prefill`, from main `932f3b729`,
 with **75/75 bitwise pairs** and five native cancellation/resume cases.
 **Default remains off.** Both incumbent serve controls were rejected by the

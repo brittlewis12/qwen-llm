@@ -45294,3 +45294,21 @@ value is analytic. Tests retain zero-variance agreement and mark a wide/noisy
 interval as inconclusive; individual tokens are not statistical replicates.
 All20 CPU harness tests pass. The measured harness/binary stay frozen at
 `abc3ba1a3` for the six-arm sustained-serve packet.
+
+## 2026-11-12 — V4.1 sustained six-arm gate: throughput inconclusive; keep off
+
+- Six valid release arms, ABBAAB,180s each,49,152 warm tokens, real sampling,
+  MS0 vs200/min500. Continuous60s<=1 before load and after warming; permit2
+  in-window, abort3. Same binary `abc3ba1a3`, one queued lease per arm.
+- Paired changes **-2.624%,+11.515%,-8.275%**. Mean **+0.206%,95% CI
+  [-25.117%,+25.529%]**. Width greatly exceeds+/-2pp; no non-inferiority claim
+  or forced default-on. Grand means86.502 off /86.400 on tok/s are misleading
+  without paired uncertainty. **Default stays0.**
+- Worst across windows3.437->2.874s (inconsistent across pairs); p99
+  30–55->191–220ms. Remaining long gap precedes first peer service; same1798-row
+  append disk reads vary6–883MB. Reported contradiction before any workaround;
+  none added. Peer rounds99/99/141; sampled completions coherent.
+- Per-arm delivered rates, all ITL/TTFT quantiles, partial-prefill seconds,
+  pressure0/1/2 durations and limitations are in the
+  [sustained note](bench/2026-11-12-v41-layer-slice-sustained.md). A3/B3 retain
+  69.5/93.7 seconds at pressure2. Compiler flags retained. Flash-Next price next.

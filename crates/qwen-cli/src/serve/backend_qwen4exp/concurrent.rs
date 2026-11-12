@@ -135,6 +135,10 @@ pub(super) struct Owner<'a> {
 }
 impl<'a> Owner<'a> {
     pub fn new(base: &'a mut FlashNextBackend) -> anyhow::Result<Self> {
+        let mut config = base.batching;
+        config.layer_policy = config
+            .layer_policy
+            .for_layers(base.loaded.config().layer_count as usize);
         let (factory, runner) = base.loaded.session_factory(&base.ctx)?;
         let mut native = if native_enabled() {
             match Qwen4ExpDecodeBatch::new(&runner, base.batching.active) {
@@ -208,7 +212,7 @@ impl<'a> Owner<'a> {
                 Driver::new(base.batching.active)
                     .with_prefill_policy(true, base.batching.decode_percent),
             ),
-            config: base.batching,
+            config,
             model_id: &base.model_id,
             default_max_tokens: base.default_max_tokens,
             max_piece_bytes: base.max_piece_bytes,

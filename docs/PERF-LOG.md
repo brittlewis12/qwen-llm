@@ -45347,3 +45347,6 @@ GPU-duration ratios average 0.99993 warm / 0.99996 cold. The selective adapter
 uses the existing Driver, row/frontier plan and validated checkpoint points;
 MS=0 preserves incumbent scheduling. It remains default-off pending six-arm
 sustained serve evidence. See [price and native gate](bench/2026-11-12-fn-layer-slice-price.md).
+
+- Flash-Next compatibility follow-up: explicit incumbent fallback for unprobed
+  layer counts, covered by the rollback policy test before the sustained packet.

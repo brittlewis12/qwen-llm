@@ -20,6 +20,12 @@ fn parse(key: &str, value: Option<&str>, default: usize) -> anyhow::Result<usize
     Ok(n)
 }
 impl Policy {
+    pub fn for_layers(self, layers: usize) -> Self {
+        Self {
+            ms: if layers == LAYERS { self.ms } else { 0 },
+            ..self
+        }
+    }
     pub fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
             ms: parse(MS, std::env::var(MS).ok().as_deref(), 0)?,
@@ -95,6 +101,10 @@ mod tests {
             ms: 200,
             minimum: 500,
         };
+        assert_eq!(on.for_layers(48).ms, 200);
+        for layers in [2, 12, 47, 49, 96] {
+            assert_eq!(on.for_layers(layers).ms, 0);
+        }
         for rows in [1, 32, 342] {
             let commands = std::collections::VecDeque::from([49152..49152 + rows]);
             assert!(!on.selects(&commands));

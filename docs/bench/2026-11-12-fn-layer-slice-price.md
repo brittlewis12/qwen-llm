@@ -86,3 +86,8 @@ peer service, including when Driver cancels before the next callback.
 
 The sustained serve gate is pending. Default remains zero; the native result
 alone does not establish the production throughput or latency gate.
+
+Compatibility review found the loader admits additional layer counts. The serve
+policy now explicitly falls back to incumbent execution unless the artifact has
+the probed 48 layers. This guard is covered by the policy test; the 48-layer
+native result is unchanged. No sustained arm was measured before this guard.

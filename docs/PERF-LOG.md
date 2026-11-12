@@ -45375,3 +45375,12 @@ cases pass; 18 sampled completions are coherent. All 698 serve tests pass,
 explain limits of the native price/bound; no workaround was added. See
 [sustained results](bench/2026-11-12-fn-layer-slice-serve.md) and
 [native price](bench/2026-11-12-fn-layer-slice-price.md).
+
+### 2026-11-12 — V4.1 sustained packet sampling clarification
+
+The six-arm packet used release-default temperature/top-p with fixed request
+seed 20261109, as the harness has always supplied. QWEN_FAST_SAMPLER is opt-in
+and was unset; explicit seed intent therefore does not alter the current
+production-default sampler path. Numbers and the default-off decision are
+unchanged: paired +0.206%, 95% CI [−25.117%, +25.529%]. See the
+[sustained note](bench/2026-11-12-v41-layer-slice-sustained.md).

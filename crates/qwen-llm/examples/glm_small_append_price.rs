@@ -642,7 +642,10 @@ mod probe {
                 depth_cursor += 1;
             }
         }
-        anyhow::ensure!(depth_cursor == sorted_depths.len(), "failed to capture all depth snapshots");
+        anyhow::ensure!(
+            depth_cursor == sorted_depths.len(),
+            "failed to capture all depth snapshots"
+        );
 
         emit(json!({
             "kind": "occupancy_header", "mode": "production_route_occupancy",
@@ -661,7 +664,10 @@ mod probe {
                 gate();
                 session.restore_snapshot(snapshot)?;
                 let (logits, stage) = session.prefill_chunk_stage_profiled(ctx, tokens)?;
-                anyhow::ensure!(logits.iter().all(|v| v.is_finite()), "non-finite occupancy logits");
+                anyhow::ensure!(
+                    logits.iter().all(|v| v.is_finite()),
+                    "non-finite occupancy logits"
+                );
                 let route_ids = session.perf_packed_route_ids(width)?;
 
                 let mut all_counts = Vec::new();
@@ -671,7 +677,10 @@ mod probe {
                     let mut counts = vec![0usize; weights.config.expert_count as usize];
                     for expert in routed_ids {
                         let expert = usize::try_from(expert)?;
-                        anyhow::ensure!(expert < counts.len(), "route id {expert} exceeds expert count");
+                        anyhow::ensure!(
+                            expert < counts.len(),
+                            "route id {expert} exceeds expert count"
+                        );
                         counts[expert] += 1;
                     }
                     let (gate_up_per_expert, down_per_expert) = route_weight_bytes(weights, block)?;
@@ -697,7 +706,10 @@ mod probe {
                 let guard = dispatch_profile_begin(ctx, 16384)?;
                 let profiled_logits = session.prefill_packed(ctx, tokens)?;
                 let report = dispatch_profile_finish(ctx, guard)?;
-                anyhow::ensure!(profiled_logits.iter().all(|v| v.is_finite()), "non-finite profiled logits");
+                anyhow::ensure!(
+                    profiled_logits.iter().all(|v| v.is_finite()),
+                    "non-finite profiled logits"
+                );
                 let (kernels, _, dispatches) = kernel_totals(&report);
                 let mut gate_up_ms = 0.0;
                 let mut down_ms = 0.0;
@@ -989,7 +1001,12 @@ mod probe {
         let occupancy_depths = if mode == "occupancy" {
             std::env::var("GLM_ROUTE_DEPTHS")
                 .ok()
-                .map(|value| value.split(',').filter_map(|item| item.trim().parse().ok()).collect())
+                .map(|value| {
+                    value
+                        .split(',')
+                        .filter_map(|item| item.trim().parse().ok())
+                        .collect()
+                })
                 .unwrap_or_else(|| vec![depth])
         } else {
             Vec::new()

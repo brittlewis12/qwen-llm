@@ -631,6 +631,23 @@ pub(super) fn grouped_down_policy(
     top_k: usize,
     rows: usize,
 ) -> GroupedDownPolicy {
+    #[cfg(feature = "perf-ablations")]
+    if dtype == GgmlType::IQ3_S {
+        match forced_expert_route() {
+            Some(ExpertRoute::ExpandedTensor) => {
+                return GroupedDownPolicy::Iq3STensorOrSmallCounts;
+            }
+            Some(ExpertRoute::TensorIqExpanded) => return GroupedDownPolicy::Iq3STensor,
+            Some(ExpertRoute::GroupedGeneric) => {
+                return if (32..=512).contains(&rows) {
+                    GroupedDownPolicy::Iq3SSmallCounts
+                } else {
+                    GroupedDownPolicy::Incumbent
+                };
+            }
+            _ => {}
+        }
+    }
     if super::tensor_q5_down::selected(arith, mode, dtype, (ffn, hidden, experts, top_k), rows) {
         GroupedDownPolicy::Q5KTensor
     } else if super::tensor_down::selected(arith, mode, dtype, rows)
@@ -1099,6 +1116,43 @@ pub(super) fn set_packet_half_max_rows(rows: usize) {
     PACKET_HALF_MAX_ROWS_OVERRIDE.with(|cell| cell.set(Some(rows)));
 }
 
+/// Probe-only routed-expert route forced across widths (`perf-ablations`).
+/// `None` restores the ordinary row policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "perf-ablations"), allow(dead_code))]
+pub(super) enum ExpertRoute {
+    /// Half-operand per-slot native packet (1..=128 rows).
+    PerSlotNative,
+    /// Incumbent grouped buckets with generic clamped kernels.
+    GroupedGeneric,
+    /// Grouped tensor gate/up with the short/expanded down policy.
+    ExpandedTensor,
+    /// Explicit tensor gate/up with IQ3_S tensor down below 1024 rows.
+    TensorIqExpanded,
+}
+
+#[cfg(feature = "perf-ablations")]
+thread_local! {
+    static EXPERT_ROUTE_OVERRIDE: std::cell::Cell<Option<ExpertRoute>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(feature = "perf-ablations")]
+pub(super) fn set_expert_route(route: Option<ExpertRoute>) {
+    EXPERT_ROUTE_OVERRIDE.with(|cell| cell.set(route));
+}
+
+#[cfg(feature = "perf-ablations")]
+fn forced_expert_route() -> Option<ExpertRoute> {
+    EXPERT_ROUTE_OVERRIDE.with(std::cell::Cell::get)
+}
+
+#[cfg(not(feature = "perf-ablations"))]
+#[inline(always)]
+fn forced_expert_route() -> Option<ExpertRoute> {
+    None
+}
+
 /// Half weights and inputs, F32 accumulation and SwiGLU. The native reduction
 /// differs from grouped MMA; the packet is row-independent up to the hard cap.
 fn packet_half_experts_selected(
@@ -1113,8 +1167,15 @@ fn packet_half_experts_selected(
     if PACKET_HALF_EXPERTS.with(std::cell::Cell::get) == Some(false) {
         return false;
     }
+    // The probe may force the packet anywhere the kernel admits (1..=128);
+    // every other forced route keeps it off.
+    let max_rows = match forced_expert_route() {
+        Some(ExpertRoute::PerSlotNative) => PACKET_HALF_MAX_ROWS,
+        Some(_) => return false,
+        None => packet_half_max_rows(),
+    };
     packet_fast_half(arith, mode)
-        && (1..=packet_half_max_rows()).contains(&rows)
+        && (1..=max_rows).contains(&rows)
         && crate::metal::all_slots_gate_up_native_half_rows_supported(gate, up)
         && crate::metal::all_slots_down_native_half_rows_supported(down)
 }
@@ -1177,15 +1238,20 @@ fn encode_experts_with_half(
     clamp: f32,
 ) -> Result<StageMode> {
     let mode = expert_mode(arith, b.gate_bank.dtype, b.up_bank.dtype, b.down_bank.dtype);
-    if super::tensor_gate_up::short_selected(
-        arith,
-        mode,
-        b.gate_bank.dtype,
-        b.up_bank.dtype,
-        (h, f, e, k),
-        rows,
-    ) && crate::metal::moe_grouped_tensor_selected(ctx)
-    {
+    let forced = forced_expert_route();
+    let use_short = match forced {
+        Some(ExpertRoute::ExpandedTensor) => true,
+        Some(_) => false,
+        None => super::tensor_gate_up::short_selected(
+            arith,
+            mode,
+            b.gate_bank.dtype,
+            b.up_bank.dtype,
+            (h, f, e, k),
+            rows,
+        ),
+    };
+    if use_short && crate::metal::moe_grouped_tensor_selected(ctx) {
         #[cfg(test)]
         record_census(Stage::RoutedExperts, "experts".into(), CensusPath::Half);
         crate::metal::encode_grouped_routed_experts_with_tensor_gate_up(
@@ -1202,14 +1268,20 @@ fn encode_experts_with_half(
         )?;
         return Ok(mode);
     }
-    if super::tensor_gate_up::selected(
-        arith,
-        mode,
-        b.gate_bank.dtype,
-        b.up_bank.dtype,
-        (h, f, e, k),
-        rows,
-    ) && let Some(half) = half
+    let use_tensor = match forced {
+        Some(ExpertRoute::TensorIqExpanded) => true,
+        Some(_) => false,
+        None => super::tensor_gate_up::selected(
+            arith,
+            mode,
+            b.gate_bank.dtype,
+            b.up_bank.dtype,
+            (h, f, e, k),
+            rows,
+        ),
+    };
+    if use_tensor
+        && let Some(half) = half
         && let Some(prepared) = crate::metal::expert_tensor_gate_up::prepare(
             ctx,
             enc,

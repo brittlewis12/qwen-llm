@@ -2918,5 +2918,32 @@ pub fn set_expert_packet_max_rows(rows: usize) {
     packed::set_packet_half_max_rows(rows);
 }
 
+/// Probe-only routed-expert route selector for the append route sweep.
+#[cfg(feature = "perf-ablations")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Glm5NextExpertRoute {
+    /// Half-operand per-slot native packet, admitted at 1..=128 rows.
+    PerSlotNative,
+    /// Incumbent grouped buckets with generic clamped kernels.
+    GroupedGeneric,
+    /// Grouped tensor gate/up with the short/expanded down policy.
+    ExpandedTensor,
+    /// Explicit tensor gate/up with IQ3_S tensor down below 1024 rows.
+    TensorIqExpanded,
+}
+
+/// Force one routed-expert route at every width the kernel admits, or restore
+/// the ordinary row policy with `None`.
+#[cfg(feature = "perf-ablations")]
+pub fn set_expert_route(route: Option<Glm5NextExpertRoute>) {
+    let route = route.map(|route| match route {
+        Glm5NextExpertRoute::PerSlotNative => packed::ExpertRoute::PerSlotNative,
+        Glm5NextExpertRoute::GroupedGeneric => packed::ExpertRoute::GroupedGeneric,
+        Glm5NextExpertRoute::ExpandedTensor => packed::ExpertRoute::ExpandedTensor,
+        Glm5NextExpertRoute::TensorIqExpanded => packed::ExpertRoute::TensorIqExpanded,
+    });
+    packed::set_expert_route(route);
+}
+
 #[cfg(test)]
 mod tests;

@@ -13,10 +13,14 @@
 //!  3. `threshold`: A/B the half-operand per-slot routed-expert packet against
 //!     grouped buckets at widths 8..=96, with full-vocab KL / signed dNLL and
 //!     the selected expert kernels at 32 rows.
+//!  4. `routes`: at a chosen depth, force every legal routed-expert route
+//!     (incumbent, per-slot native, grouped generic, expanded tensor, tensor
+//!     IQ) at the real append-width grid, with interleaved warm repetitions,
+//!     ordinary wall, the routed-expert stage, kernel names and logit deltas.
 //!
 //! Output is JSON lines. No production scheduling change.
 //!
-//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold] [depth]`
+//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold|routes] [depth]`
 
 #[cfg(not(feature = "perf-ablations"))]
 fn main() {
@@ -28,8 +32,8 @@ mod probe {
     use qwen_llm::{
         gguf::GgufFile,
         glm5_next_metal::{
-            GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch, Glm5NextSession, Glm5NextStageReport,
-            Glm5NextWeights, set_expert_packet_max_rows,
+            GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch, Glm5NextExpertRoute, Glm5NextSession,
+            Glm5NextStageReport, Glm5NextWeights, set_expert_packet_max_rows, set_expert_route,
         },
         metal::*,
         tokenizer::Tokenizer,
@@ -38,9 +42,14 @@ mod probe {
     use std::{collections::BTreeMap, io::Write, time::Instant};
 
     const CAPACITY: usize = 65536;
+    /// Deep appends need room above the 48K/80K roots.
+    const ROUTE_CAPACITY: usize = 98304;
     const PREFILL_ROWS: usize = 2048;
     const CENSUS_WIDTHS: [usize; 9] = [1, 2, 4, 8, 16, 32, 48, 64, 128];
     const THRESHOLD_WIDTHS: [usize; 8] = [8, 12, 16, 24, 32, 48, 64, 96];
+    const ROUTE_WIDTHS: [usize; 17] = [
+        8, 16, 24, 32, 48, 64, 96, 112, 128, 161, 192, 256, 384, 512, 768, 1023, 1024,
+    ];
     const GROUPED_MAX_ROWS: usize = 8;
     const PACKET_MAX_ROWS: usize = 128;
 
@@ -168,8 +177,9 @@ mod probe {
         weights: &'a Glm5NextWeights,
         ids: &[u32],
         depth: usize,
+        capacity: usize,
     ) -> anyhow::Result<Glm5NextSession<'a>> {
-        let mut session = Glm5NextSession::with_prefill_rows(ctx, weights, CAPACITY, PREFILL_ROWS)?;
+        let mut session = Glm5NextSession::with_prefill_rows(ctx, weights, capacity, PREFILL_ROWS)?;
         for part in ids[..depth].chunks(PREFILL_ROWS) {
             gate();
             session.prefill_packed(ctx, part)?;
@@ -184,7 +194,7 @@ mod probe {
         ids: &[u32],
         depth: usize,
     ) -> anyhow::Result<()> {
-        let mut session = new_session(ctx, weights, ids, depth)?;
+        let mut session = new_session(ctx, weights, ids, depth, CAPACITY)?;
         let snapshot = session.capture_snapshot()?;
 
         // A decode row is the middle path's floor anchor.
@@ -285,7 +295,7 @@ mod probe {
                 )
             })
             .collect::<Result<_, _>>()?;
-        let seed = new_session(ctx, weights, ids, depth)?;
+        let seed = new_session(ctx, weights, ids, depth, CAPACITY)?;
         let bank = seed.capture_snapshot()?;
         drop(seed);
         for session in sessions.iter_mut() {
@@ -391,7 +401,7 @@ mod probe {
         ids: &[u32],
         depth: usize,
     ) -> anyhow::Result<()> {
-        let mut session = new_session(ctx, weights, ids, depth)?;
+        let mut session = new_session(ctx, weights, ids, depth, CAPACITY)?;
         let snapshot = session.capture_snapshot()?;
         for width in THRESHOLD_WIDTHS {
             let tokens = &ids[depth..depth + width];
@@ -488,6 +498,159 @@ mod probe {
         Ok(())
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RouteArm {
+        Incumbent,
+        PerSlotNative,
+        GroupedGeneric,
+        ExpandedTensor,
+        TensorIqExpanded,
+    }
+
+    impl RouteArm {
+        fn name(self) -> &'static str {
+            match self {
+                Self::Incumbent => "incumbent",
+                Self::PerSlotNative => "per_slot_native",
+                Self::GroupedGeneric => "grouped_generic",
+                Self::ExpandedTensor => "expanded_tensor",
+                Self::TensorIqExpanded => "tensor_iq",
+            }
+        }
+
+        fn apply(self) {
+            set_expert_route(match self {
+                Self::Incumbent => None,
+                Self::PerSlotNative => Some(Glm5NextExpertRoute::PerSlotNative),
+                Self::GroupedGeneric => Some(Glm5NextExpertRoute::GroupedGeneric),
+                Self::ExpandedTensor => Some(Glm5NextExpertRoute::ExpandedTensor),
+                Self::TensorIqExpanded => Some(Glm5NextExpertRoute::TensorIqExpanded),
+            });
+        }
+    }
+
+    /// Every route the shipped kernels admit at `width`. The per-slot packet
+    /// validates 1..=128 rows; the others span the whole grid.
+    fn route_arms(width: usize) -> Vec<RouteArm> {
+        let mut arms = vec![RouteArm::Incumbent];
+        if width <= PACKET_MAX_ROWS {
+            arms.push(RouteArm::PerSlotNative);
+        }
+        arms.extend([
+            RouteArm::GroupedGeneric,
+            RouteArm::ExpandedTensor,
+            RouteArm::TensorIqExpanded,
+        ]);
+        arms
+    }
+
+    /// Force each legal routed-expert route at every width, with interleaved
+    /// warm repetitions. The ordinary wall is the timing number; the stage
+    /// profile and kernel census attribute the routed-expert time.
+    fn routes(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        ids: &[u32],
+        depth: usize,
+        capacity: usize,
+    ) -> anyhow::Result<()> {
+        let mut session = new_session(ctx, weights, ids, depth, capacity)?;
+        let snapshot = session.capture_snapshot()?;
+        for (width_index, width) in ROUTE_WIDTHS.into_iter().enumerate() {
+            let tokens = &ids[depth..depth + width];
+            let arms = route_arms(width);
+
+            // Warm each route once so the first timed call is not first-touch.
+            for &arm in &arms {
+                arm.apply();
+                gate();
+                session.restore_snapshot(&snapshot)?;
+                let logits = session.prefill_packed(ctx, tokens)?;
+                anyhow::ensure!(logits.iter().all(|v| v.is_finite()), "non-finite warm");
+            }
+
+            let mut walls: Vec<Vec<f64>> = arms.iter().map(|_| Vec::new()).collect();
+            let mut last_logits: Vec<Option<Vec<f32>>> = arms.iter().map(|_| None).collect();
+            for rep in 0..3 {
+                let n = arms.len();
+                let shift = (rep + width_index) % n;
+                let order: Vec<usize> = (0..n).map(|i| (i + shift) % n).collect();
+                for &index in &order {
+                    arms[index].apply();
+                    gate();
+                    session.restore_snapshot(&snapshot)?;
+                    let t = Instant::now();
+                    let out = session.prefill_packed(ctx, tokens)?;
+                    walls[index].push(t.elapsed().as_secs_f64() * 1e3);
+                    anyhow::ensure!(out.iter().all(|v| v.is_finite()), "non-finite logits");
+                    if rep == 2 {
+                        last_logits[index] = Some(out);
+                    }
+                }
+            }
+
+            let incumbent = last_logits[0].clone().expect("incumbent logits");
+            let next = ids[depth + width];
+            for (index, &arm) in arms.iter().enumerate() {
+                arm.apply();
+                gate();
+                session.restore_snapshot(&snapshot)?;
+                let t = Instant::now();
+                let (_out, staged) = session.prefill_chunk_stage_profiled(ctx, tokens)?;
+                let staged_wall = t.elapsed().as_secs_f64() * 1e3;
+                let stages = stage_totals(&staged);
+                let routed_ms = stages.get("routed_experts").copied();
+
+                // Name the selected expert kernels at representative widths.
+                let mut kernels = Vec::new();
+                if matches!(width, 32 | 512) {
+                    gate();
+                    session.restore_snapshot(&snapshot)?;
+                    let guard = dispatch_profile_begin(ctx, 16384)?;
+                    let out = session.prefill_packed(ctx, tokens)?;
+                    let report = dispatch_profile_finish(ctx, guard)?;
+                    anyhow::ensure!(out.iter().all(|v| v.is_finite()), "non-finite profile");
+                    let mut by_name = BTreeMap::<String, (usize, f64)>::new();
+                    for row in &report.rows {
+                        if row.kernel.contains("expert") || row.kernel.contains("moe_") {
+                            let e = by_name.entry(row.kernel.clone()).or_default();
+                            e.0 += 1;
+                            e.1 += row.gpu_ns.unwrap_or(0) as f64 / 1e6;
+                        }
+                    }
+                    kernels = by_name
+                        .into_iter()
+                        .map(|(k, (c, ms))| json!({"kernel": k, "calls": c, "gpu_ms": ms}))
+                        .collect();
+                }
+
+                let logits = last_logits[index].as_ref().expect("route logits");
+                let max_abs = qwen_llm::compare::report_max_abs_diff_f32(
+                    incumbent.iter().copied(),
+                    logits.iter().copied(),
+                );
+                emit(json!({
+                    "kind": "route", "depth": depth, "capacity": capacity,
+                    "width": width, "arm": arm.name(),
+                    "wall_ms": median(walls[index].clone()), "walls_ms": walls[index],
+                    "staged_wall_ms": staged_wall,
+                    "staged_gpu_ms": staged.command_gpu_ms,
+                    "routed_experts_ms": routed_ms,
+                    "stages": stages,
+                    "max_abs_logit_diff": max_abs,
+                    "top1_incumbent": top1(&incumbent), "top1_arm": top1(logits),
+                    "top1_agree": top1(&incumbent) == top1(logits),
+                    "kl_incumbent_arm": kl(&incumbent, logits),
+                    "dnll_signed_arm": log_prob(&incumbent, next) - log_prob(logits, next),
+                    "kernels": kernels,
+                    "pressure": pressure(), "loadavg": loadavg(),
+                }));
+            }
+        }
+        set_expert_route(None);
+        Ok(())
+    }
+
     pub fn run() -> anyhow::Result<()> {
         assert!(
             std::env::var_os("QWEN_METAL_LEASE_FD").is_some(),
@@ -496,7 +659,7 @@ mod probe {
         let args: Vec<String> = std::env::args().collect();
         let corpus = args.get(1).ok_or_else(|| {
             anyhow::anyhow!(
-                "usage: glm_small_append_price <corpus> [all|census|batch|threshold] [depth]"
+                "usage: glm_small_append_price <corpus> [all|census|batch|threshold|routes] [depth]"
             )
         })?;
         let mode = args.get(2).map(String::as_str).unwrap_or("all");
@@ -506,8 +669,21 @@ mod probe {
             .transpose()?
             .unwrap_or(48 * 1024);
         anyhow::ensure!(
-            matches!(mode, "all" | "census" | "batch" | "threshold"),
+            matches!(mode, "all" | "census" | "batch" | "threshold" | "routes"),
             "unknown mode {mode}"
+        );
+        let capacity = if mode == "routes" {
+            std::env::var("GLM_APPEND_CAPACITY")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(ROUTE_CAPACITY)
+        } else {
+            CAPACITY
+        };
+        let needed_width = if mode == "routes" { 1024 } else { 256 };
+        anyhow::ensure!(
+            capacity >= depth + needed_width + 1,
+            "capacity {capacity} cannot hold depth {depth} plus {needed_width} rows"
         );
 
         let ctx = MetalContext::new()?;
@@ -525,15 +701,16 @@ mod probe {
             .map(|t| t as u32)
             .collect();
         anyhow::ensure!(
-            ids.len() >= depth + 256,
+            ids.len() >= depth + needed_width + 1,
             "corpus has {} tokens, need {}",
             ids.len(),
-            depth + 256
+            depth + needed_width + 1
         );
         let weights = Glm5NextWeights::load(&ctx, &gguf)?;
         emit(json!({
             "kind": "header", "mode": mode, "depth": depth,
-            "capacity": CAPACITY, "prefill_rows": PREFILL_ROWS,
+            "capacity": capacity, "prefill_rows": PREFILL_ROWS,
+            "route_widths": if mode == "routes" { Some(ROUTE_WIDTHS) } else { None },
             "corpus_tokens": ids.len(), "device": ctx.device_facts(),
             "pressure": pressure(), "loadavg": loadavg(),
         }));
@@ -546,6 +723,9 @@ mod probe {
         }
         if mode == "threshold" {
             threshold(&ctx, &weights, &ids, depth)?;
+        }
+        if mode == "routes" {
+            routes(&ctx, &weights, &ids, depth, capacity)?;
         }
         emit(json!({
             "kind": "done", "pressure": pressure(), "loadavg": loadavg(),

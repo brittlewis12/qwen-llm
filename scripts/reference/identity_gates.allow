@@ -1,4 +1,5 @@
 # path<TAB>stable matched token or * for an eligible module<TAB>reason category<TAB>reason / removal trigger
+crates/qwen-cli/src/bench/artifact_choice.rs	4_294_967_296	provenance	Explicit cold CED profile soft coalescing target passed to the fit probe; not an artifact byte count or identity predicate. Mirrors the family_options cold-prefill selector.
 crates/qwen-cli/src/dflash_k0s.rs	*	frozen_experiment	pinned census evidence and frozen research records
 crates/qwen-cli/src/dsv4_mhc_delete.rs	*	frozen_experiment	pinned census evidence and frozen research records
 crates/qwen-cli/src/dsv4_prefill.rs	checkpoint_content_identity	durable_binding	strong content identity binds durable snapshots to the model weights

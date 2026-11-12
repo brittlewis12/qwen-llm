@@ -156,6 +156,40 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   reproduction: `docs/bench/2026-11-11-two-queue-causal.md`; raw
   `metagross:~/qwen-runs/2026-11-11-two-queue/`. Lane bundles, M5 worktree and
   build output removed after verification.
+## 2026-11-12 - GLM Append Routes: Tensor IQ Wins The Cliffs, Traffic Gate Fails
+
+- **Probe and decision; no production change.** A `perf-ablations` route
+  selector and a `routes`/`route-quality` probe forced the per-slot packet,
+  grouped generic, expanded tensor and explicit tensor IQ routes at 8-1024
+  rows on GLM-5.3-Flash UD-IQ3_XXS, M5 Ultra, `--profile iter`, 48K and 80K
+  depth, three interleaved warm repetitions. Thermal 0-1 during timed reps.
+- **The explicit tensor IQ route is the cheapest every measured width above
+  the packet island.** At 80K it saves **27-33%** of append wall at 16-112
+  (e.g. 32 rows **315.1 -> 231.7 ms**, routed experts **200.2 -> 116.5 ms**),
+  **2.0-3.1%** at 128-512 (already tensor in production, bitwise logits), and
+  **26-27%** at 768-1023 (production is grouped there because the IQ gate
+  starts at 1024). At 8 rows the incumbent per-slot packet is still cheapest.
+  The 9-15 fine grid is 31-34% below the incumbent but a few percent above the
+  packet. Kernel census confirms `moe_swiglu...generic` + `m128_n16_retile`
+  on the incumbent and the `_tensor`/`_f16act` pair on the candidate.
+- **Paired non-inferiority passes.** Three code prompts at 80K, per-position
+  signed dNLL against the incumbent, 20k prompt bootstrap: the 95% upper bound
+  is at most **+0.00204** nats/token (margin +0.01); 161/512 rows are bitwise;
+  top-1 agreement 99-100%. The prose control also passes.
+- **Traffic gate fails.** On the archived real three-agent serve calls the
+  candidate is **10.05-13.23%** of traffic-weighted append wall at 48K and
+  **10.05-12.82%** at 80K, against the required 20%. The 128-512 band, where
+  the real median sits, is already on the tensor route; only the 9-112 and
+  768-1023 islands have 26-32% headroom. The stated production median of 161
+  rows at 75-81K is not present in the archived M5 logs (48K, medians 67-342);
+  recompute the gate on the real production distribution before re-landing.
+- **No serve A/B was run** because the gate failed before Step 7. The
+  default-on implementation is at `46911dd35`, reverted at `aa83b92c0`; the
+  probe remains on `perf/glm-append-routes`. Step 2 is still the floor at
+  128-512: a 1.25x grouped-expert kernel there is worth only ~5-8% wall.
+- Evidence: `docs/bench/2026-11-12-glm-append-routes.md`; raw
+  `metagross:~/qwen-runs/2026-11-12-glm-append-routes/`. No merge; M5
+  worktree and bundles removed.
 
 ## 2026-11-11 - Resource-Scoped Barriers Do Not Release The Wave Floor
 

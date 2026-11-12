@@ -29,11 +29,13 @@ fn main() {
 
 #[cfg(feature = "perf-ablations")]
 mod probe {
+    use objc2_metal::MTLBuffer;
     use qwen_llm::{
         gguf::GgufFile,
         glm5_next_metal::{
-            GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch, Glm5NextExpertRoute, Glm5NextSession,
-            Glm5NextStageReport, Glm5NextWeights, set_expert_packet_max_rows, set_expert_route,
+            GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch, Glm5NextCapturedRows, Glm5NextExpertRoute,
+            Glm5NextRowBank, Glm5NextRowBankPlan, Glm5NextSession, Glm5NextStageReport,
+            Glm5NextWeights, set_expert_packet_max_rows, set_expert_route,
         },
         metal::*,
         tokenizer::Tokenizer,
@@ -651,6 +653,131 @@ mod probe {
         Ok(())
     }
 
+    fn read_f32(t: &MetalTensor) -> Vec<f32> {
+        let bytes = t.n_bytes() as usize;
+        assert_eq!(bytes % 4, 0, "F32 view");
+        unsafe {
+            std::slice::from_raw_parts(
+                t.buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(t.offset as usize)
+                    .cast::<f32>(),
+                bytes / 4,
+            )
+            .to_vec()
+        }
+    }
+
+    fn route_quality_widths() -> Vec<usize> {
+        let default = [16usize, 24, 32, 48, 64, 96, 112, 128, 161, 192, 256];
+        std::env::var("GLM_ROUTE_QUALITY_WIDTHS")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter_map(|item| item.trim().parse().ok())
+                    .filter(|width| *width > 0)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|widths| !widths.is_empty())
+            .unwrap_or_else(|| default.to_vec())
+    }
+
+    /// Paired per-position dNLL of each forced route against the incumbent at
+    /// the widths whose policy changes. One prompt per invocation; the cohort
+    /// analysis bootstraps over prompt files.
+    fn route_quality(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        ids: &[u32],
+        depth: usize,
+        capacity: usize,
+    ) -> anyhow::Result<()> {
+        let widths = route_quality_widths();
+        let max_width = *widths.iter().max().expect("quality widths");
+        anyhow::ensure!(
+            ids.len() >= depth + max_width + 1,
+            "prompt has {} tokens, need {}",
+            ids.len(),
+            depth + max_width + 1
+        );
+        let mut session = new_session(ctx, weights, ids, depth, capacity)?;
+        let snapshot = session.capture_snapshot()?;
+        let plan = Glm5NextRowBankPlan::new(&weights.config, &[], 0, max_width)?;
+        let mut bank = Glm5NextRowBank::new(ctx, weights, plan)?;
+        let vocab = weights.config.vocab_size as usize;
+        let routes = [
+            RouteArm::PerSlotNative,
+            RouteArm::GroupedGeneric,
+            RouteArm::ExpandedTensor,
+            RouteArm::TensorIqExpanded,
+        ];
+
+        for width in widths {
+            let append = &ids[depth..depth + width];
+            let actual: Vec<u32> = ids[depth + 1..depth + width + 1].to_vec();
+
+            let capture = |session: &mut Glm5NextSession,
+                           bank: &mut Glm5NextRowBank|
+             -> anyhow::Result<Vec<Vec<f32>>> {
+                let captured: Glm5NextCapturedRows<'_> =
+                    session.verify_packed_with_captures(ctx, append, bank)?;
+                let flat = read_f32(captured.logits().expect("all-row logits"));
+                anyhow::ensure!(
+                    flat.len() == width * vocab,
+                    "logit view {} != {}",
+                    flat.len(),
+                    width * vocab
+                );
+                Ok((0..width)
+                    .map(|row| flat[row * vocab..(row + 1) * vocab].to_vec())
+                    .collect())
+            };
+
+            set_expert_route(None);
+            gate();
+            session.restore_snapshot(&snapshot)?;
+            let incumbent = capture(&mut session, &mut bank)?;
+
+            for &route in &routes {
+                if route == RouteArm::PerSlotNative && width > PACKET_MAX_ROWS {
+                    continue;
+                }
+                route.apply();
+                gate();
+                session.restore_snapshot(&snapshot)?;
+                let candidate = capture(&mut session, &mut bank)?;
+                let mut dnll = Vec::with_capacity(width);
+                let mut kl_both = Vec::with_capacity(width);
+                let mut top1_agree = 0usize;
+                for row in 0..width {
+                    let (i, c) = (&incumbent[row], &candidate[row]);
+                    dnll.push(log_prob(i, actual[row]) - log_prob(c, actual[row]));
+                    kl_both.push(kl(i, c));
+                    if top1(i) == top1(c) {
+                        top1_agree += 1;
+                    }
+                }
+                let mean_dnll = dnll.iter().sum::<f64>() / width as f64;
+                emit(json!({
+                    "kind": "route_quality", "depth": depth, "capacity": capacity,
+                    "width": width, "arm": route.name(),
+                    "positions": width,
+                    "mean_dnll_vs_incumbent": mean_dnll,
+                    "max_abs_dnll": dnll.iter().map(|v| v.abs()).fold(0.0, f64::max),
+                    "mean_kl_incumbent_arm": kl_both.iter().sum::<f64>() / width as f64,
+                    "top1_agree": top1_agree,
+                    "dnll": dnll,
+                    "pressure": pressure(), "loadavg": loadavg(),
+                }));
+            }
+        }
+        set_expert_route(None);
+        Ok(())
+    }
+
     pub fn run() -> anyhow::Result<()> {
         assert!(
             std::env::var_os("QWEN_METAL_LEASE_FD").is_some(),
@@ -659,7 +786,7 @@ mod probe {
         let args: Vec<String> = std::env::args().collect();
         let corpus = args.get(1).ok_or_else(|| {
             anyhow::anyhow!(
-                "usage: glm_small_append_price <corpus> [all|census|batch|threshold|routes] [depth]"
+                "usage: glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality] [depth]"
             )
         })?;
         let mode = args.get(2).map(String::as_str).unwrap_or("all");
@@ -669,10 +796,18 @@ mod probe {
             .transpose()?
             .unwrap_or(48 * 1024);
         anyhow::ensure!(
-            matches!(mode, "all" | "census" | "batch" | "threshold" | "routes"),
+            matches!(
+                mode,
+                "all" | "census" | "batch" | "threshold" | "routes" | "route-quality"
+            ),
             "unknown mode {mode}"
         );
-        let capacity = if mode == "routes" {
+        let quality_widths = if mode == "route-quality" {
+            route_quality_widths()
+        } else {
+            Vec::new()
+        };
+        let capacity = if matches!(mode, "routes" | "route-quality") {
             std::env::var("GLM_APPEND_CAPACITY")
                 .ok()
                 .and_then(|value| value.parse().ok())
@@ -680,7 +815,13 @@ mod probe {
         } else {
             CAPACITY
         };
-        let needed_width = if mode == "routes" { 1024 } else { 256 };
+        let needed_width = if mode == "routes" {
+            1024
+        } else if mode == "route-quality" {
+            *quality_widths.iter().max().expect("quality widths")
+        } else {
+            256
+        };
         anyhow::ensure!(
             capacity >= depth + needed_width + 1,
             "capacity {capacity} cannot hold depth {depth} plus {needed_width} rows"
@@ -711,6 +852,7 @@ mod probe {
             "kind": "header", "mode": mode, "depth": depth,
             "capacity": capacity, "prefill_rows": PREFILL_ROWS,
             "route_widths": if mode == "routes" { Some(ROUTE_WIDTHS) } else { None },
+            "quality_widths": if mode == "route-quality" { Some(quality_widths) } else { None },
             "corpus_tokens": ids.len(), "device": ctx.device_facts(),
             "pressure": pressure(), "loadavg": loadavg(),
         }));
@@ -726,6 +868,9 @@ mod probe {
         }
         if mode == "routes" {
             routes(&ctx, &weights, &ids, depth, capacity)?;
+        }
+        if mode == "route-quality" {
+            route_quality(&ctx, &weights, &ids, depth, capacity)?;
         }
         emit(json!({
             "kind": "done", "pressure": pressure(), "loadavg": loadavg(),

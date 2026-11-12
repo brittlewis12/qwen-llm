@@ -91,6 +91,51 @@ pub(crate) fn capacity(
     width == 32 && threads >= required && stat.checked_add(dynamic).is_some_and(|n| n <= limit)
 }
 
+/// Down composition admitted by the explicit tensor gate/up adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DownRoute {
+    /// Native tensor down; a declined tier or PSO falls back to the ordinary
+    /// grouped gate/up instead of this composition.
+    Tensor,
+    /// Native tensor down, with the small-count retile when the tensor tier
+    /// or PSO declines.
+    TensorOrSmallCounts,
+    /// Incumbent grouped down (generic, or the IQ4_XS kernel).
+    Incumbent,
+}
+
+/// Maps a routed down policy onto this composition. The grouped adapter admits
+/// `Iq3STensorOrSmallCounts` for IQ3_S down, so the explicit adapter must admit
+/// the same pairing; otherwise short appends silently take the F32-input
+/// grouped gate/up instead of the intended Half-storage composition.
+pub(crate) fn down_route(down: GgmlType, policy: GroupedDownPolicy) -> Option<DownRoute> {
+    match (down, policy) {
+        (GgmlType::Q5_K, GroupedDownPolicy::Q5KTensor) => Some(DownRoute::Tensor),
+        (GgmlType::IQ3_S, GroupedDownPolicy::Iq3STensor) => Some(DownRoute::Tensor),
+        (GgmlType::IQ3_S, GroupedDownPolicy::Iq3STensorOrSmallCounts) => {
+            Some(DownRoute::TensorOrSmallCounts)
+        }
+        (GgmlType::IQ3_S | GgmlType::IQ4_XS | GgmlType::Q6_K, GroupedDownPolicy::Incumbent) => {
+            Some(DownRoute::Incumbent)
+        }
+        _ => None,
+    }
+}
+
+enum PreparedDown<'a> {
+    Tensor(super::expert_tensor_down::PreparedDown<'a>),
+    SmallCounts(super::iq3_s_down_retile::PreparedDown<'a>),
+}
+
+impl PreparedDown<'_> {
+    fn encode(self) -> Result<(), MetalError> {
+        match self {
+            Self::Tensor(down) => down.encode(),
+            Self::SmallCounts(down) => down.encode(),
+        }
+    }
+}
+
 pub(crate) struct Prepared<'a> {
     ctx: &'a MetalContext,
     enc: &'a KernelEncoder,
@@ -99,7 +144,7 @@ pub(crate) struct Prepared<'a> {
     dims: [usize; 5],
     clamp: f32,
     adaptive: bool,
-    tensor_down: Option<super::expert_tensor_down::PreparedDown<'a>>,
+    down: Option<PreparedDown<'a>>,
 }
 
 fn flat(t: &MetalTensor) -> MetalTensor {
@@ -116,7 +161,7 @@ impl Prepared<'_> {
             dims: [h, f, e, top, rows],
             clamp,
             adaptive,
-            tensor_down,
+            down,
         } = self;
         // normed is rewritten by FFN normalization after KDA. Always recopy.
         encode_scatter_offset_f32_to_f16(ctx, enc, &flat(b.input), &flat(&half), 0, h * rows)?;
@@ -166,7 +211,7 @@ impl Prepared<'_> {
                 Some(clamp),
             )?;
         }
-        if let Some(down) = tensor_down {
+        if let Some(down) = down {
             down.encode()?;
         } else if b.down_bank.dtype == GgmlType::IQ4_XS {
             encode_moe_down_iq4_xs_f32_grouped_slots(
@@ -232,18 +277,13 @@ pub(crate) fn prepare<'a>(
         b.gate_bank.dtype,
         GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::IQ2_S | GgmlType::IQ3_S
     ) || b.gate_bank.dtype != b.up_bank.dtype
-        || !matches!(
-            (b.down_bank.dtype, policy),
-            (GgmlType::Q5_K, GroupedDownPolicy::Q5KTensor)
-                | (GgmlType::IQ3_S, GroupedDownPolicy::Iq3STensor)
-                | (GgmlType::IQ3_S, GroupedDownPolicy::Incumbent)
-                | (GgmlType::IQ4_XS, GroupedDownPolicy::Incumbent)
-                | (GgmlType::Q6_K, GroupedDownPolicy::Incumbent)
-        )
         || rows > 2048
     {
         return Ok(None);
     }
+    let Some(route) = down_route(b.down_bank.dtype, policy) else {
+        return Ok(None);
+    };
     geometry(h, f, e, top, rows)?;
     check_encoder(ctx, enc)?;
     if !clamp.is_finite() || clamp <= 0.0 {
@@ -326,10 +366,7 @@ pub(crate) fn prepare<'a>(
         TensorActivation::F16,
     )
     .unwrap();
-    let down_tensor = matches!(
-        policy,
-        GroupedDownPolicy::Q5KTensor | GroupedDownPolicy::Iq3STensor
-    );
+    let down_tensor = matches!(route, DownRoute::Tensor | DownRoute::TensorOrSmallCounts);
     let down = if down_tensor {
         moe_grouped_tensor_pipeline_name(
             MoeGroupedTensorRole::Down,
@@ -352,8 +389,12 @@ pub(crate) fn prepare<'a>(
         ("kernel_moe_route_bucket_slots_f32", false, 0, 256),
         ("kernel_moe_weighted_sum_packed_f32", false, 0, 32),
     ];
+    // The small-count retile owns tensor-down capacity decline; a missing
+    // pipeline is still an error below. Other routes require their down PSO.
+    let down_required = route != DownRoute::TensorOrSmallCounts;
     let mut supported = true;
     for (_index, (name, tensor, dynamic, threads)) in specs.into_iter().enumerate() {
+        let required = down_required || _index != 3;
         #[cfg(test)]
         let name = if matches!(FAULT.with(std::cell::Cell::get), Some(Fault::Missing(i)) if i == _index)
             || (matches!(
@@ -382,20 +423,23 @@ pub(crate) fn prepare<'a>(
         } else {
             limit
         };
-        supported &= capacity(
-            p.threadExecutionWidth(),
-            p.maxTotalThreadsPerThreadgroup(),
-            p.staticThreadgroupMemoryLength(),
-            dynamic,
-            limit,
-            threads,
-        );
+        if required {
+            supported &= capacity(
+                p.threadExecutionWidth(),
+                p.maxTotalThreadsPerThreadgroup(),
+                p.staticThreadgroupMemoryLength(),
+                dynamic,
+                limit,
+                threads,
+            );
+        }
         #[cfg(test)]
-        if matches!(FAULT.with(std::cell::Cell::get), Some(Fault::Capacity(i)) if i == _index)
-            || (matches!(
-                FAULT.with(std::cell::Cell::get),
-                Some(Fault::CapacityAndMissing)
-            ) && _index == 0)
+        if required
+            && (matches!(FAULT.with(std::cell::Cell::get), Some(Fault::Capacity(i)) if i == _index)
+                || (matches!(
+                    FAULT.with(std::cell::Cell::get),
+                    Some(Fault::CapacityAndMissing)
+                ) && _index == 0))
         {
             supported = false;
         }
@@ -419,27 +463,50 @@ pub(crate) fn prepare<'a>(
     } else {
         false
     };
-    let tensor_down = if down_tensor {
-        let prepared = super::expert_tensor_down::prepare(
-            ctx,
-            enc,
-            b.down_bank,
-            &flat(b.inner),
-            b.counts,
-            b.slots,
-            &flat(b.slot_out),
-            f,
-            h,
-            e,
-            top,
-            rows,
-        )?;
-        supported &= prepared.is_some();
-        prepared
-    } else {
-        None
-    };
     if !supported {
+        return Ok(None);
+    }
+    let down = match route {
+        DownRoute::Incumbent => None,
+        DownRoute::Tensor | DownRoute::TensorOrSmallCounts => {
+            let tensor = super::expert_tensor_down::prepare(
+                ctx,
+                enc,
+                b.down_bank,
+                &flat(b.inner),
+                b.counts,
+                b.slots,
+                &flat(b.slot_out),
+                f,
+                h,
+                e,
+                top,
+                rows,
+            )?;
+            match tensor {
+                Some(down) => Some(PreparedDown::Tensor(down)),
+                None if route == DownRoute::Tensor => return Ok(None),
+                // Borrow the admitted bindings directly: the retile checks
+                // element counts, and this keeps the prepared down independent
+                // of any flattened temporaries in `prepare`.
+                None => super::iq3_s_down_retile::prepare_small_counts(
+                    ctx,
+                    enc,
+                    b.down_bank,
+                    b.inner,
+                    b.counts,
+                    b.slots,
+                    b.slot_out,
+                    f,
+                    h,
+                    e,
+                    rows,
+                )?
+                .map(PreparedDown::SmallCounts),
+            }
+        }
+    };
+    if down.is_none() && route != DownRoute::Incumbent {
         return Ok(None);
     }
     Ok(Some(Prepared {
@@ -450,6 +517,6 @@ pub(crate) fn prepare<'a>(
         dims: [h, f, e, top, rows],
         clamp,
         adaptive,
-        tensor_down,
+        down,
     }))
 }

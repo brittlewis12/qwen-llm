@@ -269,3 +269,107 @@ fn cpu_gate_up_geometry_and_capacity_are_checked() {
         assert!(!adapter::capacity(w, t, s, d, l, r));
     }
 }
+
+#[test]
+fn cpu_explicit_adapter_admits_each_down_policy_by_dtype() {
+    use adapter::{DownRoute, down_route};
+    for policy in [
+        GroupedDownPolicy::Incumbent,
+        GroupedDownPolicy::Iq3SSmallCounts,
+        GroupedDownPolicy::Iq3STensor,
+        GroupedDownPolicy::Iq3STensorOrSmallCounts,
+        GroupedDownPolicy::Q5KTensor,
+    ] {
+        for dtype in [
+            GgmlType::F32,
+            GgmlType::F16,
+            GgmlType::Q4_K,
+            GgmlType::Q5_K,
+            GgmlType::Q6_K,
+            GgmlType::IQ2_S,
+            GgmlType::IQ3_S,
+            GgmlType::IQ4_XS,
+            GgmlType::Q8_0,
+        ] {
+            let expected = match (dtype, policy) {
+                (GgmlType::Q5_K, GroupedDownPolicy::Q5KTensor) => Some(DownRoute::Tensor),
+                (GgmlType::IQ3_S, GroupedDownPolicy::Iq3STensor) => Some(DownRoute::Tensor),
+                (GgmlType::IQ3_S, GroupedDownPolicy::Iq3STensorOrSmallCounts) => {
+                    Some(DownRoute::TensorOrSmallCounts)
+                }
+                (
+                    GgmlType::IQ3_S | GgmlType::IQ4_XS | GgmlType::Q6_K,
+                    GroupedDownPolicy::Incumbent,
+                ) => Some(DownRoute::Incumbent),
+                _ => None,
+            };
+            assert_eq!(down_route(dtype, policy), expected, "{dtype:?}/{policy:?}");
+        }
+    }
+    // The grouped adapter accepts this pairing, so the explicit adapter must
+    // not decline it. This is the regression that silently took short appends
+    // through the F32-input grouped gate/up.
+    assert_eq!(
+        down_route(GgmlType::IQ3_S, GroupedDownPolicy::Iq3STensorOrSmallCounts),
+        Some(DownRoute::TensorOrSmallCounts)
+    );
+}
+
+#[test]
+fn cpu_glm_small_append_policy_maps_to_the_explicit_adapter() {
+    use crate::glm5_next_metal::row_policy;
+    use adapter::{DownRoute, down_route};
+    for rows in [128, 161, 256, 384, 511, 512] {
+        let policy = packed::grouped_down_policy(
+            HALF,
+            StageMode::Fast,
+            GgmlType::IQ3_S,
+            2048,
+            4096,
+            288,
+            8,
+            rows,
+        );
+        assert!(
+            down_route(GgmlType::IQ3_S, policy).is_some(),
+            "explicit adapter declined IQ3_S/{policy:?} at {rows} rows"
+        );
+        if rows == 512 || row_policy::small_expanded(rows) {
+            assert_eq!(policy, GroupedDownPolicy::Iq3STensorOrSmallCounts);
+            assert_eq!(
+                down_route(GgmlType::IQ3_S, policy),
+                Some(DownRoute::TensorOrSmallCounts)
+            );
+        }
+    }
+    // The 32-row route was already explicit.
+    let policy = packed::grouped_down_policy(
+        HALF,
+        StageMode::Fast,
+        GgmlType::IQ3_S,
+        2048,
+        4096,
+        288,
+        8,
+        32,
+    );
+    assert_eq!(policy, GroupedDownPolicy::Iq3STensor);
+    assert_eq!(down_route(GgmlType::IQ3_S, policy), Some(DownRoute::Tensor));
+    // IQ4_XS-down exception blocks keep the incumbent down policy and remain
+    // on the explicit composition.
+    let policy = packed::grouped_down_policy(
+        HALF,
+        StageMode::Fast,
+        GgmlType::IQ4_XS,
+        2048,
+        4096,
+        288,
+        8,
+        161,
+    );
+    assert_eq!(policy, GroupedDownPolicy::Incumbent);
+    assert_eq!(
+        down_route(GgmlType::IQ4_XS, policy),
+        Some(DownRoute::Incumbent)
+    );
+}

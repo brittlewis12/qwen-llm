@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 - GLM Small-Append Explicit Adapter Accepts Its Down Policy
+
+- **Decision: ship the adapter fix on `fix/glm-tensor-adapter`.** Main's
+  161/256/512-row IQ3_S blocks passed `Iq3STensorOrSmallCounts` into the
+  explicit tensor adapter, which accepted only `Iq3STensor`; 39 blocks fell
+  back to the grouped F32-input gate/up while the three IQ4_XS-down blocks were
+  already explicit. The adapter now maps that policy to the native tensor down,
+  or the small-count retile when the tensor PSO declines, keeping all tier,
+  geometry and precision guards.
+- **Route census:** main shows 3 `f16act` and 39 `f32` gate/up dispatches at
+  128/161/256/384/512 rows, 48K and 80K. The fix shows 42 `f16act`, 0 `f32`.
+  `QWEN_GLM53_PREFILL_IQ_SMALL_ROWS=0` gives 0/42 on both binaries, so the
+  documented pre-policy rollback is unchanged.
+- **Paired gate:** probe-only main vs fix, three interleaved warm repetitions
+  per width, 48K and 80K. Logits and post-append state are bitwise at every
+  cell. Wall speedup is **1.81-3.20%** at 48K and **1.70-3.03%** at 80K; every
+  90% paired-block CI excludes zero. Routed-expert stage saves **2.9-6.4%**.
+- Release serve smoke: 20 s, three agents, five non-empty completed turns,
+  767 tokens, 38.35 tok/s, gap p99 245 ms, thermal 1. No serve A/B was needed.
+- Evidence: [adapter policy note](bench/2026-11-12-glm-adapter-policy.md);
+  raw data `metagross:~/qwen-runs/2026-11-12-glm-adapter/`.
+
 ## 2026-11-12 - V4.1 Engram Admission Prefetch: I/O Real, Stall Not; Deleted
 
 - **Measured `d8602c89`, branch `perf/v41-engram-prefetch`, M5 Ultra, three-agent

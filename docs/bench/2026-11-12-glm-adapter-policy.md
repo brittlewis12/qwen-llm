@@ -7,9 +7,10 @@ state. `QWEN_GLM53_PREFILL_IQ_SMALL_ROWS=0` retains the pre-policy grouped
 route.
 
 Base: main `f691af6e1`. Fix commits `dd0641e5` (adapter + CPU tests),
-`ee02d93f` and `6530dd6f` (route-sweep state and stage probes). Probe-only
-baseline branch `bench/glm-adapter-probe-base` at `579ea648` is main plus those
-two example commits. Stock GLM-5.3-Flash UD-IQ3_XXS, M5 Ultra, `iter` profile
+`e0b6a0140` (down preflight before a capacity decline), `ee02d93f` and
+`6530dd6f` (route-sweep state and stage probes). Probe-only baseline branch
+`bench/glm-adapter-probe-base` at `579ea648` is main plus those two example
+commits. Stock GLM-5.3-Flash UD-IQ3_XXS, M5 Ultra, `iter` profile
 with `perf-ablations`, 98,304 capacity, 2,048-row prefix chunks, `code.txt`
 corpus.
 
@@ -48,7 +49,9 @@ return to the grouped route under `=0`, as `af49e2ace` documented.
 tensor tier, geometry, precision, binding, alias and capacity guards are
 unchanged. A missing eligible pipeline remains an error; a capacity decline
 falls back to the grouped route rather than silently using a different down.
-No new knob or allocation was added.
+The selected down is still prepared before a gate/up capacity decline is
+returned, so invalid down bindings remain errors. No new knob or allocation
+was added.
 
 CPU tests cover every `GroupedDownPolicy`/down-dtype pairing and the production
 GLM policy at 128..512 rows. No new `#[ignore]` tests.

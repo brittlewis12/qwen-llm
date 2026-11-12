@@ -45285,3 +45285,12 @@ pressure<=1, then180s at measurement ceiling2. Raw settling and sample-and-hold
 thermal durations are retained. Six arms follow ABBAAB (off/on/on/off/off/on),
 with paired differences and a95% paired-t CI; width beyond +/-2 percentage
 points is inconclusive. Slicing remains default-off pending this packet.
+
+### Three-pair throughput uncertainty
+
+Added a paired Student-t95% interval over three arm-level differences, reporting
+both tok/s and relative percentage changes. The two-degree-of-freedom critical
+value is analytic. Tests retain zero-variance agreement and mark a wide/noisy
+interval as inconclusive; individual tokens are not statistical replicates.
+All20 CPU harness tests pass. The measured harness/binary stay frozen at
+`abc3ba1a3` for the six-arm sustained-serve packet.

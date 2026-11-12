@@ -116,6 +116,19 @@ class SteadyTests(unittest.TestCase):
         self.assertTrue(bench.timing_flags(samples,10,20)['thermal_flagged'])
         self.assertEqual(bench.timing_flags(samples,10,20)['timing_thermal_seconds']['2'],5.)
 
+    def test_three_pair_ci_uses_arm_pairs_and_does_not_force_noisy_verdict(self):
+        exact=pair.throughput_ci([(100,101),(100,101),(100,101)])
+        self.assertEqual(exact['n'],3)
+        self.assertAlmostEqual(exact['percent']['mean'],1)
+        self.assertEqual(exact['percent']['half_width'],0)
+        self.assertTrue(exact['excludes_loss_above_two_percent'])
+        noisy=pair.throughput_ci([(100,97),(100,103),(100,100)])
+        self.assertAlmostEqual(noisy['percent']['mean'],0)
+        self.assertGreater(noisy['percent']['half_width'],2)
+        self.assertFalse(noisy['noise_within_two_pp'])
+        with self.assertRaises(ValueError):pair.throughput_ci([(100,100)])
+        with self.assertRaises(ValueError):pair.throughput_ci([(0,1)]*3)
+
     def population(self):
         return [dict(model='glm',purpose='primary',reused='48000',reuse_source='live',
                      call=f'glm/{i}',new=str(5+i),generated=str(20+i),tool_union_ms=str(i*10))

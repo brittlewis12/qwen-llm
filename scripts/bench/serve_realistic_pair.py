@@ -8,6 +8,8 @@ import argparse
 import hashlib
 import json
 import os
+import math
+import statistics
 from pathlib import Path
 import signal
 import subprocess
@@ -31,6 +33,33 @@ def paired_report(root):
                 order_effect_spread_percent=100*(max(ratios)-min(ratios)) if len(ratios)==2 else None,
                 opposite_throughput_directions=len(ratios)==2 and (ratios[0]>1)!=(ratios[1]>1),
                 policy='retain thermal1/compile flags; review both order effects, no automatic discard')
+
+
+def throughput_ci(pairs):
+    """95% paired-t interval over three independently interleaved arm pairs.
+
+    The relative differences use each reference arm as denominator. With only
+    three pairs (two degrees of freedom), this interval deliberately reflects
+    the uncertainty rather than treating individual tokens as replicates.
+    """
+    if len(pairs) != 3:
+        raise ValueError('three independent arm pairs required')
+    absolute = [candidate-reference for reference,candidate in pairs]
+    if any(reference <= 0 or not math.isfinite(reference) or not math.isfinite(candidate)
+           for reference,candidate in pairs):
+        raise ValueError('finite positive reference throughput required')
+    relative = [100*(candidate/reference-1) for reference,candidate in pairs]
+    # Student t_(0.975,2) = .95 * sqrt(2 / (1-.95**2)).
+    critical = .95 * math.sqrt(2/(1-.95**2))
+    def interval(values):
+        mean = statistics.mean(values)
+        half = critical * statistics.stdev(values)/math.sqrt(len(values))
+        return dict(mean=mean,lower=mean-half,upper=mean+half,half_width=half)
+    percent, tps = interval(relative), interval(absolute)
+    return dict(n=3,confidence=.95,df=2,method='paired Student t; arm pairs are replicates',
+                paired_percent=relative,paired_tps=absolute,percent=percent,tps=tps,
+                noise_within_two_pp=percent['half_width'] <= 2,
+                excludes_loss_above_two_percent=percent['lower'] >= -2)
 
 
 def fingerprint(args):

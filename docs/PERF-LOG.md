@@ -122,6 +122,29 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `*-failed-*`). Branch `bench/standing-2026-11-12`; no merge. M5 worktrees,
   build output and bundles removed after the run.
 
+## 2026-11-12 - V4.1 One-Ahead Batch Loop Killed At Price Gate
+
+- **Stage 1 only; no runtime change retained.** On M5 Ultra, B=3 sampled
+  rounds at 32K/48K, round wall minus summed command GPU service was
+  **1.00–1.40 ms** (the GPU-span gap was 0.63–0.88 ms), below the required
+  **2 ms per round**. The event-gated design's optimistic residual is about
+  **0.8 ms** after token readback and the prior M5 shared-event handoff price.
+  CPU Engram row staging was 0.27–0.82 ms; the Engram-free prefix used about
+  0.51–0.52 ms GPU time. Prefix-only encoding saves at most 0.21 ms. A staged
+  GPU Engram gather cannot exceed the measured round ceiling before its own
+  GPU cost. **Kill; Stage 2 and the release serve gate were not entered.**
+- User-initiated QoS lowered round wall by **2.21 ms (32K)** and **1.51 ms
+  (48K)** under high host load; wall-minus-GPU-service fell by only 0.40/0.27
+  ms. Thermal pressure was 0 at probe start/end. `~/ghost` AOT workers reached
+  roughly 434%/318% CPU. The M5 `iter` build succeeded; all four 32-round cells
+  are in `~/qwen-runs/2026-11-12-v41-pipe/hostgap-b3.jsonl`.
+- **Aven:** V41-NQTZ could not be externally annotated because this session
+  exposes no Aven connector. The local Aven note text and full price are in
+  [`docs/bench/2026-11-12-v41-pipelined-batch-price.md`](bench/2026-11-12-v41-pipelined-batch-price.md).
+- The M5 wrapper returned 2 only after the final `sort | head` process-list
+  pipeline broke its pipe; timing rows and the final host snapshot were already
+  complete. The actual price run waited **664 s** for the shared Metal lease.
+
 ## 2026-11-12 - GLM Small-Append Explicit Adapter Accepts Its Down Policy
 
 - **Decision: ship the adapter fix on `fix/glm-tensor-adapter`.** Main's

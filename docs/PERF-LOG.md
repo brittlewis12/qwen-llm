@@ -6,6 +6,86 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 - GLM Small-Row IQ Route Re-Gated: Qualifies On The Real Schedule
+
+- **Re-applied and default-on behind `QWEN_GLM53_PREFILL_IQ_SMALL_ROWS`.** The
+  admission follows the fine grid: rows 1-19 keep the per-slot Half packet,
+  rows 20-1023 use explicit tensor gate/up and IQ3_S tensor down, and `=0`
+  restores the exact incumbent 8-row packet and grouped/expanded routes. The
+  down policy keeps the production geometry guard. Candidate commit
+  **`3afa59d33`**, branch `perf/glm-append-routes`, rebased on main
+  **`f6475cb2e`**; not merged.
+- **Real-schedule gate passes.** Four interleaved pairs through the standing
+  three-agent harness at 48K, 180 s windows, release build, real sampling.
+  Matched same-label/same-width appends: pooled median TTFT **-57.7 ms**
+  (90% CI **[-116.9, -20.5]**, n=117) and prefill **-47.2 ms**
+  (**[-83.7, -18.1]**, n=107); every pair has a negative median for both.
+  That is **5.9%** lower append TTFT and **9.0%** lower prefill on roughly
+  880 ms / 523 ms medians.
+- **Throughput and ITL p99 are not worse beyond noise.** Aggregate TPS is
+  **1.19 tok/s lower** on average (candidate/incumbent 0.986) but the 90% CI
+  crosses zero **[-0.45, +3.02]**; ITL p99 is **+1.08 ms (0.6%)** with CI
+  **[-0.82, +3.22]**. The worst content gap improves in all four pairs (mean
+  **-392 ms**). Per-pair TPS off-on: +2.89, -0.14, +3.38, -1.37.
+- **Shared-host limits retained.** All eight timing windows recorded thermal
+  1; thermal 2 occurs only outside windows. Six of eight windows carry a
+  compiler-overlap flag, so this is not an isolated-host claim. Twenty-three
+  lease acquisitions waited up to **1269 s** (total **10,076 s**); every hold
+  was <=15 min. A session-cache reuse miss on a 45/56-row append reprocessed
+  6.6-7.1K tokens in several arms, including incumbent `off-4`; it inflates
+  unmatched TTFT p99 but is not route-specific.
+- **Verification.** Full lib **2492 passed / 678 ignored** and CLI **1722
+  passed / 73 ignored** in the test profile; `check-contracts.sh` and
+  `cargo fmt --all --check` pass; no new `#[ignore]`. Guarded-tail GPU
+  witnesses at 20/33/97/161/1023 rows pass in the existing down and
+  gate/up tests. Binary `qwen` sha256 `2c2d77b2ad94...`.
+- Evidence: `docs/bench/2026-11-12-glm-append-routes.md` §6; raw
+  `metagross:~/qwen-runs/2026-11-12-glm-append-routes/regate/`. The original
+  2026-11-12 traffic-gate record follows and is unchanged.
+
+## 2026-11-12 - GLM Append Routes: Tensor IQ Wins The Cliffs, Traffic Gate Fails
+
+- **Probe and decision; no production change.** A `perf-ablations` route
+  selector and a `routes`/`route-quality` probe forced the per-slot packet,
+  grouped generic, expanded tensor and explicit tensor IQ routes at 8-1024
+  rows on GLM-5.3-Flash UD-IQ3_XXS, M5 Ultra, `--profile iter`, 48K and 80K
+  depth, three interleaved warm repetitions. Thermal 0-1 during timed reps.
+- **The explicit tensor IQ route is the cheapest every measured width above
+  the packet island.** At 80K it saves **27-33%** of append wall at 16-112
+  (e.g. 32 rows **315.1 -> 231.7 ms**, routed experts **200.2 -> 116.5 ms**),
+  **2.0-3.1%** at 128-512 (already tensor in production, bitwise logits), and
+  **26-27%** at 768-1023 (production is grouped there because the IQ gate
+  starts at 1024). At 8 rows the incumbent per-slot packet is still cheapest.
+  The 9-15 fine grid is 31-34% below the incumbent but a few percent above the
+  packet. Kernel census confirms `moe_swiglu...generic` + `m128_n16_retile`
+  on the incumbent and the `_tensor`/`_f16act` pair on the candidate.
+- **Paired non-inferiority passes.** Three code prompts at 80K, per-position
+  signed dNLL against the incumbent, 20k prompt bootstrap: the 95% upper bound
+  is at most **+0.00204** nats/token (margin +0.01); 161/512 rows are bitwise;
+  top-1 agreement 99-100%. The prose control also passes.
+- **Traffic gate fails.** On the archived real three-agent serve calls the
+  candidate is **10.05-13.23%** of traffic-weighted append wall at 48K and
+  **10.05-12.82%** at 80K, against the required 20%. The 128-512 band, where
+  the real median sits, is already on the tensor route; only the 9-112 and
+  768-1023 islands have 26-32% headroom. The stated production median of 161
+  rows at 75-81K is not present in the archived M5 logs (48K, medians 67-342);
+  recompute the gate on the real production distribution before re-landing.
+- **No serve A/B was run** because the gate failed before Step 7. The
+  default-on implementation is at `46911dd35`, reverted at `aa83b92c0`; the
+  probe remains on `perf/glm-append-routes`. Step 2 is still the floor at
+  128-512: a 1.25x grouped-expert kernel there is worth only ~5-8% wall.
+- Evidence: `docs/bench/2026-11-12-glm-append-routes.md`; raw
+  `metagross:~/qwen-runs/2026-11-12-glm-append-routes/`. No merge; M5
+  worktree and bundles removed.
+
+## 2026-11-12 - GLM Append Expert Streaming: Byte Floor Leaves Room, Kernel Gate Fails
+
+- **The measured floor leaves 2.35-3.11× stage headroom** at 80K and 32/64/161/256/512 rows. The 161-row union is 83.91 GB with a 93.2 ms type-weighted floor, against a 228.0 ms incumbent stage. The 48K and 80K real-route unions, per-expert row distributions, and type-specific decode-batch reference rates are in the bench note.
+- **The multi-row IQ2_S gate/up + IQ3_S down stream path dispatched but lost.** At 80K its routed stage was 112.36/189.53/411.62/638.56/1367.81 ms versus tensor IQ at 115.85/157.45/217.08/250.21/322.03 ms for 32/64/161/256/512 rows: 1.03×/0.83×/0.53×/0.39×/0.24×. The required 1.25× gate failed at every width. Ordinary prefill wall also lost from 64 rows upward.
+- M4 synthetic F32 witness passed bitwise against decode-batch kernels for bucket sizes 1/2/4/8/16. It did not predict production throughput. Thermal pressure was 1 during the M5 interleaved route reps. One-shot top-1 agreed at all widths, but the paired non-inferiority protocol and serve A/B were not run after the speed gate failed.
+- Removed the stream kernels, selector, probe arm, test, and rollback knob. No default change. `scripts/check-contracts.sh` is the final code-contract gate. No `PERF-ROADMAP.md` change.
+- Evidence: `docs/bench/2026-11-12-glm-append-experts.md`; M5 raw under `metagross:~/qwen-runs/2026-11-12-glm-append-experts/`. The M5 worktree, bundles, and build output are removed after the record is committed.
+
 ## 2026-11-12 - V4.1 B (UD-IQ3_XXS) Speed And Serve Measured
 
 - **Updates the 2026-11-11 artifact-choice correction below with the missing B
@@ -123,86 +203,6 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `metagross:~/qwen-runs/2026-11-11-artifact-choice/`.
 
 ## 2026-11-11 - Two-Queue Causal Branches: Ceiling Passes, Isolation Does Not
-## 2026-11-12 - GLM Small-Row IQ Route Re-Gated: Qualifies On The Real Schedule
-
-- **Re-applied and default-on behind `QWEN_GLM53_PREFILL_IQ_SMALL_ROWS`.** The
-  admission follows the fine grid: rows 1-19 keep the per-slot Half packet,
-  rows 20-1023 use explicit tensor gate/up and IQ3_S tensor down, and `=0`
-  restores the exact incumbent 8-row packet and grouped/expanded routes. The
-  down policy keeps the production geometry guard. Candidate commit
-  **`3afa59d33`**, branch `perf/glm-append-routes`, rebased on main
-  **`f6475cb2e`**; not merged.
-- **Real-schedule gate passes.** Four interleaved pairs through the standing
-  three-agent harness at 48K, 180 s windows, release build, real sampling.
-  Matched same-label/same-width appends: pooled median TTFT **-57.7 ms**
-  (90% CI **[-116.9, -20.5]**, n=117) and prefill **-47.2 ms**
-  (**[-83.7, -18.1]**, n=107); every pair has a negative median for both.
-  That is **5.9%** lower append TTFT and **9.0%** lower prefill on roughly
-  880 ms / 523 ms medians.
-- **Throughput and ITL p99 are not worse beyond noise.** Aggregate TPS is
-  **1.19 tok/s lower** on average (candidate/incumbent 0.986) but the 90% CI
-  crosses zero **[-0.45, +3.02]**; ITL p99 is **+1.08 ms (0.6%)** with CI
-  **[-0.82, +3.22]**. The worst content gap improves in all four pairs (mean
-  **-392 ms**). Per-pair TPS off-on: +2.89, -0.14, +3.38, -1.37.
-- **Shared-host limits retained.** All eight timing windows recorded thermal
-  1; thermal 2 occurs only outside windows. Six of eight windows carry a
-  compiler-overlap flag, so this is not an isolated-host claim. Twenty-three
-  lease acquisitions waited up to **1269 s** (total **10,076 s**); every hold
-  was <=15 min. A session-cache reuse miss on a 45/56-row append reprocessed
-  6.6-7.1K tokens in several arms, including incumbent `off-4`; it inflates
-  unmatched TTFT p99 but is not route-specific.
-- **Verification.** Full lib **2492 passed / 678 ignored** and CLI **1722
-  passed / 73 ignored** in the test profile; `check-contracts.sh` and
-  `cargo fmt --all --check` pass; no new `#[ignore]`. Guarded-tail GPU
-  witnesses at 20/33/97/161/1023 rows pass in the existing down and
-  gate/up tests. Binary `qwen` sha256 `2c2d77b2ad94...`.
-- Evidence: `docs/bench/2026-11-12-glm-append-routes.md` §6; raw
-  `metagross:~/qwen-runs/2026-11-12-glm-append-routes/regate/`. The original
-  2026-11-12 traffic-gate record follows and is unchanged.
-## 2026-11-12 - GLM Append Expert Streaming: Byte Floor Leaves Room, Kernel Gate Fails
-
-- **The measured floor leaves 2.35-3.11× stage headroom** at 80K and 32/64/161/256/512 rows. The 161-row union is 83.91 GB with a 93.2 ms type-weighted floor, against a 228.0 ms incumbent stage. The 48K and 80K real-route unions, per-expert row distributions, and type-specific decode-batch reference rates are in the bench note.
-- **The multi-row IQ2_S gate/up + IQ3_S down stream path dispatched but lost.** At 80K its routed stage was 112.36/189.53/411.62/638.56/1367.81 ms versus tensor IQ at 115.85/157.45/217.08/250.21/322.03 ms for 32/64/161/256/512 rows: 1.03×/0.83×/0.53×/0.39×/0.24×. The required 1.25× gate failed at every width. Ordinary prefill wall also lost from 64 rows upward.
-- M4 synthetic F32 witness passed bitwise against decode-batch kernels for bucket sizes 1/2/4/8/16. It did not predict production throughput. Thermal pressure was 1 during the M5 interleaved route reps. One-shot top-1 agreed at all widths, but the paired non-inferiority protocol and serve A/B were not run after the speed gate failed.
-- Removed the stream kernels, selector, probe arm, test, and rollback knob. No default change. `scripts/check-contracts.sh` is the final code-contract gate. No `PERF-ROADMAP.md` change.
-- Evidence: `docs/bench/2026-11-12-glm-append-experts.md`; M5 raw under `metagross:~/qwen-runs/2026-11-12-glm-append-experts/`. The M5 worktree, bundles, and build output are removed after the record is committed.
-
-## 2026-11-12 - GLM Append Routes: Tensor IQ Wins The Cliffs, Traffic Gate Fails
-
-- **Probe and decision; no production change.** A `perf-ablations` route
-  selector and a `routes`/`route-quality` probe forced the per-slot packet,
-  grouped generic, expanded tensor and explicit tensor IQ routes at 8-1024
-  rows on GLM-5.3-Flash UD-IQ3_XXS, M5 Ultra, `--profile iter`, 48K and 80K
-  depth, three interleaved warm repetitions. Thermal 0-1 during timed reps.
-- **The explicit tensor IQ route is the cheapest every measured width above
-  the packet island.** At 80K it saves **27-33%** of append wall at 16-112
-  (e.g. 32 rows **315.1 -> 231.7 ms**, routed experts **200.2 -> 116.5 ms**),
-  **2.0-3.1%** at 128-512 (already tensor in production, bitwise logits), and
-  **26-27%** at 768-1023 (production is grouped there because the IQ gate
-  starts at 1024). At 8 rows the incumbent per-slot packet is still cheapest.
-  The 9-15 fine grid is 31-34% below the incumbent but a few percent above the
-  packet. Kernel census confirms `moe_swiglu...generic` + `m128_n16_retile`
-  on the incumbent and the `_tensor`/`_f16act` pair on the candidate.
-- **Paired non-inferiority passes.** Three code prompts at 80K, per-position
-  signed dNLL against the incumbent, 20k prompt bootstrap: the 95% upper bound
-  is at most **+0.00204** nats/token (margin +0.01); 161/512 rows are bitwise;
-  top-1 agreement 99-100%. The prose control also passes.
-- **Traffic gate fails.** On the archived real three-agent serve calls the
-  candidate is **10.05-13.23%** of traffic-weighted append wall at 48K and
-  **10.05-12.82%** at 80K, against the required 20%. The 128-512 band, where
-  the real median sits, is already on the tensor route; only the 9-112 and
-  768-1023 islands have 26-32% headroom. The stated production median of 161
-  rows at 75-81K is not present in the archived M5 logs (48K, medians 67-342);
-  recompute the gate on the real production distribution before re-landing.
-- **No serve A/B was run** because the gate failed before Step 7. The
-  default-on implementation is at `46911dd35`, reverted at `aa83b92c0`; the
-  probe remains on `perf/glm-append-routes`. Step 2 is still the floor at
-  128-512: a 1.25x grouped-expert kernel there is worth only ~5-8% wall.
-- Evidence: `docs/bench/2026-11-12-glm-append-routes.md`; raw
-  `metagross:~/qwen-runs/2026-11-12-glm-append-routes/`. No merge; M5
-  worktree and bundles removed.
-
-## 2026-11-11 - Two-Queue Causal Branches: Ceiling Passes, Isolation Does Not
 
 - **Negative stage-2 gate; no production default changed.** M5 GLM's optimal
   scope-preserving two-queue ceiling is **1.111 ms/token / 6.65% of wall**.
@@ -236,6 +236,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   reproduction: `docs/bench/2026-11-11-two-queue-causal.md`; raw
   `metagross:~/qwen-runs/2026-11-11-two-queue/`. Lane bundles, M5 worktree and
   build output removed after verification.
+
 ## 2026-11-11 - Resource-Scoped Barriers Do Not Release The Wave Floor
 
 - **Probe 3a closes the direct barrier replacement class.** A single

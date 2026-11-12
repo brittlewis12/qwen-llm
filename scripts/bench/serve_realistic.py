@@ -738,7 +738,7 @@ def summarize(rows, begin, end, count, native_lines=()):
              window_tokens=window_tokens(r['events'],begin,end,count),
              target=r['target'],generated=r['generated'],prompt=r['prompt'],reused=r['reused'],
              new=r['prompt']-r['reused'] if r['prompt'] is not None and r['reused'] is not None else None,
-             phases=native,spec=r['spec']))
+             phases=native,spec=r['spec'],events=r['events']))
     gaps=[b-a for r in active for a,b in zip([t for t,_,_ in r['events']],[t for t,_,_ in r['events']][1:])
           if begin<=a<b<end]
     wall_rows=[dict(sent=r['sent'],first=r['first'] if r['first'] is not None else r['end'],end=r['end']) for r in active]
@@ -763,7 +763,8 @@ def summarize(rows, begin, end, count, native_lines=()):
     return dict(window_begin=begin,window_end=end,window_seconds=end-begin,
                 window_tokens=sum(r['window_tokens'] for r in cleaned),
                 aggregate_tps=sum(r['window_tokens'] for r in cleaned)/(end-begin),
-                gap_p50_s=percentile(gaps,.5),gap_p95_s=percentile(gaps,.95),gap_max_s=max(gaps,default=None),
+                gap_p50_s=percentile(gaps,.5),gap_p95_s=percentile(gaps,.95),
+                gap_p99_s=percentile(gaps,.99),gap_max_s=max(gaps,default=None),
                 round_budget=budget,
                 agents=agents,trace_20s=trace,rows=cleaned)
 

@@ -651,7 +651,9 @@ pub(super) fn grouped_down_policy(
     if super::tensor_q5_down::selected(arith, mode, dtype, (ffn, hidden, experts, top_k), rows) {
         GroupedDownPolicy::Q5KTensor
     } else if super::tensor_down::selected(arith, mode, dtype, rows)
-        && (!(rows == 512 || super::row_policy::small_expanded(rows))
+        && (!(rows == 512
+            || super::row_policy::small_expanded(rows)
+            || super::row_policy::iq_small_expanded(rows))
             || (ffn, hidden, experts, top_k) == (2048, 4096, 288, 8))
     {
         if rows == 512 || super::row_policy::small_expanded(rows) {
@@ -1084,9 +1086,10 @@ fn packet_fast_half(arith: Arith, mode: StageMode) -> bool {
 /// arithmetic is row-independent; this is a validation bound, not a kernel
 /// limit. Grouped buckets are still available above it.
 const PACKET_HALF_MAX_ROWS: usize = 128;
-/// Rows above this use grouped buckets. Override with
-/// `QWEN_GLM53_EXPERT_PACKET_MAX_ROWS` (1..=`PACKET_HALF_MAX_ROWS`).
-const PACKET_HALF_DEFAULT_MAX_ROWS: usize = 8;
+/// Rows above this use the next route. The small-row IQ admission keeps the
+/// packet through the measured 19-row crossover; its rollback restores 8.
+/// Override with `QWEN_GLM53_EXPERT_PACKET_MAX_ROWS` (1..=`PACKET_HALF_MAX_ROWS`).
+const PACKET_HALF_INCUMBENT_MAX_ROWS: usize = 8;
 
 #[cfg(any(test, feature = "perf-ablations"))]
 thread_local! {
@@ -1101,12 +1104,13 @@ fn packet_half_max_rows() -> usize {
     }
     static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *MAX.get_or_init(|| {
-        // Rows above this use grouped buckets; default 8, hard cap 128.
+        // Rows above this use the next route; hard cap 128.
+        let default = super::row_policy::iq_small_packet_max_rows();
         std::env::var("QWEN_GLM53_EXPERT_PACKET_MAX_ROWS")
             .ok()
             .and_then(|value| value.trim().parse().ok())
             .filter(|rows: &usize| (1..=PACKET_HALF_MAX_ROWS).contains(rows))
-            .unwrap_or(PACKET_HALF_DEFAULT_MAX_ROWS)
+            .unwrap_or(default)
     })
 }
 
@@ -1239,35 +1243,9 @@ fn encode_experts_with_half(
 ) -> Result<StageMode> {
     let mode = expert_mode(arith, b.gate_bank.dtype, b.up_bank.dtype, b.down_bank.dtype);
     let forced = forced_expert_route();
-    let use_short = match forced {
-        Some(ExpertRoute::ExpandedTensor) => true,
-        Some(_) => false,
-        None => super::tensor_gate_up::short_selected(
-            arith,
-            mode,
-            b.gate_bank.dtype,
-            b.up_bank.dtype,
-            (h, f, e, k),
-            rows,
-        ),
-    };
-    if use_short && crate::metal::moe_grouped_tensor_selected(ctx) {
-        #[cfg(test)]
-        record_census(Stage::RoutedExperts, "experts".into(), CensusPath::Half);
-        crate::metal::encode_grouped_routed_experts_with_tensor_gate_up(
-            ctx,
-            enc,
-            b,
-            h,
-            f,
-            e,
-            k,
-            rows,
-            clamp,
-            grouped_down_policy(arith, mode, b.down_bank.dtype, f, h, e, k, rows),
-        )?;
-        return Ok(mode);
-    }
+    // The explicit tensor gate/up is checked first so the 9..=1023 extension
+    // also supersedes the short 128..512 grouped-tensor route; it is the
+    // measured cheaper path across that band.
     let use_tensor = match forced {
         Some(ExpertRoute::TensorIqExpanded) => true,
         Some(_) => false,
@@ -1299,6 +1277,35 @@ fn encode_experts_with_half(
         #[cfg(test)]
         record_census(Stage::RoutedExperts, "experts".into(), CensusPath::Half);
         prepared.encode()?;
+        return Ok(mode);
+    }
+    let use_short = match forced {
+        Some(ExpertRoute::ExpandedTensor) => true,
+        Some(_) => false,
+        None => super::tensor_gate_up::short_selected(
+            arith,
+            mode,
+            b.gate_bank.dtype,
+            b.up_bank.dtype,
+            (h, f, e, k),
+            rows,
+        ),
+    };
+    if use_short && crate::metal::moe_grouped_tensor_selected(ctx) {
+        #[cfg(test)]
+        record_census(Stage::RoutedExperts, "experts".into(), CensusPath::Half);
+        crate::metal::encode_grouped_routed_experts_with_tensor_gate_up(
+            ctx,
+            enc,
+            b,
+            h,
+            f,
+            e,
+            k,
+            rows,
+            clamp,
+            grouped_down_policy(arith, mode, b.down_bank.dtype, f, h, e, k, rows),
+        )?;
         return Ok(mode);
     }
     encode_experts(
@@ -3155,12 +3162,11 @@ mod down_policy_tests {
             let _rows = row_policy::Scope::new(any_rows);
             let _iq = row_policy::IqScope::new(iq_rows);
             for rows in 0..=4096 {
-                let expected = if (rows == 512 && super::super::short_prefill::enabled())
-                    || row_policy::small_expanded(rows)
-                {
+                let expected = if rows == 512 || row_policy::small_expanded(rows) {
                     GroupedDownPolicy::Iq3STensorOrSmallCounts
                 } else if matches!(rows, 1024 | 2048)
                     || (any_rows && iq_rows && (1024..=4096).contains(&rows))
+                    || row_policy::iq_small_expanded(rows)
                 {
                     GroupedDownPolicy::Iq3STensor
                 } else if (32..=512).contains(&rows) {

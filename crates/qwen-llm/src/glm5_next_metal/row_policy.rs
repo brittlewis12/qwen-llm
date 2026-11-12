@@ -27,10 +27,22 @@ crate::env_flag!(
     "QWEN_GLM53_PREFILL_IQ_ANY_ROWS"
 );
 
+crate::env_flag!(
+    /// Default-on M5 GLM Fast/Half IQ2_S/IQ3_S tensor gate/up and IQ3_S tensor down at 20..=1023 command rows, below the existing 1024-row wide gate. Zero restores grouped buckets at those widths. Rows 1..=19 keep the per-slot native packet. Existing precision, lineage, geometry, short-prefill, per-stage and tensor-tier controls still apply; no memory-plan change.
+    default_on iq_small_rows,
+    "QWEN_GLM53_PREFILL_IQ_SMALL_ROWS"
+);
+
+/// First command width whose routed experts take the tensor route below the
+/// existing 1024-row gate. Rows 1..=19 keep the per-slot native packet, which
+/// the fine grid finds cheapest through 19 rows at 80K.
+const IQ_SMALL_MIN_ROWS: usize = 20;
+
 #[cfg(test)]
 thread_local! {
     static SMALL_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static IQ_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static IQ_SMALL_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
@@ -66,6 +78,47 @@ pub(crate) fn iq_expanded(rows: usize) -> bool {
         return value && rows >= 1024 && expanded(rows);
     }
     iq_requested() && rows >= 1024 && expanded(rows)
+}
+
+/// IQ tensor gate/up and IQ3_S tensor down below the 1024-row wide gate.
+pub(crate) fn iq_small_expanded(rows: usize) -> bool {
+    #[cfg(test)]
+    if let Some(value) = IQ_SMALL_OVERRIDE.with(std::cell::Cell::get) {
+        return value && (IQ_SMALL_MIN_ROWS..1024).contains(&rows);
+    }
+    iq_small_rows() && (IQ_SMALL_MIN_ROWS..1024).contains(&rows)
+}
+
+/// Packet cap implied by the small-row route admission. The fine grid keeps
+/// the per-slot packet through the crossover; zero restores the incumbent 8.
+pub(crate) fn iq_small_packet_max_rows() -> usize {
+    #[cfg(test)]
+    if let Some(value) = IQ_SMALL_OVERRIDE.with(std::cell::Cell::get) {
+        return if value { IQ_SMALL_MIN_ROWS - 1 } else { 8 };
+    }
+    if iq_small_rows() {
+        IQ_SMALL_MIN_ROWS - 1
+    } else {
+        8
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct IqSmallScope(Option<bool>, std::marker::PhantomData<std::rc::Rc<()>>);
+#[cfg(test)]
+impl IqSmallScope {
+    pub(crate) fn new(value: bool) -> Self {
+        Self(
+            IQ_SMALL_OVERRIDE.with(|v| v.replace(Some(value))),
+            std::marker::PhantomData,
+        )
+    }
+}
+#[cfg(test)]
+impl Drop for IqSmallScope {
+    fn drop(&mut self) {
+        IQ_SMALL_OVERRIDE.with(|v| v.set(self.0));
+    }
 }
 
 #[cfg(test)]
@@ -285,6 +338,66 @@ mod tests {
         }
         assert!(iq_expanded(1596));
         assert!(!iq_expanded(usize::MAX));
+    }
+
+    #[test]
+    fn iq_small_rows_select_tensor_from_the_measured_crossover_and_roll_back() {
+        use crate::glm5_next_metal::{memory, tensor_down, tensor_gate_up};
+        let _rows = Scope::new(true);
+        let _iq = IqScope::new(true);
+        let _small_iq = IqSmallScope::new(true);
+        let _up = memory::TensorGateUpScope::new(true);
+        let _down = tensor_down::Scope::new(true);
+        let half = Arith {
+            lineage: PackedLineage::Fast,
+            precision: FastPrecision::Half,
+        };
+        let shape = (4096, 2048, 288, 8);
+        assert_eq!(iq_small_packet_max_rows(), IQ_SMALL_MIN_ROWS - 1);
+        for rows in 0..=5000 {
+            let small = (IQ_SMALL_MIN_ROWS..1024).contains(&rows);
+            let wide = iq_expanded(rows);
+            assert_eq!(iq_small_expanded(rows), small);
+            for dtype in [GgmlType::IQ2_S, GgmlType::IQ3_S] {
+                assert_eq!(
+                    tensor_gate_up::selected(half, StageMode::Fast, dtype, dtype, shape, rows),
+                    small || wide || matches!(rows, 1024 | 2048)
+                );
+            }
+            assert_eq!(
+                tensor_down::selected(half, StageMode::Fast, GgmlType::IQ3_S, rows),
+                small
+                    || wide
+                    || matches!(rows, 1024 | 2048)
+                    || (rows == 512 && short_prefill::enabled())
+                    || small_expanded(rows)
+            );
+        }
+        {
+            let _off = IqSmallScope::new(false);
+            assert_eq!(iq_small_packet_max_rows(), 8);
+            for rows in [8, 9, 16, 19, 20, 400, 512, 768, 1023] {
+                let wide = iq_expanded(rows);
+                assert!(!iq_small_expanded(rows));
+                assert_eq!(
+                    tensor_gate_up::selected(
+                        half,
+                        StageMode::Fast,
+                        GgmlType::IQ2_S,
+                        GgmlType::IQ2_S,
+                        shape,
+                        rows
+                    ),
+                    wide || matches!(rows, 1024 | 2048)
+                );
+                assert_eq!(
+                    tensor_down::selected(half, StageMode::Fast, GgmlType::IQ3_S, rows),
+                    wide || matches!(rows, 1024 | 2048)
+                        || (rows == 512 && short_prefill::enabled())
+                        || small_expanded(rows)
+                );
+            }
+        }
     }
 
     #[test]

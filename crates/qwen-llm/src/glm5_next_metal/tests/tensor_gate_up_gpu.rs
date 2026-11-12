@@ -488,7 +488,7 @@ fn m5_gate_up_native_compositions_tensor_f32_f16_bitwise_and_sampled_f64() {
         (GgmlType::IQ3_S, GgmlType::IQ3_S),
         (GgmlType::IQ3_S, GgmlType::IQ4_XS),
     ] {
-        for rows in [129, 512, 1024, 2048] {
+        for rows in [20, 33, 97, 161, 129, 512, 1023, 1024, 2048] {
             objc2::rc::autoreleasepool(|_| {
                 let f = Tiny::new(&ctx, gate, down, rows);
                 let before: Vec<_> = f.tensors[..6].iter().map(fingerprint).collect();

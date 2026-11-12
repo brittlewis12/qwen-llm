@@ -11,7 +11,24 @@ fn packet_expert_policy_checks_precision_rows_and_all_three_banks() {
     for lineage in [PackedLineage::Fast, PackedLineage::Exact] {
         for precision in FastPrecision::ALL {
             let arith = Arith { lineage, precision };
-            for rows in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 32, 512, usize::MAX] {
+            for rows in [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                16,
+                19,
+                20,
+                32,
+                512,
+                usize::MAX,
+            ] {
                 for gate in [
                     GgmlType::IQ2_S,
                     GgmlType::IQ3_S,
@@ -32,7 +49,10 @@ fn packet_expert_policy_checks_precision_rows_and_all_three_banks() {
                         ] {
                             let mode = expert_mode(arith, gate, up, down);
                             let expected = arith == HALF
-                                && (1..=8).contains(&rows)
+                                && (1
+                                    ..=crate::glm5_next_metal::row_policy::iq_small_packet_max_rows(
+                                    ))
+                                    .contains(&rows)
                                 && matches!(gate, GgmlType::IQ2_S | GgmlType::IQ3_S)
                                 && matches!(up, GgmlType::IQ2_S | GgmlType::IQ3_S)
                                 && matches!(down, GgmlType::IQ3_S | GgmlType::IQ4_XS);
@@ -260,7 +280,7 @@ fn packet_half_experts_default_dispatch_census_and_cpu_oracle() {
                 let (gate, gc) = bank(&ctx, gate_type, vec![h as u64, f as u64, e as u64], 1);
                 let (up, uc) = bank(&ctx, up_type, vec![h as u64, f as u64, e as u64], 3);
                 let (down, dc) = bank(&ctx, down_type, vec![f as u64, h as u64, e as u64], 7);
-                for rows in 1..=8 {
+                for rows in 1..=crate::glm5_next_metal::row_policy::iq_small_packet_max_rows() {
                     let values: Vec<f32> = (0..h * rows)
                         .map(|i| (i % 71) as f32 * 0.01713 - 0.5)
                         .collect();
@@ -401,7 +421,7 @@ fn packet_experts_preserve_legacy_dispatch_outside_half_packet_capability() {
     };
     let (h, f, e, k) = (256usize, 256usize, 3usize, 2usize);
     for (arith, rows, gate_type, down_type) in [
-        (HALF, 9, GgmlType::IQ2_S, GgmlType::IQ3_S),
+        (HALF, 20, GgmlType::IQ2_S, GgmlType::IQ3_S),
         (HALF, 32, GgmlType::IQ2_S, GgmlType::IQ3_S),
         (HALF, 4, GgmlType::IQ2_XS, GgmlType::IQ3_S),
         (HALF, 4, GgmlType::IQ2_S, GgmlType::IQ3_XXS),

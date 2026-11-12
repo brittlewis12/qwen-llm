@@ -52,9 +52,13 @@ fn cpu_down_policy_protects_all_arithmetic_modes_types_and_actual_rows() {
                         8,
                         9,
                         16,
+                        20,
                         31,
                         32,
+                        33,
+                        97,
                         128,
+                        161,
                         512,
                         513,
                         1023,
@@ -74,6 +78,7 @@ fn cpu_down_policy_protects_all_arithmetic_modes_types_and_actual_rows() {
                                 || (rows == 512
                                     && crate::glm5_next_metal::short_prefill::enabled())
                                 || crate::glm5_next_metal::row_policy::iq_expanded(rows)
+                                || crate::glm5_next_metal::row_policy::iq_small_expanded(rows)
                                 || crate::glm5_next_metal::row_policy::small_expanded(rows));
                         assert_eq!(
                             selected(arith, mode, dtype, rows),
@@ -462,6 +467,9 @@ impl Fixture {
         }
         assert_eq!(counts[0] as usize, rows);
         for count in [0, 1, 15, 16, 17, 31, 32, 33] {
+            // Tails wider than the command width collapse onto the full-width
+            // bucket and its empty complement, so clamp the witness to N.
+            let count = count.min(rows as i32);
             assert!(counts.contains(&count), "missing bucket boundary {count}");
         }
         let counts = guarded(
@@ -682,7 +690,12 @@ fn m5_down_real_and_older_shapes_generic_tensor_f64_and_weighted_output() {
     let ctx = MetalContext::new().expect("Metal required, never silently skipped");
     require_m5(&ctx);
     for (k, m, e, rows) in [
+        (2048, 4096, 288, 20),
+        (2048, 4096, 288, 33),
+        (2048, 4096, 288, 97),
+        (2048, 4096, 288, 161),
         (2048, 4096, 288, 512),
+        (2048, 4096, 288, 1023),
         (2048, 4096, 288, 1024),
         (2048, 4096, 288, 2048),
         (2048, 6144, 256, 1024),
@@ -704,30 +717,43 @@ fn m5_down_real_and_older_shapes_generic_tensor_f64_and_weighted_output() {
         poison(&f.y);
         poison(&f.output);
         let candidate = run(&ctx, |enc| f.encode(&ctx, enc, true, true));
-        assert_eq!(candidate.len(), 2);
-        assert_eq!(candidate[0].kernel, TENSOR);
-        assert_eq!(
-            (
-                candidate[0].grid_width,
-                candidate[0].grid_height,
-                candidate[0].grid_depth
-            ),
-            (rows.div_ceil(32) as u64, m.div_ceil(64) as u64, e as u64)
-        );
-        assert_eq!(candidate[0].threads_width, 128);
-        assert_eq!(
-            (
-                candidate[0].grid_width,
-                candidate[0].grid_height,
-                candidate[0].grid_depth
-            ),
-            (
-                baseline[0].grid_width,
-                baseline[0].grid_height,
-                baseline[0].grid_depth
-            )
-        );
-        assert_eq!(candidate[1].kernel, baseline[1].kernel);
+        // Production geometry and >=128 rows take the count-adaptive IQ3_S
+        // panels; narrow or non-production shapes retain the single tile.
+        let adaptive = (k, m, e) == (2048, 4096, 288) && rows >= 128;
+        assert_eq!(candidate.len(), if adaptive { 4 } else { 2 }, "rows={rows}");
+        if adaptive {
+            assert!(candidate[0].kernel.contains("kernel_glm_iq3_down_n16"));
+            assert_eq!(candidate[1].kernel, TENSOR);
+            assert!(candidate[2].kernel.contains("kernel_glm_iq3_down_n64"));
+            assert_eq!(candidate[3].kernel, baseline[1].kernel);
+            for row in &candidate[..3] {
+                assert_eq!(row.threads_width, 128);
+            }
+        } else {
+            assert_eq!(candidate[0].kernel, TENSOR);
+            assert_eq!(
+                (
+                    candidate[0].grid_width,
+                    candidate[0].grid_height,
+                    candidate[0].grid_depth
+                ),
+                (rows.div_ceil(32) as u64, m.div_ceil(64) as u64, e as u64)
+            );
+            assert_eq!(candidate[0].threads_width, 128);
+            assert_eq!(
+                (
+                    candidate[0].grid_width,
+                    candidate[0].grid_height,
+                    candidate[0].grid_depth
+                ),
+                (
+                    baseline[0].grid_width,
+                    baseline[0].grid_height,
+                    baseline[0].grid_depth
+                )
+            );
+            assert_eq!(candidate[1].kernel, baseline[1].kernel);
+        }
         let b = read(&f.y);
         f.validate(&b);
         let scale = a.iter().map(|x| x.abs()).fold(0.0f32, f32::max);

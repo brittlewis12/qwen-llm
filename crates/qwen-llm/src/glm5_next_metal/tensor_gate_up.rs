@@ -50,7 +50,8 @@ pub(super) fn selected(
             || (iq_tensor_gate_up_enabled() && matches!(gate, GgmlType::IQ2_S | GgmlType::IQ3_S)))
         && (matches!(rows, 1024 | 2048)
             || (matches!(gate, GgmlType::IQ2_S | GgmlType::IQ3_S)
-                && super::row_policy::iq_expanded(rows)))
+                && (super::row_policy::iq_expanded(rows)
+                    || super::row_policy::iq_small_expanded(rows))))
 }
 
 #[cfg(test)]

@@ -102,7 +102,11 @@ fn cpu_gate_up_selection_protects_modes_dtypes_rows_and_production_geometry() {
                         for rows in [
                             0,
                             1,
+                            20,
                             32,
+                            33,
+                            97,
+                            161,
                             512,
                             1023,
                             1024,
@@ -122,9 +126,11 @@ fn cpu_gate_up_selection_protects_modes_dtypes_rows_and_production_geometry() {
                                             && matches!(gate, GgmlType::IQ2_S | GgmlType::IQ3_S)))
                                     && (matches!(rows, 1024 | 2048)
                                         || (matches!(gate, GgmlType::IQ2_S | GgmlType::IQ3_S)
-                                            && crate::glm5_next_metal::row_policy::iq_expanded(
-                                                rows
-                                            )))
+                                            && (crate::glm5_next_metal::row_policy::iq_expanded(
+                                                rows,
+                                            ) || crate::glm5_next_metal::row_policy::iq_small_expanded(
+                                                rows,
+                                            ))))
                             );
                         }
                     }

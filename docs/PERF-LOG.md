@@ -159,6 +159,13 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Evidence: `docs/bench/2026-11-12-glm-append-routes.md` §6; raw
   `metagross:~/qwen-runs/2026-11-12-glm-append-routes/regate/`. The original
   2026-11-12 traffic-gate record follows and is unchanged.
+## 2026-11-12 - GLM Append Expert Streaming: Byte Floor Leaves Room, Kernel Gate Fails
+
+- **The measured floor leaves 2.35-3.11× stage headroom** at 80K and 32/64/161/256/512 rows. The 161-row union is 83.91 GB with a 93.2 ms type-weighted floor, against a 228.0 ms incumbent stage. The 48K and 80K real-route unions, per-expert row distributions, and type-specific decode-batch reference rates are in the bench note.
+- **The multi-row IQ2_S gate/up + IQ3_S down stream path dispatched but lost.** At 80K its routed stage was 112.36/189.53/411.62/638.56/1367.81 ms versus tensor IQ at 115.85/157.45/217.08/250.21/322.03 ms for 32/64/161/256/512 rows: 1.03×/0.83×/0.53×/0.39×/0.24×. The required 1.25× gate failed at every width. Ordinary prefill wall also lost from 64 rows upward.
+- M4 synthetic F32 witness passed bitwise against decode-batch kernels for bucket sizes 1/2/4/8/16. It did not predict production throughput. Thermal pressure was 1 during the M5 interleaved route reps. One-shot top-1 agreed at all widths, but the paired non-inferiority protocol and serve A/B were not run after the speed gate failed.
+- Removed the stream kernels, selector, probe arm, test, and rollback knob. No default change. `scripts/check-contracts.sh` is the final code-contract gate. No `PERF-ROADMAP.md` change.
+- Evidence: `docs/bench/2026-11-12-glm-append-experts.md`; M5 raw under `metagross:~/qwen-runs/2026-11-12-glm-append-experts/`. The M5 worktree, bundles, and build output are removed after the record is committed.
 
 ## 2026-11-12 - GLM Append Routes: Tensor IQ Wins The Cliffs, Traffic Gate Fails
 

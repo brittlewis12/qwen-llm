@@ -847,9 +847,9 @@ fn prefill_cap_is_reported_per_request() {
     };
     let calls = phases["batch"]["prefill_loaded_calls"].as_u64().unwrap();
     assert!(calls >= 1);
-    // Prefill time spans every slice and the steps interleaved with them.
+    // Active prefill time excludes decode service between the slices.
     let rows = phases["prefill_tokens"].as_f64().unwrap();
-    assert!(phases["prefill_ms"].as_f64().unwrap() > rows, "{phases}");
+    assert_eq!(phases["prefill_ms"].as_f64().unwrap(), rows, "{phases}");
     let Some(Ok((_, _, phases))) = short.terminal() else {
         panic!()
     };

@@ -45235,3 +45235,11 @@ Reported this contradiction to the equal-GPU-cost assumption before serve
 integration. Correcting CED gap pricing to include the incumbent opportunity
 between encoder calls. Staged selective 200/500 ms serve integration remains
 default-off pending exact/cancellation regression and the four-arm serve gate.
+
+### V4.1 integration CPU checks
+
+95/95 V4.1 and 23/23 shared Driver tests pass, including model-free Full/CED
+mid-layer cancellation and active-prefill accounting. Slice-policy geometry
+unit passes. The native policy/cancellation probe and release serve build are
+queued behind the GLM append-route lane; serving default remains off until
+the measured gate. No row partition or CED replay group was changed.

@@ -1239,7 +1239,8 @@ fn v41_native_phase_clock_excludes_preparation_and_counts_eos_and_max_one() {
             }
         );
         let phases = stats.phases.unwrap();
-        assert_eq!(phases["prefill_ms"], 48.);
+        // Native prefill is 6 rows × 7 ms; sink ticks remain in total wall.
+        assert_eq!(phases["prefill_ms"], 42.);
         assert_eq!(clock.get(), 2 + 3 + 2000 + 48 + decode_work);
         // Decode uses the shared loop's real clock, not this prefill clock.
         assert!(phases["decode_ms"].as_f64().unwrap() >= phases["transition_ms"].as_f64().unwrap());

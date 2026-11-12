@@ -90,3 +90,13 @@ boundary and native-call completion. A conservative M5 estimate is
 call. The family-specific scheduler temporarily removes the appender from
 peer scans and does not double-credit decode service. Completed and partial
 prefill accounting sums active native work, excluding peer decode time.
+
+### Model-free integration checks
+
+The V4.1 suite passes **95/95** and shared Driver passes **23/23**. New
+scheduler tests exercise cancellation at every seam for both Full and CED,
+provisional exclusion from peer batches, and accounting that excludes peer
+service. Two older timing assertions were updated for active native work
+rather than elapsed time containing sink/decode service. The synthetic total
+request clock is unchanged. Slice-policy geometry and exact-zero rollback
+also pass. The complete serve suite and contracts run separately.

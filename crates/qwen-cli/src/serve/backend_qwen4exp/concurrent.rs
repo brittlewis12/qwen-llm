@@ -37,6 +37,7 @@ pub(super) struct Config {
     pub active: usize,
     live: usize,
     decode_percent: usize,
+    layer_policy: super::layer_prefill::Policy,
 }
 fn bounded(
     key: &str,
@@ -66,6 +67,7 @@ impl Config {
                 10,
                 90,
             )?,
+            layer_policy: super::layer_prefill::Policy::from_env()?,
         })
     }
 }
@@ -105,6 +107,7 @@ pub(super) struct Run<'a> {
     prefill_calls: usize,
     reserve: u64,
     ready: bool,
+    layer_work: super::layer_prefill::Work,
 }
 
 pub(super) struct Owner<'a> {
@@ -462,6 +465,7 @@ impl<'a> Owner<'a> {
             start = end;
         }
         let rows = runner.packed_prefill_capacity().unwrap_or(1).max(1);
+        let prompt_len = tokens.len();
         Ok(Run {
             state: idle.state,
             tokens,
@@ -489,6 +493,12 @@ impl<'a> Owner<'a> {
             prefill_calls: 0,
             reserve,
             ready: false,
+            layer_work: super::layer_prefill::Work {
+                matched,
+                prompt: prompt_len,
+                reuse_source,
+                ..Default::default()
+            },
         })
     }
     fn prefill_run(
@@ -547,32 +557,48 @@ impl<'a> Owner<'a> {
                     },
                 )
                 .map(|_| ());
+            let active_ms = started.elapsed().as_secs_f64() * 1e3 - captured;
+            run.layer_work.note(active_ms);
             map_prefill_result(result, abort)?;
-            run.prefill_ms += started.elapsed().as_secs_f64() * 1e3 - captured;
+            run.prefill_ms += active_ms;
             run.capture_ms += captured;
             run.prefill_calls += 1;
-            run.position = run.state.runner.next_position();
-            if run.position != stop {
-                return Err(ServeError::server_error("concurrent prefill extent differs").into());
-            }
-            if stop == end {
-                if run.transcript_split == Some(end) && !run.endpoint {
-                    let t = Instant::now();
-                    if capture_snapshot(
-                        self.cache,
-                        self.ctx,
-                        &run.state.runner,
-                        &run.tokens[..end],
-                        "transcript",
-                        run.reserve,
-                    ) {
-                        run.transcript_entry = self.cache.entry_for(&run.tokens[..end]);
-                    }
-                    run.capture_ms += t.elapsed().as_secs_f64() * 1e3;
-                }
-                run.segment += 1;
-            }
+            self.commit_prefill_command(run, stop, end)?;
         }
+        self.finish_prefill(run)
+    }
+
+    fn commit_prefill_command(
+        &mut self,
+        run: &mut Run<'a>,
+        stop: usize,
+        end: usize,
+    ) -> Result<(), BackendFailure> {
+        run.position = run.state.runner.next_position();
+        if run.position != stop {
+            return Err(ServeError::server_error("concurrent prefill extent differs").into());
+        }
+        if stop == end {
+            if run.transcript_split == Some(end) && !run.endpoint {
+                let t = Instant::now();
+                if capture_snapshot(
+                    self.cache,
+                    self.ctx,
+                    &run.state.runner,
+                    &run.tokens[..end],
+                    "transcript",
+                    run.reserve,
+                ) {
+                    run.transcript_entry = self.cache.entry_for(&run.tokens[..end]);
+                }
+                run.capture_ms += t.elapsed().as_secs_f64() * 1e3;
+            }
+            run.segment += 1;
+        }
+        Ok(())
+    }
+
+    fn finish_prefill(&mut self, run: &mut Run<'a>) -> Result<bool, BackendFailure> {
         if run.segment < run.ends.len() {
             return Ok(false);
         }
@@ -600,8 +626,89 @@ impl<'a> Owner<'a> {
                 run.capture_ms += t.elapsed().as_secs_f64() * 1e3;
             }
             run.ready = true;
+            run.layer_work.finished = true;
+            tracing::info!(target:"qwen_diag", "serve prefill: family=qwen4exp complete=true cancelled=false prefill_ms={:.3} reused_tokens={} prefill_tokens={} reused_source={} layer_slices={} layer_gpu_ms={:.3}",run.prefill_ms,run.matched,run.tokens.len().saturating_sub(run.matched),run.reuse_source,run.layer_work.commands,run.layer_work.gpu_ms);
         }
         Ok(true)
+    }
+
+    fn prefill_slice_run(
+        &mut self,
+        run: &mut Run<'a>,
+        rows: usize,
+        sink: &mut dyn GenerationSink,
+        peers: bool,
+    ) -> Result<bool, BackendFailure> {
+        if let Err(e) = sink.tick() {
+            run.state.runner.cancel_layer_prefill();
+            run.state.failed = true;
+            return Err(BackendFailure::Aborted(e));
+        }
+        crate::shutdown::checkpoint().map_err(|e| ServeError::server_error(e.to_string()))?;
+        let Some(command) = run.commands.front().cloned() else {
+            return self.finish_prefill(run);
+        };
+        let end = run.ends[run.segment];
+        if command.start != run.position || command.end > end || command.len() > rows {
+            return Err(ServeError::server_error(
+                "layer quantum differs from the native prefill plan",
+            )
+            .into());
+        }
+        if command.len() < 2 {
+            // Scalar/frontier tails retain the original forward. The Driver
+            // still counts the intervening round as this quantum's service.
+            return self.prefill_run(run, rows, sink);
+        }
+        let boundary = self
+            .config
+            .layer_policy
+            .end(command.len(), run.layer_work.next, peers);
+        let started = Instant::now();
+        let result = run
+            .state
+            .runner
+            .prefill_layer_slice(&run.tokens[command.clone()], boundary);
+        let elapsed = started.elapsed().as_secs_f64() * 1e3;
+        run.layer_work.note(elapsed);
+        run.prefill_ms += elapsed;
+        let (complete, gpu_ms) = result.map_err(|e| {
+            run.state.failed = true;
+            ServeError::server_error(format!("{FAMILY} layer prefill: {e}"))
+        })?;
+        run.layer_work.gpu_ms += gpu_ms;
+        run.layer_work.commands += 1;
+        run.layer_work.next = boundary;
+        tracing::debug!(target:"qwen_diag", "serve layer: family=qwen4exp rows={} end_layer={} gpu_ms={gpu_ms:.3} final={complete}",command.len(),boundary);
+        if !complete {
+            return Ok(false);
+        }
+        run.layer_work.next = 0;
+        run.commands.pop_front();
+        run.prefill_calls += 1;
+        // Original ladder points are captured only after the native pending
+        // length and every child state have passed final validation.
+        if self.cache.ladder_enabled()
+            && run.conversation.is_some()
+            && command.len() == run.rows
+            && command.end < end
+            && end - command.end <= run.rows
+        {
+            let t = Instant::now();
+            capture_snapshot_impl(
+                self.cache,
+                self.ctx,
+                &run.state.runner,
+                &run.tokens[..command.end],
+                "ladder",
+                run.reserve,
+                run.conversation,
+                &[],
+            );
+            run.capture_ms += t.elapsed().as_secs_f64() * 1e3;
+        }
+        self.commit_prefill_command(run, command.end, end)?;
+        self.finish_prefill(run)
     }
     fn cursor(&self, run: &mut Run<'a>) -> Result<DecodeCursor, BackendFailure> {
         let logits = match run
@@ -667,7 +774,7 @@ impl<'a> Owner<'a> {
             self.cache.record_tip(run.conversation, &(), &run.tokens);
         }
         self.cache.record_tip(run.conversation, &(), &consumed);
-        let phases = serde_json::json!({"prefill_ms":run.prefill_ms,"decode_ms":generation.wall_ms,"reused_tokens":run.matched,"prefill_tokens":run.tokens.len()-run.matched,"restore_ms":run.restore_ms,"reuse_source":run.reuse_source,"batch":batch,"decode_impl":if self.native.is_some(){"native_hc_dense_head"}else{"ordinary_members"}});
+        let phases = serde_json::json!({"prefill_ms":run.prefill_ms,"decode_ms":generation.wall_ms,"layer_slices":run.layer_work.commands,"layer_gpu_ms":run.layer_work.gpu_ms,"reused_tokens":run.matched,"prefill_tokens":run.tokens.len()-run.matched,"restore_ms":run.restore_ms,"reuse_source":run.reuse_source,"batch":batch,"decode_impl":if self.native.is_some(){"native_hc_dense_head"}else{"ordinary_members"}});
         tracing::info!(target:"qwen_diag", "serve phases: family=qwen4exp tokenize_ms={:.1} restore_ms={:.1} reuse_source={} departing_capture_ms={:.1} endpoint_checkpoint={} prefill_calls={} matched_tokens={} prefill_ms={:.1} prefill_tokens={} snapshot_capture_ms={:.1} decode_ms={:.1} required_forwards={} forward_limit={} transitions={} batch={}",run.tokenize_ms,run.restore_ms,run.reuse_source,run.departing_ms,run.endpoint,run.prefill_calls,run.matched,run.prefill_ms,run.tokens.len()-run.matched,run.capture_ms,generation.wall_ms,run.required,self.forward_limit,generation.transitions,phases["batch"]);
         let mut out = super::super::outcome::finish_generation(
             run.tokens.len(),
@@ -880,6 +987,35 @@ impl<'a> Runtime for Owner<'a> {
             self.cursor(run).map(Some)
         })();
         self.track_failure(result)
+    }
+    fn prefill_sliced(
+        &mut self,
+        run: &mut Self::Run,
+        rows: usize,
+        sink: &mut dyn GenerationSink,
+        reserve: u64,
+        peers: bool,
+    ) -> Option<Result<Option<DecodeCursor>, BackendFailure>> {
+        let policy = self.config.layer_policy;
+        if policy.ms == 0 || (!peers && !run.layer_work.armed) {
+            return None;
+        }
+        if !run.layer_work.armed
+            && (!policy.selects(&run.commands)
+                || run.state.runner.packed_prefill_capacity().is_none())
+        {
+            return None;
+        }
+        let _qos = qwen_llm::metal::GpuThreadQos::enter();
+        run.layer_work.armed = true;
+        run.reserve = reserve;
+        let result = (|| {
+            if !self.prefill_slice_run(run, rows, sink, peers)? {
+                return Ok(None);
+            }
+            self.cursor(run).map(Some)
+        })();
+        Some(self.track_failure(result))
     }
     fn advance(
         &mut self,

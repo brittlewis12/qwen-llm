@@ -32,6 +32,7 @@ const FAMILY: &str = "Qwen3.8-Flash-Next";
 
 mod concurrent;
 mod dflash;
+mod layer_prefill;
 mod reuse;
 use reuse::*;
 

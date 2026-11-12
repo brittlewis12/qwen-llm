@@ -6111,6 +6111,27 @@
     "reason": "Pure owner limits, fake member transition/failure lifecycle and idle selection; no Metal or model."
   },
   {
+    "target": "qwen",
+    "name": "serve::backend_qwen4exp::layer_prefill::tests::cancellation_accounts_only_active_work_until_completion",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only selective layer planning, rollback parsing and partial-work cancellation accounting; no Metal context or model."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_qwen4exp::layer_prefill::tests::cold_and_warm_slices_preserve_the_row_plan_and_fused_ple_boundary",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only selective layer planning, rollback parsing and partial-work cancellation accounting; no Metal context or model."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_qwen4exp::layer_prefill::tests::rollback_and_selective_policy_preserve_small_appends",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only selective layer planning, rollback parsing and partial-work cancellation accounting; no Metal context or model."
+  },
+  {
     "target": "lib",
     "name": "qwen4exp_metal::hc_read::tests::native_hc_axis_matches_member_reductions_and_guards",
     "class": "gpu",

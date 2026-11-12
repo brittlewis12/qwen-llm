@@ -76,6 +76,7 @@ SCOPES = {
         "serve::backend_glm5_next::scheduler::tests::",
         "serve::backend_glm5_next::layer_prefill::tests::",
         "serve::backend_qwen4exp::concurrent::tests::",
+        "serve::backend_qwen4exp::layer_prefill::tests::",
         "serve::checkpoint_ladder::",
         "serve::snapshot_cache::tests::ladder_",
         "serve::backend_glm5_next::chunk_checkpoint::tests::live_targets_follow_committed_command_plan",

@@ -45336,3 +45336,14 @@ All20 CPU harness tests pass. The measured harness/binary stay frozen at
   checkpoints with fused first-two PLE semantics, pending-state publication
   gated through original validation, and terminal command guards. Added
   perf-only1/2/4/8 pair/cancel regression. No CLI/default changes before gate.
+
+
+### 2026-11-12 — Flash-Next native layer gate and selective serve adapter
+
+60/60 warm/cold paired probes at 48K are bitwise exact, including causal state,
+next decode and both peers; ten cancel/dispose/replay cases pass. Warm 2048-row
+worst peer gap is 1.12–1.14 s unsplit versus 0.170 s at eight cuts. Equal-round
+GPU-duration ratios average 0.99993 warm / 0.99996 cold. The selective adapter
+uses the existing Driver, row/frontier plan and validated checkpoint points;
+MS=0 preserves incumbent scheduling. It remains default-off pending six-arm
+sustained serve evidence. See [price and native gate](bench/2026-11-12-fn-layer-slice-price.md).

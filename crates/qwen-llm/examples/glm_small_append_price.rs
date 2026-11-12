@@ -531,6 +531,20 @@ mod probe {
         }
     }
 
+    fn route_widths() -> Vec<usize> {
+        std::env::var("GLM_ROUTE_WIDTHS")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter_map(|item| item.trim().parse().ok())
+                    .filter(|width| *width > 0)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|widths| !widths.is_empty())
+            .unwrap_or_else(|| ROUTE_WIDTHS.to_vec())
+    }
+
     /// Every route the shipped kernels admit at `width`. The per-slot packet
     /// validates 1..=128 rows; the others span the whole grid.
     fn route_arms(width: usize) -> Vec<RouteArm> {
@@ -558,7 +572,8 @@ mod probe {
     ) -> anyhow::Result<()> {
         let mut session = new_session(ctx, weights, ids, depth, capacity)?;
         let snapshot = session.capture_snapshot()?;
-        for (width_index, width) in ROUTE_WIDTHS.into_iter().enumerate() {
+        let widths = route_widths();
+        for (width_index, width) in widths.into_iter().enumerate() {
             let tokens = &ids[depth..depth + width];
             let arms = route_arms(width);
 
@@ -816,7 +831,7 @@ mod probe {
             CAPACITY
         };
         let needed_width = if mode == "routes" {
-            1024
+            *route_widths().iter().max().expect("route widths")
         } else if mode == "route-quality" {
             *quality_widths.iter().max().expect("quality widths")
         } else {
@@ -851,7 +866,7 @@ mod probe {
         emit(json!({
             "kind": "header", "mode": mode, "depth": depth,
             "capacity": capacity, "prefill_rows": PREFILL_ROWS,
-            "route_widths": if mode == "routes" { Some(ROUTE_WIDTHS) } else { None },
+            "route_widths": if mode == "routes" { Some(route_widths()) } else { None },
             "quality_widths": if mode == "route-quality" { Some(quality_widths) } else { None },
             "corpus_tokens": ids.len(), "device": ctx.device_facts(),
             "pressure": pressure(), "loadavg": loadavg(),

@@ -101,6 +101,47 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `experts` arm when QSA status was 0/count 0 instead of 512. The targeted
   `hc-band` pair avoids that invalid late hold. Raw B=1 graph/profile and
   probe output: `metagross:~/qwen-runs/2026-11-11-hc-fuse/`.
+## 2026-11-11 - Artifact Choice Correction: Deep Cohort Changes V4.1 Tradeoff
+
+- **Supersedes the initial V4.1 keep-C decision in the entry below.** The
+  four-prompt packet remains as history; the correction is in
+  `docs/bench/2026-11-11-artifact-choice/RESULTS.md`. Runs used the clean M5
+  worktree at `bba889ccf`. No model files were changed.
+- **V4.1 wide cohort:** 11 natural prompts (10 code, one prose), 49,152-token
+  prefix and 512 targets each. B−A **−0.02163** (90% CI [−0.03104, −0.01286];
+  sign p=0.0117) and C−A **−0.01560** ([−0.02590, −0.00726]; p=0.0654).
+  B−C **−0.00603** ([−0.01260, +0.00064]; p=0.5488); code-only B−C
+  **−0.00763** ([−0.01426, −0.00065]; p=0.3438). The all-prompt evidence
+  does not distinguish B/C. Code-only mean favors B, with a nonsignificant
+  prompt sign test.
+- Quality packet thermal start→end: V4.1 A **0→2**, C **2→1**, B **1→1**;
+  GLM D **0→2**, E **2→1**. Held A/B/C were **0→0**. Boundary readings only.
+- **Held October packet:** all six source and 18 prefix-plus-target ID hashes
+  match the frozen expected file. Current C−B is **+0.06320** (90% CI
+  [+0.01989, +0.10657]), in the same direction as the old **+0.079659**;
+  sign p=0.6875. The 48K-prefix wide cohort answers a different
+  long-context/code-heavy question and reduces B−C to −0.00603 overall.
+- **Production V4.1 A/C:** width 1 A/C **14.052/16.358 ms/token**; width 3
+  **25.837/36.113 ms/round**. A2's 180-second three-agent serve delivered
+  **84.006 tok/s** (thermal max 1). A1 aborted at thermal 2; C1 was blocked
+  at preflight at thermal 2, and C2/C3-retry aborted at thermal 2. C serve is
+  not measured; B production timing/serve were not run. Current-build A suite
+  rerun is **14.63–15.23 ms/token**; the old 30.24 row did not reproduce.
+- **V4.1 call:** no single candidate dominates. B has the quality-first
+  signal, while measured production and serving favor A. Britt chooses which
+  tradeoff matters; the report lists exact conditional deletable directories.
+  A/B/C on-disk totals are 265.83 GB (backbone plus Engram), 394.74 GB and
+  339.48 GB, respectively.
+- **GLM wide cohort:** E−D **−0.00217** (90% CI [−0.01278, +0.00845];
+  sign p=0.5488); code-only **−0.00624** ([−0.01563, +0.00281]; p=0.3438).
+  Keep D; E is 4.36 GB smaller, while the first-packet `a2a1965fe` suite
+  measured D/E at 17.71/18.22 ms/token. No current-build GLM width-3 timing
+  or GLM serving result is recorded.
+- Raw scores and prompt-cluster analyses are under
+  `metagross:~/qwen-runs/2026-11-11-artifact-choice/`. Route packets completed
+  with no reported fallback (width-1 overflow zero; width-3 capture has no
+  fallback counter).
+
 ## 2026-11-11 - Artifact Choice: Keep V4.1 Maya-S And GLM Stock IQ3
 
 - Clean M5 Ultra `qwen-bench` iter build **`a2a1965fe`**. DeepSeek V4.1

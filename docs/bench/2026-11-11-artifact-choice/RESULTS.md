@@ -1,11 +1,177 @@
 # M5 artifact choice: results and decisions
 
-Run root: `metagross:~/qwen-runs/2026-11-11-artifact-choice/`. Build and all
-five candidates used the same clean `qwen-bench` iter binary from
-`a2a1965fe` (`build_dirty=0`, source identity matched). No model file was
-changed.
+Run root: `metagross:~/qwen-runs/2026-11-11-artifact-choice/`. The original
+first packet used the same clean `qwen-bench` iter binary for all five
+candidates from `a2a1965fe` (`build_dirty=0`, source identity matched). No
+model file was changed.
 
-## Decisions
+## Correction — 2026-11-11: wide cohort and held-packet rescore
+
+This correction supersedes the first-packet decisions below. The original
+four-prompt results remain as historical evidence. The current wide and held
+scores used `build/iter/qwen-bench` from the clean M5 worktree at
+`bba889ccf`; the successful current-build suite record also identifies
+`bba889ccf`. No model files were moved or deleted.
+
+### Cohorts and analysis
+
+The wide cohort is `cohort-v3/`: 11 natural sources (10 code prompts across
+six repositories and four languages, plus one prose control), 49,152 prefix
+tokens and 512 teacher-forced targets per prompt (5,632 positions per model).
+The V4.1 tokenizer hashes match across A/B/C; the GLM hashes match across D/E.
+Every paired comparison below also verifies prompt IDs, target IDs and
+per-prompt token hashes.
+
+The first cohort in `quality/` is separate: four prompts (three code and one
+prose), 49,152 prefix tokens and 1,024 targets per prompt (4,096 positions).
+The two cohorts are not pooled. The October held packet is a third, separate
+instrument: six frozen documents, 512 prefix tokens and 64 targets each.
+
+Wide quality arm thermal start→end: V4.1 A 0→2, C 2→1, B 1→1; GLM D 0→2,
+E 2→1. Held rescoring A/B/C was 0→0 for every arm. These are packet boundary
+readings.
+
+All pairwise means below are equal-prompt candidate-minus-reference dNLL in
+nats/token; negative means the candidate assigns higher probability to the
+same targets. Intervals are central 90% prompt-cluster bootstrap intervals
+(20,000 resamples, seed 1,196,182,867). The p-values are exact two-sided
+sign tests over prompt means. Top-1 agreement is pooled over target positions.
+
+### Wide V4.1 results
+
+| Pair | All prompts: mean [90% CI], sign-test p | Code only: mean [90% CI], sign-test p | Top-1 agreement |
+| --- | --- | --- | ---: |
+| B−A | −0.02163 [−0.03104, −0.01286], p=0.0117 | −0.01793 [−0.02575, −0.01035], p=0.0215 | 95.19% |
+| C−A | −0.01560 [−0.02590, −0.00726], p=0.0654 | −0.01030 [−0.01501, −0.00521], p=0.1094 | 95.03% |
+| B−C | −0.00603 [−0.01260, +0.00064], p=0.5488 | −0.00763 [−0.01426, −0.00065], p=0.3438 | 96.16% |
+
+B and C both improve on A in mean NLL; B separates from A in both the
+bootstrap and prompt sign tests. C's bootstrap intervals exclude zero against
+A, while its sign tests do not. B−C is unresolved overall. The code-only
+bootstrap favors B, but the code-only sign test does not show a consistent
+prompt-level difference.
+
+### First cohort results, reported separately
+
+| Pair | All prompts: mean [90% CI], sign-test p | Code only: mean [90% CI], sign-test p | Top-1 agreement |
+| --- | --- | --- | ---: |
+| B−A | −0.02001 [−0.04013, −0.00460], p=0.1250 | −0.00886 [−0.01462, −0.00310], p=0.2500 | 94.95% |
+| C−A | −0.01789 [−0.03392, −0.00356], p=0.1250 | −0.00879 [−0.01595, −0.00163], p=0.2500 | 94.87% |
+| B−C | −0.00212 [−0.00621, +0.00204], p=0.6250 | −0.00007 [−0.00293, +0.00278], p=1.0000 | 95.95% |
+| E−D | −0.00615 [−0.01151, +0.00011], p=1.0000 | −0.00466 [−0.00946, +0.00014], p=1.0000 | 95.39% |
+
+### October 22 held-packet reconciliation
+
+The current scorer re-read the six frozen source files. All six source hashes
+match the held manifest, and all 18 candidate/prompt
+`scored_token_ids_sha256_i32le` values match
+`held-oct22-expected-ids.json`. A/B/C scored identical 576-token
+prefix-plus-target sequences.
+
+On this exact short-context packet, Maya-S C is worse than UD-IQ3_XXS B by
+**+0.06320 nats/token** (90% CI **[+0.01989, +0.10657]**); code-only is
+**+0.03661** (**[+0.00515, +0.06807]**). Top-1 agreement is **76.82%**.
+The sign tests are not significant (all prompts p=0.6875; code p=1.0000),
+reflecting the small and mixed set of document directions. The October report's
+**+0.079659** Maya-S−IQ3 mean therefore reproduces in direction and remains
+large on the held texts, though the current mean is 0.01646 lower.
+
+That held result does not generalize to the wide deep cohort: there B−C is
+−0.00603 overall, with an interval crossing zero. The instruments differ in
+prefix depth (512 versus 49,152), targets per prompt (64 versus 512), and
+corpus mix (three code/three prose held documents versus ten code/one prose
+wide prompts). The earlier score also used the October build
+`3e63384c`, while the rescore uses the current build. Since exact target IDs
+match, tokenization or target alignment does not explain the held result.
+The wide result answers a different long-context, code-heavy question.
+
+### GLM wide result
+
+| Pair | All prompts: mean [90% CI], sign-test p | Code only: mean [90% CI], sign-test p | Top-1 agreement |
+| --- | --- | --- | ---: |
+| E−D | −0.00217 [−0.01278, +0.00845], p=0.5488 | −0.00624 [−0.01563, +0.00281], p=0.3438 | 93.87% |
+
+E trends lower in NLL, but neither interval nor sign test distinguishes it
+from D. The wide run scored all 11 prompts and 5,632 targets per candidate,
+with the tokenizer fingerprint check enabled.
+
+### Production speed and serving
+
+The current-build `qwen-bench suite --tg 64 --depth 32768 --runs 3` rerun for
+A is **14.63–15.23 ms/token** (14.84 mean). The old 30.24 ms/token A row did
+not reproduce and remains an unexplained outlier.
+
+The production `v41_batch_depth` causal schedule at 32K, from three
+interleaved pairs in `speed-v2/`, gives:
+
+| Width | A, current GSQ-RCO | C, Maya-S | Difference |
+| ---: | ---: | ---: | --- |
+| 1 | 14.052 ms/token | 16.358 ms/token | A is 2.305 ms/token faster |
+| 3 | 25.837 ms/round | 36.113 ms/round | A is 10.276 ms/round faster |
+
+B has no measurement in this production reference path. In the earlier
+`a2a1965fe` solo suite, D was 17.71 ms/token and E 18.22 ms/token at depth
+32K; there is no comparable current-build GLM width-3 result.
+
+For the three-agent 48K serve, A2 completed at **84.006 tok/s** (15,121
+window tokens, 180 seconds, thermal max 1). A1 aborted at thermal level 2.
+C1 was rejected at preflight because thermal pressure was already level 2;
+C2 and C3-retry aborted at level 2. C serving is **not measured** because no
+attempt passed the thermal gate. B serving was not run.
+
+### Route differences
+
+All four `routes-v2/` packets exited successfully. Width-1 profile overflow
+was zero. A uses IQ2_S/IQ2_XS/IQ2_XXS expert kernels, including IQ2_XS routed
+gate/up and down work. C has no IQ2_XS route; it uses IQ2_S/IQ2_XXS gate/up
+and IQ3_S/IQ3_XXS down kernels. The attention/control sequence and route/HC
+control kernels are common. A's shared, attention output and Engram projection
+work uses Q5_K kernels; C uses Q8_0 for those rows. At width 3 the direct
+capture counts 2,186
+dispatches for A and 2,672 for C. No fallback is reported in the route
+records; the width-3 capture provides dispatch counts but no separate fallback
+counter.
+
+### Current recommendation and exact directories
+
+No V4.1 candidate dominates. B has the strongest quality-first result, with a
+small code-only mean edge over C (**0.00763 nats/token**) whose prompt sign
+test is not significant. The production A/C path and the only accepted serve
+run favor A for throughput: A is 2.305 ms/token faster at width 1 and 10.276
+ms/round faster at width 3, and A2 delivered 84.006 tok/s. C improves NLL
+against A, but is slower on that production path and has no accepted serve
+measurement. **Britt's choice is whether that quality evidence justifies
+giving up the measured A/C throughput and serving evidence.** The V4.1
+directories are therefore conditional:
+
+- Keep A: B and C are deletable:
+  `~/models/unsloth-DeepSeek-V4.1-Flash-1017/UD-IQ3_XXS/` and
+  `~/models/DeepSeek-V4.1-Flash-1017-Maya-S/Maya-S/`.
+- Keep B: A and C are deletable:
+  `~/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/` (including its IQ4_NL
+  Engram companion) and
+  `~/models/DeepSeek-V4.1-Flash-1017-Maya-S/Maya-S/`.
+- Keep C: A and B are deletable:
+  `~/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/` (including its IQ4_NL
+  Engram companion) and
+  `~/models/unsloth-DeepSeek-V4.1-Flash-1017/UD-IQ3_XXS/`.
+
+On-disk sizes from the identity records: A is 155.23 GB backbone plus a
+110.60 GB IQ4_NL Engram; B is 394.74 GB; C is 339.48 GB. No one of these
+tradeoffs was hidden in the NLL result.
+
+For GLM, **keep D and delete E**. Their wide NLL intervals overlap and the
+prompt sign tests are inconclusive; the older solo suite gives D a 0.51
+ms/token speed edge. E is 4.36 GB smaller on disk (116.00 versus 120.37 GB),
+but the wide cohort does not establish a quality gain. The exact deletable
+directory is `~/models/glm-5.3-flash-maya-m/`; keep
+`~/models/glm-stock-iq3-download/UD-IQ3_XXS/`.
+
+Raw wide and held analyses are retained under
+`metagross:~/qwen-runs/2026-11-11-artifact-choice/analysis/`; model files
+remain untouched.
+
+## Original first-packet decisions (superseded by the correction above)
 
 ### DeepSeek V4.1 Flash 1017: keep C, delete A and B
 

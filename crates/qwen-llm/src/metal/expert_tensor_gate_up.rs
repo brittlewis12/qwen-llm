@@ -463,9 +463,6 @@ pub(crate) fn prepare<'a>(
     } else {
         false
     };
-    if !supported {
-        return Ok(None);
-    }
     let down = match route {
         DownRoute::Incumbent => None,
         DownRoute::Tensor | DownRoute::TensorOrSmallCounts => {
@@ -485,27 +482,34 @@ pub(crate) fn prepare<'a>(
             )?;
             match tensor {
                 Some(down) => Some(PreparedDown::Tensor(down)),
-                None if route == DownRoute::Tensor => return Ok(None),
                 // Borrow the admitted bindings directly: the retile checks
                 // element counts, and this keeps the prepared down independent
                 // of any flattened temporaries in `prepare`.
-                None => super::iq3_s_down_retile::prepare_small_counts(
-                    ctx,
-                    enc,
-                    b.down_bank,
-                    b.inner,
-                    b.counts,
-                    b.slots,
-                    b.slot_out,
-                    f,
-                    h,
-                    e,
-                    rows,
-                )?
-                .map(PreparedDown::SmallCounts),
+                None if route == DownRoute::TensorOrSmallCounts => {
+                    super::iq3_s_down_retile::prepare_small_counts(
+                        ctx,
+                        enc,
+                        b.down_bank,
+                        b.inner,
+                        b.counts,
+                        b.slots,
+                        b.slot_out,
+                        f,
+                        h,
+                        e,
+                        rows,
+                    )?
+                    .map(PreparedDown::SmallCounts)
+                }
+                None => None,
             }
         }
     };
+    // Preparation covers every binding so invalid down bindings are still
+    // errors when an earlier pipeline cannot dispatch.
+    if !supported {
+        return Ok(None);
+    }
     if down.is_none() && route != DownRoute::Incumbent {
         return Ok(None);
     }

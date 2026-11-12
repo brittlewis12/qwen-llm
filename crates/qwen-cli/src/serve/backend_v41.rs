@@ -205,6 +205,9 @@ pub(super) fn start(
     }
     let mut settings = prepared.settings;
     settings.model_id = listening.model_id.clone();
+    if settings.layer_slice_ms > 0 {
+        tracing::info!(target:"qwen_diag", "serve layer prefill: family=deepseek_v41 target_gpu_ms={} minimum_predicted_ms={} rows=original", settings.layer_slice_ms, settings.layer_slice_min_ms);
+    }
     let mut backend = Backend::new(&ctx, &weights, forward, settings, idle_window);
     if prepared.max_active > 1 {
         backend.idle_residency.note_activity();

@@ -100,3 +100,21 @@ service. Two older timing assertions were updated for active native work
 rather than elapsed time containing sink/decode service. The synthetic total
 request clock is unchanged. Slice-policy geometry and exact-zero rollback
 also pass. The complete serve suite and contracts run separately.
+
+### Policy/cancellation regression and thermal limit
+
+The corrected policy run adds **23/23** exact pairs, bringing the total to
+**71/71**, plus four native cancellation/resume checks (warm Full at 342 and
+1509 rows, warm CED and cold CED at 8192). Cancelled appender state refuses
+snapshot and decode; a fresh state restored from the prior checkpoint
+reproduces the original output and complete causal payload exactly.
+The run includes the 18-way cuts predicted for a 4096-row CED encoder.
+It started at pressure 0 but reached pressure 2 during sustained packed
+prefill. Its timing ratios are excluded; exactness remains valid. A short
+policy-only re-price with idle intervals and pressure <=1 before/after each
+arm is required before relying on that timing. The run held its lease for
+10m05s, including the iter probe and release serve builds.
+
+The frozen standing trace identifies its 2097.924 ms maximum as a **1959-row
+Full append at position 63471**, with 2703360 disk-read bytes in the native
+call. The raw-event manifest is `price-standing.json` under the run directory.

@@ -1,5 +1,6 @@
 //! Row-preserving V4.1 layer-boundary price and exactness probe.
 //! v41_layer_slice_probe <model> <corpus> [reps=2] [sizes=32,342,1509]
+//! [full|ced] [warm|cold] [slices=1,2,4,8] [settle_seconds=0]
 use anyhow::{Result, ensure};
 use qwen_llm::{
     deepseek_v41::{
@@ -166,6 +167,7 @@ fn main() -> Result<()> {
         .split(',')
         .map(str::parse)
         .collect::<std::result::Result<_, _>>()?;
+    let settle_secs: u64 = args.get(8).map_or(Ok(0), |s| s.parse())?;
     let ced = args.get(5).map(String::as_str) == Some("ced");
     let depth = if args.get(6).map(String::as_str) == Some("cold") {
         0
@@ -318,14 +320,31 @@ fn main() -> Result<()> {
                 ends.len() - 1
             };
             for rep in 0..reps {
+                let mut thermal_samples = Vec::new();
+                let mut measure = |split| -> Result<Arm> {
+                    if settle_secs > 0 {
+                        std::thread::sleep(std::time::Duration::from_secs(settle_secs));
+                    }
+                    let before = thermal();
+                    if settle_secs > 0 {
+                        ensure!(
+                            (0..=1).contains(&before),
+                            "thermal gate before arm: {before}"
+                        );
+                    }
+                    let result = arm(&f, &root, &ids, n, &ends, split, ced, depth, rounds_after)?;
+                    let after = thermal();
+                    thermal_samples.push(json!({"split":split,"before":before,"after":after}));
+                    if settle_secs > 0 {
+                        ensure!((0..=1).contains(&after), "thermal gate after arm: {after}");
+                    }
+                    Ok(result)
+                };
                 let (a, b) = if rep % 2 == 0 {
-                    (
-                        arm(&f, &root, &ids, n, &ends, false, ced, depth, rounds_after)?,
-                        arm(&f, &root, &ids, n, &ends, true, ced, depth, rounds_after)?,
-                    )
+                    (measure(false)?, measure(true)?)
                 } else {
-                    let b = arm(&f, &root, &ids, n, &ends, true, ced, depth, rounds_after)?;
-                    let a = arm(&f, &root, &ids, n, &ends, false, ced, depth, rounds_after)?;
+                    let b = measure(true)?;
+                    let a = measure(false)?;
                     (a, b)
                 };
                 let exact = same(&a.logits, &b.logits)
@@ -341,7 +360,7 @@ fn main() -> Result<()> {
                         .zip(b.peers.iter().flatten())
                         .all(|(x, y)| same(x, y));
                 emit(
-                    json!({"kind":"pair","ced":ced,"depth":depth,"rows":n,"slices":s,"rep":rep,"bitwise":exact,"thermal":thermal(),
+                    json!({"kind":"pair","ced":ced,"depth":depth,"rows":n,"slices":s,"rep":rep,"bitwise":exact,"thermal":thermal(),"thermal_samples":thermal_samples,
                     "base_ttft_ms":a.ttft,"slice_ttft_ms":b.ttft,"base_wall_ms":a.wall,"slice_wall_ms":b.wall,
                     "base_gpu_ms":a.gpu,"slice_gpu_ms":b.gpu,"gpu_ratio":b.gpu/a.gpu,
                     "base_gaps_ms":a.gaps,"slice_gaps_ms":b.gaps,"commands":b.commands}),

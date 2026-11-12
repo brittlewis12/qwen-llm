@@ -45243,3 +45243,13 @@ mid-layer cancellation and active-prefill accounting. Slice-policy geometry
 unit passes. The native policy/cancellation probe and release serve build are
 queued behind the GLM append-route lane; serving default remains off until
 the measured gate. No row partition or CED replay group was changed.
+
+### V4.1 policy regression — 71/71 exact; hot timing excluded
+
+Corrected encoder-return sharing and nominal-policy cuts add 23 exact pairs
+(total 71) and four native cancel/restore checks. All pass logits and complete
+persistent-state comparisons. The sustained probe reached thermal pressure 2;
+its timing is excluded. Added a pressure-gated short re-price and peer-round
+diagnostics before serve A/B. Release serve binary built successfully under
+the 10m05s lease; default remains off. Frozen incumbent max is a 1959-row
+Full append at position 63471, confirming warm-append responsiveness ROI.

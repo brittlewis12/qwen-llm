@@ -643,8 +643,15 @@ impl<S> Scheduler<S> {
                     .collect::<Vec<_>>();
                 if !members.is_empty() {
                     self.decode(members, settings, engine, reuse);
+                    rounds += 1;
                 }
             }
+            active
+                .run
+                .as_mut()
+                .expect("prefill run")
+                .prefill_work
+                .peer_rounds += rounds;
             let index = index.min(self.active.len());
             self.active.insert(index, active);
             if let Err(failure) = result {

@@ -6452,5 +6452,26 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed pure selective-prefill cost, threshold, row-plan and layer coverage checks; no Metal context or model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::layer_prefill::tests::selective_cuts_preserve_small_appends_and_exact_zero_rollback",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "CPU-only selective slice geometry and zero rollback arithmetic"
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::layer_slices_keep_appender_out_of_peer_rounds_and_exclude_peer_time",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted engine checks provisional exclusion, service between layers and active accounting"
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::cancellation_between_layers_discards_appender_and_keeps_peers_consistent",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Model-free Full and CED cancellation at every layer seam preserves peer lifecycle"
   }
 ]

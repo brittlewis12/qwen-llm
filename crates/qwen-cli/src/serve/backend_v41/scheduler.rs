@@ -425,8 +425,11 @@ impl<S> Scheduler<S> {
         };
         let started = engine.now();
         if prefill_turn {
-            self.prefill(prefilling.expect("prefill turn"), settings, engine, reuse);
-            if settings.prefill_fair && mixed {
+            let interleaved =
+                self.prefill(prefilling.expect("prefill turn"), settings, engine, reuse);
+            if interleaved {
+                self.decode_budget = Duration::ZERO;
+            } else if settings.prefill_fair && mixed {
                 self.decode_budget = (engine.now() - started)
                     .mul_f64(
                         settings.decode_percent as f64 / (100 - settings.decode_percent) as f64,
@@ -585,7 +588,7 @@ impl<S> Scheduler<S> {
         settings: &Settings,
         engine: &mut impl BatchEngine<S>,
         reuse: &mut impl reuse::Reuse<S>,
-    ) {
+    ) -> bool {
         let loaded = self
             .active
             .iter()
@@ -596,6 +599,66 @@ impl<S> Scheduler<S> {
         } else {
             crate::family_options::V41_PREFILL_ROWS
         };
+        if loaded && settings.prefill_fair && settings.layer_slice_ms > 0 {
+            // Keep the provisional appender outside every decode scan. Peer
+            // retirement may compact the active vector between checkpoints.
+            let mut active = self.active.remove(index);
+            let mut rounds = 0;
+            let result = {
+                let run = active.run.as_mut().expect("prefilling run");
+                let position = engine.position(&run.state);
+                let input_rows = run.next_endpoint(rows).saturating_sub(run.position);
+                memory_io::observe_chunk(
+                    active.prefill_io.as_mut(),
+                    position,
+                    input_rows,
+                    || qwen_llm::pid_metrics::PidSnapshot::now().ok(),
+                    || {
+                        settings.prefill_layer_slice(
+                            run,
+                            rows,
+                            &mut Publish(active.sink.as_mut()),
+                            engine,
+                            reuse,
+                            Some(&mut |engine, reuse| {
+                                self.reap();
+                                self.deliver();
+                                let members = (0..self.active.len())
+                                    .filter(|&i| {
+                                        self.active[i].decoding() && !self.active[i].parked()
+                                    })
+                                    .collect::<Vec<_>>();
+                                if !members.is_empty() {
+                                    self.decode(members, settings, engine, reuse);
+                                    rounds += 1;
+                                }
+                            }),
+                        )
+                    },
+                )
+            };
+            if rounds > 0 && result.is_ok() {
+                let members = (0..self.active.len())
+                    .filter(|&i| self.active[i].decoding() && !self.active[i].parked())
+                    .collect::<Vec<_>>();
+                if !members.is_empty() {
+                    self.decode(members, settings, engine, reuse);
+                }
+            }
+            let index = index.min(self.active.len());
+            self.active.insert(index, active);
+            if let Err(failure) = result {
+                self.fail(index, failure);
+            } else if self.active[index]
+                .run
+                .as_ref()
+                .expect("prefill run")
+                .prefilled()
+            {
+                self.start_decode(index, settings, engine, reuse);
+            }
+            return rounds > 0;
+        }
         let active = &mut self.active[index];
         let run = active.run.as_mut().expect("prefilling request has a run");
         if loaded
@@ -616,11 +679,12 @@ impl<S> Scheduler<S> {
         );
         if let Err(failure) = result {
             self.fail(index, failure);
-            return;
+            return false;
         }
         if run.prefilled() {
             self.start_decode(index, settings, engine, reuse);
         }
+        false
     }
 
     fn start_decode(

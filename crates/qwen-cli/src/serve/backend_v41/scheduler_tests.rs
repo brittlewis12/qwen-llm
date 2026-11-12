@@ -89,6 +89,8 @@ struct StubEngine {
     step_ms: u64,
     /// Serve batched steps through `step_batch_sampled` (device-style tokens).
     sampled_step: bool,
+    layered: bool,
+    cancel_layer: Option<usize>,
 }
 
 impl StubEngine {
@@ -132,6 +134,75 @@ impl execution::Engine<Seq> for StubEngine {
         }
         state.prompt = state.tokens.len();
         Ok(self.logits(state))
+    }
+    fn prefill_layered(
+        &mut self,
+        state: &mut Seq,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        with_logits: bool,
+        target_ms: usize,
+        _: usize,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> Result<Vec<f32>, ServeError> {
+        if !self.layered || target_ms == 0 || tokens.len() < 300 {
+            return self.prefill(state, tokens, cancel, with_logits);
+        }
+        state.unready = true;
+        for layer in 0..3 {
+            self.clock += Duration::from_millis(100);
+            self.log.borrow_mut().events.push(format!("layer {layer}"));
+            if self.cancel_layer == Some(layer) {
+                cancel.store(true, Ordering::Release);
+            }
+            if layer < 2 {
+                between(self);
+            }
+            if cancel.load(Ordering::Acquire) {
+                state.poisoned = true;
+                return Err(ServeError::server_error("cancelled partial layer append"));
+            }
+        }
+        state.tokens.extend_from_slice(tokens);
+        state.unready = false;
+        if with_logits {
+            state.prompt = state.tokens.len();
+            Ok(self.logits(state))
+        } else {
+            Ok(Vec::new())
+        }
+    }
+    fn cold_prefill_layered(
+        &mut self,
+        state: &mut Seq,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        begin: bool,
+        max_rows: usize,
+        target_ms: usize,
+        _: usize,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> Result<Option<qwen_llm::deepseek_v41::forward::ColdPrefillSlice>, ServeError> {
+        if !self.cold || !self.layered || target_ms == 0 {
+            return self.cold_prefill(state, tokens, cancel, begin, max_rows);
+        }
+        let previous = state.unready;
+        state.unready = true;
+        for layer in 0..3 {
+            self.clock += Duration::from_millis(100);
+            if self.cancel_layer == Some(layer) {
+                cancel.store(true, Ordering::Release);
+            }
+            if layer < 2 {
+                between(self);
+            }
+            if cancel.load(Ordering::Acquire) {
+                state.poisoned = true;
+                return Err(ServeError::server_error("cancelled CED layer"));
+            }
+        }
+        state.unready = previous;
+        self.cold_prefill(state, tokens, cancel, begin, max_rows)
     }
     fn cold_prefill(
         &mut self,
@@ -1437,4 +1508,88 @@ fn fair_cancelled_ced_discards_provisional_state_and_preserves_other_decoders() 
     assert!(matches!(cold.terminal(), Some(Err((true, _, _)))));
     assert!(matches!(short.terminal(), Some(Ok(_))));
     assert_eq!(reuse.commits.len(), 1, "provisional CED was not committed");
+}
+
+#[test]
+fn layer_slices_keep_appender_out_of_peer_rounds_and_exclude_peer_time() {
+    let mut settings = settings();
+    settings.prefill_fair = true;
+    settings.cold_ced = false;
+    settings.layer_slice_ms = 200;
+    let mut scheduler = Scheduler::new(3);
+    let mut engine = StubEngine {
+        layered: true,
+        step_ms: 20,
+        ..Default::default()
+    };
+    let mut reuse = Recording {
+        ready_short: true,
+        ..Default::default()
+    };
+    let a = submit(&mut scheduler, prepared(&settings, "hi", true));
+    scheduler.pump(&settings, &mut engine, &mut reuse);
+    let b = submit(&mut scheduler, prepared(&settings, "hello", true));
+    scheduler.pump(&settings, &mut engine, &mut reuse);
+    let mut request = prepared(&settings, &"x".repeat(1500), true);
+    Arc::get_mut(&mut request).unwrap().boundaries = None;
+    let app = submit(&mut scheduler, request);
+    scheduler.pump(&settings, &mut engine, &mut reuse);
+    drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+    assert!(matches!(a.terminal(), Some(Ok(_))) && matches!(b.terminal(), Some(Ok(_))));
+    let Some(Ok((_, _, phases))) = app.terminal() else {
+        panic!("{:?}", app.terminal());
+    };
+    assert_eq!(
+        phases["prefill_ms"], 300.0,
+        "only native slice work is charged"
+    );
+    let log = engine.log.borrow();
+    let first = log.events.iter().position(|e| e == "layer 0").unwrap();
+    let last = log.events.iter().position(|e| e == "layer 2").unwrap();
+    assert!(
+        log.events[first..last]
+            .iter()
+            .any(|e| e.starts_with("step"))
+    );
+    assert!(
+        !log.events[first..last].iter().any(|e| e == "step 3"),
+        "provisional appender excluded"
+    );
+}
+
+#[test]
+fn cancellation_between_layers_discards_appender_and_keeps_peers_consistent() {
+    for (cold, layer) in [false, true]
+        .into_iter()
+        .flat_map(|cold| (0..3).map(move |layer| (cold, layer)))
+    {
+        let mut settings = settings();
+        settings.prefill_fair = true;
+        settings.cold_ced = cold;
+        settings.layer_slice_ms = 200;
+        let mut scheduler = Scheduler::new(2);
+        let mut engine = StubEngine {
+            cold,
+            layered: true,
+            cancel_layer: Some(layer),
+            ..Default::default()
+        };
+        let mut reuse = Recording {
+            ready_short: true,
+            ..Default::default()
+        };
+        let peer = submit(&mut scheduler, prepared(&settings, "hi", true));
+        scheduler.pump(&settings, &mut engine, &mut reuse);
+        let mut request = prepared(
+            &settings,
+            &"x".repeat(if cold { 12000 } else { 1500 }),
+            true,
+        );
+        Arc::get_mut(&mut request).unwrap().boundaries = None;
+        let app = submit(&mut scheduler, request);
+        drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+        assert!(matches!(app.terminal(), Some(Err((true, _, _)))));
+        assert!(matches!(peer.terminal(), Some(Ok(_))));
+        assert_eq!(reuse.commits.len(), 1, "partial appender never retained");
+    }
 }

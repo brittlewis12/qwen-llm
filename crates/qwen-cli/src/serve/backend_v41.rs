@@ -51,10 +51,14 @@ const SAMPLE_WORKERS_ENV: &str = "QWEN_SERVE_V41_SAMPLE_WORKERS";
 /// alternating 512-row Full calls and single decode steps. Read at startup.
 const PREFILL_FAIR_ENV: &str = "QWEN_SERVE_V41_PREFILL_FAIR";
 /// Decode's target percentage of mixed prefill/decode service time with
-/// fair prefilling (default 10; integer 1..=90). Each prefill quantum earns
-/// at most one second of decode service; idle service earns no credit.
-/// Does not preempt a native prefill call. Read at startup.
+/// fair prefilling (default 10; integer 1..=90). Each unsliced prefill quantum
+/// earns at most one second of service; idle service earns no credit.
 const DECODE_PERCENT_ENV: &str = "QWEN_SERVE_V41_DECODE_PERCENT";
+/// Target GPU milliseconds for selective row-preserving layer slices. Zero
+/// restores the incumbent native calls and decode budget. Default 0 pending A/B.
+const LAYER_SLICE_MS_ENV: &str = "QWEN_SERVE_V41_LAYER_SLICE_MS";
+/// Minimum predicted original append wall before layer slicing (default 500 ms).
+const LAYER_SLICE_MIN_MS_ENV: &str = "QWEN_SERVE_V41_LAYER_SLICE_MIN_MS";
 /// Default off. Log per-call native V4.1 serve prefill wall time and unsplit
 /// forward timings to stderr as JSON; no stage or per-dispatch profiling.
 /// Driver scheduling can overlap GPU and commit/wait; wait minus GPU is not
@@ -262,6 +266,7 @@ fn warm_batched_decode(forward: &Forward<'_>, width: usize, token: u32) -> Resul
 
 mod cursor;
 mod execution;
+mod layer_prefill;
 #[path = "backend_v41/io.rs"]
 mod memory_io;
 mod reuse;
@@ -329,6 +334,8 @@ pub(crate) struct Settings {
     prefill_fair: bool,
     gpu_sample: bool,
     decode_percent: usize,
+    layer_slice_ms: usize,
+    layer_slice_min_ms: usize,
 }
 
 impl Settings {
@@ -374,6 +381,8 @@ impl Settings {
             prefill_fair: qwen_llm::env_flag::read_default_on(PREFILL_FAIR_ENV),
             gpu_sample: qwen_llm::env_flag::read_default_on(GPU_SAMPLE_ENV),
             decode_percent,
+            layer_slice_ms: layer_prefill::parse(LAYER_SLICE_MS_ENV, 0, 10_000)?,
+            layer_slice_min_ms: layer_prefill::parse(LAYER_SLICE_MIN_MS_ENV, 500, 1_000_000)?,
         })
     }
 
@@ -553,6 +562,67 @@ impl execution::Engine<qwen_llm::deepseek_v41::forward::State> for ForwardEngine
             native_prefill(self.forward, state, tokens, cancel, with_logits),
         )
         .map_err(state_error)
+    }
+    fn prefill_layered(
+        &mut self,
+        state: &mut qwen_llm::deepseek_v41::forward::State,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        with_logits: bool,
+        target_ms: usize,
+        minimum_ms: usize,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> std::result::Result<Vec<f32>, ServeError> {
+        let _qos = qwen_llm::metal::GpuThreadQos::enter();
+        let forward = self.forward;
+        let result = forward.prefill_layer_interleaved(
+            state,
+            tokens,
+            Some(cancel),
+            with_logits,
+            target_ms,
+            minimum_ms,
+            &mut || {
+                between(self);
+                Ok(())
+            },
+        );
+        track_native_failure(&self.native_failed, result).map_err(state_error)
+    }
+    fn cold_prefill_layered(
+        &mut self,
+        state: &mut qwen_llm::deepseek_v41::forward::State,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        begin: bool,
+        max_rows: usize,
+        target_ms: usize,
+        minimum_ms: usize,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> std::result::Result<Option<qwen_llm::deepseek_v41::forward::ColdPrefillSlice>, ServeError>
+    {
+        let _qos = qwen_llm::metal::GpuThreadQos::enter();
+        let forward = self.forward;
+        let result = (|| {
+            if begin && !forward.begin_cold_prefill_episode(state, tokens.len())? {
+                return Ok(None);
+            }
+            forward
+                .cold_prefill_episode_layer_interleaved(
+                    state,
+                    tokens,
+                    Some(cancel),
+                    max_rows,
+                    target_ms,
+                    minimum_ms,
+                    &mut || {
+                        between(self);
+                        Ok(())
+                    },
+                )
+                .map(Some)
+        })();
+        track_native_failure(&self.native_failed, result).map_err(state_error)
     }
     fn cold_prefill(
         &mut self,

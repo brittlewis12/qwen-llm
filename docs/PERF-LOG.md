@@ -45225,3 +45225,13 @@ At 1509 rows/eight slices worst peer gap 1387–1394 -> 217–218 ms;
 equal-round GPU ratio 0.9900–0.9902, thermal 0. Added CED encoder and
 original two-layer decoder-group boundaries for the next probe; still no
 serve default change. Details in the V4.1 layer-slice note.
+
+### V4.1 CED/cold slice checkpoint probe — 48/48 exact, placement-sensitive price
+
+Warm Full 24, cold Full 12, warm CED 8 and cold CED 4 paired cases all
+bitwise in logits and persistent state. Eight-slice CED GPU ratios were
+0.9951/0.9967 warm and 0.9933 cold, while coarse cuts cost 12–19% more.
+Reported this contradiction to the equal-GPU-cost assumption before serve
+integration. Correcting CED gap pricing to include the incumbent opportunity
+between encoder calls. Staged selective 200/500 ms serve integration remains
+default-off pending exact/cancellation regression and the four-arm serve gate.

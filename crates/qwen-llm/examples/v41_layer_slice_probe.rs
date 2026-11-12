@@ -103,6 +103,8 @@ fn arm(
             if slice.complete {
                 break slice.logits;
             }
+            // The incumbent serve scheduler can decode between encoder calls.
+            round().map_err(anyhow::Error::msg)?;
         };
         (logits, commands)
     } else {
@@ -212,13 +214,80 @@ fn main() -> Result<()> {
     let root = f.capture_snapshot(&prefix)?;
     drop(prefix);
     emit(json!({"kind":"snapshot","thermal":thermal(),"digest":root.diagnostic_digest()}));
+    let slices: Vec<usize> = args
+        .get(7)
+        .map_or("1,2,4,8", String::as_str)
+        .split(',')
+        .map(str::parse)
+        .collect::<std::result::Result<_, _>>()?;
     for n in sizes {
         let mut ordinary = f.new_state(98_304)?;
         f.restore_snapshot(&mut ordinary, &root)?;
         let reference = f.prefill(&mut ordinary, &ids[depth..depth + n], None)?;
         let reference_digest = f.capture_snapshot(&ordinary)?.diagnostic_digest();
         drop(ordinary);
-        for s in [1, 2, 4, 8] {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let mut cancelled_state = f.new_state(98_304)?;
+        f.restore_snapshot(&mut cancelled_state, &root)?;
+        let digest_before = root.diagnostic_digest();
+        let mut hit = false;
+        let mut stop = || {
+            hit = true;
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        };
+        let failed = if ced {
+            ensure!(
+                f.begin_cold_prefill_episode(&mut cancelled_state, n)
+                    .map_err(anyhow::Error::msg)?,
+                "cancel CED eligible"
+            );
+            f.cold_prefill_layer_sliced_probe(
+                &mut cancelled_state,
+                &ids[depth..depth + n],
+                Some(&flag),
+                &[5, 10, 15, 20, 25, 30, 35, 40],
+                &mut stop,
+            )
+            .is_err()
+        } else {
+            f.prefill_layer_sliced_probe(
+                &mut cancelled_state,
+                &ids[depth..depth + n],
+                Some(&flag),
+                &[5, 10, 15, 20, 25, 30, 35, 40],
+                &mut stop,
+            )
+            .is_err()
+        };
+        ensure!(
+            hit && failed && cancelled_state.is_poisoned() && !cancelled_state.is_ready(),
+            "cancellation disposition"
+        );
+        ensure!(
+            f.capture_snapshot(&cancelled_state).is_err(),
+            "provisional checkpoint refused"
+        );
+        ensure!(
+            f.step(&mut cancelled_state, ids[depth + n], None).is_err(),
+            "partial decode refused"
+        );
+        ensure!(
+            digest_before == root.diagnostic_digest(),
+            "old checkpoint unchanged"
+        );
+        drop(cancelled_state);
+        let mut resumed = f.new_state(98_304)?;
+        f.restore_snapshot(&mut resumed, &root)?;
+        let resumed_logits = f.prefill(&mut resumed, &ids[depth..depth + n], None)?;
+        ensure!(
+            same(&reference, &resumed_logits)
+                && reference_digest == f.capture_snapshot(&resumed)?.diagnostic_digest(),
+            "checkpoint cancel/resume exact"
+        );
+        drop(resumed);
+        emit(json!({"kind":"cancel_resume","ced":ced,"depth":depth,"rows":n,"bitwise":true}));
+        for &s in &slices {
             let ends: Vec<_> = (1..=s).map(|i| i * 40 / s).collect();
             let rounds_after = if ced {
                 let mut state = f.new_state(98_304)?;
@@ -265,6 +334,7 @@ fn main() -> Result<()> {
                     && b.digest == reference_digest
                     && same(&a.next, &b.next)
                     && a.peer_digests == b.peer_digests
+                    && a.peers.len() == b.peers.len()
                     && a.peers
                         .iter()
                         .flatten()

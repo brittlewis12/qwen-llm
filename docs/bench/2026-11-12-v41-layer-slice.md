@@ -66,3 +66,27 @@ and remained 0. For 1509 rows and eight slices, the paired worst gaps were
 0.9900/0.9902. These are controlled probe gaps, not serve ITL statistics.
 The 32-row case confirms that unconditional slicing taxes TTFT. CED and
 cold cases are still under test; no serving policy has been enabled.
+
+### CED placement sensitivity
+
+The initial CED probe produced **8/8 warm** and **4/4 cold** exact pairs;
+cold Full added **12/12**. Together with warm Full this is **48/48** exact
+pairs. CED coarse placements cost 12–19% more completed-command GPU time;
+eight slices were neutral (warm ratios 0.9951/0.9967, cold 0.9933).
+Pressure was 1. These results contradict an unconditional equal-GPU-cost
+assumption for every CED placement; this was reported before integration.
+The actual target policy therefore still needs measurement and the serve gate.
+
+The initial CED gap trace also omitted the incumbent peer opportunity at
+nonfinal encoder returns. It is retained as `ced-probe.jsonl`, not used as
+an incumbent serve-gap estimate. The corrected probe gives both arms that
+opportunity, and preserves every original encoder row partition and decoder
+group. No alternate replay arithmetic is substituted.
+
+The staged serve policy is opt-in pending A/B: nominal 200 ms slices,
+minimum predicted 500 ms, fixed row geometry, one peer round per drained
+boundary and native-call completion. A conservative M5 estimate is
+`275 + 0.8 * rows` ms per original chunk; tiny chunks stay on the original
+call. The family-specific scheduler temporarily removes the appender from
+peer scans and does not double-credit decode service. Completed and partial
+prefill accounting sums active native work, excluding peer decode time.

@@ -13,6 +13,7 @@ pub use ced::{
     PrefillReport,
 };
 mod engram_gpu;
+mod layer_prefill;
 mod prefill;
 pub use prefill::DEFAULT_CHUNK_ROWS as PREFILL_CHUNK_ROWS;
 pub use prefill::MAX_CHUNK_ROWS as MAX_PREFILL_CHUNK_ROWS;

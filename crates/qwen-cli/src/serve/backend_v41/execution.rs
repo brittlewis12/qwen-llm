@@ -284,7 +284,6 @@ impl Settings {
             (state, Vec::new(), 0, "none")
         };
         let capacity = reuse.capacity(&state, required);
-        let prefill_start = engine.now();
         // A shared-prelude hit still starts a cold body. History reuse can use
         // the same Ready-prefix engine, with its own threshold and rollback.
         let ced_live = matched > 0 && Some(matched) != shared_cut;
@@ -293,6 +292,7 @@ impl Settings {
         } else {
             self.cold_ced
         };
+        let prompt_rows = ids.len();
         Ok(Run {
             position: matched,
             ids,
@@ -324,12 +324,18 @@ impl Settings {
             reuse_source,
             restore_ms,
             capacity,
-            prefill_start,
             prefill_rows: 0,
             prefill_chunks: 0,
             prefill_calls: 0,
             prefill_ranges: Vec::new(),
             selected_rows: None,
+            prefill_work: layer_prefill::Work {
+                armed: true,
+                matched,
+                prompt: prompt_rows,
+                reuse_source,
+                ..Default::default()
+            },
             prefill_ms: 0.0,
             consumed: Vec::new(),
         })
@@ -344,6 +350,18 @@ impl Settings {
         sink: &mut dyn GenerationSink,
         engine: &mut impl Engine<S>,
         reuse: &mut impl reuse::Reuse<S>,
+    ) -> std::result::Result<(), BackendFailure> {
+        self.prefill_layer_slice(run, max_rows, sink, engine, reuse, None)
+    }
+
+    pub(super) fn prefill_layer_slice<S, E: Engine<S>, R: reuse::Reuse<S>>(
+        &self,
+        run: &mut Run<S>,
+        max_rows: usize,
+        sink: &mut dyn GenerationSink,
+        engine: &mut E,
+        reuse: &mut R,
+        mut between: Option<&mut dyn FnMut(&mut E, &mut R)>,
     ) -> std::result::Result<(), BackendFailure> {
         let flag = run.flag.clone();
         let cancel = cancel_of(&flag);
@@ -379,16 +397,35 @@ impl Settings {
         let mut endpoint = run.next_endpoint(max_rows);
         if let Some(target) = run.ced_target {
             let begin = !run.ced_active;
-            match engine
-                .cold_prefill(
+            let start = engine.now();
+            let mut peer_ms = 0.0;
+            let result = if let Some(callback) = between.as_deref_mut() {
+                engine.cold_prefill_layered(
+                    &mut run.state,
+                    &ids[position..target],
+                    cancel,
+                    begin,
+                    max_rows,
+                    self.layer_slice_ms,
+                    self.layer_slice_min_ms,
+                    &mut |engine| {
+                        let started = engine.now();
+                        callback(engine, reuse);
+                        peer_ms += (engine.now() - started).as_secs_f64() * 1000.0;
+                    },
+                )
+            } else {
+                engine.cold_prefill(
                     &mut run.state,
                     &ids[position..target],
                     cancel,
                     begin,
                     max_rows,
                 )
-                .map_err(|error| prefill_error(cancel, error))?
-            {
+            };
+            run.prefill_work
+                .note((engine.now() - start).as_secs_f64() * 1000.0 - peer_ms);
+            match result.map_err(|error| prefill_error(cancel, error))? {
                 Some(progress) => {
                     run.ced_active = true;
                     run.ced_yields += 1;
@@ -416,14 +453,33 @@ impl Settings {
             .is_some_and(|header| position < header && header < endpoint);
         let with_logits = endpoint == ids.len();
         if !episode {
-            run.logits = engine
-                .prefill(
+            let start = engine.now();
+            let mut peer_ms = 0.0;
+            let result = if let Some(callback) = between.as_deref_mut() {
+                engine.prefill_layered(
+                    &mut run.state,
+                    &ids[position..endpoint],
+                    cancel,
+                    with_logits,
+                    self.layer_slice_ms,
+                    self.layer_slice_min_ms,
+                    &mut |engine| {
+                        let started = engine.now();
+                        callback(engine, reuse);
+                        peer_ms += (engine.now() - started).as_secs_f64() * 1000.0;
+                    },
+                )
+            } else {
+                engine.prefill(
                     &mut run.state,
                     &ids[position..endpoint],
                     cancel,
                     with_logits,
                 )
-                .map_err(|error| prefill_error(cancel, error))?;
+            };
+            run.prefill_work
+                .note((engine.now() - start).as_secs_f64() * 1000.0 - peer_ms);
+            run.logits = result.map_err(|error| prefill_error(cancel, error))?;
         }
         check(sink, cancel)?;
         if with_logits
@@ -494,14 +550,16 @@ impl Settings {
         reuse: &mut impl reuse::Reuse<S>,
     ) -> std::result::Result<(), BackendFailure> {
         check(sink, cancel_of(&run.flag))?;
-        run.prefill_ms =
-            (engine.now() - run.prefill_start).as_secs_f64() * 1e3 - run.ladder_capture_ms;
+        run.prefill_ms = run.prefill_work.elapsed_ms;
         if run.logits.len() != run.vocab || !run.logits.iter().all(|v| v.is_finite()) {
             return Err(ServeError::server_error("V4.1 returned malformed logits").into());
         }
         if run.checkpoint_cuts.is_empty() {
             reuse.checkpoint(&run.state, &run.ids, &run.logits, run.reserve);
         }
+        run.prefill_work.finished = true;
+        tracing::info!(target:"qwen_diag", "serve prefill: family=deepseek_v41 complete=true prefill_ms={:.3} reused_tokens={} prefill_tokens={} reused_source={}",
+            run.prefill_ms, run.matched, run.ids.len()-run.matched, run.reuse_source);
         run.consumed = run.ids.clone();
         Ok(())
     }
@@ -613,6 +671,37 @@ pub(super) trait Engine<S> {
         cancel: &AtomicBool,
         with_logits: bool,
     ) -> std::result::Result<Vec<f32>, ServeError>;
+    fn prefill_layered(
+        &mut self,
+        state: &mut S,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        with_logits: bool,
+        _: usize,
+        _: usize,
+        _: &mut dyn FnMut(&mut Self),
+    ) -> std::result::Result<Vec<f32>, ServeError>
+    where
+        Self: Sized,
+    {
+        self.prefill(state, tokens, cancel, with_logits)
+    }
+    fn cold_prefill_layered(
+        &mut self,
+        state: &mut S,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        begin: bool,
+        max_rows: usize,
+        _: usize,
+        _: usize,
+        _: &mut dyn FnMut(&mut Self),
+    ) -> std::result::Result<Option<qwen_llm::deepseek_v41::forward::ColdPrefillSlice>, ServeError>
+    where
+        Self: Sized,
+    {
+        self.cold_prefill(state, tokens, cancel, begin, max_rows)
+    }
     fn cold_prefill(
         &mut self,
         _: &mut S,
@@ -720,13 +809,13 @@ pub(super) struct Run<S> {
     reuse_source: &'static str,
     restore_ms: f64,
     capacity: usize,
-    prefill_start: Duration,
     pub(super) position: usize,
     prefill_rows: usize,
     prefill_chunks: usize,
     prefill_calls: usize,
     prefill_ranges: Vec<[usize; 2]>,
     selected_rows: Option<usize>,
+    pub(super) prefill_work: layer_prefill::Work,
     prefill_ms: f64,
     pub(super) consumed: Vec<u32>,
 }

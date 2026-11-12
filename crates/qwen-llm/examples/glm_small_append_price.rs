@@ -809,15 +809,38 @@ mod probe {
             let incumbent = last_logits[0].clone().expect("incumbent logits");
             let incumbent_state = last_states[0].as_ref().expect("incumbent state");
             let next = ids[depth + width];
+
+            // Three interleaved stage-profile repetitions per arm.
+            let mut staged_walls: Vec<Vec<f64>> = arms.iter().map(|_| Vec::new()).collect();
+            let mut routed_samples: Vec<Vec<f64>> = arms.iter().map(|_| Vec::new()).collect();
+            let mut last_stages: Vec<Option<BTreeMap<&'static str, f64>>> =
+                arms.iter().map(|_| None).collect();
+            let mut last_staged_gpu: Vec<Option<f64>> = arms.iter().map(|_| None).collect();
+            for rep in 0..3 {
+                let n = arms.len();
+                let shift = (rep + width_index) % n;
+                let order: Vec<usize> = (0..n).map(|i| (i + shift) % n).collect();
+                for &index in &order {
+                    arms[index].apply();
+                    gate();
+                    session.restore_snapshot(&snapshot)?;
+                    let t = Instant::now();
+                    let (_out, staged) = session.prefill_chunk_stage_profiled(ctx, tokens)?;
+                    staged_walls[index].push(t.elapsed().as_secs_f64() * 1e3);
+                    let stages = stage_totals(&staged);
+                    routed_samples[index]
+                        .push(stages.get("routed_experts").copied().unwrap_or(0.0));
+                    if rep == 2 {
+                        last_stages[index] = Some(stages);
+                        last_staged_gpu[index] = Some(staged.command_gpu_ms);
+                    }
+                }
+            }
+
             for (index, &arm) in arms.iter().enumerate() {
-                arm.apply();
-                gate();
-                session.restore_snapshot(&snapshot)?;
-                let t = Instant::now();
-                let (_out, staged) = session.prefill_chunk_stage_profiled(ctx, tokens)?;
-                let staged_wall = t.elapsed().as_secs_f64() * 1e3;
-                let stages = stage_totals(&staged);
-                let routed_ms = stages.get("routed_experts").copied();
+                let stages = last_stages[index].clone().expect("stage totals");
+                let routed_ms = median(routed_samples[index].clone());
+                let staged_wall = median(staged_walls[index].clone());
 
                 // Name the selected expert kernels at representative widths.
                 let mut kernels = Vec::new();
@@ -852,8 +875,10 @@ mod probe {
                     "width": width, "arm": arm.name(),
                     "wall_ms": median(walls[index].clone()), "walls_ms": walls[index],
                     "staged_wall_ms": staged_wall,
-                    "staged_gpu_ms": staged.command_gpu_ms,
+                    "staged_walls_ms": staged_walls[index],
+                    "staged_gpu_ms": last_staged_gpu[index].unwrap_or(0.0),
                     "routed_experts_ms": routed_ms,
+                    "routed_experts_ms_samples": routed_samples[index],
                     "stages": stages,
                     "max_abs_logit_diff": max_abs,
                     "state_bitwise": last_states[index]

@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 - Serve SSE Cadence: Raw-Socket Audit Finds No Server Buffering
+
+- **Question.** The 2026-11-11 solo census claimed the V4.1 output partition
+  buffered SSE deltas until completion (client inter-delta p50/p99
+  0.015/0.018 ms); an outside review called it unverified. Re-measured on main
+  **`619e3f501`** with a plain-socket client that timestamps every `recv` and
+  every complete SSE event, for V4.1/GLM/Flash-Next, one and three agents.
+- **Result: server streams per token; no fix made.** Continuous 40 s arms:
+  V4.1 solo/trio client p50/p99 **15.57/17.27** and **27.89/30.10 ms** against
+  server ITL **14.65/14.79** and **27.71/28.07**; GLM solo **17.14/18.91** vs
+  **17.25/17.27**; Flash-Next solo **11.52/16.94** vs **11.86/12.22**. Tok/s
+  (solo/trio): V4.1 **62.2/94.2**, GLM **58.5/90.5**, Flash-Next
+  **81.1/130.5**. Single-shot trio steady p99 tracks server p99 within
+  0.87-1.17x.
+- **Cited case re-run.** V4.1 `MAX_ACTIVE=1`, 31,918-token prompt, 64 tokens:
+  client p50 **16.10 ms**, server ITL **14.74 ms**. The old 0.015 ms is a
+  client-side body-collection artifact, not wire arrival.
+- **Tails are not buffering.** Tool blocks are parsed atomically by contract
+  (0.67/1.01 s V4.1 solo/trio, 0.62 s FN trio); continuous trio p99 also
+  includes next-turn prefill pauses (GLM 0.26 s, FN 0.55 s). Single-shot
+  steady runs remove the latter.
+- **Checks.** `cargo test -p qwen-llm --lib` 2495 passed / 0 failed / 678
+  ignored; `cargo test -p qwen-cli` 1729 / 0 / 73; `scripts/check-contracts.sh`
+  PASS. New probe `scripts/bench/sse_cadence.py`. Note:
+  `docs/bench/2026-11-12-sse-cadence.md`. No merge.
+
 ## 2026-11-12 - Serve QoS Covers Every GPU-Feeding Path; V4.1 +10.7%
 
 - **Shipped `68559c950`, branch `perf/serve-qos-coverage`, M5 Ultra, three-agent

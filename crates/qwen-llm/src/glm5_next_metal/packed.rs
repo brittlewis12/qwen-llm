@@ -2674,7 +2674,17 @@ impl Glm5NextSession<'_> {
             out: &v(&p.kda_out),
         };
         let profiling = self.stage_recorder.borrow().is_some();
-        if profiling || super::kda_value4::selected(p.arith(), c.head_count as usize, rows) {
+        let parallel_prepare = super::kda_parallel_prep::selected(
+            p.arith(),
+            c.head_count as usize,
+            rows,
+            p.dense_gate.n_elements(),
+            p.dense_up.n_elements(),
+        );
+        if profiling
+            || parallel_prepare
+            || super::kda_value4::selected(p.arith(), c.head_count as usize, rows)
+        {
             let mut prepared = crate::metal::prepare_kda_prefill(
                 ctx,
                 enc,
@@ -2688,7 +2698,15 @@ impl Glm5NextSession<'_> {
                 prepared.select_value4(ctx)?;
             }
             self.stage(enc, Glm5NextStage::PackedKdaPrepare, Some(block))?;
-            prepared.encode_prepare(enc)?;
+            if parallel_prepare {
+                let width = c.kda_width() as u64;
+                let shape = vec![width, rows as u64];
+                let raw_q = p.dense_gate.view_subrange(0, shape.clone());
+                let raw_k = p.dense_up.view_subrange(0, shape);
+                prepared.encode_prepare_parallel(ctx, enc, &raw_q, &raw_k, &p.kda_out)?;
+            } else {
+                prepared.encode_prepare(enc)?;
+            }
             self.stage(enc, Glm5NextStage::PackedKdaRecurrence, Some(block))?;
             prepared.encode_recurrence(enc)?;
             self.stage(enc, Glm5NextStage::PackedKdaOutputNorm, Some(block))?;

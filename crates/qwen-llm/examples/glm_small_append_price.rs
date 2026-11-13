@@ -22,8 +22,10 @@
 //!
 //!  5. `occupancy`: capture real per-expert row buckets and per-kernel bytes
 //!     at one or more context depths, using the production route selection.
+//!  6. `kda-prep`: paired serial/parallel KDA preparation stage samples, then
+//!     three interleaved ordinary-wall pairs if the 1.25x stage gate passes.
 //!
-//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy] [depth]`
+//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy|kda-prep] [depth]`
 
 #[cfg(not(feature = "perf-ablations"))]
 fn main() {
@@ -1216,6 +1218,166 @@ mod probe {
         Ok(())
     }
 
+    fn kda_prep_gate(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        ids: &[u32],
+        depth: usize,
+    ) -> anyhow::Result<()> {
+        const ROWS: usize = 2048;
+        anyhow::ensure!(
+            ids.len() > depth + ROWS,
+            "prefix/corpus too short for KDA prep gate"
+        );
+        let tokens = &ids[depth..depth + ROWS];
+        let mut session = new_session(ctx, weights, ids, depth, CAPACITY)?;
+        let snapshot = session.capture_snapshot()?;
+        let mut stage_samples = [Vec::new(), Vec::new()];
+        let mut last_logits: [Option<Vec<f32>>; 2] = [None, None];
+        let mut last_states: [Option<Glm5NextSnapshot>; 2] = [None, None];
+
+        for enabled in [false, true] {
+            gate();
+            session.restore_snapshot(&snapshot)?;
+            let (logits, _) =
+                session.prefill_chunk_stage_profiled_kda_parallel_prep(ctx, tokens, enabled)?;
+            anyhow::ensure!(
+                logits.iter().all(|value| value.is_finite()),
+                "non-finite KDA warm"
+            );
+        }
+        for rep in 0..3 {
+            let order = if rep % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for enabled in order {
+                gate();
+                session.restore_snapshot(&snapshot)?;
+                let (logits, report) =
+                    session.prefill_chunk_stage_profiled_kda_parallel_prep(ctx, tokens, enabled)?;
+                anyhow::ensure!(
+                    logits.iter().all(|value| value.is_finite()),
+                    "non-finite KDA stage logits"
+                );
+                let stage_ms = report
+                    .spans
+                    .iter()
+                    .filter(|span| span.stage.as_str() == "packed_kda_prepare")
+                    .map(|span| span.gpu_ms)
+                    .sum::<f64>();
+                anyhow::ensure!(
+                    stage_ms.is_finite() && stage_ms > 0.0,
+                    "missing KDA prepare span"
+                );
+                let index = if enabled { 1 } else { 0 };
+                stage_samples[index].push(stage_ms);
+                if rep == 2 {
+                    last_logits[index] = Some(logits);
+                    last_states[index] = Some(session.capture_snapshot()?);
+                }
+            }
+        }
+
+        let serial_logits = last_logits[0].as_ref().expect("serial stage logits");
+        let parallel_logits = last_logits[1].as_ref().expect("parallel stage logits");
+        let serial_state = last_states[0].as_ref().expect("serial stage state");
+        let parallel_state = last_states[1].as_ref().expect("parallel stage state");
+        let stage_bitwise = serial_logits.len() == parallel_logits.len()
+            && serial_logits
+                .iter()
+                .zip(parallel_logits)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+            && serial_state.same_state(parallel_state);
+        anyhow::ensure!(
+            stage_bitwise,
+            "parallel KDA preparation changed logits or state bits"
+        );
+        let serial_stage_ms = median(stage_samples[0].clone());
+        let parallel_stage_ms = median(stage_samples[1].clone());
+        let stage_speedup = serial_stage_ms / parallel_stage_ms;
+        let stage_gate_passed = stage_speedup >= 1.25;
+        emit(json!({
+            "kind": "kda_parallel_prep_stage_gate",
+            "depth": depth,
+            "rows": ROWS,
+            "serial_prepare_ms": stage_samples[0],
+            "parallel_prepare_ms": stage_samples[1],
+            "serial_median_ms": serial_stage_ms,
+            "parallel_median_ms": parallel_stage_ms,
+            "speedup": stage_speedup,
+            "gate_1_25x_passed": stage_gate_passed,
+            "bitwise_logits_and_state": stage_bitwise,
+            "pressure": pressure(),
+            "loadavg": loadavg(),
+        }));
+        if !stage_gate_passed {
+            emit(
+                json!({"kind":"kda_parallel_prep_wall_gate_skipped","reason":"isolated stage did not reach 1.25x"}),
+            );
+            return Ok(());
+        }
+
+        let mut wall_samples = [Vec::new(), Vec::new()];
+        let mut last_wall_logits: [Option<Vec<f32>>; 2] = [None, None];
+        let mut last_wall_states: [Option<Glm5NextSnapshot>; 2] = [None, None];
+        for rep in 0..3 {
+            let order = if rep % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for enabled in order {
+                gate();
+                session.restore_snapshot(&snapshot)?;
+                let started = Instant::now();
+                let logits = session.prefill_chunk_kda_parallel_prep(ctx, tokens, enabled)?;
+                let index = if enabled { 1 } else { 0 };
+                wall_samples[index].push(started.elapsed().as_secs_f64() * 1e3);
+                anyhow::ensure!(
+                    logits.iter().all(|value| value.is_finite()),
+                    "non-finite KDA wall logits"
+                );
+                if rep == 2 {
+                    last_wall_logits[index] = Some(logits);
+                    last_wall_states[index] = Some(session.capture_snapshot()?);
+                }
+            }
+        }
+        let serial_wall_logits = last_wall_logits[0].as_ref().expect("serial wall logits");
+        let parallel_wall_logits = last_wall_logits[1].as_ref().expect("parallel wall logits");
+        let wall_bitwise = serial_wall_logits.len() == parallel_wall_logits.len()
+            && serial_wall_logits
+                .iter()
+                .zip(parallel_wall_logits)
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+            && last_wall_states[0]
+                .as_ref()
+                .expect("serial wall state")
+                .same_state(last_wall_states[1].as_ref().expect("parallel wall state"));
+        anyhow::ensure!(
+            wall_bitwise,
+            "parallel KDA preparation changed ordinary-wall logits or state bits"
+        );
+        let serial_wall_ms = median(wall_samples[0].clone());
+        let parallel_wall_ms = median(wall_samples[1].clone());
+        emit(json!({
+            "kind": "kda_parallel_prep_wall_gate",
+            "depth": depth,
+            "rows": ROWS,
+            "serial_wall_ms": wall_samples[0],
+            "parallel_wall_ms": wall_samples[1],
+            "serial_median_ms": serial_wall_ms,
+            "parallel_median_ms": parallel_wall_ms,
+            "speedup": serial_wall_ms / parallel_wall_ms,
+            "bitwise_logits_and_state": wall_bitwise,
+            "pressure": pressure(),
+            "loadavg": loadavg(),
+        }));
+        Ok(())
+    }
+
     fn read_f32(t: &MetalTensor) -> Vec<f32> {
         let bytes = t.n_bytes() as usize;
         assert_eq!(bytes % 4, 0, "F32 view");
@@ -1374,7 +1536,14 @@ mod probe {
         anyhow::ensure!(
             matches!(
                 mode,
-                "all" | "census" | "batch" | "threshold" | "routes" | "route-quality" | "occupancy"
+                "all"
+                    | "census"
+                    | "batch"
+                    | "threshold"
+                    | "routes"
+                    | "route-quality"
+                    | "occupancy"
+                    | "kda-prep"
             ),
             "unknown mode {mode}"
         );
@@ -1391,7 +1560,9 @@ mod probe {
         } else {
             CAPACITY
         };
-        let needed_width = if mode == "routes" || mode == "occupancy" {
+        let needed_width = if mode == "kda-prep" {
+            2048
+        } else if mode == "routes" || mode == "occupancy" {
             *route_widths().iter().max().expect("route widths")
         } else if mode == "route-quality" {
             *quality_widths.iter().max().expect("quality widths")
@@ -1456,6 +1627,9 @@ mod probe {
         }
         if mode == "occupancy" {
             occupancy(&ctx, &weights, &ids, &occupancy_depths, capacity)?;
+        }
+        if mode == "kda-prep" {
+            kda_prep_gate(&ctx, &weights, &ids, depth)?;
         }
         emit(json!({
             "kind": "done", "pressure": pressure(), "loadavg": loadavg(),

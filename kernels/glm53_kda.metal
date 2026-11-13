@@ -258,6 +258,153 @@ kernel void kernel_glm53_kda_prefill_prepare(
     }
 }
 
+// Parallel prefill preparation uses caller-provided dead scratch to preserve
+// the projected q/k/v rows. This first pass snapshots them before any row is
+// transformed, so every (row, head) group can evaluate its causal window
+// independently without racing with neighboring rows.
+kernel void kernel_glm53_kda_prefill_snapshot(
+        constant glm53_kda_args & args [[buffer(0)]],
+        device const float * q [[buffer(1)]],
+        device const float * k [[buffer(2)]],
+        device const float * v [[buffer(3)]],
+        device float * raw_q [[buffer(4)]],
+        device float * raw_k [[buffer(5)]],
+        device float * raw_v [[buffer(6)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint count = args.n_rows * args.n_heads * 128u;
+    if (index < count) {
+        raw_q[index] = q[index];
+        raw_k[index] = k[index];
+        raw_v[index] = v[index];
+    }
+}
+
+// Parallel counterpart to kernel_glm53_kda_prefill_prepare. One group owns
+// one (row, head), reads only the preserved projected rows plus the incoming
+// three-row conv tail, and writes that row's prepared activations.
+kernel void kernel_glm53_kda_prefill_prepare_parallel(
+        constant glm53_kda_args & args [[buffer(0)]],
+        device const float * raw_q [[buffer(1)]],
+        device const float * raw_k [[buffer(2)]],
+        device const float * raw_v [[buffer(3)]],
+        device float * q [[buffer(4)]],
+        device float * k [[buffer(5)]],
+        device float * v [[buffer(6)]],
+        device float * raw_gate [[buffer(7)]],
+        device const float * q_conv [[buffer(8)]],
+        device const float * k_conv [[buffer(9)]],
+        device const float * v_conv [[buffer(10)]],
+        device const float * neg_exp_a_log [[buffer(11)]],
+        device const float * dt_bias [[buffer(12)]],
+        device const float * conv_state [[buffer(13)]],
+        threadgroup float * scratch [[threadgroup(0)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        ushort tid [[thread_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort sg [[simdgroup_index_in_threadgroup]]) {
+    constexpr uint D = 128u;
+    constexpr uint HISTORY = 3u;
+    const uint token = tgpig.x;
+    const uint head = tgpig.y;
+    if (token >= args.n_rows || head >= args.n_heads) return;
+    threadgroup float * sq = scratch;
+    threadgroup float * sk = sq + D;
+    threadgroup float * reduce_q = sk + D;
+    threadgroup float * reduce_k = reduce_q + 4u;
+    const uint projection = args.n_heads * D;
+    const uint channel = head * D + tid;
+    const ulong index = (ulong)token * projection + channel;
+    const ulong q_state = 0ul;
+    const ulong k_state = (ulong)HISTORY * projection;
+    const ulong v_state = (ulong)(2u * HISTORY) * projection;
+
+    float q_acc = 0.0f;
+    float k_acc = 0.0f;
+    float v_acc = 0.0f;
+    for (uint w = 0; w < HISTORY; ++w) {
+        const int source_token = (int)token + (int)w - (int)HISTORY;
+        float q_hist;
+        float k_hist;
+        float v_hist;
+        if (source_token < 0) {
+            const ulong hist = (ulong)((int)token + (int)w) * projection + channel;
+            q_hist = conv_state[q_state + hist];
+            k_hist = conv_state[k_state + hist];
+            v_hist = conv_state[v_state + hist];
+        } else {
+            const ulong source = (ulong)source_token * projection + channel;
+            q_hist = raw_q[source];
+            k_hist = raw_k[source];
+            v_hist = raw_v[source];
+        }
+        q_acc = fma(q_hist, q_conv[(ulong)channel * 4u + w], q_acc);
+        k_acc = fma(k_hist, k_conv[(ulong)channel * 4u + w], k_acc);
+        v_acc = fma(v_hist, v_conv[(ulong)channel * 4u + w], v_acc);
+    }
+    const float q_new = raw_q[index];
+    const float k_new = raw_k[index];
+    const float v_new = raw_v[index];
+    q_acc = fma(q_new, q_conv[(ulong)channel * 4u + HISTORY], q_acc);
+    k_acc = fma(k_new, k_conv[(ulong)channel * 4u + HISTORY], k_acc);
+    v_acc = fma(v_new, v_conv[(ulong)channel * 4u + HISTORY], v_acc);
+    sq[tid] = q_acc / (1.0f + exp(-q_acc));
+    sk[tid] = k_acc / (1.0f + exp(-k_acc));
+    v[index] = v_acc / (1.0f + exp(-v_acc));
+    const float gate = raw_gate[index] + dt_bias[channel];
+    raw_gate[index] = exp(args.lower_bound * (1.0f / (1.0f + exp(neg_exp_a_log[head] * gate))));
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float q_sumsq = simd_sum(sq[tid] * sq[tid]);
+    float k_sumsq = simd_sum(sk[tid] * sk[tid]);
+    if (lane == 0u) {
+        reduce_q[sg] = q_sumsq;
+        reduce_k[sg] = k_sumsq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float q_total = lane < 4u ? reduce_q[lane] : 0.0f;
+    float k_total = lane < 4u ? reduce_k[lane] : 0.0f;
+    q_total = simd_sum(q_total);
+    k_total = simd_sum(k_total);
+    const float q_scale = rsqrt(q_total + 1.0e-6f) * 0x1.6a09e6p-4f;
+    const float k_scale = rsqrt(k_total + 1.0e-6f);
+    q[index] = sq[tid] * q_scale;
+    k[index] = sk[tid] * k_scale;
+}
+
+// Commit the final three projected rows as the new convolution tail after
+// every independent row has consumed the original tail.
+kernel void kernel_glm53_kda_prefill_update_tail(
+        constant glm53_kda_args & args [[buffer(0)]],
+        device const float * raw_q [[buffer(1)]],
+        device const float * raw_k [[buffer(2)]],
+        device const float * raw_v [[buffer(3)]],
+        device float * conv_state [[buffer(4)]],
+        uint channel [[thread_position_in_grid]]) {
+    const uint projection = args.n_heads * 128u;
+    if (channel >= projection) return;
+    const ulong section = (ulong)3u * projection;
+    for (uint slot = 0; slot < 3u; ++slot) {
+        const int source_token = (int)args.n_rows - 3 + (int)slot;
+        float q_value;
+        float k_value;
+        float v_value;
+        if (source_token < 0) {
+            const ulong history = (ulong)((int)args.n_rows + (int)slot) * projection + channel;
+            q_value = conv_state[history];
+            k_value = conv_state[section + history];
+            v_value = conv_state[2ul * section + history];
+        } else {
+            const ulong source = (ulong)source_token * projection + channel;
+            q_value = raw_q[source];
+            k_value = raw_k[source];
+            v_value = raw_v[source];
+        }
+        conv_state[(ulong)slot * projection + channel] = q_value;
+        conv_state[section + (ulong)slot * projection + channel] = k_value;
+        conv_state[2ul * section + (ulong)slot * projection + channel] = v_value;
+    }
+}
+
 // Stage 2, grid (heads, 32) x 128: each simdgroup owns one value row of the
 // state in registers across all rows; lanes own four keys.
 kernel void kernel_glm53_kda_prefill_recurrence(

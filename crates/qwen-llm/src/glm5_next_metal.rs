@@ -1453,6 +1453,32 @@ impl<'w> Glm5NextSession<'w> {
         self.stage_profiled(ctx, |session| session.prefill_packed(ctx, tokens))
     }
 
+    /// Paired-benchmark entry point for the default-off KDA preparation
+    /// candidate. This has no effect outside the requested call and is only
+    /// compiled into perf-ablation builds.
+    #[cfg(feature = "perf-ablations")]
+    pub fn prefill_chunk_kda_parallel_prep(
+        &mut self,
+        ctx: &MetalContext,
+        tokens: &[u32],
+        enabled: bool,
+    ) -> Result<Vec<f32>> {
+        let _route = kda_parallel_prep::Scope::new(enabled);
+        self.prefill_packed(ctx, tokens)
+    }
+
+    /// Timestamp-sampled counterpart used for the isolated preparation gate.
+    #[cfg(feature = "perf-ablations")]
+    pub fn prefill_chunk_stage_profiled_kda_parallel_prep(
+        &mut self,
+        ctx: &MetalContext,
+        tokens: &[u32],
+        enabled: bool,
+    ) -> Result<(Vec<f32>, Glm5NextStageReport)> {
+        let _route = kda_parallel_prep::Scope::new(enabled);
+        self.prefill_chunk_stage_profiled(ctx, tokens)
+    }
+
     /// Runs `body` (one command) with a stage recorder and reports the
     /// sampled spans scaled to the command's GPU time.
     fn stage_profiled(
@@ -2875,6 +2901,7 @@ mod gpu_decode;
 pub use gpu_decode::gpu_token_loop_enabled;
 mod interventions;
 mod kda_half_inputs;
+mod kda_parallel_prep;
 mod kda_value4;
 mod lens;
 mod packed;

@@ -104,6 +104,31 @@ The 256-row and 1,024-row cells requested by the brief: 256 rows stays on the
 narrow route (measured 232-240 ms at 48K before this change); 1,024 is inside
 the shipped band and is bracketed by the 1,000-row bitwise/neutral result.
 
+## Three-agent serve screen
+
+Release `qwen`/`qwen-tok` built from the ship tree (`qwen` sha256
+`cf3fd872494001ef5446fc5b28de66123d14967bcc307e1cd30b0dbdf9497329`), 48K
+warm roots, 120 s windows, real FN call plan, seeded agent sampling, thermal
+settle 60 s at <=1 before load, ceiling 2 in-window. Two order-controlled
+pairs, not the three-pair gate:
+
+| Pair | Off tok/s | On tok/s | Ratio | Off/On thermal |
+| --- | ---: | ---: | ---: | --- |
+| off -> on | 126.658 | 130.325 | 1.0289 | 0 / 0 |
+| on -> off | 129.750 | 129.275 | 0.9963 | 0 / 2 (flagged) |
+
+TTFT medians in the clean pair moved 1.629/0.894/0.932 -> 1.379/0.856/0.883 s;
+in the reversed pair they were flat (1.384/0.872/0.894 -> 1.389/0.864/0.891 s).
+Gap p99 was 136.7 -> 134.1 ms in the clean pair, 0.4 -> 0.32 s worst gap.
+
+**Serve is neutral/inconclusive, not a win.** The clean pair's +2.9% is order
+and clock, not the lever: the reversed pair is -0.4% with the candidate arm at
+thermal 2. The plan has only **2 of 25** calls in the 1024-2047-row band, so
+the real mix cannot resolve a 3% per-cell change. Larger appends (23,603 rows)
+only touch the band in their final tail. The stage gate (1.26x) and the
+three-pair targeted wall gate are the evidence for this lever; serve needs a
+cohort enriched in 1024-2047-row appends before it can be called.
+
 ## Parked: larger packed commands
 
 An opt-in `QWEN_FN_PACKED_ROWS` path (4,096-row commands, QSA packed pans

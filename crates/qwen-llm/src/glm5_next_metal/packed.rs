@@ -34,6 +34,14 @@ use crate::metal::{
 };
 use objc2_metal::MTLComputePipelineState;
 
+crate::env_flag!(
+    /// Default-off M5 GLM Fast/Half sorted expert-major routed chain for
+    /// 1,024..=4,096 rows with IQ2_S gate/up and IQ3_S down. Reuses the
+    /// admitted normalized-half and slot scratch; zero restores grouped tiles.
+    default_off glm_sorted_experts_enabled,
+    "QWEN_GLM53_SORTED_EXPERTS"
+);
+
 /// Synchronous research hook. The session stays poisoned and its published
 /// position stays unchanged until every layer and the normal validation finish.
 #[cfg(feature = "perf-ablations")]
@@ -1243,6 +1251,89 @@ fn encode_experts_with_half(
 ) -> Result<StageMode> {
     let mode = expert_mode(arith, b.gate_bank.dtype, b.up_bank.dtype, b.down_bank.dtype);
     let forced = forced_expert_route();
+    if forced.is_none()
+        && glm_sorted_experts_enabled()
+        && packet_fast_half(arith, mode)
+        && crate::metal::moe_grouped_tensor_selected(ctx)
+        && !crate::half_telemetry::enabled()
+        && half.is_some()
+        && (1024..=4096).contains(&rows)
+        && (h, f, e, k) == (4096, 2048, 288, 8)
+        && b.gate_bank.dtype == GgmlType::IQ2_S
+        && b.up_bank.dtype == GgmlType::IQ2_S
+        && b.down_bank.dtype == GgmlType::IQ3_S
+    {
+        let half = half.expect("selected sorted experts require normalized half");
+        let slots = k
+            .checked_mul(rows)
+            .ok_or_else(|| Glm5NextMetalError::Invalid("sorted expert slots overflow".into()))?;
+        let packed_elements = h
+            .checked_mul(slots)
+            .ok_or_else(|| Glm5NextMetalError::Invalid("sorted packed extent overflow".into()))?;
+        let inner_elements = f
+            .checked_mul(slots)
+            .filter(|elements| elements.is_multiple_of(2))
+            .ok_or_else(|| Glm5NextMetalError::Invalid("sorted inner extent overflow".into()))?;
+        let plan_elements = 2usize
+            .checked_mul(e + 1)
+            .ok_or_else(|| Glm5NextMetalError::Invalid("sorted plan extent overflow".into()))?;
+
+        // The input slab aliases the first half of slot_out; sorted down
+        // overwrites it only after gate/up has consumed every packed row.
+        let mut packed = b
+            .slot_out
+            .view_subrange(0, vec![(packed_elements / 2) as u64]);
+        packed.dtype = GgmlType::F16;
+        packed.shape = vec![packed_elements as u64];
+        let mut inner = b.inner.view_subrange(0, vec![inner_elements as u64]);
+        inner.dtype = GgmlType::F16;
+        inner.shape = vec![f as u64, slots as u64];
+        // Sorted inner occupies the first half of the admitted F32 inner
+        // slab. The unused second half carries the expert prefix/run plan.
+        let mut plan = b
+            .inner
+            .view_bytes((inner_elements as u64) * 2, vec![plan_elements as u64]);
+        plan.dtype = GgmlType::I32;
+
+        crate::metal::encode_scatter_offset_f32_to_f16(
+            ctx,
+            enc,
+            &flat(b.input, h * rows),
+            &flat(half, h * rows),
+            0,
+            h * rows,
+        )?;
+        crate::metal::encode_moe_route_bucket_slots_f32_status(
+            ctx, enc, b.ids, b.counts, b.slots, status, e, rows, k,
+        )?;
+        let sorted = crate::metal::SortedExperts::prepare(
+            ctx,
+            enc,
+            [b.gate_bank, b.up_bank, b.down_bank],
+            half,
+            b.counts,
+            b.slots,
+            b.weights,
+            &plan,
+            &packed,
+            &inner,
+            b.slot_out,
+            crate::metal::SortedExpertGeometry {
+                hidden: h,
+                inner: f,
+                experts: e,
+                topk: k,
+                rows,
+                clamp,
+            },
+        )?;
+        sorted.encode_gate_up(enc);
+        sorted.encode_down(enc);
+        crate::metal::encode_moe_weighted_sum_packed_f32(
+            ctx, enc, b.slot_out, b.weights, b.output, h, k, rows,
+        )?;
+        return Ok(StageMode::Fast);
+    }
     // The explicit tensor gate/up is checked first so the 9..=1023 extension
     // also supersedes the short 128..512 grouped-tensor route; it is the
     // measured cheaper path across that band.

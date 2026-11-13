@@ -11,7 +11,11 @@ use crate::metal::checks::{
 pub(crate) fn sorted_iq_supported(dtype: GgmlType) -> bool {
     matches!(
         dtype,
-        GgmlType::IQ2_XXS | GgmlType::IQ2_XS | GgmlType::IQ2_S | GgmlType::IQ3_XXS
+        GgmlType::IQ2_XXS
+            | GgmlType::IQ2_XS
+            | GgmlType::IQ2_S
+            | GgmlType::IQ3_XXS
+            | GgmlType::IQ3_S
     )
 }
 

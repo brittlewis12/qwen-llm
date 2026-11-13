@@ -49,6 +49,28 @@ Native wall gain **+4.88%** at 32K and **+3.76%** at 48K; physical decode
 reads **-99.4%** in both. The on arm reads only the distinct misses; the off
 arm pays a 16 KiB page for repeated rows.
 
+### Landing witness: three interleaved 48K pairs
+
+Landed tree `77224e49`, `iter` profile, one binary, 48K 3-wide 512-round.
+Order is ABBAAB (A off, B default); each arm loaded the model, ran
+`invalidate_file_cache.py` on the Engram companion, then let the probe purge
+again immediately before the measured loop (resident pages after: 0). Every
+arm ran at niceness 0 (`ps -o nice=` recorded 0) under the metal lease.
+
+| arm | cache | ms/round | decode disk bytes |
+| --- | --- | ---: | ---: |
+| A1 | `=0` | 35.213 | 773,701,632 |
+| B1 | default | 27.121 | 4,734,976 |
+| B2 | default | 28.264 | 4,734,976 |
+| A2 | `=0` | 30.231 | 773,701,632 |
+| A3 | `=0` | 29.396 | 773,701,632 |
+| B3 | default | 28.081 | 4,734,976 |
+
+Off/on ms-per-round ratios: pair 1 **1.298**, pair 2 **1.070**, pair 3
+**1.047**; mean **1.136** (+12.0% on arm). All endpoint hashes are identical
+across all six arms. Raw `metagross:~/qwen-runs/2026-11-13-engram-cache-landing/`;
+probe sha256 `cd33e366a2c25728e567e6ee0c48be447ee09762070666beae95e33fb5242ee7`.
+
 ## Serve A/B
 
 `scripts/bench/serve_realistic.py`, three warm agents, 49,152-token roots,

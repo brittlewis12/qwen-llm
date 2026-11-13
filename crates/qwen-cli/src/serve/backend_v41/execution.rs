@@ -827,9 +827,8 @@ pub(super) struct Run<S> {
 
 impl<S> Run<S> {
     /// Keep earlier cuts and loaded 512-row quanta. An idle owner's append may
-    /// include its terminal header in the first Full call when the whole
-    /// suffix fits one quantum; the floor/ceiling are the quantum, not a
-    /// historical band.
+    /// include its terminal header in the first Full call across the qualified
+    /// 1..=2048-row band; the one-quantum, cut, and header guards still apply.
     pub(super) fn next_endpoint(&self, max_rows: usize) -> usize {
         let cut = self
             .checkpoint_cuts
@@ -840,7 +839,7 @@ impl<S> Run<S> {
         let fold = self.fuse_header
             && self.matched > 0
             && self.position == self.matched
-            && (1..=4096).contains(&(self.ids.len() - self.matched))
+            && (1..=2048).contains(&(self.ids.len() - self.matched))
             && max_rows == crate::family_options::V41_PREFILL_ROWS
             && self.generation_cut == Some(cut)
             && (1..=8).contains(&(self.ids.len() - cut))

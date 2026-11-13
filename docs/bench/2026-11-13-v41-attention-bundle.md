@@ -103,3 +103,28 @@ from measured-server physical reads. Main pair budget860s plus outer885s
 remains below the15-minute lease; all windows, gate thresholds, bins and
 three-pair orders are unchanged. Do not attribute the discarded warmup ratio
 to attention speed. If resource time is insufficient, report incomplete.
+
+
+## Native cold packet, completed18:18:40 UTC
+
+One iter SHA19d9adf78d3a; nice0, warmup plus3 retained interleaved pairs;
+all8 complete signatures per cell bitwise. Keep every retained pair.
+
+| Cell | Baseline ms | Bundle ms | Ratio | Positive pairs | Pressure max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 49152 | 26848.591 | 30309.481 | 0.885815x | 1/3 | 1 |
+| 4096 | 2855.960 | 2797.941 | 1.020736x | 2/3 | 0 |
+| 8192 | 4009.679 | 3906.816 | 1.026329x | 2/3 | 0 |
+
+The48K root regresses in this native packet and is not hidden by averaging
+across cells. Retained root pairs A/B ms:21480.729/30623.624,
+28663.776/30132.464,30401.268/30172.355; ratios0.70144/0.95126/1.00759.
+Its exposed Engram preparation+encode ratio is0.70755x; that component's
+large movement is recorded without assigning a cause. Native root is not
+purged; the declared purged served-root non-regression gate remains decisive.
+No rerun or sub-bisection. Deep150/256/1K packet queued.
+
+Python warmup7ed354ad9 is installed between native packets, before any
+served process; Rust/shaders are unchanged. The weight-warmup CPU smoke
+passes inherited FD, paired4096 command, ps nice0,2 exact signatures, live
+PID/I/O evidence and pressure3 refusal. No served result has been inspected.

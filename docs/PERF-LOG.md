@@ -31,6 +31,19 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw captures and generated tables:
   `metagross:~/qwen-runs/2026-11-12-waste-audit/`. Branch `perf/waste-audit`;
   not merged.
+## 2026-11-13 - V4.1 Attention Bundle: Bitwise Cold Cells, Root Regression Retained
+
+- Functional M5 witnesses pass,15 wide cases/13,434,880 strict components.
+  Shader hashes identical across test/iter/release; both rollback families
+  exercised before each served arm. Iter19d9adf78d3a, release5c538677b90c.
+- Nice0 native48K0.885815x (1/3 positive), pp4K1.020736x (2/3),
+  pp8K1.026329x (2/3). All8 signatures per cell bitwise; pressure1/0/0.
+  Root pairs and host movement retained; no cross-cell averaging or rerun.
+- Before any served arm, add identical paired4K model warmup to warm GGUF
+  pages, exit, dispatch GPU witnesses, then Engram purge0. Separate warmup
+  and measured disk bytes; thresholds/windows unchanged. Deep cells queued.
+  [Protocol and every cold pair](bench/2026-11-13-v41-attention-bundle.md).
+
 ## 2026-11-13 - V4.1 Attention Bundle: Bounded Qualification Starts
 
 - Reapply short masked index and wide PV on main9877b6f25; both default-on

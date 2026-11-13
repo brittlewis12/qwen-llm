@@ -3,10 +3,11 @@
 //! A blocking wait for a command buffer can lose several milliseconds while the
 //! host CPU is saturated: the GPU finishes, but the waiter is not scheduled to
 //! observe it. Raising the calling thread to user-initiated for the duration of
-//! a decode removes that idle. The guard is nested-safe and never lowers a
-//! thread already at or above user-initiated.
+//! a decode, prefill, scheduler round or request burst removes that idle. The
+//! guard is nested-safe and never lowers a thread already at or above
+//! user-initiated.
 crate::env_flag!(
-    /// Raise the thread that feeds the GPU to user-initiated QoS for the duration of a decode, prefill slice or burst, so it is scheduled promptly when the host CPU is saturated. 0 disables every raise.
+    /// Raise the thread that feeds the GPU to user-initiated QoS for the duration of a decode, prefill, scheduler round or request/packet burst, so it is scheduled promptly when the host CPU is saturated. 0 disables every raise.
     default_on qos_enabled, "QWEN_GPU_THREAD_QOS"
 );
 

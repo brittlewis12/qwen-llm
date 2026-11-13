@@ -77,6 +77,16 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw captures and generated tables:
   `metagross:~/qwen-runs/2026-11-12-waste-audit/`. Branch `perf/waste-audit`;
   not merged.
+## 2026-11-13 - GLM Decoded Expert Cache: F16 Loses; Level Codes Need a Probe
+
+- Measurement only; no implementation. A 57 GB GLM cache covers 33.81% of
+  route work in F16, 51.08% in per-row int8, and 81.01% in the exact 3.3-bpw
+  level-code estimate. The measured F16 no-dequant control is 2.0-2.8x slower
+  than its matched full control at 32/161/512 rows. BF16/int8 crossovers and
+  all V4.1 crossovers remain unmeasured.
+- Level codes are the only cache format worth the next exactness and isolated
+  stage probe; no default change until it clears the 1.25x stage gate. V4.1's
+  DSV4 profiler rejects `deepseek41` before model load. [First-slice record](bench/2026-11-13-glm-decoded-expert-cache.md).
 
 ## 2026-11-13 - V4.1 Purged Root Passes; Served Packet at Five Arms
 

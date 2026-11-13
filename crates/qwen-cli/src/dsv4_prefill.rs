@@ -50,6 +50,10 @@ pub struct Dsv4PrefillArgs {
     /// Emit the complete report to stdout instead of the compact summary.
     #[arg(long)]
     full_json: bool,
+    /// Route-cache census only: allow several production chunks in one long
+    /// causal stream; each individual `chunk_tokens` value keeps its normal cap.
+    #[arg(long)]
+    route_census_long_context: bool,
 
     /// Skip sampled profiling after warmup and one ordinary production pass.
     #[arg(long)]
@@ -1152,9 +1156,14 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
     if args.verifier_snapshot.is_some() {
         return run_verifier_floor(&args, build);
     }
+    let token_limit = if args.route_census_long_context {
+        196_608
+    } else {
+        32_768
+    };
     ensure!(
-        (1..=32_768).contains(&args.tokens),
-        "--tokens must be 1..=32768"
+        (1..=token_limit).contains(&args.tokens),
+        "--tokens must be 1..={token_limit}"
     );
     ensure!(
         (1..=DEEPSEEK_V4_PREFILL_MAX_TOKENS).contains(&args.chunk_tokens),

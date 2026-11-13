@@ -66,9 +66,9 @@ const LAYER_SLICE_MIN_MS_ENV: &str = "QWEN_SERVE_V41_LAYER_SLICE_MIN_MS";
 /// pure queue time. Read for each native prefill call.
 const PREFILL_TIMING_ENV: &str = "QWEN_SERVE_V41_PREFILL_TIMING";
 /// Fold a terminal recipe header of at most eight tokens into a reused
-/// 512..2048-token append when the owner has a full prefill quantum. Keep
-/// earlier shared-prefix cuts; publish the header checkpoint at the prompt
-/// end with logits instead. Default on; 0 restores the separate header call.
+/// append of up to one full prefill quantum (4096 rows). Keep earlier
+/// shared-prefix cuts; publish the header checkpoint at the prompt end with
+/// logits instead. Default on; 0 restores the separate header call.
 /// Read once when preparing the server.
 const FUSE_HEADER_ENV: &str = "QWEN_SERVE_V41_FUSE_HEADER";
 /// Plan exact shrinking CED across a cold serve request's retained cuts.

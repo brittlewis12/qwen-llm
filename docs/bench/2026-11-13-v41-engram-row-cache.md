@@ -38,12 +38,12 @@ after a CED root. The Engram companion is purged with
 so both arms start with zero resident Engram pages. All full-vocabulary
 hashes are identical between arms at both depths.
 
-| depth | cache | ms/round | aggregate tok/s | decode disk | bytes/token |
-| --- | --- | ---: | ---: | ---: | ---: |
-| 32K | on | **28.242** | **106.225** | **4,734,976** | **3,083** |
-| 32K | `=0` | 29.620 | 101.282 | 773,701,632 | 503,712 |
-| 48K | on | **27.966** | **107.275** | **4,734,976** | **3,083** |
-| 48K | `=0` | 29.058 | 103.241 | 773,701,632 | 503,712 |
+| depth | cache | ms/round | ms/token | aggregate tok/s | decode disk | bytes/token |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 32K | on | **28.242** | **9.414** | **106.225** | **4,734,976** | **3,083** |
+| 32K | `=0` | 29.620 | 9.873 | 101.282 | 773,701,632 | 503,712 |
+| 48K | on | **27.966** | **9.322** | **107.275** | **4,734,976** | **3,083** |
+| 48K | `=0` | 29.058 | 9.686 | 103.241 | 773,701,632 | 503,712 |
 
 Native wall gain **+4.88%** at 32K and **+3.76%** at 48K; physical decode
 reads **-99.4%** in both. The on arm reads only the distinct misses; the off

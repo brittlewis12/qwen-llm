@@ -73,6 +73,13 @@ def reduce(folder,tag):
         gap_p99_s={arm:arms[arm]["summary"]["gap_p99_s"] for arm in "ab"},
         thermal_max={arm:arms[arm]["summary"]["thermal_max"] for arm in "ab"},
         note="Root phases include all three roots; absent visible warm deltas remain null. Short appends match label and exact new-row count, exclude ramp/carry-in and incomplete calls, and retain every matched observation.")
+    # Bundle gates use separate short and 1K-class bins; keep every matched row.
+    for name,lo,hi in (("short",128,511),("1k",512,2000)):
+        group=[r for r in matched if all(lo<=r[k]<=hi for k in ("baseline_prefill_rows","candidate_prefill_rows"))]
+        observed=[r for r in group if r["baseline_ttft_s"] is not None and r["candidate_ttft_s"] is not None]
+        summary["bundle_"+name]=dict(matches=len(group),observed_ttft=len(observed),
+            prefill_ratio=sum(r["baseline_prefill_ms"] for r in group)/sum(r["candidate_prefill_ms"] for r in group) if group else None,
+            ttft_ratio=sum(r["baseline_ttft_s"] for r in observed)/sum(r["candidate_ttft_s"] for r in observed) if observed else None)
     return summary
 
 

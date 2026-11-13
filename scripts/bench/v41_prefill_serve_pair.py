@@ -64,11 +64,41 @@ def run_harness(command,log_path,binary,deadline,fd):
     return model_pids,model_niceness
 
 
+def attention_warmup(binary,log_path,fd):
+    """Dispatch both candidate and rollback kernels identically before each arm."""
+    names=("deepseek_v41::forward::attention_gpu::tests::radix_select::masked_mma_index_preserves_allowed_scores_and_selection",
+           "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::tensor64_sink_tile_matches_tensor32_sink")
+    record=[]
+    for i,name in enumerate(names):
+        dest=log_path.with_name(log_path.name+f"-{i}.log")
+        env=dict(os.environ,QWEN_REQUIRE_METAL_TESTS="1")
+        env.pop("MTL_DEBUG_LAYER",None)
+        command=packet.nice_command([str(binary.resolve()),name,"--exact","--nocapture"])
+        started=time.time()
+        with dest.open("w") as log:
+            child=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,env=env,pass_fds=(fd,))
+            try:
+                nice=int(subprocess.check_output(["ps","-o","nice=","-p",str(child.pid)],text=True,timeout=5).strip())
+                if nice!=0:raise RuntimeError("warmup niceness is not0")
+                child.wait(timeout=60)
+            finally:
+                if child.poll() is None:
+                    child.terminate()
+                    try:child.wait(timeout=10)
+                    except subprocess.TimeoutExpired:child.kill();child.wait(timeout=5)
+        text=dest.read_text()
+        if child.returncode or "1 passed" not in text:raise RuntimeError("attention warmup failed: "+str(dest))
+        if i==1 and text.count("raw_and_rope_bits_exact=true")!=15:raise RuntimeError("wide warmup did not exercise all15 cases")
+        record.append(dict(test=name,pid=child.pid,niceness=nice,seconds=time.time()-started,log=dest.name))
+    return record
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ("binary","tokenizer","model","corpus","output"):
         p.add_argument("--"+name,type=Path,required=True)
-    p.add_argument("--flag",required=True)
+    p.add_argument("--flag",action="append",required=True)
+    p.add_argument("--attention-warmup-binary",type=Path)
     p.add_argument("--engram",type=Path,required=True)
     p.add_argument("--tag",required=True);p.add_argument("--order",choices=("ab","ba"),required=True)
     p.add_argument("--port",type=int,default=19973);p.add_argument("--seconds",type=int,default=120)
@@ -81,10 +111,11 @@ def main():
     subprocess.run(["python3","scripts/bench/serve_realistic.py","plan","--family","v41",
         "--seconds",str(a.seconds),"--seed","20261112","--out",str(plan)],check=True,timeout=10)
     sha=hashlib.sha256(a.binary.read_bytes()).hexdigest()
-    result=dict(binary_sha256=sha,flag=a.flag,order=a.order,sampling=a.sampling,arms=[])
+    result=dict(binary_sha256=sha,flags=a.flag,order=a.order,sampling=a.sampling,arms=[])
     for arm in a.order:
         processes=resident_check()
         (out/f"{a.tag}-{arm}-processes.txt").write_text(processes)
+        warmup=attention_warmup(a.attention_warmup_binary,out/f"{a.tag}-{arm}-attention-warmup",fd) if a.attention_warmup_binary else []
         purge=out/f"{a.tag}-{arm}-purge.jsonl"
         subprocess.run(["python3","scripts/bench/invalidate_file_cache.py",str(a.engram),"--out",str(purge)],check=True,timeout=60)
         reset=json.loads(purge.read_text().splitlines()[-1])
@@ -98,7 +129,7 @@ def main():
             "--sampling",a.sampling,"--cool","0","--ramp","15","--timeout","650","--port",str(a.port),
             "--max-thermal-pressure","2","--warmup-max-thermal-pressure","2",
             "--settle-thermal-seconds","60","--settle-max-thermal-pressure","1",
-            "--env",a.flag+"="+("0" if arm=="a" else "1"),
+            *[item for flag in a.flag for item in ("--env",flag+"="+("0" if arm=="a" else "1"))],
             "--env","QWEN_SERVE_V41_PREFILL_TIMING=1",
             "--env","QWEN_SERVE_V41_MAX_ACTIVE=4",
             "--env","QWEN_SERVE_V41_SAMPLE_WORKERS=3",
@@ -109,7 +140,7 @@ def main():
         io=[json.loads(line) for line in (out/f"{a.tag}-{arm}.process-io.jsonl").read_text().splitlines()]
         disk=max((r["disk_read"] for r in io),default=None)
         if disk is None:raise RuntimeError("no process disk counter captured")
-        result["arms"].append(dict(arm=arm,engram_purge=reset,process_disk_read_bytes=disk,process_disk_counter_note="maximum live counter sampled every 0.5s; native per-call I/O retained",root_turns=roots,model_pids=sorted(model_pids),model_niceness=model_niceness,
+        result["arms"].append(dict(arm=arm,attention_warmup=warmup,engram_purge=reset,process_disk_read_bytes=disk,process_disk_counter_note="maximum live counter sampled every 0.5s; native per-call I/O retained",root_turns=roots,model_pids=sorted(model_pids),model_niceness=model_niceness,
             summary=json.loads((dest/"summary.json").read_text())))
         (out/f"{a.tag}-summary.json").write_text(json.dumps(result,indent=2)+"\n")
     print(json.dumps(result),flush=True)

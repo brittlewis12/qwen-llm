@@ -986,3 +986,186 @@ kernel void kernel_deepseek_v41_attention_score_tensor64_qkvhalf(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 }
+
+
+// Experimental wide cooperative PV. Raw form is a differential witness;
+// the production candidate fuses normalized inverse-RoPE writeback.
+#define V41_PV_WIDE_DIM 256
+kernel void kernel_deepseek_v41_attention_pv_tensor64_wide(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const float *raw [[buffer(3)]], device const float *compressed [[buffer(4)]],
+    device const uint *ids [[buffer(5)]], device const float *scores [[buffer(7)]],
+    device float *out [[buffer(8)]], constant uint4 &m [[buffer(11)]],
+    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup half vblk[V41_TT64_KEYS * V41_PV_WIDE_DIM];
+    threadgroup half pblk[V41_TT64_HEADS * V41_TT64_KEYS];
+    const uint r = group.y;
+    const uint4 rr = attention_row_raw(a, b, r);
+    const uint length = attention_row_length(b, r);
+    const uint selected = min(length, a.z);
+    const uint count = rr.y + selected;
+    device const uint *row_ids = ids + r * a.z;
+    device const float *srow = scores + r * m.y * a.w;
+    const bool invalid = srow[a.w - 1] == -1.0f;
+
+    constexpr auto desc = tensor_ops::matmul2d_descriptor(
+        V41_TT64_HEADS, V41_PV_WIDE_DIM, V41_TT64_KEYS, false, false, false,
+        tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    tensor_ops::matmul2d<desc, execution_simdgroups<16>> op;
+    using p_t = tensor<threadgroup half, extents<int, V41_TT64_KEYS, V41_TT64_HEADS>, tensor_inline>;
+    using v_t = tensor<threadgroup half, extents<int, V41_PV_WIDE_DIM, V41_TT64_KEYS>, tensor_inline>;
+    p_t pt(pblk, extents<int, V41_TT64_KEYS, V41_TT64_HEADS>());
+    v_t vt(vblk, extents<int, V41_PV_WIDE_DIM, V41_TT64_KEYS>());
+
+    for (uint dc = 0; dc < 2; ++dc) {
+        auto acc = op.get_destination_cooperative_tensor<p_t, v_t, float>();
+#pragma clang loop unroll(full)
+        for (ushort i = 0; i < acc.get_capacity(); ++i) {
+            acc[i] = 0.0f;
+        }
+        if (!invalid) {
+            for (uint k0 = 0; k0 < count; k0 += V41_TT64_KEYS) {
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                for (uint e = tid; e < V41_TT64_KEYS * V41_PV_WIDE_DIM / 4; e += 512) {
+                    const uint key = e / (V41_PV_WIDE_DIM / 4), c4 = e % (V41_PV_WIDE_DIM / 4);
+                    const uint i = k0 + key;
+                    float4 v = float4(0.0f);
+                    if (i < count) {
+                        const device float *krow =
+                            attention_row_key(rr, raw, compressed, row_ids, i);
+                        v = ((device const float4 *)(krow + dc * V41_PV_WIDE_DIM))[c4];
+                    }
+                    ((threadgroup half4 *)vblk)[e] = half4(v);
+                }
+                for (uint e = tid; e < V41_TT64_HEADS * V41_TT64_KEYS; e += 512) {
+                    const uint h = e / V41_TT64_KEYS, kk = e % V41_TT64_KEYS;
+                    pblk[e] = half(k0 + kk < count ? srow[h * a.w + k0 + kk] : 0.0f);
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                op.run(pt, vt, acc);
+            }
+        }
+        device float *orow = out + r * a.x + dc * V41_PV_WIDE_DIM;
+        tensor<device float, extents<int, V41_PV_WIDE_DIM, V41_TT64_HEADS>, tensor_inline> ot(
+            orow, extents<int, V41_PV_WIDE_DIM, V41_TT64_HEADS>(),
+            array<int, 2>{1, int(m.z * a.x)});
+        acc.store(ot);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+// Wider PV writeback uses H64/K32/D256 with sixteen SIMD groups.
+// K32 updates retain increasing-key order; nominal destination storage is
+// 32 floats/thread rather than 64 in the original D128/four-group kernel.
+// Cooperative-pair epilogue adapted from mlx-serve
+// src/plugins/deepseek_v41/kernels/attn_pv.metal at da964cf12a899772285be58e4740de6f75c9f6af.
+/*
+MIT License
+
+Copyright (c) 2026 David Dalcu
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+kernel void kernel_deepseek_v41_attention_pv_tensor64_wide_rope(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    device const float *raw [[buffer(3)]], device const float *compressed [[buffer(4)]],
+    device const uint *ids [[buffer(5)]], device const float *scores [[buffer(7)]],
+    device float *output [[buffer(2)]], device const float *freq [[buffer(9)]],
+    device atomic_uint *status [[buffer(10)]], constant uint4 &m [[buffer(11)]],
+    constant uint &pairs [[buffer(12)]],
+    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup half vblk[V41_TT64_KEYS * V41_PV_WIDE_DIM];
+    threadgroup half pblk[V41_TT64_HEADS * V41_TT64_KEYS];
+    const uint r = group.y;
+    const uint4 rr = attention_row_raw(a, b, r);
+    const uint length = attention_row_length(b, r);
+    const uint selected = min(length, a.z);
+    const uint count = rr.y + selected;
+    device const uint *row_ids = ids + r * a.z;
+    device const float *srow = scores + r * m.y * a.w;
+    const bool invalid = srow[a.w - 1] == -1.0f;
+
+    constexpr auto desc = tensor_ops::matmul2d_descriptor(
+        V41_TT64_HEADS, V41_PV_WIDE_DIM, V41_TT64_KEYS, false, false, false,
+        tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    tensor_ops::matmul2d<desc, execution_simdgroups<16>> op;
+    using p_t = tensor<threadgroup half, extents<int, V41_TT64_KEYS, V41_TT64_HEADS>, tensor_inline>;
+    using v_t = tensor<threadgroup half, extents<int, V41_PV_WIDE_DIM, V41_TT64_KEYS>, tensor_inline>;
+    p_t pt(pblk, extents<int, V41_TT64_KEYS, V41_TT64_HEADS>());
+    v_t vt(vblk, extents<int, V41_PV_WIDE_DIM, V41_TT64_KEYS>());
+
+    for (uint dc = 0; dc < 2; ++dc) {
+        auto acc = op.get_destination_cooperative_tensor<p_t, v_t, float>();
+#pragma clang loop unroll(full)
+        for (ushort i = 0; i < acc.get_capacity(); ++i) {
+            acc[i] = 0.0f;
+        }
+        if (!invalid) {
+            for (uint k0 = 0; k0 < count; k0 += V41_TT64_KEYS) {
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                for (uint e = tid; e < V41_TT64_KEYS * V41_PV_WIDE_DIM / 4; e += 512) {
+                    const uint key = e / (V41_PV_WIDE_DIM / 4), c4 = e % (V41_PV_WIDE_DIM / 4);
+                    const uint i = k0 + key;
+                    float4 v = float4(0.0f);
+                    if (i < count) {
+                        const device float *krow =
+                            attention_row_key(rr, raw, compressed, row_ids, i);
+                        v = ((device const float4 *)(krow + dc * V41_PV_WIDE_DIM))[c4];
+                    }
+                    ((threadgroup half4 *)vblk)[e] = half4(v);
+                }
+                for (uint e = tid; e < V41_TT64_HEADS * V41_TT64_KEYS; e += 512) {
+                    const uint h = e / V41_TT64_KEYS, kk = e % V41_TT64_KEYS;
+                    pblk[e] = half(k0 + kk < count ? srow[h * a.w + k0 + kk] : 0.0f);
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                op.run(pt, vt, acc);
+            }
+        }
+        // The cooperative destination assigns adjacent D coordinates in pairs.
+        // Keep each normalized quotient rounded to F32 before applying RoPE,
+        // matching normalize_rows followed by rope_rows under fast math.
+#pragma clang loop unroll(full)
+        for (ushort i = 0; i < acc.get_capacity(); i += 2) {
+            if (!acc.is_valid_element(i)) continue;
+            const auto ij = acc.get_multidimensional_index(i);
+            const auto next = acc.get_multidimensional_index(i + 1);
+            const uint d = dc * V41_PV_WIDE_DIM + uint(ij[0]), h = uint(ij[1]);
+            if (next[0] != ij[0] + 1 || next[1] != ij[1]) {
+                atomic_fetch_or_explicit(status, 4u, memory_order_relaxed);
+                continue;
+            }
+            const float denom = srow[h * a.w + a.w - 1];
+            volatile float u = denom == -1.0f ? 0.0f : acc[i] / denom;
+            volatile float v = denom == -1.0f ? 0.0f : acc[i + 1] / denom;
+            if (!isfinite(float(u)) || !isfinite(float(v)))
+                atomic_fetch_or_explicit(status, 4u, memory_order_relaxed);
+            float x = float(u), y = float(v);
+            if (d >= a.x - 2 * pairs) {
+                const float angle = float(b.x + r) * freq[(d - (a.x - 2 * pairs)) / 2] * -1.0f;
+                const float c = cos(angle), sn = sin(angle);
+                x = float(u) * c - float(v) * sn;
+                y = float(u) * sn + float(v) * c;
+            }
+            device float *dst = output + (ulong(r) * m.y + h) * a.x + d;
+            dst[0] = x; dst[1] = y;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}

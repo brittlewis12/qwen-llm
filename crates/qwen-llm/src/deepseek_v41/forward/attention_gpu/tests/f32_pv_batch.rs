@@ -952,8 +952,80 @@ fn tensor64_sink_tile_matches_tensor32_sink() {
             }
         }
         close_tile(f32_slice(&f.output).unwrap(), &base_out);
+        check_wide_pv(&ctx, &f);
         f.check_guards();
     }
+}
+
+// Extend the existing tensor64 differential with strict comparisons to its
+// normalized output and the original inverse-RoPE pass. No tolerance is added.
+fn check_wide_pv(ctx: &MetalContext, f: &Fixture) {
+    let baseline = f32_slice(&f.output).unwrap().to_vec();
+    execute(ctx, |enc| {
+        f.bind(enc);
+        let pso = tensor_pipeline(ctx, enc, "pv_tensor64_wide").unwrap();
+        assert!(pso.maxTotalThreadsPerThreadgroup() >= 512);
+        assert!(pso.staticThreadgroupMemoryLength() <= ctx.device.maxThreadgroupMemoryLength());
+        grid(enc, 1, f.n, 1, 512);
+        let pso = pipeline(ctx, enc, "normalize_rows").unwrap();
+        dispatch(enc, &pso, f.n * H * M);
+    });
+    for (i, (&got, &expected)) in f32_slice(&f.output)
+        .unwrap()
+        .iter()
+        .zip(&baseline)
+        .enumerate()
+    {
+        assert_eq!(
+            got.to_bits(),
+            expected.to_bits(),
+            "wide PV normalized component {i}"
+        );
+    }
+    let frequencies: Vec<f32> = (0..32).map(|i| (i + 1) as f32 * 0.001).collect();
+    let freq = upload(ctx, &frequencies, vec![32]).unwrap();
+    // The scalar value-matrix payload is dead in this tensor-only case.
+    let reference = f.values.view_subrange(0, vec![(f.n * H * M) as u64]);
+    execute(ctx, |enc| {
+        let pso = pipeline(ctx, enc, "rope_rows").unwrap();
+        enc.set_bytes(0, &[M as u32, H as u32, 32, (f.start + f.first) as u32]);
+        enc.set_tensor(1, &f.output);
+        enc.set_tensor(2, &freq);
+        enc.set_bytes(3, &[f.n as u32, 1]);
+        enc.set_tensor(4, &reference);
+        dispatch(enc, &pso, f.n * H * M);
+    });
+    let baseline_rope = f32_slice(&reference).unwrap().to_vec();
+    execute(ctx, |enc| {
+        f.bind(enc);
+        let pso = tensor_pipeline(ctx, enc, "pv_tensor64_wide_rope").unwrap();
+        assert!(pso.maxTotalThreadsPerThreadgroup() >= 512);
+        enc.set_tensor(9, &freq);
+        enc.set_bytes(12, &32u32);
+        // Query storage is dead after QK, matching the production alias.
+        enc.set_tensor(2, &f.query);
+        grid(enc, 1, f.n, 1, 512);
+    });
+    assert_eq!(ids(&f.status, 1), [0]);
+    for (i, (&got, &expected)) in f32_slice(&f.query)
+        .unwrap()
+        .iter()
+        .zip(&baseline_rope)
+        .enumerate()
+    {
+        assert_eq!(
+            got.to_bits(),
+            expected.to_bits(),
+            "wide PV RoPE component {i}"
+        );
+    }
+    eprintln!(
+        "pv_wide_check k={} n={} ragged_layout_first={} output_elements={} raw_and_rope_bits_exact=true",
+        f.k,
+        f.n,
+        f.first,
+        baseline.len()
+    );
 }
 
 /// Two half-operand F32-sum tiles differing only in reduction order.

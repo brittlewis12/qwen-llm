@@ -33,6 +33,38 @@ crate::env_flag!(
     default_on masked_reindex_mid_env,
     "QWEN_V41_MASKED_REINDEX_MID"
 );
+crate::env_flag!(
+    /// Extend exact mask-skipping index scoring to ordinary 128..511-row appends on M5 Ultra, using the existing depth threshold and MASKED_REINDEX veto. Bitwise bundle candidate, default on; 0 retains the qualified 512..2048-row range. No new tensors or arithmetic changes.
+    default_on masked_reindex_short_env,
+    "QWEN_V41_MASKED_REINDEX_SHORT"
+);
+fn masked_reindex_short_enabled() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    if let Some(
+        super::super::PrefillExperiment::MaskedReindexShort(enabled)
+        | super::super::PrefillExperiment::AttentionBundle(enabled),
+    ) = super::super::PREFILL_EXPERIMENT.with(|s| s.get())
+    {
+        return enabled;
+    }
+    masked_reindex_short_env()
+}
+crate::env_flag!(
+    /// Use a D256/sixteen-simdgroup PV tile with normalized inverse-RoPE writeback on the M5 Ultra H64/D512/R64 tensor tier; K32 update order is retained. Bitwise bundle candidate, default on; 0 keeps D128/four-group PV.
+    default_on pv_wide_env,
+    "QWEN_V41_ATTN_PV_WIDE"
+);
+fn pv_wide_enabled() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    if let Some(
+        super::super::PrefillExperiment::PvWide(enabled)
+        | super::super::PrefillExperiment::AttentionBundle(enabled),
+    ) = super::super::PREFILL_EXPERIMENT.with(|s| s.get())
+    {
+        return enabled;
+    }
+    pv_wide_env()
+}
 fn masked_reindex_mid_enabled() -> bool {
     #[cfg(feature = "perf-ablations")]
     if let Some(super::super::PrefillExperiment::MaskedReindexMid(enabled)) =
@@ -1363,7 +1395,8 @@ impl Workspace {
                 && c.candidate_topk == 2048
                 && c.index_topk == 512
                 && (start >= 131_072 || start >= 49_152 && masked_reindex_mid_enabled())
-                && (512..=2048).contains(&rows.rows)
+                && ((512..=2048).contains(&rows.rows)
+                    || (128..512).contains(&rows.rows) && masked_reindex_short_enabled())
                 && super::index_ilp_supported(c)
                 && super::select_grid_enabled()
                 && self.global_mode(id, start, rows.rows)? == GlobalKvMode::Ordinary
@@ -1759,7 +1792,24 @@ impl Workspace {
             },
         );
         if mma {
-            if tensor64 {
+            let wide = tensor64
+                && c.rope_dim == 64
+                && (128..=4096).contains(&rows.rows)
+                && ctx.device_facts().name == "Apple M5 Ultra"
+                && pv_wide_enabled();
+            if wide {
+                let pso = tensor_pipeline(ctx, enc, "pv_tensor64_wide_rope")?;
+                op::require(
+                    pso.maxTotalThreadsPerThreadgroup() >= 512
+                        && pso.staticThreadgroupMemoryLength()
+                            <= ctx.device.maxThreadgroupMemoryLength(),
+                    "wide PV pipeline resources",
+                )?;
+                enc.set_tensor(2, &query);
+                enc.set_tensor(9, &self.constants[id].frequencies);
+                enc.set_tensor(10, &self.status);
+                enc.set_bytes(12, &((c.rope_dim / 2) as u32));
+            } else if tensor64 {
                 tensor_pipeline(ctx, enc, "pv_tensor64")?;
             } else if tensor {
                 tensor_pipeline(ctx, enc, "pv_tensor")?;
@@ -1773,11 +1823,20 @@ impl Workspace {
                     depth: 1,
                 },
                 MTLSize {
-                    width: if tensor { 128 } else { 256 },
+                    width: if wide {
+                        512
+                    } else if tensor {
+                        128
+                    } else {
+                        256
+                    },
                     height: 1,
                     depth: 1,
                 },
             );
+            if wide {
+                return Ok(());
+            }
             let pso = pipeline(ctx, enc, "normalize_rows")?;
             dispatch(enc, &pso, n * c.heads * c.head_dim);
         } else if let Some(matrix) = matrix {

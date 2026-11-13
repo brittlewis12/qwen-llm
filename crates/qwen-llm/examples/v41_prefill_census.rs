@@ -110,9 +110,11 @@ fn execute(
         let e = match experiment {
             "baseline" => match control_for {
                 "masked-reindex-mid" => E::MaskedReindexMid(false),
+                "attention-bundle" => E::AttentionBundle(false),
                 _ => E::Production,
             },
             "masked-reindex-mid" => E::MaskedReindexMid(true),
+            "attention-bundle" => E::AttentionBundle(true),
             _ => anyhow::bail!("experiment"),
         };
         with_prefill_experiment(e, run)
@@ -142,7 +144,10 @@ fn main() -> Result<()> {
     let paired = experiment.starts_with("paired-");
     let candidate = experiment.strip_prefix("paired-").unwrap_or(experiment);
     ensure!(
-        matches!(candidate, "baseline" | "masked-reindex-mid"),
+        matches!(
+            candidate,
+            "baseline" | "masked-reindex-mid" | "attention-bundle"
+        ),
         "experiment"
     );
     ensure!(

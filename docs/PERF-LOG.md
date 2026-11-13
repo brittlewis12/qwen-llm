@@ -31,6 +31,16 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw captures and generated tables:
   `metagross:~/qwen-runs/2026-11-12-waste-audit/`. Branch `perf/waste-audit`;
   not merged.
+## 2026-11-13 - V4.1 Attention Bundle: Bounded Qualification Starts
+
+- Reapply short masked index and wide PV on main9877b6f25; both default-on
+  candidates with separate0 rollbacks. Retain archived shader MIT attribution.
+- Freeze bitwise/native6-cell and3-pair non-regression serve gates. Before
+  each served arm, identical model-free GPU witnesses dispatch both families,
+  then Engram purge0 pages. Same release, greedy/nice0, AB/BA/AB, disk counts.
+- No qualification result yet. Target2h, hard2h15m from17:37:08UTC.
+  [Frozen protocol](bench/2026-11-13-v41-attention-bundle.md).
+
 ## 2026-11-13 - V4.1 Short Index: Bounded Stage Closed, Candidate Removed
 
 - Corrected purged serve completed2/3 pairs: AB prefill/TTFT1.01352x/1.01306x;

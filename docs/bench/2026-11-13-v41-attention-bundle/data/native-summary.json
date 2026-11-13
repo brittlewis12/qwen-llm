@@ -1,0 +1,236 @@
+[
+  {
+    "source": "bundle-native-cold-0-49152-native.jsonl",
+    "sha256": "b1dac9a015804a0175446cfe2e0719f3d611f6361599c33ac591a178d18061ec",
+    "depth": 0,
+    "rows": 49152,
+    "candidate": "attention-bundle",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 21480.729375,
+        "candidate_ms": 30623.623667,
+        "ratio": 0.7014430953234193
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 28663.775708,
+        "candidate_ms": 30132.464375000003,
+        "ratio": 0.9512589262955031
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 30401.267792,
+        "candidate_ms": 30172.354958,
+        "ratio": 1.0075868401494894
+      }
+    ],
+    "baseline_mean_ms": 26848.590958333334,
+    "candidate_mean_ms": 30309.481,
+    "mean_ratio": 0.8858149355422263,
+    "geometric_pair_ratio": 0.8760412551875105,
+    "positive_pairs": 1,
+    "all_exact": true,
+    "thermal_max": 1,
+    "exposed_engram_prepare_and_encode_baseline_ms": 7195.657348,
+    "exposed_engram_prepare_and_encode_candidate_ms": 10169.849430333334,
+    "exposed_engram_prepare_and_encode_ratio": 0.7075480711187039
+  },
+  {
+    "source": "bundle-native-cold-0-4096-native.jsonl",
+    "sha256": "3bb72b80519317c403ee29de4063f2a9dbc8678c300b8f2144e25edbbd22f573",
+    "depth": 0,
+    "rows": 4096,
+    "candidate": "attention-bundle",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 2791.513334,
+        "candidate_ms": 2847.4989170000003,
+        "ratio": 0.9803386815476004
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 2884.2693750000003,
+        "candidate_ms": 2819.4745000000003,
+        "ratio": 1.0229811885158033
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 2892.0966249999997,
+        "candidate_ms": 2726.8504590000002,
+        "ratio": 1.0605996436125065
+      }
+    ],
+    "baseline_mean_ms": 2855.959778,
+    "candidate_mean_ms": 2797.9412920000004,
+    "mean_ratio": 1.020736134159029,
+    "geometric_pair_ratio": 1.0207790648040171,
+    "positive_pairs": 2,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 1.9439026666666668,
+    "exposed_engram_prepare_and_encode_candidate_ms": 1.8564166666666668,
+    "exposed_engram_prepare_and_encode_ratio": 1.0471262737352427
+  },
+  {
+    "source": "bundle-native-cold-0-8192-native.jsonl",
+    "sha256": "2293592097f0df800352eae1f3699bb15e7bdd0ed951969f4f8c6e35f50c12f2",
+    "depth": 0,
+    "rows": 8192,
+    "candidate": "attention-bundle",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 3872.449167,
+        "candidate_ms": 3886.1502090000004,
+        "ratio": 0.9964743920684616
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 4171.3279999999995,
+        "candidate_ms": 3892.963125,
+        "ratio": 1.0715046266974335
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 3985.261084,
+        "candidate_ms": 3941.3341659999996,
+        "ratio": 1.0111451899661128
+      }
+    ],
+    "baseline_mean_ms": 4009.679417,
+    "candidate_mean_ms": 3906.8158333333336,
+    "mean_ratio": 1.026329263537079,
+    "geometric_pair_ratio": 1.0258674206682898,
+    "positive_pairs": 2,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 364.17739,
+    "exposed_engram_prepare_and_encode_candidate_ms": 337.1961253333333,
+    "exposed_engram_prepare_and_encode_ratio": 1.080016532337062
+  },
+  {
+    "source": "bundle-native-deep-81920-150-native.jsonl",
+    "sha256": "125bdcae727e31316f9d3a7690ba43801a7413c4c3b4c18dd677282d89dc3a96",
+    "depth": 81920,
+    "rows": 150,
+    "candidate": "attention-bundle",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 404.304625,
+        "candidate_ms": 378.133167,
+        "ratio": 1.0692122783294489
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 405.62987499999997,
+        "candidate_ms": 379.578916,
+        "ratio": 1.0686312065868273
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 409.334833,
+        "candidate_ms": 375.558,
+        "ratio": 1.089937727328402
+      }
+    ],
+    "baseline_mean_ms": 406.423111,
+    "candidate_mean_ms": 377.7566943333333,
+    "mean_ratio": 1.0758859263030596,
+    "geometric_pair_ratio": 1.0758816288418354,
+    "positive_pairs": 3,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 3.4885416666666664,
+    "exposed_engram_prepare_and_encode_candidate_ms": 3.2156946666666664,
+    "exposed_engram_prepare_and_encode_ratio": 1.0848485407611255
+  },
+  {
+    "source": "bundle-native-deep-81920-256-native.jsonl",
+    "sha256": "e01e15c2657d090c56777842af2bdb7d35862da7988ef7aa8b595197d96d835a",
+    "depth": 81920,
+    "rows": 256,
+    "candidate": "attention-bundle",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 517.6935000000001,
+        "candidate_ms": 498.151292,
+        "ratio": 1.0392294636465584
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 519.253208,
+        "candidate_ms": 500.52741599999996,
+        "ratio": 1.0374121204981108
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 523.302166,
+        "candidate_ms": 495.857708,
+        "ratio": 1.0553474465702972
+      }
+    ],
+    "baseline_mean_ms": 520.0829580000001,
+    "candidate_mean_ms": 498.17880533333334,
+    "mean_ratio": 1.0439684555668935,
+    "geometric_pair_ratio": 1.0439653335750347,
+    "positive_pairs": 3,
+    "all_exact": true,
+    "thermal_max": 1,
+    "exposed_engram_prepare_and_encode_baseline_ms": 2.9981386666666663,
+    "exposed_engram_prepare_and_encode_candidate_ms": 4.4595,
+    "exposed_engram_prepare_and_encode_ratio": 0.6723037709758193
+  },
+  {
+    "source": "bundle-native-deep-81920-1024-native.jsonl",
+    "sha256": "2860b79b4b32769d52fa707ffce69fc7528c051fbaf9d94b20f45f3ac6baae76",
+    "depth": 81920,
+    "rows": 1024,
+    "candidate": "attention-bundle",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 1056.206666,
+        "candidate_ms": 1049.476584,
+        "ratio": 1.006412798629912
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 1058.2658330000002,
+        "candidate_ms": 1053.536042,
+        "ratio": 1.0044894439406375
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 1067.8192499999998,
+        "candidate_ms": 1047.3712090000001,
+        "ratio": 1.0195232032581103
+      }
+    ],
+    "baseline_mean_ms": 1060.7639163333333,
+    "candidate_mean_ms": 1050.127945,
+    "mean_ratio": 1.0101282623550536,
+    "geometric_pair_ratio": 1.0101197925087058,
+    "positive_pairs": 3,
+    "all_exact": true,
+    "thermal_max": 1,
+    "exposed_engram_prepare_and_encode_baseline_ms": 2.292431,
+    "exposed_engram_prepare_and_encode_candidate_ms": 3.1317643333333334,
+    "exposed_engram_prepare_and_encode_ratio": 0.7319934567234891
+  }
+]

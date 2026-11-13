@@ -128,3 +128,22 @@ Python warmup7ed354ad9 is installed between native packets, before any
 served process; Rust/shaders are unchanged. The weight-warmup CPU smoke
 passes inherited FD, paired4096 command, ps nice0,2 exact signatures, live
 PID/I/O evidence and pressure3 refusal. No served result has been inspected.
+
+
+## Native deep packet, completed18:33:17 UTC
+
+Same iter19d9adf78d3a, nice0, one warmup plus3 retained interleaved pairs.
+All8 signatures per cell bitwise; all six requested cells are now complete.
+
+| Rows at80K | Baseline ms | Bundle ms | Ratio | Positive pairs | Pressure max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 150 | 406.423 | 377.757 | 1.075886x | 3/3 | 0 |
+| 256 | 520.083 | 498.179 | 1.043968x | 3/3 | 1 |
+| 1024 | 1060.764 | 1050.128 | 1.010128x | 3/3 | 1 |
+
+All raw hashes are verified against local copies. First150 baseline warmup
+was1429.194ms versus380.895ms bundle; it is excluded as predeclared, retained
+in raw data. No native reruns. The negative48K root is retained alongside
+positive append/pp cells. Serve pair1AB queued18:33:17 behind GLM.
+Contracts with the full symmetric-weight-warmup driver pass sourcee51141aba,
+tree645d2d7c41d9979f76d86e2d6db01e4080a5625a. Main remains9877b6f25.

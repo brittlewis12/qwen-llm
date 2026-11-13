@@ -7,10 +7,14 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    /// Extend the qualified 64-slot routed gate/up to the 512..=2047-row append band (A/B opt-in). Same half operand, F32 sums and dead-scratch reuse as the M2048 route; zero keeps the 32-slot incumbent below 2048.
-    default_off short_enabled,
+    /// Default-on 64-slot routed gate/up for the 1024..=2047-row append band, alongside the original M2048 route. Same half operand, F32 sums and dead-scratch reuse; bitwise at 1000/1383/2000 rows. The isolated gate/up is 1.26x at 2000 rows and the whole append is 3.0% faster; at 1000 rows the win is 0.5%. Set to 0 to keep the 32-slot incumbent below 2048.
+    default_on short_enabled,
     "QWEN_FN_PREFILL_EXPERT_WIDE_SHORT"
 );
+
+fn rows_qualified(short: bool, tokens: usize) -> bool {
+    tokens == 2048 || (short && (1024..=2047).contains(&tokens))
+}
 
 pub(super) fn try_encode(
     ctx: &MetalContext,
@@ -25,7 +29,7 @@ pub(super) fn try_encode(
     g: Qwen4ExpMoeMetalGeometry,
     tokens: usize,
 ) -> Result<bool, MetalError> {
-    let rows_qualified = tokens == 2048 || (short_enabled() && (512..=2047).contains(&tokens));
+    let rows_qualified = rows_qualified(short_enabled(), tokens);
     if !enabled()
         || !rows_qualified
         || !ctx.tensor_ops_status().is_available()
@@ -103,4 +107,23 @@ pub(super) fn try_encode(
         tokens,
     )?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rows_qualified;
+
+    #[test]
+    fn wide_gate_up_rows_cover_the_measured_band_only() {
+        for rows in [0, 1, 128, 256, 512, 1000, 1023, 2049, 4096] {
+            assert!(!rows_qualified(true, rows), "rows={rows}");
+        }
+        for rows in [1024, 1383, 2000, 2047, 2048] {
+            assert!(rows_qualified(true, rows), "rows={rows}");
+        }
+        assert!(rows_qualified(false, 2048));
+        for rows in [1024, 1383, 2000, 2047] {
+            assert!(!rows_qualified(false, rows), "rows={rows}");
+        }
+    }
 }

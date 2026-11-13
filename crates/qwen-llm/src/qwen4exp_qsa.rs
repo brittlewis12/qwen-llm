@@ -750,10 +750,10 @@ impl QwenSparseAttentionMetalGeometry {
         self,
         capacity: usize,
     ) -> Result<Vec<usize>, Qwen4ExpQsaError> {
-        if capacity == 0 || capacity > self.capacity {
+        if capacity == 0 || capacity > self.token_budget {
             return invalid(format!(
                 "dense packed QSA capacity must be in 1..={}, got {capacity}",
-                self.capacity
+                self.token_budget
             ));
         }
         let f32_bytes = |name: &str, factors: &[usize]| {
@@ -790,10 +790,10 @@ impl QwenSparseAttentionMetalGeometry {
         self,
         capacity: usize,
     ) -> Result<Vec<usize>, Qwen4ExpQsaError> {
-        if capacity == 0 || capacity > self.capacity {
+        if capacity == 0 || capacity > self.token_budget {
             return invalid(format!(
                 "selected packed QSA capacity must be in 1..={}, got {capacity}",
-                self.capacity
+                self.token_budget
             ));
         }
         let query_tile = capacity.min(DENSE_PACKED_QUERY_TILE);
@@ -878,10 +878,10 @@ impl QwenSparseAttentionMetalGeometry {
         start_position: usize,
         tokens: usize,
     ) -> Result<QwenSparseAttentionPackedRangePlan, Qwen4ExpQsaError> {
-        if tokens == 0 || tokens > self.capacity {
+        if tokens == 0 || tokens > self.token_budget {
             return invalid(format!(
                 "packed QSA token count must be in 1..={}, got {tokens}",
-                self.capacity
+                self.token_budget
             ));
         }
         let end_position = start_position.checked_add(tokens).ok_or_else(|| {
@@ -908,10 +908,10 @@ impl QwenSparseAttentionMetalGeometry {
     }
 
     fn packed_attention_score_elements(self, capacity: usize) -> Result<usize, Qwen4ExpQsaError> {
-        if capacity == 0 || capacity > self.capacity {
+        if capacity == 0 || capacity > self.token_budget {
             return invalid(format!(
                 "dense packed QSA capacity must be in 1..={}, got {capacity}",
-                self.capacity
+                self.token_budget
             ));
         }
         let elements = self
@@ -1094,10 +1094,10 @@ impl QwenSparseAttentionPackedScratch {
         selected_capable: bool,
     ) -> Result<Self, Qwen4ExpQsaError> {
         geometry.validate(geometry.capacity)?;
-        if capacity == 0 || capacity > geometry.capacity {
+        if capacity == 0 || capacity > geometry.token_budget {
             return invalid(format!(
                 "dense packed QSA capacity must be in 1..={}, got {capacity}",
-                geometry.capacity
+                geometry.token_budget
             ));
         }
         let query_tile = capacity.min(DENSE_PACKED_QUERY_TILE);

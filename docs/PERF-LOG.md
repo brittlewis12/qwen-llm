@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-13 - V4.1 Agent-Depth Masked Reindex: Promoted After Exact, Native and Served Gates
+
+- Prototype `95d622e9a`, now-default-on `QWEN_V41_MASKED_REINDEX_MID`.
+  Extend the existing exact mask-skipping F32 MMA eligibility to ordinary
+  512..2048-row appends at 48K..128K. Same arithmetic, masks, selection and
+  backing; `=0` restores the 128K threshold and the existing mask rollback
+  still vetoes it.
+- Verified-niceness-10 M5 isolation, three retained pairs: score stage
+  **162.983 -> 107.521 ms (1.51582x)**. Native 1K@80K, same `iter` binary,
+  three retained pairs after one declared warmup pair:
+  **1056.477 -> 1001.714 ms (1.05467x)**, 3/3 positive, pressure 0.
+  Every endpoint, complete causal state and following teacher step is bitwise.
+- Inactive 48K CED root control **20048.21/20121.08 ms (-0.36%)**. The
+  45-second first baseline remains recorded as the declared warmup pair.
+- Served eligibility is fixed by actual row count/depth, retaining all
+  matched short calls and both order directions at warm reply cap 32.
+  [MID-only excerpt, native pairs and served evidence](bench/2026-11-12-v41-prefill/README.md);
+  the shared `perf/v41-prefill` note carries the non-MID levers.
+
+- Same-release B3, cap32, both directions: AB eligible matched append mean
+  **1.03881x**, BA **1.09442x**; all **18/18** eligible calls improve.
+  All matched short appends **1.03200/1.05123x**. Delivered tok/s
+  **78.575 -> 80.517**, **78.458 -> 80.283**. Root controls are noisy and
+  outside the guard; no root speed claim. BA baseline reaches allowed
+  pressure 2 (retained); other arms 0. Both model children per arm are NI10.
+- **Promoted default on, `QWEN_V41_MASKED_REINDEX_MID=0` rollback**. Existing
+  MASKED_REINDEX=0 veto remains. No added memory; three 48K sessions fit.
+  No other default changed.
+
 ## 2026-11-12 - IQ Fast Decode: Bitwise, But Slower (Swing #1 Gate Fails)
 
 - **No ship; operator gate failed.** Branch `perf/iq-fast-decode` at

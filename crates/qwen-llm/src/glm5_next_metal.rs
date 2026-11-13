@@ -1035,8 +1035,9 @@ pub struct Glm5NextStageReport {
     pub span_sum_ms: f64,
 }
 
-/// Samples per profiled step: two per stage span, with headroom.
-const STAGE_SAMPLE_CAPACITY: usize = 8192;
+/// Samples per profiled step: two per stage span. On M5 the Metal counter
+/// sample buffer is capped at 32 KiB (4,096 eight-byte timestamps).
+const STAGE_SAMPLE_CAPACITY: usize = 4096;
 
 struct StageRecorder {
     samples: crate::metal::MetalTimestampSampleBuffer,

@@ -30,6 +30,19 @@ pub(super) struct RowCache {
     entries: HashMap<RowKey, usize>,
     slots: Vec<Slot>,
     hand: usize,
+    hits: u64,
+    misses: u64,
+}
+
+/// Current cache footprint and hit counts. Hits and misses count actual row
+/// reads; advisory probes use [`RowCache::contains`] and are not counted.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct RowCacheStats {
+    pub(super) capacity_bytes: usize,
+    pub(super) bytes: usize,
+    pub(super) rows: usize,
+    pub(super) hits: u64,
+    pub(super) misses: u64,
 }
 
 impl RowCache {
@@ -40,31 +53,41 @@ impl RowCache {
             entries: HashMap::new(),
             slots: Vec::new(),
             hand: 0,
+            hits: 0,
+            misses: 0,
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn capacity_bytes(&self) -> usize {
-        self.capacity_bytes
+    pub(super) fn stats(&self) -> RowCacheStats {
+        RowCacheStats {
+            capacity_bytes: self.capacity_bytes,
+            bytes: self.bytes,
+            rows: self.slots.len(),
+            hits: self.hits,
+            misses: self.misses,
+        }
     }
 
-    #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
-        self.slots.len()
-    }
-
-    #[cfg(test)]
-    pub(super) fn bytes(&self) -> usize {
-        self.bytes
+    /// Look up a row without counting a read. Used by the advisory path.
+    pub(super) fn contains(&mut self, key: RowKey) -> bool {
+        let Some(&index) = self.entries.get(&key) else {
+            return false;
+        };
+        self.slots[index].referenced = true;
+        true
     }
 
     /// Look up a row and mark it for a second chance. The returned slice
     /// remains valid until the next insert; callers copy it before dropping
     /// the lock.
     pub(super) fn get(&mut self, key: RowKey) -> Option<&[u8]> {
-        let index = *self.entries.get(&key)?;
+        let Some(&index) = self.entries.get(&key) else {
+            self.misses = self.misses.saturating_add(1);
+            return None;
+        };
         let slot = &mut self.slots[index];
         slot.referenced = true;
+        self.hits = self.hits.saturating_add(1);
         Some(&slot.data)
     }
 
@@ -145,7 +168,7 @@ mod tests {
         cache.insert(key(1), b"packed-row");
         assert_eq!(cache.get(key(1)), Some(&b"packed-row"[..]));
         assert_eq!(cache.get(key(2)), None);
-        assert_eq!(cache.bytes(), 10);
+        assert_eq!(cache.stats().bytes, 10);
     }
 
     #[test]
@@ -154,11 +177,11 @@ mod tests {
         for row in 0..3 {
             cache.insert(key(row), &[row as u8; 4]);
         }
-        assert_eq!(cache.len(), 3);
-        assert_eq!(cache.bytes(), 12);
+        assert_eq!(cache.stats().rows, 3);
+        assert_eq!(cache.stats().bytes, 12);
         cache.insert(key(3), &[3; 4]);
-        assert_eq!(cache.bytes(), 12);
-        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.stats().bytes, 12);
+        assert_eq!(cache.stats().rows, 3);
         assert_eq!(cache.get(key(3)), Some(&[3; 4][..]));
         assert_eq!(cache.get(key(0)), None);
         for row in 1..=3 {
@@ -182,8 +205,8 @@ mod tests {
     fn oversized_row_is_not_cached() {
         let mut cache = RowCache::new(3);
         cache.insert(key(0), &[0; 4]);
-        assert_eq!(cache.len(), 0);
-        assert_eq!(cache.bytes(), 0);
+        assert_eq!(cache.stats().rows, 0);
+        assert_eq!(cache.stats().bytes, 0);
         assert_eq!(cache.get(key(0)), None);
     }
 }

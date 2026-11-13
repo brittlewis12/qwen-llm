@@ -178,6 +178,14 @@ pub(super) fn validate_encoding(g: &GgufFile) -> Result<(), LoadError> {
 const ROW_CACHE_MB_ENV: &str = "QWEN_V41_ENGRAM_ROW_CACHE_MB";
 const DEFAULT_ROW_CACHE_MB: usize = 1024;
 
+/// Print the row cache's capacity at construction and its packed bytes,
+/// rows, hits and misses at teardown. Default off; diagnostic only.
+const ROW_CACHE_STATS_ENV: &str = "QWEN_V41_ENGRAM_ROW_CACHE_STATS";
+
+fn row_cache_stats_enabled() -> bool {
+    std::env::var(ROW_CACHE_STATS_ENV).as_deref() == Ok("1")
+}
+
 fn row_cache_capacity_bytes() -> usize {
     static BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *BYTES.get_or_init(|| {
@@ -207,6 +215,9 @@ impl DiskEngram {
     pub(super) fn for_tables(gguf: Arc<GgufFile>, mut context: companion::TableContext) -> Self {
         let tables = std::mem::take(&mut context.tables);
         let capacity = row_cache_capacity_bytes();
+        if row_cache_stats_enabled() {
+            eprintln!("Engram row cache: capacity_bytes={capacity}");
+        }
         Self {
             gguf,
             context,
@@ -225,10 +236,11 @@ impl DiskEngram {
     #[cfg(test)]
     pub(crate) fn row_cache_usage(&self) -> Option<(usize, usize, usize)> {
         self.cache.as_ref().map(|cache| {
-            let cache = cache
+            let stats = cache
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            (cache.len(), cache.bytes(), cache.capacity_bytes())
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .stats();
+            (stats.rows, stats.bytes, stats.capacity_bytes)
         })
     }
     pub fn source_groups(&self) -> &SourceGroups {
@@ -242,7 +254,7 @@ impl DiskEngram {
             let mut cache = cache
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            cache.get(engram_cache::RowKey { layer, row }).is_some()
+            cache.contains(engram_cache::RowKey { layer, row })
         })
     }
     pub fn decode_rows(&self, layer: usize, ids: &[u64]) -> Result<Vec<f32>, String> {
@@ -523,6 +535,24 @@ fn trace_read(layer: usize, ids: &[u64]) {
     let _ = times.write_all(&written.to_le_bytes());
     let _ = rows.flush();
     let _ = times.flush();
+}
+
+impl Drop for DiskEngram {
+    fn drop(&mut self) {
+        if !row_cache_stats_enabled() {
+            return;
+        }
+        if let Some(cache) = &self.cache {
+            let stats = cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .stats();
+            eprintln!(
+                "Engram row cache: capacity_bytes={} packed_bytes={} rows={} hits={} misses={}",
+                stats.capacity_bytes, stats.bytes, stats.rows, stats.hits, stats.misses
+            );
+        }
+    }
 }
 
 /// Upper bound on the distinct host pages touched by these rows: one page per

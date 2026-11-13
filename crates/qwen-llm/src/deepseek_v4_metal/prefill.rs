@@ -230,6 +230,7 @@ pub struct DeepSeekV4MhcOracleIdentity {
     pub hc_epsilon_bits: u32,
     pub device_registry_id: u64,
     pub residency_tensor_count: usize,
+    pub residency_source_bytes: u64,
     pub expert_count: usize,
 }
 
@@ -9788,6 +9789,7 @@ impl DeepSeekV4Session {
             hc_epsilon_bits: config.hyper_connection_epsilon.to_bits(),
             device_registry_id: ctx.device.registryID(),
             residency_tensor_count: self.residency.report().tensor_count,
+            residency_source_bytes: self.residency.report().source_bytes,
             expert_count: self.prefill.moe.expert_count,
         })
     }

@@ -291,6 +291,8 @@ struct Dsv4PrefillLayer {
     grouped_iq3: bool,
     bm16: bool,
     bucket_count: usize,
+    /// Per-expert routed-row counts from this exact packed prefill chunk.
+    expert_counts: Vec<u16>,
     active_experts: usize,
     max_routes_per_expert: u16,
     route_count: usize,
@@ -545,6 +547,7 @@ fn summarize_chunk(
             grouped_iq3: metadata.grouped_iq3,
             bm16: metadata.bm16,
             bucket_count: metadata.bucket_count,
+            expert_counts: metadata.expert_counts.to_vec(),
             active_experts: metadata
                 .expert_counts
                 .iter()

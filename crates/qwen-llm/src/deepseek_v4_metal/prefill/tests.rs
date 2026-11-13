@@ -304,6 +304,7 @@ fn mhc_delete_oracle_plans_all_sites_and_arm_ownership() {
         hc_epsilon_bits: 1.0e-6f32.to_bits(),
         device_registry_id: ctx.device.registryID(),
         residency_tensor_count: 1_328,
+        residency_source_bytes: 0,
         expert_count: 160,
     };
     let ordinary = MetalTensor::zeros_f32(&ctx, vec![DEEPSEEK_V4_HC_PARAMETER_COUNT as u64, 1])
@@ -435,6 +436,7 @@ fn mhc_delete_oracle_requires_matching_capture_pair_and_endpoint() {
         hc_epsilon_bits: 1.0e-6f32.to_bits(),
         device_registry_id: ctx.device.registryID(),
         residency_tensor_count: 1_328,
+        residency_source_bytes: 0,
         expert_count: 160,
     };
     let capture = || {

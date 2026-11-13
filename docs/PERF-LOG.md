@@ -174,6 +174,34 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   [census and wide band](bench/2026-11-13-fn-prefill-census/README.md); raw
   `metagross:~/qwen-runs/2026-11-12-fn-prefill/`. No Aven connector was
   available for `SRV-2K0Y`.
+## 2026-11-12 - Serve QoS At Normal Priority: No Throughput Gain, TTFT Stays Lower
+
+- **Question.** The 2026-11-12 coverage gate measured +10.72% V4.1 tok/s, but
+  launched `serve_realistic.py` and `qwen serve` under `nice -n 10`. Production
+  runs at normal priority. Re-gated the landed change (`3d831eacd`, on main
+  since `1edb7e8d8`) at nice 0 on current main `5ee5c8c4f`, one release build,
+  same V4.1 48K three-agent plan and settings.
+- **No nice anywhere on serve or harness.** The first launch inherited zsh
+  `BGNICE` niceness 5 and was discarded (`serve-invalid-nice5/`); scripts now
+  refuse niceness != 0, and every reported arm's server was verified at nice 0
+  with `ps -o nice=`. Only the build used `nice -n 10`.
+- **Agent-sampling result:** three interleaved pairs A1 B1 B2 A2 A3 B3 at
+  180 s, settle <=1 for 60 s, pressure 2 allowed and 3 aborting. tok/s
+  on/off **+6.44%**, 95% CI **[-12.14%, +25.02%]**, df2; ITL p99 ratio
+  **1.049** (CI [-0.254, 2.351]); worst-gap mean +0.228 s; append TTFT p95
+  **-19.79%** (CI **[-31.67%, -7.92%]**), lower in all three pairs.
+- **Greedy same-token control:** because the result is near 5%, two greedy
+  pairs in opposite orders. The fully same-token pair (23/23 common completed
+  calls) is **-4.21%** with the on arm reading **18.56 GB** vs **1.72 GB**;
+  the other pair is -10.19% with one divergent request. Both on arms were
+  I/O-cold, and the four low-load greedy arms order by disk reads (1.7 GB /
+  100.6 tok/s to 23.8 GB / 90.2), not by the flag.
+- **Reading:** the +10.72% is a nice-10 result, not a production-priority
+  throughput gain. The only nice-0 signal that survives across pairs is append
+  TTFT p95. No product change; branch `bench/qos-nice0` from main, not merged.
+  Raw `metagross:~/qwen-runs/2026-11-12-qos-nice0/`; record
+  [bench note](bench/2026-11-12-serve-qos-nice0.md). Aven note on `SRV-2K0Y`:
+  `JQFK6MMVXBWTG93N`.
 
 ## 2026-11-12 - Solo Routed-Expert Prefetch: Closed (2.4-3.6 ms/Token Worse)
 

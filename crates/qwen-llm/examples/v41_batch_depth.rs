@@ -10,6 +10,7 @@ use qwen_llm::{
     },
     gguf::GgufFile,
     metal::{self, GpuThreadQos, MetalContext},
+    pid_metrics::{PidDelta, PidSnapshot},
     tokenizer::NativeTokenizer,
 };
 use std::{
@@ -319,6 +320,7 @@ fn main() -> Result<()> {
                 n <= 512 && streams.iter().all(|s| s.len() > 4310 + n),
                 "bounded complete compression period"
             );
+            let io_before = PidSnapshot::now().ok();
             let start = Instant::now();
             let mut heads = Vec::with_capacity(n);
             for j in 0..n {
@@ -326,6 +328,10 @@ fn main() -> Result<()> {
                 heads.push(step(&f, &mut states[..batch], &tokens, true)?);
             }
             let ms = start.elapsed().as_secs_f64() * 1000.;
+            let disk = match (io_before, PidSnapshot::now().ok()) {
+                (Some(before), Some(after)) => Some(PidDelta::between(before, after)),
+                _ => None,
+            };
             let mut digests: Vec<_> = (0..batch).map(|_| blake3::Hasher::new()).collect();
             for head in &heads {
                 for (h, digest) in head.iter().zip(&mut digests) {
@@ -335,7 +341,7 @@ fn main() -> Result<()> {
             }
             println!(
                 "{}",
-                serde_json::json!({"kind":"kill","depth":depth,"batch":batch,"rounds":n,"compression_period":period,"vocab":heads[0][0].len(),"ms":ms,"ms_round":ms/n as f64,"aggregate_tps":batch as f64*n as f64*1000./ms,"hashes":digests.iter().map(|d|d.finalize().to_hex().to_string()).collect::<Vec<_>>(),"first_hashes":hashes(&heads[0])?,"last_hashes":hashes(heads.last().unwrap())?})
+                serde_json::json!({"kind":"kill","depth":depth,"batch":batch,"rounds":n,"compression_period":period,"vocab":heads[0][0].len(),"ms":ms,"ms_round":ms/n as f64,"aggregate_tps":batch as f64*n as f64*1000./ms,"disk_read_bytes":disk.map(|d|d.diskio_bytesread),"disk_bytes_per_token":disk.map(|d|d.diskio_bytesread as f64/n as f64),"pageins":disk.map(|d|d.pageins),"hashes":digests.iter().map(|d|d.finalize().to_hex().to_string()).collect::<Vec<_>>(),"first_hashes":hashes(&heads[0])?,"last_hashes":hashes(heads.last().unwrap())?})
             );
             if let Some(path) = args.get(5).and_then(|s| s.strip_prefix("dump=")) {
                 let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);

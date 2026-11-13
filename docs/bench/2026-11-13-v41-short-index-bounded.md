@@ -41,6 +41,14 @@ each order separately and all disk bytes; a failed gate removes the short
 candidate. Optional wide-PV served-root recheck only if this finishes within
 ~90 GPU minutes; it is evidence only and cannot promote in this stage.
 
+Before the first served arm, freeze the decision rule: require at least3
+eligible prefill matches and3 observed eligible TTFT pairs in each of the3
+arm pairs. Empty-EOS calls remain in the complete record; absent TTFT is
+never invented. Require improved geometric mean of pair mean ratios and
+pooled median for both eligible prefill and client TTFT. Root prefill and
+aggregate throughput geometric means must each remain within2% of baseline.
+Report every pair/order, matched call, missing-TTFT count and disk counter.
+
 ## Rebased build and nice0 deep gate
 
 Source `4ba3c377b` based on rewritten main `56a1e8fe5`. Full contracts pass.

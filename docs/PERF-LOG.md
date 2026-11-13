@@ -31,6 +31,20 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw captures and generated tables:
   `metagross:~/qwen-runs/2026-11-12-waste-audit/`. Branch `perf/waste-audit`;
   not merged.
+## 2026-11-13 - V4.1 Short Index: Bounded Stage Closed, Candidate Removed
+
+- Corrected purged serve completed2/3 pairs: AB prefill/TTFT1.01352x/1.01306x;
+  BA1.06259x/1.06426x. All four arms purge0 pages, nice0, pressure0; per-arm
+  disk bytes and all calls retained. Third AB still queued at17:26:57;
+  stop verified exact controller PID before an unfinishable model load.
+- Three-pair and current-main folded-header gates incomplete; remove short
+  runtime/probe flag, retain evidence. No performance promotion or landing
+  recommendation. Historical128/511 boundaries are nice10; fresh nice0
+  target/control results remain separate. Wide PV not rechecked.
+- Withdrawal contracts pass`d9d0faa25`; ENV regenerated. M5 processes exited,
+  worktree/private build output/archive/bundles deleted. No pushes or merges.
+  [Numbers, limits and next bounded gate](bench/2026-11-13-v41-short-index-bounded.md).
+
 ## 2026-11-13 - V4.1 Short Index: Purged Serve Evidence; Current-Main Gate Open
 
 - Rebased onto rewritten and then current main`9877b6f25`. Nice0 native

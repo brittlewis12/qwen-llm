@@ -129,3 +129,50 @@ The exact measured source remains at `backup/v41-short-bounded-measured`.
 This is an incomplete qualification, not a measured performance rejection.
 Even a positive pinned-base third pair does not close the composition gate.
 No new default is promoted. Wide PV is deferred to preserve the stage limit.
+
+
+## Bounded stage closes without promotion
+
+At17:26:57 UTC, third pairAB remained queued behind `glm-prefill`, with no
+model or harness started. Fewer than9 minutes remained before the fixed
+17:35 measurement cutoff, insufficient for a complete two-arm run at the
+observed duration. Verify controller46629's exact command and send SIGTERM;
+its finally block interrupts/reaps the exact lease child46636. Both exit;
+no third-arm measurements exist. The required3-pair serve gate is incomplete.
+No numerical failure is inferred from the two completed positive pairs.
+
+| Pair/order | Eligible/observed TTFT | Short prefill | Short client TTFT | Root prefill | TPS A/B | Disk read bytes A/B |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 AB | 6/6 | 1.013515x | 1.013062x | 0.995840x | 87.0167/86.9833 | 32,785,104,896 /32,762,953,728 |
+| 2 BA | 5/5 | 1.062591x | 1.064259x | 1.173610x | 83.1/84.4 | 34,681,307,136 /35,810,758,656 |
+| 3 AB | no model loaded | incomplete | incomplete | incomplete | incomplete | none |
+
+All four completed arms require0 resident pages after purge, ps-verified
+nice0, and observed pressure0. Disk bytes are maximum live lifetime physical
+read counters sampled every0.5s; native per-call and sampled-window records
+remain available. Root/all-call records are retained rather than filtering
+by speed, order, I/O or compiler activity. The large inactive-MID movement
+in pair2 limits causal attribution; report each order separately.
+
+The 128/511 boundary records remain historical nice10 evidence, explicitly
+separate from this stage's nice0 controls. They were not remeasured at nice0.
+Current-main composed-server, fresh boundary and third-pair gates remain open.
+No short-index performance change is ready to land; runtime and probe
+candidate are removed. MID remains exactly as main. The optional wide-PV
+recheck was not run. Next bounded stage: reapply only short index from the
+measured backup onto current main; qualify folded-header shapes, rerun
+nice0 boundaries and all three purged served pairs in one reserved GPU slot.
+
+`scripts/check-contracts.sh` passed the rebased candidate `e4629cf57` and
+withdrawal `d9d0faa25` (tree`f48062920c6590894f1788822ffdc5f64e2ffc6a`).
+Generated ENV has823 knobs and no short runtime knob. No new ignored tests.
+The index-selection source after withdrawal is byte-identical to main.
+
+Cleanup at17:27:30: all recorded benchmark/model/lease PIDs have exited;
+remove M5 worktree, its private target directory, archived wide-PV binary,
+35 remote transfer bundles and34 local transfer bundles. Raw logs/summaries
+remain under the specified run directory; local raw copies remain under
+`target/v41-raw`. `data/bounded-cleanup.json` and
+`data/bounded-third-pair-deferred.json` preserve deletion and exact-PID facts.
+No pushes, merges or PERF-ROADMAP edits. Final process verification follows
+record commit; no further GPU work belongs to this stage.

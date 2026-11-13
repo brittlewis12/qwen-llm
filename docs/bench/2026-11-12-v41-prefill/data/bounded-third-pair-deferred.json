@@ -1,0 +1,6 @@
+{
+  "time": 1794590817.138952,
+  "reason": "insufficient hard-deadline time for a complete third pair; still queued, no model loaded",
+  "controller_pid": 46629,
+  "verified_command": "/Users/tito/.local/share/mise/installs/python/3.15.0/bin/python3 /Users/tito/qwen-runs/2026-11-12-v41-prefill/run-bounded-short-serve-final.py"
+}

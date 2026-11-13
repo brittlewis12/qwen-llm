@@ -163,6 +163,16 @@ class SteadyTests(unittest.TestCase):
                     events=events,completed=False,prompt=None,reused=None,generated=None,
                     target=9062,spec={},x_qwen={})
 
+    def test_solo_summary_requires_exactly_one_configured_stream(self):
+        k='response.output_text.delta'
+        rows=[self.row(0,5,6,22,[(6,k,'aa'),(12,k,'bbbb')])]
+        x=bench.summarize(rows,10,20,len,agents=1)
+        self.assertEqual(x['agent_count'],1)
+        self.assertEqual(len(x['agents']),1)
+        self.assertEqual(x['window_tokens'],4)
+        with self.assertRaises(ValueError):bench.summarize(rows,10,20,len)
+        with self.assertRaises(ValueError):bench.summarize(rows+[self.row(1,5,6,22,[])],10,20,len,agents=1)
+
     def test_partial_calls_count_and_pending_ttft_is_right_censored(self):
         k='response.output_text.delta'
         rows=[self.row(0,5,6,22,[(6,k,'aa'),(12,k,'bbbb')]),

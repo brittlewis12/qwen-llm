@@ -9,12 +9,18 @@ find_library(GGML_LIBRARY NAMES ggml PATHS "${LLAMA_BUILD_DIR}/bin" NO_DEFAULT_P
 find_library(GGML_BASE_LIBRARY NAMES ggml-base PATHS "${LLAMA_BUILD_DIR}/bin" NO_DEFAULT_PATH REQUIRED)
 find_package(Git REQUIRED)
 execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${LLAMA_CPP_DIR}" rev-parse HEAD
-    OUTPUT_VARIABLE LLAMA_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
-execute_process(COMMAND "${GIT_EXECUTABLE}" --no-optional-locks -C "${LLAMA_CPP_DIR}" status --porcelain --untracked-files=no
-    OUTPUT_VARIABLE source_diff OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
-set(LLAMA_DIRTY "false")
-if(source_diff)
-    set(LLAMA_DIRTY "true")
+    OUTPUT_VARIABLE LLAMA_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE revision_status ERROR_QUIET)
+if(revision_status EQUAL 0)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" --no-optional-locks -C "${LLAMA_CPP_DIR}" status --porcelain --untracked-files=no
+        OUTPUT_VARIABLE source_diff OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+    set(LLAMA_DIRTY "false")
+    if(source_diff)
+        set(LLAMA_DIRTY "true")
+    endif()
+else()
+    set(LLAMA_REVISION "archive-no-git")
+    set(LLAMA_DIRTY "unknown")
+    message(WARNING "Upstream source has no Git metadata; provenance uses library/header hashes")
 endif()
 set(LIBRARY_COMMIT "unknown")
 if(EXISTS "${LLAMA_BUILD_DIR}/common/build-info.cpp")
@@ -36,7 +42,7 @@ configure_file(build_info.hpp.in build_info.hpp @ONLY)
 add_executable(glm53_nextn_probe main.cpp)
 target_compile_features(glm53_nextn_probe PRIVATE cxx_std_17)
 target_include_directories(glm53_nextn_probe PRIVATE "${CMAKE_CURRENT_BINARY_DIR}"
-    "${LLAMA_CPP_DIR}/include" "${LLAMA_CPP_DIR}/ggml/include" "${LLAMA_CPP_DIR}/vendor")
+    "${LLAMA_CPP_DIR}/include" "${LLAMA_CPP_DIR}/src" "${LLAMA_CPP_DIR}/ggml/include" "${LLAMA_CPP_DIR}/vendor")
 target_link_libraries(glm53_nextn_probe PRIVATE "${LLAMA_LIBRARY}" "${GGML_LIBRARY}"
     "${GGML_BASE_LIBRARY}" ${CMAKE_DL_LIBS})
 set_target_properties(glm53_nextn_probe PROPERTIES BUILD_RPATH "${LLAMA_BUILD_DIR}/bin")

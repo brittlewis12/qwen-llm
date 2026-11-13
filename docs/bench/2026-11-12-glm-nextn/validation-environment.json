@@ -1,0 +1,152 @@
+{
+  "native-ring-k1-v2": {
+    "exit_code": 0,
+    "load_before": [
+      25.11865234375,
+      35.62744140625,
+      34.4501953125
+    ],
+    "load_after": [
+      15.767578125,
+      29.23583984375,
+      32.107421875
+    ],
+    "settle_s": 60.674485958064906,
+    "thermal": {
+      "settle": {
+        "max_pressure": 0,
+        "span_seconds": 60.64892292022705
+      },
+      "run": {
+        "max_pressure": 1,
+        "span_seconds": 61.873085021972656
+      }
+    },
+    "compiler_processes_before": 0
+  },
+  "native-ring-k2": {
+    "exit_code": 0,
+    "load_before": [
+      15.767578125,
+      29.23583984375,
+      32.107421875
+    ],
+    "load_after": [
+      19.64990234375,
+      25.58642578125,
+      30.20556640625
+    ],
+    "settle_s": 60.83399133407511,
+    "thermal": {
+      "settle": {
+        "max_pressure": 1,
+        "span_seconds": 60.80702209472656
+      },
+      "run": {
+        "max_pressure": 1,
+        "span_seconds": 67.92242097854614
+      }
+    },
+    "compiler_processes_before": 0
+  },
+  "native-k1-cost": {
+    "exit_code": 0,
+    "load_before": [
+      19.64990234375,
+      25.58642578125,
+      30.20556640625
+    ],
+    "load_after": [
+      22.72802734375,
+      24.4052734375,
+      28.95556640625
+    ],
+    "settle_s": 60.66515516594518,
+    "thermal": {
+      "settle": {
+        "max_pressure": 1,
+        "span_seconds": 60.639872789382935
+      },
+      "run": {
+        "max_pressure": 2,
+        "span_seconds": 84.17229270935059
+      }
+    },
+    "compiler_processes_before": 24
+  },
+  "native-k2-cost": {
+    "exit_code": 0,
+    "load_before": [
+      22.72802734375,
+      24.4052734375,
+      28.95556640625
+    ],
+    "load_after": [
+      23.1337890625,
+      23.9814453125,
+      27.91650390625
+    ],
+    "settle_s": 100.1547298328951,
+    "thermal": {
+      "settle": {
+        "max_pressure": 2,
+        "span_seconds": 100.1302878856659
+      },
+      "run": {
+        "max_pressure": 1,
+        "span_seconds": 82.04842805862427
+      }
+    },
+    "compiler_processes_before": 24
+  },
+  "history-dense-v3": {
+    "exit_code": 0,
+    "load_before": [
+      16.78857421875,
+      20.34228515625,
+      22.93115234375
+    ],
+    "load_after": [
+      10.13818359375,
+      17.29736328125,
+      21.5283203125
+    ],
+    "settle_s": 60.98612649994902,
+    "thermal": {
+      "settle": {
+        "max_pressure": 1,
+        "span_seconds": 60.96130108833313
+      },
+      "run": {
+        "max_pressure": 0,
+        "span_seconds": 19.189916849136353
+      }
+    },
+    "compiler_processes_before": 0
+  },
+  "history-sparse-v1": {
+    "exit_code": 0,
+    "load_before": [
+      10.13818359375,
+      17.29736328125,
+      21.5283203125
+    ],
+    "load_after": [
+      15.31982421875,
+      17.24609375,
+      21.125
+    ],
+    "settle_s": 60.80894158408046,
+    "thermal": {
+      "settle": {
+        "max_pressure": 0,
+        "span_seconds": 60.78269696235657
+      },
+      "run": {
+        "max_pressure": 0,
+        "span_seconds": 20.287073135375977
+      }
+    },
+    "compiler_processes_before": 16
+  }
+}

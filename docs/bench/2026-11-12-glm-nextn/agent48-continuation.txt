@@ -1,0 +1,35 @@
+The user wants me to review the test changes from the coding-agent transcript. Let me carefully analyze what was done:
+
+**Context recap:**
+
+The coding agent was asked to strengthen `SnapshotPolicyPinGuard` regression coverage in `crates/qwen-llm/src/snapshot_policy.rs`. The guard's implementation:
+
+```rust
+pub struct SnapshotPolicyPinGuard<'a> {
+    policy: &'a mut SnapshotPolicy,
+    pinned: Vec<EntryId>,
+}
+
+impl<'a> SnapshotPolicyPinGuard<'a> {
+    pub fn new(policy: &'a mut SnapshotPolicy, ids: impl IntoIterator<Item = EntryId>) -> Self {
+        let mut guard = Self { policy, pinned: Vec::new() };
+        for id in ids {
+            guard.pin(id);
+        }
+        guard
+    }
+
+    pub fn pin(&mut self, id: EntryId) -> bool {
+        if self.pinned.contains(&id) {
+            return self.policy.contains(id);
+        }
+        self.pinned.reserve(1);
+        if self.policy.pin(id) {
+            self.pinned.push(id);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn fits_strict(&self, bytes: u64) -> bool { self.policy.fits

@@ -206,7 +206,7 @@ fn export_native_nextn_capture() -> CaptureResult<()> {
         "requires packed GLM target with final completed block tap 44 and four streams"
     );
     let (h, v) = (c.hidden_size as usize, c.vocab_size as usize);
-    let tokens: Vec<u32> = prepared
+    let mut tokens: Vec<u32> = prepared
         .tokenizer()
         .encode(&prompt, false)?
         .into_iter()
@@ -218,6 +218,27 @@ fn export_native_nextn_capture() -> CaptureResult<()> {
             Ok(id as u32)
         })
         .collect::<CaptureResult<_>>()?;
+    let requested_prompt_tokens: Option<usize> = std::env::var("QWEN_NEXTN_PROMPT_TOKENS")
+        .ok()
+        .map(|v| v.parse())
+        .transpose()?;
+    let original_prompt_tokens = tokens.len();
+    if let Some(keep) = requested_prompt_tokens {
+        ensure!(
+            keep >= 64 && keep <= tokens.len(),
+            "prompt token budget outside 64..=rendered length"
+        );
+        // One-user-message research fixture: preserve its chat prefix and
+        // generation suffix while removing source context from the middle.
+        ensure!(
+            chat_input.messages.len() == 1
+                && matches!(chat_input.messages[0], Message::User { .. }),
+            "fixed-depth capture requires one user message"
+        );
+        let tail = tokens.split_off(tokens.len() - (keep - 32));
+        tokens.truncate(32);
+        tokens.extend(tail);
+    }
     let s = tokens.len();
     lengths(s, limit, h, v)?;
     let capacity = s.checked_add(limit).context("context overflow")?.max(ROWS);
@@ -328,7 +349,8 @@ fn export_native_nextn_capture() -> CaptureResult<()> {
     let manifest = serde_json::json!({
         "schema":"qwen.glm-nextn-capture.v1", "status":if t > 0 {"complete"} else {"no_evaluable_rows"},
         "hidden_size":h, "vocab_size":v, "token_count":s+t, "score_start":s, "score_count":t,
-        "prompt_count":s, "message_count":chat_input.messages.len(), "requested_score_tokens":limit, "byte_order":"little",
+        "prompt_count":s,"original_prompt_count":original_prompt_tokens,
+        "prompt_truncation":requested_prompt_tokens.map(|_|"keep first 32 and tail tokens of single-user render"), "message_count":chat_input.messages.len(), "requested_score_tokens":limit, "byte_order":"little",
         "finish_reason":if stop_token.is_some() {"eos"} else {"score_token_limit"}, "stop_token":stop_token,
         "sampling":{"temperature":sampling.temperature,"top_k":sampling.top_k,"top_p":sampling.top_p,
             "min_p":sampling.min_p,"seed":sampling.seed,"draws":sampler.draws(),"algorithm_version":SAMPLER_ALGORITHM_VERSION},

@@ -51,6 +51,26 @@ def filtered(logits):
     return out
 
 
+def first_accept_weight(p_taken, q_taken):
+    if np.any(p_taken <= 0):
+        raise ValueError("captured continuation is outside target top-p support")
+    return np.minimum(1.0, q_taken / p_taken)
+
+
+def self_test():
+    p = np.array([0.5, 0.3, 0.2, 0.0])
+    q = np.array([0.3, 0.4, 0.1, 0.2])
+    second = np.array([0.8, 0.2, 0.6, 0.3])
+    support = p > 0
+    direct = float((np.minimum(p, q) * second).sum())
+    teacher = float((p[support] * first_accept_weight(p[support], q[support]) * second[support]).sum())
+    np.testing.assert_allclose(direct, 0.36, rtol=0, atol=1e-15)
+    np.testing.assert_allclose(teacher, direct, rtol=0, atol=1e-15)
+    np.testing.assert_array_equal(first_accept_weight(p[support], p[support]), np.ones(3))
+    np.testing.assert_array_equal(first_accept_weight(p[support], np.zeros(3)), np.zeros(3))
+    print("recursive importance weights: self-test passed")
+
+
 def main():
     capture = Path(sys.argv[1])
     probe = Path(sys.argv[2])
@@ -107,6 +127,24 @@ def main():
         "head_step_first_ms": float(report["score_steps"][0]["full_head_step_ms"]),
         "head_history_init_ms": report["head_history_init_ms"],
     }
+    recursive_path = probe / "draft2-logits.f32"
+    if recursive_path.exists():
+        recursive = np.fromfile(recursive_path, dtype=np.float32).reshape(rows - 1, vocab)
+        recursive_overlap = np.array([np.minimum(pp[i+1], filtered(recursive[i].astype(np.float64))).sum() for i in range(n)])
+        target_taken = pp[index, captured]
+        # x~P on the captured target trajectory. min(P(x),Q(x))/P(x)
+        # importance-weights the recursive overlap into the first-accept path.
+        weight = first_accept_weight(target_taken, qq[index, captured])
+        joint = weight * recursive_overlap
+        out["recursive_two_step"] = {
+            "rows": n, "first_step_aligned": stat(one_step[:n]),
+            "second_overlap_on_target_tokens": stat(recursive_overlap),
+            "first_accept_importance_weight": stat(weight),
+            "joint_accepted_two": stat(joint),
+            "conditional_second_estimate": float(joint.mean()/one_step[:n].mean()),
+            "expected_emitted": float(1+one_step[:n].mean()+joint.mean()),
+            "conditioning": report["recursive_conditioning"],
+        }
     text = json.dumps(out, indent=2)
     print(text)
     if len(sys.argv) > 3:
@@ -114,4 +152,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--self-test"]:
+        self_test()
+    else:
+        main()

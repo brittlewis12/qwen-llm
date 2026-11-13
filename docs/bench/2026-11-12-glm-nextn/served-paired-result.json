@@ -1,0 +1,165 @@
+{
+  "pairs": [
+    {
+      "pair": 0,
+      "order": [
+        0,
+        2
+      ],
+      "lease_work_s": 529.9331707090605,
+      "load_before": [
+        8.9501953125,
+        17.84375,
+        22.1748046875
+      ],
+      "load_after": [
+        11.89501953125,
+        12.89892578125,
+        17.43310546875
+      ],
+      "baseline": {
+        "tps": 50.2,
+        "window_tokens": 3012,
+        "window_thermal_max": 0,
+        "compile_overlapped": true,
+        "load_after": [
+          15.22119140625,
+          16.00634765625,
+          19.99462890625
+        ],
+        "settling_validated": true
+      },
+      "nextn": {
+        "tps": 52.583333333333336,
+        "window_tokens": 3155,
+        "window_thermal_max": 0,
+        "compile_overlapped": false,
+        "load_after": [
+          11.89501953125,
+          12.89892578125,
+          17.43310546875
+        ],
+        "settling_validated": true,
+        "packets": 1373.0,
+        "accepted_drafts": 1673.0,
+        "accepted_per_draft": 0.6092498179169702,
+        "emitted_per_packet_estimate": 2.2184996358339406,
+        "head_prepare_ms": 298.583
+      },
+      "ratio": 1.047476759628154
+    },
+    {
+      "pair": 1,
+      "order": [
+        2,
+        0
+      ],
+      "lease_work_s": 531.2009142079623,
+      "load_before": [
+        24.3193359375,
+        18.35986328125,
+        17.93115234375
+      ],
+      "load_after": [
+        4.8701171875,
+        8.8642578125,
+        13.2685546875
+      ],
+      "baseline": {
+        "tps": 50.916666666666664,
+        "window_tokens": 3055,
+        "window_thermal_max": 0,
+        "compile_overlapped": false,
+        "load_after": [
+          4.8701171875,
+          8.8642578125,
+          13.2685546875
+        ],
+        "settling_validated": true
+      },
+      "nextn": {
+        "tps": 53.68333333333333,
+        "window_tokens": 3221,
+        "window_thermal_max": 0,
+        "compile_overlapped": true,
+        "load_after": [
+          9.55126953125,
+          13.5615234375,
+          15.97802734375
+        ],
+        "settling_validated": true,
+        "packets": 1416.0,
+        "accepted_drafts": 1717.0,
+        "accepted_per_draft": 0.6062853107344632,
+        "emitted_per_packet_estimate": 2.2125706214689265,
+        "head_prepare_ms": 292.096
+      },
+      "ratio": 1.0543371522094926
+    },
+    {
+      "pair": 2,
+      "order": [
+        0,
+        2
+      ],
+      "lease_work_s": 515.8886235830141,
+      "load_before": [
+        10.21923828125,
+        10.9404296875,
+        12.306640625
+      ],
+      "load_after": [
+        11.91015625,
+        12.11181640625,
+        12.42724609375
+      ],
+      "baseline": {
+        "tps": 50.46666666666667,
+        "window_tokens": 3028,
+        "window_thermal_max": 0,
+        "compile_overlapped": false,
+        "load_after": [
+          14.1201171875,
+          12.51513671875,
+          12.6357421875
+        ],
+        "settling_validated": true
+      },
+      "nextn": {
+        "tps": 53.4,
+        "window_tokens": 3204,
+        "window_thermal_max": 0,
+        "compile_overlapped": false,
+        "load_after": [
+          11.91015625,
+          12.11181640625,
+          12.42724609375
+        ],
+        "settling_validated": true,
+        "packets": 1405.0,
+        "accepted_drafts": 1699.0,
+        "accepted_per_draft": 0.6046263345195729,
+        "emitted_per_packet_estimate": 2.209252669039146,
+        "head_prepare_ms": 289.03000000000003
+      },
+      "ratio": 1.0581241743725232
+    }
+  ],
+  "profile": "iter",
+  "order": [
+    0,
+    2,
+    2,
+    0,
+    0,
+    2
+  ],
+  "window_seconds": 60,
+  "warm_source_tokens": 49152,
+  "context": 196608,
+  "gate": 1.15,
+  "decision": "kill",
+  "binary_sha256": "f89548c68bd1dc25f18f87b063e4246c3c5c5ef17c60a1e959488fbd17a85ed5",
+  "geometric_mean_ratio": 1.0533034684632276,
+  "gate_passed": false
+}

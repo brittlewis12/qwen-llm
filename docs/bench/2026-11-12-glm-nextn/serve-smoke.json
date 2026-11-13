@@ -1,0 +1,144 @@
+{
+  "complete": true,
+  "greedy_bitwise_text": true,
+  "limits": true,
+  "ignored_custom_stop": true,
+  "disconnect_recovery": true,
+  "midturn_peer_handoff": true,
+  "reports": [
+    {
+      "arm": 0,
+      "greedy": [
+        {
+          "type": "reasoning",
+          "role": null,
+          "content": [
+            {
+              "type": "reasoning_text",
+              "text": "The user wants a code review of cache_probe.rs. The source is truncated mid-test. Provide detailed review: per-function invariants, proposed tests, issues. Keep substantive."
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "# Review: `crates/qwen-llm/src/cache_probe.rs`\n\nThis is a well-documented, focused FFI module.",
+              "annotations": []
+            }
+          ]
+        }
+      ],
+      "greedy_usage": {
+        "input_tokens": 3981,
+        "output_tokens": 64,
+        "total_tokens": 4045,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "limits": [
+        {
+          "maximum": 1,
+          "actual": 1
+        },
+        {
+          "maximum": 2,
+          "actual": 2
+        },
+        {
+          "maximum": 3,
+          "actual": 3
+        },
+        {
+          "maximum": 4,
+          "actual": 4
+        },
+        {
+          "maximum": 17,
+          "actual": 17
+        }
+      ],
+      "three_agent": null,
+      "ignored_custom_stop": true,
+      "disconnect_recovered": true,
+      "peer_native_width_max": 2
+    },
+    {
+      "arm": 2,
+      "greedy": [
+        {
+          "type": "reasoning",
+          "role": null,
+          "content": [
+            {
+              "type": "reasoning_text",
+              "text": "The user wants a code review of cache_probe.rs. The source is truncated mid-test. Provide detailed review: per-function invariants, proposed tests, issues. Keep substantive."
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "# Review: `crates/qwen-llm/src/cache_probe.rs`\n\nThis is a well-documented, focused FFI module.",
+              "annotations": []
+            }
+          ]
+        }
+      ],
+      "greedy_usage": {
+        "input_tokens": 3981,
+        "output_tokens": 64,
+        "total_tokens": 4045,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "limits": [
+        {
+          "maximum": 1,
+          "actual": 1
+        },
+        {
+          "maximum": 2,
+          "actual": 2
+        },
+        {
+          "maximum": 3,
+          "actual": 3
+        },
+        {
+          "maximum": 4,
+          "actual": 4
+        },
+        {
+          "maximum": 17,
+          "actual": 17
+        }
+      ],
+      "three_agent": {
+        "seconds": 20.02368974685669,
+        "events": [
+          861,
+          772,
+          725
+        ],
+        "nextn_reports": 0
+      },
+      "ignored_custom_stop": true,
+      "disconnect_recovered": true,
+      "peer_native_width_max": 2
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "protocol": "scripts/bench/serve_realistic.py, one agent, agent sampling",
+  "order": [0, 2, 2, 0, 0, 2],
+  "pairs": 3,
+  "warm_source_tokens": 49152,
+  "context": 196608,
+  "window_seconds": 60,
+  "ramp_seconds": 10,
+  "seed": 20261112,
+  "profile": "iter, identical binary for both arms",
+  "thermal": "60 continuous seconds <=1 before load and after warming; allow 2 in ramp/window, abort at 3",
+  "gate": "geometric mean of three candidate/reference delivered aggregate_tps ratios >=1.15; retain every pair and arm",
+  "population": "31 observed GLM primary live-prefix OpenCode calls",
+  "corpus_sha256": "548f9633398180fa7cb053c51f425a702f75203d57627d226724efceb5da76c3",
+  "corpus_source_commit": "df4b238f7f181b5103a1d5124d8051ddab7f959c",
+  "native_and_lifecycle_gates_required_before_pairs": true
+}

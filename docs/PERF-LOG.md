@@ -6,6 +6,59 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 - GLM Solo NextN Delivered Gate Fails; Product Removed
+
+- **Kill: 1.0533x delivered**, below 1.15x. Single-agent, 49,152 warm source
+  tokens, real agent sampling, same iter binary, three 60-second paired
+  windows in A-B-B-A-A-B order: **50.20 -> 52.58 (1.047x)**,
+  **50.92 -> 53.68 (1.054x)**, **50.47 -> 53.40 tok/s (1.058x)**.
+  All windows stayed at pressure 0 after continuous 60-second <=1 settling
+  before load and after warm-up. Shared ghost/compiler work was left running
+  and recorded. Paired leases held 8.6–8.9 minutes each.
+- K=1 qualified natively first (~1.173x on the favorable trace); K=2 selected
+  after ~1.256x native. Real serve accepts only ~0.61 drafts/proposal,
+  ~2.2 emitted tokens/packet. Head history is reused across turns; catch-up is
+  small in the measured window. The copying-cohort projection did not transfer
+  to the broader source-review workload. Output remains coherent.
+- Exact sampler statistics, greedy equality, target/head row rings, host head
+  restore (11–14 ms, bitwise logits), cancellation, terminal IDs, token limits,
+  and mid-turn peer handoff pass. A 20-second three-agent smoke shows zero
+  NextN activity. Custom stop fields retain the parser's existing ignored behavior.
+  Functional serve uses release; state witnesses use the test profile and Metal
+  validation. No serial retained-prefix replay.
+- Removed the runtime/API changes, bridge/dependency and Rust diagnostics;
+  only research tooling, the capture-depth fixture and evidence remain.
+  No default change, no merge. Prototype `5e0e6d339` remains in branch history.
+  Evidence: `docs/bench/2026-11-12-glm-nextn/README.md` and
+  `served-paired-result.json` in that directory.
+
+
+## 2026-11-12 - GLM Solo NextN Current-Main Price Clears A Prototype
+
+- Base `f691af6e1`, same-iter M5 48K: T=1 GPU loop **17.996 ms/token**;
+  causal batch-path V(2)/V(3) **24.125/28.776 ms** across all pooling phases;
+  153 MB target state copy/restore **0.631/0.650 ms**. Eight future-input
+  perturbation checks pass bitwise; 20/20 checked greedy tokens match scalar.
+- Native block-45 reference head **1.613 ms**, history init **3.537 s**.
+  Full head-state serialization is too costly (**4.045/12.110 ms** save/restore),
+  but position rewind is **0.051–0.068 ms**, with bitwise replay at all four
+  pooling phases. No alias guard removed and no retained target replay.
+- Fresh actual-transcript-conditioned review at **49,152 tokens**, 256 scored
+  rows, is coherent and copies relevant Rust context: overlap **0.9811**,
+  true recursive conditional second estimate **0.9345**, **2.898** expected
+  emitted tokens at K=2. The older code cohort is **0.7976/0.6770** and loses
+  the 1.15x screen; the old .814 figure used target hidden states, not recursive
+  head hidden. The high-overlap copying cohort is not a universal acceptance rate.
+- Final trace head calls **2.295/1.836 ms**; position rewind produces byte-identical
+  one/two-step logits to full restore. With exact CPU sampling and an extra
+  **0.75 ms/packet** catch-up/adapter allowance, projected warm gain is
+  **1.15–1.17x K=1 / 1.28–1.33x K=2** over 0–2 ms host cost/token.
+  Head history must be fused or reused; these are not delivered serve results.
+- **Stage 1: proceed to K=1, then K=2; no product/serve change yet.** All
+  distribution, terminal/cancel, B=1 paired serve and B=3 smoke gates remain.
+  Native target window stayed at pressure 0; every load/build was queued under
+  a <=15-minute lease. Evidence: `docs/bench/2026-11-12-glm-nextn/README.md`.
+
 ## 2026-11-12 - Serve SSE Cadence: Raw-Socket Audit Finds No Server Buffering
 
 - **Question.** The 2026-11-11 solo census claimed the V4.1 output partition

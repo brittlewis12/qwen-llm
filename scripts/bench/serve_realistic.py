@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Seeded warm-agent concurrency workload (stdlib only).
 
-Three warm agents draw continuously from recorded per-family OpenCode calls.
+One to three warm agents draw continuously from recorded per-family OpenCode calls.
 The default is a fixed shared measurement window, excluding ramp and cancellation.
 Rates permit natural EOS and unequal completed work. Timing needs a Metal lease,
 not the build lock. Build first; retain commit + command and compact summaries.
@@ -347,13 +347,13 @@ class Arm:
         text = self.args.corpus.read_text().replace('<|', '‹|').replace('<｜', '‹｜')
         ids = token_text(self.args.tokenizer, self.args.model, text=text)
         n = self.args.warm_tokens
-        if len(ids) < n * 3:
-            raise ValueError('corpus needs three disjoint warm roots')
-        warm = [token_text(self.args.tokenizer, self.args.model, ids=ids[a*n:(a+1)*n]) for a in range(3)]
+        if len(ids) < n * self.args.agents:
+            raise ValueError('corpus needs disjoint warm roots for each agent')
+        warm = [token_text(self.args.tokenizer, self.args.model, ids=ids[a*n:(a+1)*n]) for a in range(self.args.agents)]
         sizes = sorted({t['append_tokens'] for t in self.plan['population']})
         suffix = {(a, size): token_text(self.args.tokenizer, self.args.model,
                                       ids=ids[(a*977) % (len(ids)-size):(a*977) % (len(ids)-size)+size])
-                  for a in range(3) for size in sizes}
+                  for a in range(self.args.agents) for size in sizes}
         return warm, suffix
 
     def body(self, history, count):
@@ -444,7 +444,7 @@ class Arm:
             raise RuntimeError('port occupied or lsof failed')
         env = arm_environment(os.environ, self.plan['family'], args.arm, args.env)
         maximum = max(t['reply_tokens'] for t in self.plan['population'])
-        command = [str(args.binary.resolve()),'serve','-m',str(args.model.resolve()),
+        command = [str(args.binary.resolve()),'serve','-m',str(args.model.absolute()),
                    '--addr',f'127.0.0.1:{args.port}','--max-context-tokens',str(args.context),
                    '--max-tokens',str(maximum)]
         dump(self.out/'launch.json', dict(commit=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
@@ -453,7 +453,7 @@ class Arm:
              sampling=dict(mode=args.sampling, fields=self.sampling),
              env_overrides=list(args.env),
              cool_seconds=args.cool, warm_cool_seconds=args.warm_cool,
-             ramp_seconds=args.ramp, context=args.context,
+             ramp_seconds=args.ramp, context=args.context, agents=args.agents, load_before=os.getloadavg(),
              preflight_thermal=preflight,max_thermal_pressure=args.max_thermal_pressure,
              warmup_max_thermal_pressure=args.warmup_max_thermal_pressure,
              settle_thermal_seconds=args.settle_thermal_seconds,
@@ -482,19 +482,19 @@ class Arm:
             else:
                 raise TimeoutError('startup')
             ready=time.time();histories=[]
-            for agent in range(3):
+            for agent in range(args.agents):
                 body=self.body([dict(role='user',content=f'Independent agent {agent}. Source corpus follows.\n'+warm[agent])],8)
                 final=self.request(body,f'a{agent}-warm',warm=True)
                 if final is None:raise RuntimeError('warm-up failed')
                 histories.append(body['input']+history_items(final.get('output',[])))
-                if agent<2 and args.warm_cool:
+                if agent+1<args.agents and args.warm_cool:
                     if self.finish.wait(args.warm_cool):
                         raise RuntimeError('aborted during warm-up cooling')
             warmed=time.time()
             self.emit(event='warmed',startup_s=ready-started,warmup_s=warmed-ready)
             self.settle_after_warm()
             if thermal_exceeds_limit(pressure(),args.max_thermal_pressure):raise RuntimeError('thermal pressure exceeds arm limit after warm-up')
-            barrier=threading.Barrier(4)
+            barrier=threading.Barrier(args.agents+1)
             self.window_begin=time.time()+args.ramp
             self.window_end=self.window_begin+self.plan['window_seconds']
             def agent_loop(agent):
@@ -512,8 +512,8 @@ class Arm:
                     if final is None:break
                     history.extend(history_items(final.get('output',[])))
                     if self.finish.wait(spec['tool_gap_s']):break
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-                futures=[pool.submit(agent_loop,a) for a in range(3)]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=args.agents) as pool:
+                futures=[pool.submit(agent_loop,a) for a in range(args.agents)]
                 barrier.wait()
                 try:
                     while time.time()<self.window_end and not self.finish.is_set():
@@ -552,13 +552,14 @@ class Arm:
         if self.abort.is_set():
             raise RuntimeError('arm aborted; no accepted timing summary')
         result=summarize(self.rows,self.window_begin,self.window_end,
-                         lambda text:len(token_text(args.tokenizer,args.model,text=text)),self.lines)
+                         lambda text:len(token_text(args.tokenizer,args.model,text=text)),self.lines,agents=args.agents)
         result.update(startup_s=ready-started,warmup_s=warmed-ready,warm_settle_s=self.warm_settle_s,arm=args.arm,
                       family=self.plan['family'],seed=self.plan['seed'],thermal_max=max(x['thermal'] for x in self.samples),
                       sampling=dict(mode=args.sampling, fields=self.sampling),
                       metric='delivered text+reasoning tokens retokenized; excludes EOS/format control')
         result.update(timing_flags(self.samples,self.window_begin,self.window_end))
         result['max_thermal_pressure']=args.max_thermal_pressure
+        result['load_after']=os.getloadavg()
         result['arm_thermal_seconds']=thermal_seconds(self.samples,self.samples[0]['time'],self.samples[-1]['time']) if self.samples else {}
         detailed=result.pop('rows')
         dump(self.out/'summary.json',result)
@@ -742,10 +743,10 @@ def round_budget(cleaned,native_lines,begin,end,gap_p50_s=None):
                 host_ms_per_round=host_per_round,
                 host_metric='median content gap minus native round wall')
 
-def summarize(rows, begin, end, count, native_lines=()):
+def summarize(rows, begin, end, count, native_lines=(), agents=3):
     if begin is None or end<=begin:raise ValueError('invalid shared window')
     active=[r for r in rows if not r['warm'] and r['sent']<end and r['end']>begin]
-    if {r['agent'] for r in active}!={0,1,2}:raise ValueError('three active agent loops required')
+    if agents not in (1,2,3) or {r['agent'] for r in active}!=set(range(agents)):raise ValueError('all configured agent loops required')
     cleaned=[]
     for r in active:
         native=r['x_qwen'].get('phases',{})
@@ -786,10 +787,10 @@ def summarize(rows, begin, end, count, native_lines=()):
         trace.append(dict(start_s=offset,duration_s=hi-lo,gap_p50_s=percentile(gs,.5),
                           gap_p95_s=percentile(gs,.95),gap_max_s=max(gs,default=None),
                           **interval_buckets(wall_rows,lo,hi)))
-    agents=[]
-    for agent in range(3):
+    per_agent=[]
+    for agent in range(agents):
         rs=[r for r in cleaned if r['agent']==agent];tt=[r['ttft_s'] for r in rs if r['ttft_s'] is not None]
-        agents.append(dict(agent=agent,window_tokens=sum(r['window_tokens'] for r in rs),
+        per_agent.append(dict(agent=agent,window_tokens=sum(r['window_tokens'] for r in rs),
                            turns_offered=sum(r['offered_in_window'] for r in rs),
                            ttft_p50_s=percentile(tt,.5),ttft_p95_s=percentile(tt,.95),
                            carry_in_requests=sum(r['carry_in'] for r in rs),
@@ -803,13 +804,13 @@ def summarize(rows, begin, end, count, native_lines=()):
                 gap_p50_s=percentile(gaps,.5),gap_p95_s=percentile(gaps,.95),
                 gap_p99_s=percentile(gaps,.99),gap_max_s=max(gaps,default=None),
                 round_budget=budget,
-                agents=agents,trace_20s=trace,rows=cleaned)
+                agents=per_agent,agent_count=agents,trace_20s=trace,rows=cleaned)
 
 
 def compare(reference,candidate):
     a=json.loads((reference/'summary.json').read_text());b=json.loads((candidate/'summary.json').read_text())
-    if ((a['family'],a['seed'],a['window_seconds'],a['metric'],a.get('sampling'))
-            !=(b['family'],b['seed'],b['window_seconds'],b['metric'],b.get('sampling'))):
+    if ((a['family'],a['seed'],a['window_seconds'],a['metric'],a.get('sampling'),a.get('agent_count',3))
+            !=(b['family'],b['seed'],b['window_seconds'],b['metric'],b.get('sampling'),b.get('agent_count',3))):
         raise ValueError('different rate protocols')
     ttft=[]
     for x,y in zip(a.get('agents',[]),b.get('agents',[])):
@@ -833,6 +834,7 @@ def main():
     p.add_argument('--seconds',type=float,default=180);p.add_argument('--out',type=Path,required=True)
     p=sub.add_parser('run')
     for name in ('binary','tokenizer','model','corpus','plan','out'):p.add_argument('--'+name,type=Path,required=True)
+    p.add_argument('--agents',type=int,choices=(1,2,3),default=3)
     p.add_argument('--arm',choices=('serial','default'),required=True);p.add_argument('--ramp',type=float,default=15)
     p.add_argument('--warm-tokens',type=int,default=48000);p.add_argument('--context',type=int,default=196608)
     p.add_argument('--warm-cool',type=float,default=0,

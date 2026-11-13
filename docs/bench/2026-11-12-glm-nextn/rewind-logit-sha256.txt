@@ -1,0 +1,4 @@
+a72be6f2ad92712a37aabb047ba7629d4c3a70067a08e55bd12bbf977f866da3  /Users/tito/qwen-runs/2026-11-12-glm-nextn/agent48-head/probe/draft-logits.f32
+a72be6f2ad92712a37aabb047ba7629d4c3a70067a08e55bd12bbf977f866da3  /Users/tito/qwen-runs/2026-11-12-glm-nextn/agent48-fast-head/probe/draft-logits.f32
+872694908d59039923d2985c201a8f35e454d1fc3ce84e0b1f3767d752234b47  /Users/tito/qwen-runs/2026-11-12-glm-nextn/agent48-head/probe/draft2-logits.f32
+872694908d59039923d2985c201a8f35e454d1fc3ce84e0b1f3767d752234b47  /Users/tito/qwen-runs/2026-11-12-glm-nextn/agent48-fast-head/probe/draft2-logits.f32

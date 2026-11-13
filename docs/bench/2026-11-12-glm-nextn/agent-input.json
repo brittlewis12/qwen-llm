@@ -1,0 +1,9 @@
+{
+  "agent_export": "/Users/tito/qwen-runs/2026-11-08-real-opencode-agents/glm/continue.db.json",
+  "agent_export_sha256": "1705e36630fd16ca1cabd6c420188a179febcf72c5dc91040a327f31d23ee391",
+  "source_context": "/Users/tito/qwen-runs/2026-11-09-spec-econ/nextn/messages48.json",
+  "source_chars": 65000,
+  "transcript_parts": 71,
+  "prompt_chars": 214247,
+  "messages_sha256": "200a7cf405df1bc25034bd900dfc2167079882edc9dd3f913de711b39f9b75bd"
+}

@@ -1,6 +1,7 @@
 #include "capture.hpp"
 #include "build_info.hpp"
 #include "llama.h"
+#include "llama-ext.h"
 #include "ggml-backend.h"
 #include "gguf.h"
 
@@ -26,11 +27,13 @@ struct Options {
     fs::path model, input, output;
     std::string hidden_kind;
     size_t history_batch = 512;
+    size_t state_ring_reps = 0;
+    bool recursive_two = false;
 };
 
 static Options options(int argc, char ** argv) {
     const char * usage = "glm53_nextn_probe --model HEAD.gguf --input-dir CAPTURE --output-dir NEW_DIR "
-                        "--hidden-kind post-norm|raw [--history-batch 1..512]";
+                        "--hidden-kind post-norm|raw [--history-batch 1..512] [--state-ring-reps 0..128]";
     Options o;
     std::set<std::string> seen;
     for (int i = 1; i < argc; ++i) {
@@ -46,6 +49,14 @@ static Options options(int argc, char ** argv) {
             require(!value.empty() && value.find_first_not_of("0123456789") == std::string::npos,
                     "invalid history batch");
             o.history_batch = std::stoul(value);
+        } else if (key == "--recursive-two") {
+            require(value == "0" || value == "1", "recursive-two must be 0 or 1");
+            o.recursive_two = value == "1";
+        } else if (key == "--state-ring-reps") {
+            require(!value.empty() && value.find_first_not_of("0123456789") == std::string::npos,
+                    "invalid state ring reps");
+            o.state_ring_reps = std::stoul(value);
+            require(o.state_ring_reps <= 128, "state ring reps must be 0..128");
         } else throw std::runtime_error("unknown option: " + key);
     }
     require(!o.model.empty() && !o.input.empty() && !o.output.empty(), usage);
@@ -170,14 +181,28 @@ static void run(const Options & o) {
         std::unique_ptr<llama_batch_ext, decltype(&llama_batch_ext_free)> batch(
             llama_batch_ext_init(ctx.get()), llama_batch_ext_free);
         require(bool(batch), "cannot create extended batch");
+        // Decode the actual captured continuation for a coherence audit.
+        std::ofstream continuation(o.output / "captured-continuation.txt", std::ios::binary);
+        require(bool(continuation), "cannot create continuation audit");
+        const auto * vocab = llama_model_get_vocab(model.get());
+        for (size_t i = c.score_start; i < c.count; ++i) {
+            std::vector<char> piece(4096);
+            int n = llama_token_to_piece(vocab, static_cast<llama_token>(tokens[i]), piece.data(), piece.size(), 0, true);
+            if (n < 0) { piece.resize(-n); n = llama_token_to_piece(vocab, static_cast<llama_token>(tokens[i]), piece.data(), piece.size(), 0, true); }
+            require(n >= 0, "continuation token decode failed");
+            continuation.write(piece.data(), n);
+        }
+        continuation.close();
         report["load_and_context_ms"] = ms(load_start);
         report["context_capacity"] = llama_n_ctx(ctx.get());
         report["n_gpu_layers_requested"] = mp.n_gpu_layers;
         report["phase"] = "history";
         save_report(o.output, report);
 
-        auto prepare = [&](size_t start, size_t rows, bool logits) {
-            auto states = shifted_hidden(hidden_file, start, rows, c.hidden);
+        auto prepare = [&](size_t start, size_t rows, bool logits, const float * override_hidden = nullptr) {
+            auto states = override_hidden
+                ? std::vector<float>(override_hidden, override_hidden + rows * c.hidden)
+                : shifted_hidden(hidden_file, start, rows, c.hidden);
             llama_batch_ext_clear(batch.get());
             for (size_t j = 0; j < rows; ++j) {
                 const auto index = llama_batch_ext_add_token(batch.get(), 0, static_cast<llama_token>(tokens[start + j]));
@@ -203,13 +228,30 @@ static void run(const Options & o) {
             report["history_rows_processed"] = start;
         }
         report["head_history_init_ms"] = ms(history_start);
+        if (o.recursive_two) { llama_set_embeddings_nextn(ctx.get(), true, true); }
         report["phase"] = "scoring";
         save_report(o.output, report);
         std::unique_ptr<FILE, decltype(&std::fclose)> logits_file(
             std::fopen((o.output / "draft-logits.f32").c_str(), "wbx"), std::fclose);
         require(bool(logits_file), "cannot create draft-logits.f32");
+        std::unique_ptr<FILE, decltype(&std::fclose)> recursive_file(nullptr, std::fclose);
+        if (o.recursive_two) {
+            recursive_file.reset(std::fopen((o.output / "draft2-logits.f32").c_str(), "wbx"));
+            require(bool(recursive_file), "cannot create recursive logits");
+            report["recursive_rows_returned"] = 0;
+            report["recursive_conditioning"] = "head h_nextn + captured next token, canonical history position rewind after each probe";
+        }
+        std::vector<uint8_t> head_ring;
+        std::vector<float> final_reference;
+        const auto ring_flags = LLAMA_STATE_SEQ_FLAGS_ON_DEVICE;
         double score_sum = 0;
         for (size_t i = c.score_start; i < c.count; ++i) {
+            if (o.state_ring_reps && i + 1 == c.count) {
+                head_ring.resize(llama_state_seq_get_size_ext(ctx.get(), 0, ring_flags));
+                require(llama_state_seq_get_data_ext(ctx.get(), head_ring.data(), head_ring.size(), 0,
+                        ring_flags) == head_ring.size(), "head checkpoint capture failed");
+                llama_synchronize(ctx.get());
+            }
             prepare(i, 1, true);
             const auto started = Clock::now();
             process();
@@ -217,6 +259,9 @@ static void run(const Options & o) {
             require(logits != nullptr, "MTP did not return the requested scored row");
             const double step_ms = ms(started);
             finite(logits, c.vocab, "draft logits");
+            if (o.state_ring_reps && i + 1 == c.count) {
+                final_reference.assign(logits, logits + c.vocab);
+            }
             require(std::fwrite(logits, sizeof(float), c.vocab, logits_file.get()) == c.vocab,
                     "draft logits write failed");
             score_sum += step_ms;
@@ -224,11 +269,99 @@ static void run(const Options & o) {
                 {"hidden_source_position", i == 0 ? json(nullptr) : json(i - 1)},
                 {"full_head_step_ms", step_ms}});
             report["scored_rows_returned"] = i - c.score_start + 1;
+            if (o.recursive_two && i + 1 < c.count) {
+                const float * h = llama_get_embeddings_nextn_ith(ctx.get(), 0);
+                require(h != nullptr, "missing recursive head hidden");
+                std::vector<float> hidden(h, h + c.hidden);
+                finite(hidden.data(), c.hidden, "recursive hidden");
+                prepare(i + 1, 1, true, hidden.data());
+                const auto recursive_started = Clock::now();
+                process();
+                const float * q2 = llama_get_logits_ith(ctx.get(), 0);
+                require(q2 != nullptr, "missing recursive logits");
+                report["recursive_head_steps_ms"].push_back(ms(recursive_started));
+                finite(q2, c.vocab, "recursive logits");
+                require(std::fwrite(q2, sizeof(float), c.vocab, recursive_file.get()) == c.vocab,
+                        "recursive logits write failed");
+                require(llama_memory_seq_rm(llama_get_memory(ctx.get()), 0,
+                        static_cast<llama_pos>(i + 1), -1), "recursive position rewind failed");
+                llama_synchronize(ctx.get());
+                report["recursive_rows_returned"] = i - c.score_start + 1;
+            }
         }
         require(std::fflush(logits_file.get()) == 0 && ::fsync(fileno(logits_file.get())) == 0,
                 "draft logits flush failed");
         require(fs::file_size(o.output / "draft-logits.f32") == uint64_t(c.score_count) * c.vocab * 4,
                 "draft logits extent mismatch");
+        if (o.recursive_two) {
+            require(std::fflush(recursive_file.get()) == 0 && ::fsync(fileno(recursive_file.get())) == 0,
+                    "recursive logits flush failed");
+            require(fs::file_size(o.output / "draft2-logits.f32") == uint64_t(c.score_count - 1) * c.vocab * 4,
+                    "recursive logits extent mismatch");
+        }
+        if (o.state_ring_reps) {
+            require(!head_ring.empty() && !final_reference.empty(), "missing checkpoint witness");
+            json copy_ms = json::array(), restore_ms = json::array();
+            const size_t host_bytes = llama_state_seq_get_size(ctx.get(), 0);
+            require(llama_state_seq_set_data_ext(ctx.get(), head_ring.data(), head_ring.size(), 0,
+                    ring_flags) == head_ring.size(), "initial head restore failed");
+            llama_synchronize(ctx.get());
+            for (size_t rep = 0; rep <= o.state_ring_reps; ++rep) {
+                const auto copy_start = Clock::now();
+                require(llama_state_seq_get_data_ext(ctx.get(), head_ring.data(), head_ring.size(), 0,
+                        ring_flags) == head_ring.size(), "head ring copy failed");
+                llama_synchronize(ctx.get());
+                const double copy = ms(copy_start);
+                prepare(c.count - 1, 1, true);
+                process();
+                const float * replay = llama_get_logits_ith(ctx.get(), 0);
+                require(replay && std::memcmp(replay, final_reference.data(), c.vocab * sizeof(float)) == 0,
+                        "head checkpoint replay logits differ bitwise");
+                const auto restore_start = Clock::now();
+                require(llama_state_seq_set_data_ext(ctx.get(), head_ring.data(), head_ring.size(), 0,
+                        ring_flags) == head_ring.size(), "head ring restore failed");
+                llama_synchronize(ctx.get());
+                const double restore = ms(restore_start);
+                if (rep > 0) { copy_ms.push_back(copy); restore_ms.push_back(restore); }
+            }
+            report["state_ring"] = {{"flags", "ON_DEVICE"}, {"slots", 1},
+                {"metadata_bytes", head_ring.size()}, {"host_state_bytes_at_end", host_bytes},
+                {"copy_ms", copy_ms}, {"restore_ms", restore_ms},
+                {"replay_bitwise", true}, {"repetitions", o.state_ring_reps},
+                {"qualification", "one device checkpoint plus the live endpoint; a second get invalidates the prior checkpoint"}};
+            // MLA head caches are append-only in this backend. Qualify the
+            // cheaper position ring separately; do not assume seq_rm repairs
+            // compressed/indexer state. Four suffix lengths cover every pool
+            // phase. Replay here is a test witness, not the commit mechanism.
+            json rewind = json::array();
+            for (size_t rows = 1; rows <= std::min<size_t>(4, c.score_count); ++rows) {
+                json times = json::array();
+                bool bitwise = true;
+                const size_t start = c.count - rows;
+                for (size_t rep = 0; rep <= o.state_ring_reps; ++rep) {
+                    require(llama_state_seq_set_data_ext(ctx.get(), head_ring.data(), head_ring.size(),
+                            0, ring_flags) == head_ring.size(), "rewind witness reset failed");
+                    if (!llama_memory_seq_rm(llama_get_memory(ctx.get()), 0, start, -1)) {
+                        bitwise = false; break;
+                    }
+                    for (size_t i = start; i < c.count; ++i) { prepare(i, 1, true); process(); }
+                    const auto started = Clock::now();
+                    const bool removed = llama_memory_seq_rm(llama_get_memory(ctx.get()), 0, start, -1);
+                    llama_synchronize(ctx.get());
+                    const double elapsed = ms(started);
+                    if (!removed) { bitwise = false; break; }
+                    for (size_t i = start; i < c.count; ++i) { prepare(i, 1, true); process(); }
+                    const float * replay = llama_get_logits_ith(ctx.get(), 0);
+                    if (!replay || std::memcmp(replay, final_reference.data(), c.vocab * sizeof(float)) != 0) {
+                        bitwise = false; break;
+                    }
+                    if (rep > 0) { times.push_back(elapsed); }
+                }
+                rewind.push_back({{"rows", rows}, {"start_position", start},
+                    {"restore_ms", times}, {"replay_bitwise", bitwise}});
+            }
+            report["head_position_ring"] = rewind;
+        }
         report["score_steps_total_ms"] = score_sum;
         report["status"] = "complete";
         report["phase"] = "complete";

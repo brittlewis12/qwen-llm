@@ -342,51 +342,6 @@ kernel void kernel_glm53_kda_prefill_recurrence_value4(
     for (uint j = 0; j < 4u; ++j) state_ptr[j * (D / 4u)] = h[j];
 }
 
-// Eight independent value rows share one q/k/decay load per simdgroup.
-// Each row keeps the value4 kernel's float4 operations, reduction and FMA
-// order; only the independent rows are grouped more widely.
-kernel void kernel_glm53_kda_prefill_recurrence_value8(
-        constant glm53_kda_args & args [[buffer(0)]],
-        device const float * q [[buffer(1)]],
-        device const float * k [[buffer(2)]],
-        device const float * v [[buffer(3)]],
-        device const float * decay [[buffer(4)]],
-        device const float * raw_beta [[buffer(5)]],
-        device float * state [[buffer(6)]],
-        device float * out [[buffer(7)]],
-        uint2 tgpig [[threadgroup_position_in_grid]],
-        ushort lane [[thread_index_in_simdgroup]],
-        ushort sg [[simdgroup_index_in_threadgroup]]) {
-    constexpr uint D = 128u;
-    const uint head = tgpig.x;
-    const uint first = tgpig.y * 32u + sg * 8u;
-    if (head >= args.n_heads || first >= D) return;
-    const uint projection = args.n_heads * D;
-    const uint k0 = lane * 4u;
-    device float4 * state_ptr = (device float4 *)(state + ((ulong)head * D + first) * D + k0);
-    float4 h[8];
-#pragma clang loop unroll(full)
-    for (uint j = 0; j < 8u; ++j) h[j] = state_ptr[j * (D / 4u)];
-    for (uint token = 0; token < args.n_rows; token++) {
-        const ulong base = (ulong)token * projection + head * D;
-        const float4 q4 = *((device const float4 *)(q + base + k0));
-        const float4 k4 = *((device const float4 *)(k + base + k0));
-        const float4 decay4 = *((device const float4 *)(decay + base + k0));
-        const float beta = 1.0f / (1.0f + exp(-raw_beta[(ulong)token * args.n_heads + head]));
-#pragma clang loop unroll(full)
-        for (uint j = 0; j < 8u; ++j) {
-            h[j] *= decay4;
-            const float hk = simd_sum(dot(h[j], k4));
-            const float delta_v = (v[base + first + j] - hk) * beta;
-            h[j] = fma(k4, float4(delta_v), h[j]);
-            const float result = simd_sum(dot(h[j], q4));
-            if (lane == 0u) out[base + first + j] = result;
-        }
-    }
-#pragma clang loop unroll(full)
-    for (uint j = 0; j < 8u; ++j) state_ptr[j * (D / 4u)] = h[j];
-}
-
 // Stage 3, grid (rows, heads) x 128: per-head RMSNorm, norm weight and
 // sigmoid output gate, in place.
 kernel void kernel_glm53_kda_prefill_output(

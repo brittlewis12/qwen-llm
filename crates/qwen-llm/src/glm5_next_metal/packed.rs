@@ -2240,7 +2240,9 @@ impl Glm5NextSession<'_> {
                     },
                 ) => {
                     self.stage(&mut enc, Glm5NextStage::MlaProjection, Some(index))?;
-                    self.encode_mla_rows(ctx, &enc, rows, mla, latent, pending, pooled, mla_index)?;
+                    self.encode_mla_rows(
+                        ctx, &mut enc, rows, mla, latent, pending, pooled, mla_index,
+                    )?;
                     mla_index += 1;
                 }
                 _ => return invalid(format!("block {index} state does not match its mixer")),
@@ -2722,7 +2724,7 @@ impl Glm5NextSession<'_> {
     fn encode_mla_rows(
         &self,
         ctx: &MetalContext,
-        enc: &KernelEncoder,
+        enc: &mut KernelEncoder,
         rows: usize,
         mla: &crate::glm5_next::MlaTensors<MetalTensor>,
         latent: &MetalTensor,
@@ -2817,6 +2819,7 @@ impl Glm5NextSession<'_> {
         // Indexer cache maintenance first: every pool the chunk completes is
         // published before attention, and each row scores only its own
         // visible prefix (the first L / 4 pools).
+        self.stage(enc, Glm5NextStage::MlaIndexer, Some(mla_index))?;
         let index_dim = c.indexer_head_dim as usize;
         matmat(
             ctx,
@@ -2876,6 +2879,7 @@ impl Glm5NextSession<'_> {
         if dense < rows {
             self.encode_sparse_rows(ctx, enc, mla, latent, pooled, mla_index, dense, rows, scale)?;
         }
+        self.stage(enc, Glm5NextStage::MlaOutput, Some(mla_index))?;
         absorb_rows(
             ctx,
             enc,
@@ -2915,7 +2919,7 @@ impl Glm5NextSession<'_> {
     fn encode_sparse_rows(
         &self,
         ctx: &MetalContext,
-        enc: &KernelEncoder,
+        enc: &mut KernelEncoder,
         mla: &crate::glm5_next::MlaTensors<MetalTensor>,
         latent: &MetalTensor,
         pooled: &MetalTensor,
@@ -2938,6 +2942,7 @@ impl Glm5NextSession<'_> {
         let sub = |t: &MetalTensor, width: usize| {
             t.view_subrange((first * width) as u64, vec![width as u64, count as u64])
         };
+        self.stage(enc, Glm5NextStage::SparseQuery, Some(mla_index))?;
         matmat(
             ctx,
             enc,
@@ -2983,6 +2988,7 @@ impl Glm5NextSession<'_> {
         let pool = c.indexer_pool as usize;
         let flat = |t: &MetalTensor| t.view_subrange(0, vec![(kv * heads) as u64, rows as u64]);
         let mut start = first;
+        self.stage(enc, Glm5NextStage::SparseScores, Some(mla_index))?;
         while start < rows {
             let n = sp.microbatch.min(rows - start);
             let i32_rows = |t: &MetalTensor| t.view_subrange(start as u64, vec![n as u64]);
@@ -3027,6 +3033,7 @@ impl Glm5NextSession<'_> {
                 max_pools,
                 n,
             )?;
+            self.stage(enc, Glm5NextStage::SparseSelect, Some(mla_index))?;
             crate::metal::encode_select_top_k_ids(
                 ctx,
                 enc,
@@ -3056,6 +3063,7 @@ impl Glm5NextSession<'_> {
                 row_slots,
                 n,
             )?;
+            self.stage(enc, Glm5NextStage::SparseAttention, Some(mla_index))?;
             let tensor_encoded = super::prefill_attention::try_encode(
                 ctx,
                 enc,
@@ -3138,6 +3146,9 @@ impl Glm5NextSession<'_> {
                 }
             }
             start += n;
+            if start < rows {
+                self.stage(enc, Glm5NextStage::SparseScores, Some(mla_index))?;
+            }
         }
         Ok(())
     }

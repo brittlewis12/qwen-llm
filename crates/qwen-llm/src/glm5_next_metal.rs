@@ -1036,7 +1036,7 @@ pub struct Glm5NextStageReport {
 }
 
 /// Samples per profiled step: two per stage span, with headroom.
-const STAGE_SAMPLE_CAPACITY: usize = 2048;
+const STAGE_SAMPLE_CAPACITY: usize = 8192;
 
 struct StageRecorder {
     samples: crate::metal::MetalTimestampSampleBuffer,

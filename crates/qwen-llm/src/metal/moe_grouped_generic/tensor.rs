@@ -97,6 +97,12 @@ pub fn moe_grouped_tensor_pipeline_name_for_weight(
             (MoeGroupedTensorRole::UpClamped, GgmlType::IQ2_S, TensorActivation::F16) => {
                 "kernel_moe_up_clamped_iq2_s_f16act_grouped_slots_tensor_repacked"
             }
+            (MoeGroupedTensorRole::Down, GgmlType::IQ3_S, TensorActivation::F16) => {
+                "kernel_moe_down_iq3_s_f16act_grouped_slots_tensor_repacked"
+            }
+            (MoeGroupedTensorRole::UpClamped, GgmlType::IQ3_S, TensorActivation::F16) => {
+                "kernel_moe_up_clamped_iq3_s_f16act_grouped_slots_tensor_repacked"
+            }
             (MoeGroupedTensorRole::Down, GgmlType::IQ3_S, TensorActivation::F32) => {
                 "kernel_moe_down_iq3_s_f32_grouped_slots_tensor_repacked"
             }
@@ -114,8 +120,11 @@ pub fn wide_probe_pipeline_name(dtype: GgmlType) -> Option<String> {
 
 pub fn wide_probe_pipeline_name_for_weight(weight: &MetalTensor) -> Option<String> {
     if weight.provenance() == MetalTensorProvenance::RepackedExpertWeightReadOnly {
-        return (weight.dtype == GgmlType::IQ2_S)
-            .then(|| "kernel_moe_wide_probe_iq2_s_f16act_repacked".to_owned());
+        return match weight.dtype {
+            GgmlType::IQ2_S => Some("kernel_moe_wide_probe_iq2_s_f16act_repacked".to_owned()),
+            GgmlType::IQ3_S => Some("kernel_moe_wide_probe_iq3_s_f16act_repacked".to_owned()),
+            _ => None,
+        };
     }
     wide_probe_pipeline_name(weight.dtype)
 }

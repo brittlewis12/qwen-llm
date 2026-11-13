@@ -158,6 +158,25 @@ mod probe {
         out
     }
 
+    fn moe_dtype_census(weights: &Glm5NextWeights) -> Value {
+        let mut gate_up = BTreeMap::<String, usize>::new();
+        let mut down = BTreeMap::<String, usize>::new();
+        for block in &weights.blocks {
+            if let FfnTensors::Moe(moe) = &block.ffn {
+                *gate_up
+                    .entry(format!("{:?}", moe.gate_experts.dtype))
+                    .or_default() += 1;
+                *gate_up
+                    .entry(format!("{:?}", moe.up_experts.dtype))
+                    .or_default() += 1;
+                *down
+                    .entry(format!("{:?}", moe.down_experts.dtype))
+                    .or_default() += 1;
+            }
+        }
+        json!({ "gate_up_bank_count_by_dtype": gate_up, "down_bank_count_by_dtype": down })
+    }
+
     fn kernel_totals(
         report: &DispatchProfileReport,
     ) -> (Vec<Value>, BTreeMap<&'static str, (usize, f64)>, usize) {
@@ -1616,6 +1635,7 @@ mod probe {
             "corpus_tokens": ids.len(), "device": ctx.device_facts(),
             "retained_weight_bytes": weights.retained_bytes,
             "repacked_weight_bytes": weights.repacked_bytes,
+            "moe_dtype_census": moe_dtype_census(&weights),
             "pressure": pressure(), "loadavg": loadavg(),
         }));
 

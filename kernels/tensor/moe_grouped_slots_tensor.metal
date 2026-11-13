@@ -643,6 +643,10 @@ template [[host_name("kernel_moe_up_clamped_iq2_s_f16act_grouped_slots_tensor_re
 kernel moe_up_clamped_grouped_slots_tensor_f16act_t kernel_moe_up_clamped_grouped_slots_tensor_f16act<84, 16, qt_dequantize_iq2_s_repacked>;
 template [[host_name("kernel_moe_down_iq3_s_f32_grouped_slots_tensor_repacked")]]
 kernel moe_grouped_slots_mm_tensor_t kernel_moe_grouped_slots_mm_tensor<116, 16, qt_dequantize_iq3_s_repacked, 0>;
+template [[host_name("kernel_moe_down_iq3_s_f16act_grouped_slots_tensor_repacked")]]
+kernel moe_grouped_slots_mm_tensor_f16act_t kernel_moe_grouped_slots_mm_tensor_f16act<116, 16, qt_dequantize_iq3_s_repacked, 0>;
+template [[host_name("kernel_moe_up_clamped_iq3_s_f16act_grouped_slots_tensor_repacked")]]
+kernel moe_up_clamped_grouped_slots_tensor_f16act_t kernel_moe_up_clamped_grouped_slots_tensor_f16act<116, 16, qt_dequantize_iq3_s_repacked>;
 
 // The wide dense tile is instantiated for the Q8_0 projections V4.1 uses
 // (q/kv/output and the shared expert). Additional forms below are explicit-only.
@@ -698,6 +702,8 @@ TT_INSTANTIATE_WIDE(iq1_m,   QT_IQ1_M_BYTES,   QT_IQ1_M_NL,   qt_dequantize_iq1_
 
 template [[host_name("kernel_moe_wide_probe_iq2_s_f16act_repacked")]]
 kernel moe_wide_probe_t kernel_moe_wide_probe_f16act<84, 16, qt_dequantize_iq2_s_repacked>;
+template [[host_name("kernel_moe_wide_probe_iq3_s_f16act_repacked")]]
+kernel moe_wide_probe_t kernel_moe_wide_probe_f16act<116, 16, qt_dequantize_iq3_s_repacked>;
 
 // Natural-row-major Q5_K -> F16 dequant for the dense preweight route.
 // One thread dequantizes one 16-element sub-tile with `qt_dequantize_q5_K`

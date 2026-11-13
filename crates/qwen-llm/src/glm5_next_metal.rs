@@ -369,16 +369,33 @@ fn repacked_iq_bank_len(desc: &TensorDesc, dtype: GgmlType, bytes_per_block: u64
         .ok_or_else(|| Glm5NextMetalError::Invalid("repacked bank byte count overflow".into()))
 }
 
+fn repacked_block_bytes(dtype: GgmlType) -> Result<u64> {
+    match dtype {
+        GgmlType::IQ2_S => Ok(84),
+        GgmlType::IQ3_S => Ok(116),
+        other => invalid(format!("unsupported GLM repacked expert dtype {other:?}")),
+    }
+}
+
 fn repacked_model_bytes(model: &Glm5NextModel) -> Result<u64> {
     let mut total = 0u64;
     for block in &model.blocks {
         let FfnTensors::Moe(moe) = &block.ffn else {
             continue;
         };
+        let gate_block_bytes = repacked_block_bytes(moe.gate_experts.dtype)?;
+        let up_block_bytes = repacked_block_bytes(moe.up_experts.dtype)?;
+        let down_block_bytes = repacked_block_bytes(moe.down_experts.dtype)?;
+        if moe.down_experts.dtype != GgmlType::IQ3_S {
+            return invalid(format!(
+                "{} down bank is {:?}; the GLM repack candidate currently requires IQ3_S",
+                moe.down_experts.name, moe.down_experts.dtype
+            ));
+        }
         for (desc, dtype, block_bytes) in [
-            (moe.gate_experts, GgmlType::IQ2_S, 84u64),
-            (moe.up_experts, GgmlType::IQ2_S, 84u64),
-            (moe.down_experts, GgmlType::IQ3_S, 116u64),
+            (moe.gate_experts, moe.gate_experts.dtype, gate_block_bytes),
+            (moe.up_experts, moe.up_experts.dtype, up_block_bytes),
+            (moe.down_experts, moe.down_experts.dtype, down_block_bytes),
         ] {
             total = total
                 .checked_add(repacked_iq_bank_len(desc, dtype, block_bytes)?)
@@ -594,8 +611,16 @@ impl Glm5NextWeights {
                 .iter()
                 .map(|block| match &block.ffn {
                     FfnTensors::Moe(moe) => Ok(Some(RepackedMoeWeights {
-                        gate: repack_expert_tensor(ctx, &moe.gate_experts, 84)?,
-                        up: repack_expert_tensor(ctx, &moe.up_experts, 84)?,
+                        gate: repack_expert_tensor(
+                            ctx,
+                            &moe.gate_experts,
+                            repacked_block_bytes(moe.gate_experts.dtype)? as usize,
+                        )?,
+                        up: repack_expert_tensor(
+                            ctx,
+                            &moe.up_experts,
+                            repacked_block_bytes(moe.up_experts.dtype)? as usize,
+                        )?,
                         down: repack_expert_tensor(ctx, &moe.down_experts, 116)?,
                     })),
                     FfnTensors::Dense(_) => Ok(None),

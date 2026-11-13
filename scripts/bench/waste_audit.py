@@ -33,8 +33,9 @@ from collections import defaultdict
 from pathlib import Path
 
 MOVEMENT = re.compile(
-    r"(?i)(^kernel_copy|copy_offset|blit|round_trip|scatter|fill|zero|"
-    r"pack|unpack|broadcast|convert|f32_to_f16|f16_to_f32|_to_half|_half_to_)"
+    r"(?i)(^kernel_copy|copy_offset|blit|round_trip|(^|_)scatter|"
+    r"(^|_)fill(_|$)|(^|_)zero(_|$)|(^|_)pack(_|$)|unpack|broadcast|"
+    r"convert|f32_to_f16|f16_to_f32|_to_half|_half_to_)"
 )
 ELEMENTWISE = re.compile(
     r"(?i)(add|mul|axpy|swiglu|silu|gelu|relu|scale|clamp|norm|rms|"
@@ -57,18 +58,22 @@ def covered_bytes(a_lo, a_hi, b_lo, b_hi):
     return max(0, min(a_hi, b_hi) - max(a_lo, b_lo))
 
 
+def capture_records(path: Path):
+    records = [
+        json.loads(line)
+        for line in path.read_text().splitlines()
+        if line.startswith("{")
+    ]
+    captures = [r for r in records if r.get("kind") == "causal_graph"]
+    if not captures:
+        raise SystemExit(f"{path}: no causal_graph record")
+    return captures
+
+
 class Capture:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, raw=None):
         self.path = path
-        records = [
-            json.loads(line)
-            for line in path.read_text().splitlines()
-            if line.startswith("{")
-        ]
-        captures = [r for r in records if r.get("kind") == "causal_graph"]
-        if not captures:
-            raise SystemExit(f"{path}: no causal_graph record")
-        self.raw = captures[-1]
+        self.raw = capture_records(path)[-1] if raw is None else raw
         if self.raw.get("mode") != "nodes":
             raise SystemExit(f"{path}: capture is {self.raw.get('mode')!r}, need nodes")
         if not self.raw.get("bitwise", True):
@@ -142,7 +147,7 @@ class Capture:
         return "round" if self.width > 1 else "token"
 
     def gpu_ms_total(self):
-        return sum(self.gpu_ns(pi, ni) for pi, _, ni, _, _, _ in self.events()) / 1e6
+        return sum(self.gpu_ns(pi, ni) for _, pi, ni, _, _, _ in self.events()) / 1e6
 
     def per_unit_ms(self):
         return self.gpu_ms_total() / max(1, self.rounds)
@@ -160,6 +165,25 @@ def index_accesses(cap: Capture):
     for rows in by_buffer.values():
         rows.sort(key=lambda x: (x[0], x[1], x[2]))
     return by_buffer
+
+
+def ordered_events(cap: Capture):
+    return list(cap.events())
+
+
+def writes_between(events, start, end, spans):
+    """True if any node after `start` and before `end` overwrites an input."""
+    for _rnd, pi, ni, _node, writes, _reads in events:
+        pos = (pi, ni)
+        if pos <= start or pos >= end:
+            continue
+        for w in writes:
+            for s in spans:
+                if s["buffer"] == w["buffer"] and overlap(
+                    s["lo"], s["hi"], w["lo"], w["hi"]
+                ):
+                    return True
+    return False
 
 
 def dead_writes(cap: Capture):
@@ -225,6 +249,7 @@ def dead_writes(cap: Capture):
 
 def recomputation(cap: Capture):
     items = []
+    events = ordered_events(cap)
     for rnd in range(cap.rounds):
         seen = {}
         for pi in range(rnd * cap.scopes_per_round, (rnd + 1) * cap.scopes_per_round):
@@ -248,6 +273,14 @@ def recomputation(cap: Capture):
                 )
                 if key in seen and reads:
                     first = seen[key]
+                    if writes_between(
+                        events,
+                        (first[0], first[1]),
+                        (pi, ni),
+                        [{"buffer": b, "lo": lo, "hi": hi} for b, lo, hi in reads],
+                    ):
+                        seen[key] = (pi, ni)
+                        continue
                     items.append(
                         {
                             "category": "recomputation",
@@ -300,17 +333,28 @@ def movement(cap: Capture):
 
 
 def _consumers(cap: Capture, rnd, pi, ni, writes):
-    """Nodes that read a written range before another write covers it."""
+    """Nodes that read a written range before the next write covers it."""
+    events = ordered_events(cap)
     consumers = set()
-    for r2, p2, n2, node2, _w2, reads2 in cap.events():
-        if (r2, p2, n2) <= (rnd, pi, ni):
-            continue
-        for w in writes:
+    for w in writes:
+        pos = (pi, ni)
+        for r2, p2, n2, _node2, writes2, reads2 in events:
+            if r2 != rnd or (p2, n2) <= pos:
+                continue
+            covered = False
             for s in reads2:
                 if s["buffer"] == w["buffer"] and overlap(
                     w["lo"], w["hi"], s["lo"], s["hi"]
                 ):
                     consumers.add((p2, n2))
+            for x in writes2:
+                if x["buffer"] == w["buffer"] and overlap(
+                    w["lo"], w["hi"], x["lo"], x["hi"]
+                ):
+                    covered = True
+                    break
+            if covered:
+                break
     return consumers
 
 
@@ -428,8 +472,8 @@ def unneeded_rows(cap: Capture):
     return items
 
 
-def analyze(path: Path):
-    cap = Capture(path)
+def analyze(path: Path, raw=None):
+    cap = Capture(path, raw)
     items = []
     items += dead_writes(cap)
     items += recomputation(cap)
@@ -441,6 +485,7 @@ def analyze(path: Path):
     per_unit = cap.per_unit_ms()
     return {
         "file": str(path),
+        "cell": cap.phase,
         "phase": cap.phase,
         "width": cap.width,
         "rounds": cap.rounds,
@@ -644,6 +689,49 @@ def _label(item):
     return item.get("kernel", item["category"])
 
 
+FUSION_BW_GBPS = 800.0
+
+
+def _aggregate(result):
+    groups = {}
+    for item in result["items"]:
+        label = (
+            f"{item['producer']} -> {item['consumer']}"
+            if item.get("producer")
+            else item.get("kernel", item["category"])
+        )
+        key = (item["category"], label)
+        entry = groups.setdefault(
+            key,
+            {
+                "category": item["category"],
+                "label": label,
+                "ms": 0.0,
+                "count": 0,
+                "bytes": 0,
+                "scope": item.get("scope"),
+                "node": item.get("node"),
+            },
+        )
+        entry["ms"] += item["gpu_ms"]
+        entry["count"] += 1
+        entry["bytes"] += (
+            item.get("intermediate_bytes")
+            or item.get("dead_bytes")
+            or item.get("duplicated_bytes")
+            or item.get("bytes")
+            or 0
+        )
+    for entry in groups.values():
+        if entry["category"] == "fusable_chain":
+            entry["gain_ms"] = min(
+                entry["ms"], 2 * entry["bytes"] / (FUSION_BW_GBPS * 1e6)
+            )
+        else:
+            entry["gain_ms"] = entry["ms"]
+    return sorted(groups.values(), key=lambda x: -x["ms"])
+
+
 def markdown_tables(results, top):
     lines = ["# Waste audit tables", ""]
     for result in results:
@@ -661,18 +749,21 @@ def markdown_tables(results, top):
         lines.append("")
         lines.append(
             "| category | node / kernel | ms/call | share of cell wall | "
-            "proposed fix | expected gain |"
+            "bytes | proposed fix | expected gain |"
         )
-        lines.append("|---|---|---:|---:|---|---|")
-        ranked = sorted(result["items"], key=lambda x: -x["gpu_ms"])
-        for item in ranked[:top]:
-            per_call = item["gpu_ms"] / max(1, result["rounds"])
+        lines.append("|---|---|---:|---:|---:|---|---|")
+        for entry in _aggregate(result)[:top]:
+            per_call = entry["ms"] / max(1, result["rounds"])
+            gain = entry["gain_ms"] / max(1, result["rounds"])
             share = 100 * per_call / wall if wall else float("nan")
-            node = f"[{item.get('scope')}:{item.get('node')}] {_label(item)}"
+            gain_share = 100 * gain / wall if wall else float("nan")
+            label = f"{entry['label']} (x{entry['count']})"
+            node = f"[{entry['scope']}:{entry['node']}] {label}"
             lines.append(
-                f"| {item['category']} | `{node}` | {per_call:.4f} | "
-                f"{share:.2f}% | {FIX.get(item['category'], 'review')} | "
-                f"{per_call:.4f} ms/call ({share:.2f}% wall) |"
+                f"| {entry['category']} | `{node}` | {per_call:.4f} | "
+                f"{share:.2f}% | {entry['bytes']} | "
+                f"{FIX.get(entry['category'], 'review')} | "
+                f"{gain:.4f} ms/call ({gain_share:.2f}% wall) |"
             )
         lines.append("")
     return "\n".join(lines) + "\n"
@@ -691,7 +782,11 @@ def main():
         return
     if not args.captures:
         parser.error("no captures")
-    results = [analyze(path) for path in args.captures]
+    results = [
+        analyze(path, raw)
+        for path in args.captures
+        for raw in capture_records(path)
+    ]
     ranked = ledger(results)
     out = {"captures": results, "ledger": ranked[: args.top]}
     if args.markdown:

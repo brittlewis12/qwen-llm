@@ -1429,6 +1429,17 @@ mod probe {
             max_depth + needed_width + 1
         );
         let weights = Glm5NextWeights::load(&ctx, &gguf)?;
+        let three_agent_plan = Glm5NextSession::plan_memory(&ctx, &weights, 48 * 1024, 2048)?;
+        let three_agent_session_bytes = three_agent_plan
+            .session_buffer_bytes()
+            .checked_mul(3)
+            .ok_or_else(|| anyhow::anyhow!("three-agent session byte count overflow"))?;
+        let three_agent_admission = evaluate_metal_memory_admission(
+            three_agent_session_bytes,
+            0,
+            ctx.memory_signals(),
+            true,
+        );
         emit(json!({
             "kind": "header", "mode": mode, "depth": depth,
             "occupancy_depths": if mode == "occupancy" { Some(&occupancy_depths) } else { None },
@@ -1436,6 +1447,10 @@ mod probe {
             "route_widths": if matches!(mode, "routes" | "occupancy") { Some(route_widths()) } else { None },
             "quality_widths": if mode == "route-quality" { Some(quality_widths) } else { None },
             "corpus_tokens": ids.len(), "device": ctx.device_facts(),
+            "retained_weight_bytes": weights.retained_bytes,
+            "three_agent_48k_session_bytes": three_agent_session_bytes,
+            "three_agent_48k_memory_admitted": three_agent_admission.is_admitted(),
+            "three_agent_48k_memory_reason": format!("{:?}", three_agent_admission.reason),
             "pressure": pressure(), "loadavg": loadavg(),
         }));
 

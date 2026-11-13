@@ -24,6 +24,9 @@ share one load.
   whole-kernel saving.
 - Repeated per-layer occurrences are aggregated by `(category, kernel pair)`;
   the count is in the row.
+- Host load on the shared M5 was about 16-22 (1/5/15-minute averages) around
+  the runs. Builds and loads ran at nice 10 under the lease, which serializes
+  GPU access. This is a service-time ranking, not a timing gate.
 
 ## Captures
 

@@ -12,6 +12,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   throughput geomean **1.01861 >= 0.98**; lead accepts this as the bitwise
   non-regression check below the two-percent resolution. Default-on with
   `QWEN_GLM53_KDA_PARALLEL_PREP=0` rollback. [Record](bench/2026-11-13-glm-kda-parallel-prep.md).
+
 ## 2026-11-13 - Prefill Waste Audit: Attention and Expert Round Trips Dominate
 
 - **Measurement only; no product change.** Node-graph capture of GLM-5.3

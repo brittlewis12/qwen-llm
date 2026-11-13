@@ -152,7 +152,7 @@ full 7%.
 - Every build and arm ran under `QWEN_METAL_LEASE_WAIT=1
   scripts/bench/with-metal-lease --task v41-engram-res --for 15m`; build at
   nice 10, every server and harness at nice 0 (`ps -o nice=` sampled in
-  `serve/*.server-nice.txt`). The purged cold arm held 15m02s (target 15m).
+  `serve/*.server-nice.txt`). The purged cold arm held 14m48s and the warm arm 14m09s (target 15m).
 - Thermal: settle to <=1 for 60 s, allow 2, abort at 3. Step1 max 1;
   step3-cold and step3-warm max 1 throughout their windows; no arm aborted.
 - Raw: `metagross:~/qwen-runs/2026-11-13-v41-engram-residency/`, including

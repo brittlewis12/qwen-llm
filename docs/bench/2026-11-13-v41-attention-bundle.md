@@ -78,3 +78,10 @@ serve models/warmups additionally verify ps-o nice=. No build timing claim.
 The warmup CPU smoke checks both witnesses, inherited lease FD, debug-layer
 removal, nice0 and pressure3 refusal. Archived reducer replay preserves every
 matched row and produces both predeclared append bins. Native cells pending.
+
+
+Main and tensor metallib hashes are identical across iter/release/test;
+tensor SHA256`43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c`.
+Thus model-free warmup dispatches the exact shader binaries used by serving.
+The restored wide shader and extended fixture are byte-identical to archive
+659974115. Per-profile sizes/hashes remain in data/shader-profile-hashes.json.

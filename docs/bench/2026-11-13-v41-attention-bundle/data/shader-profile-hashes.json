@@ -1,0 +1,56 @@
+[
+  {
+    "profile": "iter",
+    "file": "kernels.metallib",
+    "bytes": 9789820,
+    "sha256": "4c006656e021a51266a79cfcea38a97c36fac9b5c08b5ad5ccd55e6e8bc15e15"
+  },
+  {
+    "profile": "iter",
+    "file": "kernels_research.metallib",
+    "bytes": 912052,
+    "sha256": "be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f"
+  },
+  {
+    "profile": "iter",
+    "file": "kernels_tensor.metallib",
+    "bytes": 4249314,
+    "sha256": "43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c"
+  },
+  {
+    "profile": "release",
+    "file": "kernels.metallib",
+    "bytes": 9789820,
+    "sha256": "4c006656e021a51266a79cfcea38a97c36fac9b5c08b5ad5ccd55e6e8bc15e15"
+  },
+  {
+    "profile": "release",
+    "file": "kernels_research.metallib",
+    "bytes": 912052,
+    "sha256": "be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f"
+  },
+  {
+    "profile": "release",
+    "file": "kernels_tensor.metallib",
+    "bytes": 4249314,
+    "sha256": "43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c"
+  },
+  {
+    "profile": "debug",
+    "file": "kernels.metallib",
+    "bytes": 9789820,
+    "sha256": "4c006656e021a51266a79cfcea38a97c36fac9b5c08b5ad5ccd55e6e8bc15e15"
+  },
+  {
+    "profile": "debug",
+    "file": "kernels_research.metallib",
+    "bytes": 912052,
+    "sha256": "be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f"
+  },
+  {
+    "profile": "debug",
+    "file": "kernels_tensor.metallib",
+    "bytes": 4249314,
+    "sha256": "43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c"
+  }
+]

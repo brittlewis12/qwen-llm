@@ -1,0 +1,5 @@
+metal: waiting for process lease /tmp/qwen-llm-501/metal.lock (pid=69728 executable=timeout opencode_session=none started=2026-11-13T14:32:38Z task=v41-prefill expected=15m; held 2m27s)
+From /Users/tito/qwen-runs/2026-11-12-glm-prefill/glm-prefill-iq-repack.bundle
+ * branch                perf/glm-prefill -> FETCH_HEAD
+Previous HEAD position was 8509e6ea0 docs: refresh repack route reference
+HEAD is now at a93e863c0 docs: add KDA value8 rollback knob

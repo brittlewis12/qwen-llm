@@ -206,6 +206,19 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Raw `metagross:~/qwen-runs/2026-11-12-qos-nice0/`; record
   [bench note](bench/2026-11-12-serve-qos-nice0.md). Aven note on `SRV-2K0Y`:
   `JQFK6MMVXBWTG93N`.
+## 2026-11-13 - GLM KDA Value8 Recurrence: Rejected
+
+- At 49K + 2,048 rows, three interleaved `packed_kda_recurrence` spans were
+  **75.34 ms** on value4 and **78.64 ms** on value8 (**0.958x**). This misses
+  the 1.25x isolated-stage gate.
+- Pressure stayed at 0 and the pre-load residency snapshots were empty. Load
+  average ranged from about 18.9 to 20.1. No paired wall, quality, or serve
+  gate was run after the stage failure.
+- Removed value8. Next lever: parallel-row KDA preparation, aimed at the
+  83 ms prepare span in the full-chunk baseline.
+- **Evidence:** [KDA value8 rejection](bench/2026-11-13-glm-kda-value8.md),
+  raw files under `bench/2026-11-13-glm-prefill/kda-value8/`.
+
 ## 2026-11-13 - GLM Full-Chunk IQ Repack: Rejected
 
 - At 49K + 2,048 rows, three interleaved routed-expert spans were **719.21 ms**

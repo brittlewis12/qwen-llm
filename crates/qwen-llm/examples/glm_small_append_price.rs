@@ -23,7 +23,7 @@
 //!  5. `occupancy`: capture real per-expert row buckets and per-kernel bytes
 //!     at one or more context depths, using the production route selection.
 //!
-//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy] [depth]`
+//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy|iq-repack-stage|iq-repack-ab] [depth]`
 
 #[cfg(not(feature = "perf-ablations"))]
 fn main() {
@@ -40,6 +40,7 @@ mod probe {
             GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch, Glm5NextCapturedRows, Glm5NextExpertRoute,
             Glm5NextRowBank, Glm5NextRowBankPlan, Glm5NextSession, Glm5NextSnapshot,
             Glm5NextStageReport, Glm5NextWeights, set_expert_packet_max_rows, set_expert_route,
+            with_iq_repack_prefill,
         },
         metal::*,
         tokenizer::Tokenizer,
@@ -194,6 +195,173 @@ mod probe {
         }
         anyhow::ensure!(session.position() == depth, "prefix position mismatch");
         Ok(session)
+    }
+
+    fn iq_repack_three_session_gate(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+    ) -> anyhow::Result<u64> {
+        let ledger = Glm5NextSession::plan_memory(ctx, weights, CAPACITY, PREFILL_ROWS)?;
+        let one = ledger.peak_bytes().saturating_sub(weights.retained_bytes);
+        let three = one
+            .checked_mul(3)
+            .ok_or_else(|| anyhow::anyhow!("three-session buffer estimate overflow"))?;
+        let admission = evaluate_metal_memory_admission(three, 0, ctx.memory_signals(), true);
+        emit(json!({
+            "kind": "iq_repack_three_session_memory",
+            "retained_and_repacked_weight_bytes": weights.retained_bytes,
+            "repacked_weight_bytes": weights.repacked_bytes,
+            "one_session_buffer_bytes": one,
+            "three_session_buffer_bytes": three,
+            "admitted": admission.is_admitted(),
+            "reason": format!("{:?}", admission.reason),
+            "pressure": pressure(), "loadavg": loadavg(),
+        }));
+        anyhow::ensure!(
+            admission.is_admitted(),
+            "three-session repack memory gate failed: {:?}",
+            admission.reason
+        );
+        Ok(three)
+    }
+
+    fn iq_repack_stage(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        ids: &[u32],
+        depth: usize,
+        capacity: usize,
+    ) -> anyhow::Result<()> {
+        const WIDTH: usize = 2048;
+        iq_repack_three_session_gate(ctx, weights)?;
+        let mut session =
+            with_iq_repack_prefill(false, || new_session(ctx, weights, ids, depth, capacity))?;
+        let snapshot = session.capture_snapshot()?;
+        let tokens = &ids[depth..depth + WIDTH];
+        let mut stages: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+        let mut walls: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+        for enabled in [false, true] {
+            with_iq_repack_prefill(enabled, || -> anyhow::Result<()> {
+                session.restore_snapshot(&snapshot)?;
+                let logits = session.prefill_packed(ctx, tokens)?;
+                anyhow::ensure!(
+                    logits.iter().all(|v| v.is_finite()),
+                    "non-finite repack warm logits"
+                );
+                Ok(())
+            })?;
+        }
+        for order in [[0usize, 1usize], [1, 0], [0, 1]] {
+            for arm in order {
+                let enabled = arm == 1;
+                with_iq_repack_prefill(enabled, || -> anyhow::Result<()> {
+                    session.restore_snapshot(&snapshot)?;
+                    let start = Instant::now();
+                    let (logits, report) = session.prefill_chunk_stage_profiled(ctx, tokens)?;
+                    walls[arm].push(start.elapsed().as_secs_f64() * 1e3);
+                    anyhow::ensure!(
+                        logits.iter().all(|v| v.is_finite()),
+                        "non-finite repack stage logits"
+                    );
+                    stages[arm].push(
+                        stage_totals(&report)
+                            .get("routed_experts")
+                            .copied()
+                            .ok_or_else(|| anyhow::anyhow!("missing routed-expert span"))?,
+                    );
+                    Ok(())
+                })?;
+            }
+        }
+        let baseline_ms = median(stages[0].clone());
+        let repacked_ms = median(stages[1].clone());
+        emit(json!({
+            "kind": "iq_repack_stage", "depth": depth, "width": WIDTH,
+            "arms": ["gguf", "aligned_repack"],
+            "repacked_weight_bytes": weights.repacked_bytes,
+            "routed_experts_stage_ms": [baseline_ms, repacked_ms],
+            "routed_experts_stage_samples_ms": stages,
+            "stage_speedup": baseline_ms / repacked_ms,
+            "stage_profile_wall_ms": [median(walls[0].clone()), median(walls[1].clone())],
+            "stage_profile_wall_samples_ms": walls,
+            "pressure": pressure(), "loadavg": loadavg(),
+        }));
+        Ok(())
+    }
+
+    fn iq_repack_ab(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        ids: &[u32],
+        depth: usize,
+        capacity: usize,
+    ) -> anyhow::Result<()> {
+        const WIDTH: usize = 2048;
+        let mut session =
+            with_iq_repack_prefill(false, || new_session(ctx, weights, ids, depth, capacity))?;
+        let snapshot = session.capture_snapshot()?;
+        let tokens = &ids[depth..depth + WIDTH];
+        for enabled in [false, true] {
+            with_iq_repack_prefill(enabled, || -> anyhow::Result<()> {
+                session.restore_snapshot(&snapshot)?;
+                let logits = session.prefill_packed(ctx, tokens)?;
+                anyhow::ensure!(
+                    logits.iter().all(|v| v.is_finite()),
+                    "non-finite repack A/B warm logits"
+                );
+                Ok(())
+            })?;
+        }
+        let mut walls = [Vec::new(), Vec::new()];
+        let mut final_logits: [Option<Vec<f32>>; 2] = [None, None];
+        let mut final_states: [Option<Glm5NextSnapshot>; 2] = [None, None];
+        let mut final_routes: [Option<Vec<(usize, Vec<i32>)>>; 2] = [None, None];
+        for (pair, order) in [[0usize, 1usize], [1, 0], [0, 1]].into_iter().enumerate() {
+            for arm in order {
+                let enabled = arm == 1;
+                with_iq_repack_prefill(enabled, || -> anyhow::Result<()> {
+                    session.restore_snapshot(&snapshot)?;
+                    let start = Instant::now();
+                    let logits = session.prefill_packed(ctx, tokens)?;
+                    walls[arm].push(start.elapsed().as_secs_f64() * 1e3);
+                    anyhow::ensure!(
+                        logits.iter().all(|v| v.is_finite()),
+                        "non-finite repack A/B logits"
+                    );
+                    if pair == 2 {
+                        final_logits[arm] = Some(logits);
+                        final_states[arm] = Some(session.capture_snapshot()?);
+                        final_routes[arm] = Some(session.perf_packed_route_ids(WIDTH)?);
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        let baseline = final_logits[0].as_ref().expect("baseline logits");
+        let repacked = final_logits[1].as_ref().expect("repacked logits");
+        let logits_bitwise_equal = baseline.len() == repacked.len()
+            && baseline
+                .iter()
+                .zip(repacked)
+                .all(|(a, b)| a.to_bits() == b.to_bits());
+        let state_bitwise_equal = final_states[0]
+            .as_ref()
+            .expect("baseline state")
+            .same_state(final_states[1].as_ref().expect("repacked state"));
+        let routes_equal = final_routes[0] == final_routes[1];
+        let pair_speedups: Vec<f64> = (0..3).map(|i| walls[0][i] / walls[1][i]).collect();
+        emit(json!({
+            "kind": "iq_repack_ab", "depth": depth, "width": WIDTH,
+            "arms": ["gguf", "aligned_repack"],
+            "wall_samples_ms": walls,
+            "pair_speedups": pair_speedups,
+            "median_speedup": median(walls[0].clone()) / median(walls[1].clone()),
+            "logits_bitwise_equal": logits_bitwise_equal,
+            "persistent_state_bitwise_equal": state_bitwise_equal,
+            "route_ids_equal": routes_equal,
+            "pressure": pressure(), "loadavg": loadavg(),
+        }));
+        Ok(())
     }
 
     fn census(
@@ -1349,7 +1517,7 @@ mod probe {
         let args: Vec<String> = std::env::args().collect();
         let corpus = args.get(1).ok_or_else(|| {
             anyhow::anyhow!(
-                "usage: glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality] [depth]"
+                "usage: glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy|iq-repack-stage|iq-repack-ab] [depth]"
             )
         })?;
         let mode = args.get(2).map(String::as_str).unwrap_or("all");
@@ -1374,7 +1542,15 @@ mod probe {
         anyhow::ensure!(
             matches!(
                 mode,
-                "all" | "census" | "batch" | "threshold" | "routes" | "route-quality" | "occupancy"
+                "all"
+                    | "census"
+                    | "batch"
+                    | "threshold"
+                    | "routes"
+                    | "route-quality"
+                    | "occupancy"
+                    | "iq-repack-stage"
+                    | "iq-repack-ab"
             ),
             "unknown mode {mode}"
         );
@@ -1391,7 +1567,9 @@ mod probe {
         } else {
             CAPACITY
         };
-        let needed_width = if mode == "routes" || mode == "occupancy" {
+        let needed_width = if matches!(mode, "iq-repack-stage" | "iq-repack-ab") {
+            2048
+        } else if mode == "routes" || mode == "occupancy" {
             *route_widths().iter().max().expect("route widths")
         } else if mode == "route-quality" {
             *quality_widths.iter().max().expect("quality widths")
@@ -1436,6 +1614,8 @@ mod probe {
             "route_widths": if matches!(mode, "routes" | "occupancy") { Some(route_widths()) } else { None },
             "quality_widths": if mode == "route-quality" { Some(quality_widths) } else { None },
             "corpus_tokens": ids.len(), "device": ctx.device_facts(),
+            "retained_weight_bytes": weights.retained_bytes,
+            "repacked_weight_bytes": weights.repacked_bytes,
             "pressure": pressure(), "loadavg": loadavg(),
         }));
 
@@ -1456,6 +1636,12 @@ mod probe {
         }
         if mode == "occupancy" {
             occupancy(&ctx, &weights, &ids, &occupancy_depths, capacity)?;
+        }
+        if mode == "iq-repack-stage" {
+            iq_repack_stage(&ctx, &weights, &ids, depth, capacity)?;
+        }
+        if mode == "iq-repack-ab" {
+            iq_repack_ab(&ctx, &weights, &ids, depth, capacity)?;
         }
         emit(json!({
             "kind": "done", "pressure": pressure(), "loadavg": loadavg(),

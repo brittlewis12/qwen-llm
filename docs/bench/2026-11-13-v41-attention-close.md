@@ -62,3 +62,37 @@ and expert input plus v41_sorted_pack~71/34ms GPU (4.2% of chunk GPU); three
 apparently duplicated attention_index_heads_rows_mma append dispatches~7.5ms,
 0.68%, same inputs and no intervening write. Wide PV already covers PV to
 normalization. Audit reference: perf/waste-audit:docs/bench/2026-11-13-waste-audit.md.
+
+## Rebuild and bitwise witnesses
+
+Source: `67b3ebaf44ceebdd1b98c914f3730e12da810de0`. Builds use the original iter, release and test
+profiles at the original worktree and target paths. Cargo commands run through
+`nice -n 10`; the immediate launcher samples are before `nice` exec, so their
+recorded zero does not establish the Cargo process niceness. Both GPU fixture
+processes were independently checked at nice 0. Both passed with required Metal
+and `MTL_DEBUG_LAYER=1`, including all 15 wide-PV exactness markers.
+
+The following SHA-256 values record every executable generation; the prior
+rebuild was stopped on a literal-hash check before the lead clarified the pin.
+
+| Artifact | Original | Previous rebuild | Current archived |
+|---|---|---|---|
+| iter | `19d9adf78d3a53f7f8d209386a1c06e0d4da10162524cdcba123cabfc1facaef` | `1fa66184f9a13bde213e09ee2f459e4268a3bb1649790132a3a89b05ee9f7d87` | `a896361f30248b7e6ef0f6848c85cb5e90abef6bd2b056ef61e454ee803388b6` |
+| release | `5c538677b90c074f36c40ec44b9616942e71ed392ff3368154dbb72a153d575f` | `78131445f024043993933239282ca69adafb105a332eafbb8a1982a49db84d4a` | `fce29b316a826b22ddd5649e84b020bdbf40e81f9b8137145617c0b79859797c` |
+| test | `a83fa4a6639aeb0d8579f1cdc8413e22ef8d9a77152aec61fb45d8e850ddfc10` | `b253930bc372e38790453ac06b861983234c51d695c7f36928d1b41cbe7f14c6` | `e86a0ed37aed6f82e6d88378b9ca10995568a3a4b28c901bfd9d9871aa5cced6` |
+| tokenizer | `eb94be08eb27fb5dfb0feaa423c83f958323970686e946b9f99e752fd7fc000e` | `eb94be08eb27fb5dfb0feaa423c83f958323970686e946b9f99e752fd7fc000e` | `eb94be08eb27fb5dfb0feaa423c83f958323970686e946b9f99e752fd7fc000e` |
+
+All three profiles have the same metallib hashes, identical to the original:
+
+| Metallib | SHA-256 |
+|---|---|
+| kernels_tensor.metallib | `43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c` |
+| kernels.metallib | `4c006656e021a51266a79cfcea38a97c36fac9b5c08b5ad5ccd55e6e8bc15e15` |
+| kernels_research.metallib | `be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f` |
+
+The archived binaries are under
+`metagross:~/qwen-runs/2026-11-12-v41-prefill/attention-close/pins/`.
+The full manifest is `build-functional-done.json` in that run directory.
+A missing harness-bundle path stopped the first controller before any model
+load. The transferred source bundle was linked to that path and scheduling
+restarted without repeating any measurements.

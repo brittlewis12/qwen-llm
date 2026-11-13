@@ -40,3 +40,24 @@ three pairs, and no material root or aggregate latency regression. Report
 each order separately and all disk bytes; a failed gate removes the short
 candidate. Optional wide-PV served-root recheck only if this finishes within
 ~90 GPU minutes; it is evidence only and cannot promote in this stage.
+
+## Rebased build and nice0 deep gate
+
+Source `4ba3c377b` based on rewritten main `56a1e8fe5`. Full contracts pass.
+Release SHA256 `94cadc3065c78572ed92cd396d800e22b7efb4035f28c649fa6b8143f5dc370c`;
+iter `524444e298fd63c481cfa3ea29e9a208df884d5ba4e218d0a3c31aa38ad2cf42`.
+Builds nice10; native children record nice0. Both arms share one iter binary,
+with one declared warmup plus three interleaved retained pairs.
+
+| Rows at80K | Baseline ms | Candidate ms | Ratio | Positive pairs |
+| --- | ---: | ---: | ---: | ---: |
+| 150 | 389.204 | 381.099 | 1.02127x | 3/3 |
+| 256 | 503.816 | 490.679 | 1.02677x | 3/3 |
+| 127 inactive | 383.647 | 381.334 | 1.00607x | 2/3 |
+| 512 inactive | 649.756 | 649.588 | 1.00026x | 2/3 |
+| 1024 inactive | 1012.154 | 1012.723 | 0.99944x | 2/3 |
+
+All8 signatures per cell are bitwise; all are pressure0. No speedup claim for
+inactive controls. Per-pair times and raw hashes are retained in
+`2026-11-12-v41-prefill/data/bounded-short-deep-nice0-summary.json`.
+Root49152/49509 and purged serve gates remain pending. No default promotion.

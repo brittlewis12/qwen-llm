@@ -1,0 +1,197 @@
+[
+  {
+    "source": "bounded-short-deep-nice0-81920-150-native.jsonl",
+    "sha256": "dbd8b6751b2e2ea32ea8c82ded1bc42a012c0b3a1342569a99a5e01669b97408",
+    "depth": 81920,
+    "rows": 150,
+    "candidate": "masked-reindex-short",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 388.85362499999997,
+        "candidate_ms": 381.21250000000003,
+        "ratio": 1.0200442666491785
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 389.83516699999996,
+        "candidate_ms": 381.0655,
+        "ratio": 1.0230135422912858
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 388.923,
+        "candidate_ms": 381.01775,
+        "ratio": 1.0207477210707376
+      }
+    ],
+    "baseline_mean_ms": 389.2039306666666,
+    "candidate_mean_ms": 381.09858333333335,
+    "mean_ratio": 1.0212683743467077,
+    "geometric_pair_ratio": 1.0212677245499227,
+    "positive_pairs": 3,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 2.1371526666666667,
+    "exposed_engram_prepare_and_encode_candidate_ms": 2.4573753333333332,
+    "exposed_engram_prepare_and_encode_ratio": 0.8696891507280261
+  },
+  {
+    "source": "bounded-short-deep-nice0-81920-256-native.jsonl",
+    "sha256": "f41b446ec996d17136b9595f98f942b91e7391e12c5b993fa9b854163cac2f36",
+    "depth": 81920,
+    "rows": 256,
+    "candidate": "masked-reindex-short",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 502.26099999999997,
+        "candidate_ms": 496.831583,
+        "ratio": 1.0109280834507655
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 504.25104200000004,
+        "candidate_ms": 485.846875,
+        "ratio": 1.0378805914929472
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 504.93683300000004,
+        "candidate_ms": 489.358042,
+        "ratio": 1.0318351588467407
+      }
+    ],
+    "baseline_mean_ms": 503.8162916666667,
+    "candidate_mean_ms": 490.67883333333333,
+    "mean_ratio": 1.0267740473826568,
+    "geometric_pair_ratio": 1.026816072598753,
+    "positive_pairs": 3,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 3.4069863333333332,
+    "exposed_engram_prepare_and_encode_candidate_ms": 3.9204163333333333,
+    "exposed_engram_prepare_and_encode_ratio": 0.8690368684482405
+  },
+  {
+    "source": "bounded-short-deep-nice0-81920-127-native.jsonl",
+    "sha256": "c14d3a1ca2eb685c4638329f316cf2d6fae15ddd091ec26857cfc373eff67174",
+    "depth": 81920,
+    "rows": 127,
+    "candidate": "masked-reindex-short",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 385.81475,
+        "candidate_ms": 385.247208,
+        "ratio": 1.0014731891321065
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 379.427375,
+        "candidate_ms": 379.58387500000003,
+        "ratio": 0.9995877064061268
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 385.69966700000003,
+        "candidate_ms": 379.171583,
+        "ratio": 1.0172167016007632
+      }
+    ],
+    "baseline_mean_ms": 383.647264,
+    "candidate_mean_ms": 381.334222,
+    "mean_ratio": 1.0060656554448975,
+    "geometric_pair_ratio": 1.0060615975999376,
+    "positive_pairs": 2,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 2.223792,
+    "exposed_engram_prepare_and_encode_candidate_ms": 1.945375,
+    "exposed_engram_prepare_and_encode_ratio": 1.1431173938186725
+  },
+  {
+    "source": "bounded-short-deep-nice0-81920-512-native.jsonl",
+    "sha256": "aeb65689d5d25eb47e1589a37f560aeb0b23fd3290f7f595ba78dc8d61c339dd",
+    "depth": 81920,
+    "rows": 512,
+    "candidate": "masked-reindex-short",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 645.704125,
+        "candidate_ms": 644.222542,
+        "ratio": 1.0022997999967533
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 647.464041,
+        "candidate_ms": 654.683,
+        "ratio": 0.9889733519886723
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 656.101083,
+        "candidate_ms": 649.857625,
+        "ratio": 1.009607424395459
+      }
+    ],
+    "baseline_mean_ms": 649.7564163333333,
+    "candidate_mean_ms": 649.5877223333333,
+    "mean_ratio": 1.000259693947715,
+    "geometric_pair_ratio": 1.000256977666096,
+    "positive_pairs": 2,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 1.4726113333333333,
+    "exposed_engram_prepare_and_encode_candidate_ms": 1.4298046666666666,
+    "exposed_engram_prepare_and_encode_ratio": 1.0299388214800436
+  },
+  {
+    "source": "bounded-short-deep-nice0-81920-1024-native.jsonl",
+    "sha256": "c79a9b5555f5fbb273f3e43ff69f41fc74fed78e203bf7241aacc61d152b94aa",
+    "depth": 81920,
+    "rows": 1024,
+    "candidate": "masked-reindex-short",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 1012.383958,
+        "candidate_ms": 1012.31225,
+        "ratio": 1.00007083585129
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 1006.321583,
+        "candidate_ms": 1012.849833,
+        "ratio": 0.9935545726648701
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 1017.7556249999999,
+        "candidate_ms": 1013.0077909999999,
+        "ratio": 1.0046868681980354
+      }
+    ],
+    "baseline_mean_ms": 1012.153722,
+    "candidate_mean_ms": 1012.7232913333332,
+    "mean_ratio": 0.9994375864185139,
+    "geometric_pair_ratio": 0.9994269854293145,
+    "positive_pairs": 2,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 1.6226663333333333,
+    "exposed_engram_prepare_and_encode_candidate_ms": 1.6417496666666667,
+    "exposed_engram_prepare_and_encode_ratio": 0.988376222197091
+  }
+]

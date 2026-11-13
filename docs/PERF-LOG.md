@@ -46,6 +46,18 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   fold **678.057/735.361** vs split **788.930/799.782 ms**. One call instead
   of two; **86.8/87.6 ms** median wall saved. Witness only. Raw runs in
   `$HOME/qwen-runs/2026-11-13-fold-band-landing/`.
+## 2026-11-13 - V4.1 Short Index: Rebased Bounded Nice0 Gate
+
+- Rebased onto rewritten main `56a1e8fe5`; landed MID preserved. Cooperative
+  prototype deferred/removed. Priming superseded by targeted Engram purge.
+- Same rebuilt iter `524444e298fd`, nice0/pressure0:150@80K
+  **389.204 -> 381.099 ms,1.02127x**;256 **503.816 -> 490.679 ms,1.02677x**,
+  both3/3 positive. All8 signatures in all5 deep target/control cells bitwise.
+- Inactive127/512/1024 means1.00607/1.00026/.99944; no benefit claim.
+  Root49152/49509 and three purged nice0 serve pairs pending. Default off.
+- Full contracts pass source `4ba3c377b`; release `94cadc3065c7` built.
+  [Bounded protocol and evidence](bench/2026-11-13-v41-short-index-bounded.md).
+
 ## 2026-11-13 - V4.1 Short Index: Native 150/256-Row Walls Pass
 
 - Same `iter` `d207776beaa5`, NI10/pressure0, fixed common flags. 150@80K

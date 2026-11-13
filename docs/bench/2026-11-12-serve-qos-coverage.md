@@ -190,5 +190,4 @@ burst scope.
 - Builds and every model load ran under
   `QWEN_METAL_LEASE_WAIT=1 scripts/bench/with-metal-lease`; no lease was held
   longer than one arm.
-- The aven note for `SRV-2K0Y` could not be posted from this session because no
-  Aven connector is available; the result is recorded here and in PERF-LOG.
+- The aven note on `SRV-2K0Y` is `B4DV97X43WQZEEPE`.

@@ -197,9 +197,8 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   no GLM throughput claim. Flash-Next uses the same driver/serial/DFlash
   scopes but was not separately gated.
 - **Records:** `docs/bench/2026-11-12-serve-qos-coverage.md`; raw
-  `metagross:~/qwen-runs/2026-11-12-serve-qos/`. No roadmap change. The aven
-  note for `SRV-2K0Y` could not be posted because this session has no Aven
-  connector.
+  `metagross:~/qwen-runs/2026-11-12-serve-qos/`. No roadmap change. Aven note
+  on `SRV-2K0Y`: `B4DV97X43WQZEEPE`.
 
 ## 2026-11-12 - V4.1 Engram Admission Prefetch: I/O Real, Stall Not; Deleted
 

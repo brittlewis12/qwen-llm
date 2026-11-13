@@ -70,7 +70,8 @@ def main():
     p.add_argument("--engram",type=Path,required=True)
     p.add_argument("--tag",required=True);p.add_argument("--order",choices=("ab","ba"),required=True)
     p.add_argument("--port",type=int,default=19973);p.add_argument("--seconds",type=int,default=120)
-    p.add_argument("--warm-reply-tokens",type=int,default=8)
+    p.add_argument("--warm-reply-tokens",type=int,default=32)
+    p.add_argument("--sampling",choices=("agent","greedy"),default="greedy")
     a=p.parse_args();out=a.output.resolve();out.mkdir(parents=True,exist_ok=True)
     fd=int(os.environ["QWEN_METAL_LEASE_FD"])
     deadline=time.monotonic()+800
@@ -78,7 +79,7 @@ def main():
     subprocess.run(["python3","scripts/bench/serve_realistic.py","plan","--family","v41",
         "--seconds",str(a.seconds),"--seed","20261112","--out",str(plan)],check=True,timeout=10)
     sha=hashlib.sha256(a.binary.read_bytes()).hexdigest()
-    result=dict(binary_sha256=sha,flag=a.flag,order=a.order,arms=[])
+    result=dict(binary_sha256=sha,flag=a.flag,order=a.order,sampling=a.sampling,arms=[])
     for arm in a.order:
         processes=resident_check()
         (out/f"{a.tag}-{arm}-processes.txt").write_text(processes)
@@ -92,11 +93,14 @@ def main():
             "--model",str(a.model),"--corpus",str(a.corpus),"--plan",str(plan),"--out",str(dest),
             "--agents","3","--arm","default","--warm-tokens","49152","--context","196608",
             "--warm-reply-tokens",str(a.warm_reply_tokens),
-            "--cool","0","--ramp","15","--timeout","650","--port",str(a.port),
+            "--sampling",a.sampling,"--cool","0","--ramp","15","--timeout","650","--port",str(a.port),
             "--max-thermal-pressure","2","--warmup-max-thermal-pressure","2",
             "--settle-thermal-seconds","60","--settle-max-thermal-pressure","1",
             "--env",a.flag+"="+("0" if arm=="a" else "1"),
-            "--env","QWEN_SERVE_V41_PREFILL_TIMING=1"])
+            "--env","QWEN_SERVE_V41_PREFILL_TIMING=1",
+            "--env","QWEN_SERVE_V41_MAX_ACTIVE=4",
+            "--env","QWEN_SERVE_V41_SAMPLE_WORKERS=3",
+            "--env","QWEN_SERVE_V41_PREFILL_FAIR=1"])
         model_pids,model_niceness=run_harness(command,out/f"{a.tag}-{arm}.log",a.binary,deadline,fd)
         events=[json.loads(line) for line in (out/f"{a.tag}-{arm}.log").read_text().splitlines() if line.startswith("{")]
         roots=[e for e in events if e.get("event")=="turn" and e.get("label","").endswith("-warm")]

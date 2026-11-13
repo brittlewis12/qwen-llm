@@ -20,7 +20,9 @@ measurements and unpurged serve results remain records, not new acceptance.
   the residency study's `msync(MS_SYNC|MS_INVALIDATE)` helper, and require
   zero resident pages afterward. No priming process.
 - Three interleaved pairs, orders AB / BA / AB, same release binary, plan,
-  cap32 and three 48K agents. Keep every matched observation and root.
+  cap32 and three 48K agents. Use greedy sampling in both arms to reduce
+  stochastic history/I/O variation, as in the residency study. Keep every
+  matched observation and root. Fixed active4, sample-workers3, fair1.
 - Record live process disk-read counters, native per-call I/O, load,
   compiler activity and exact model niceness for every arm.
 - Settle <=1 for 60 continuous seconds per load, allow2, abort3.

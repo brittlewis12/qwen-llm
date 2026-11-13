@@ -56,3 +56,25 @@ any served arm, additionally enforce pressure<3 throughout model-free warmup,
 record its maximum and verify nice0 via ps. This guard changes only Python;
 binaries remain pinned to67b3ebaf4 and one SHA per profile. No served result
 has been inspected; thresholds and timing windows remain frozen.
+
+
+## M5 functional witness
+
+Builds67b3ebaf4 complete, same source for each profile. Iter SHA256
+`19d9adf78d3a53f7f8d209386a1c06e0d4da10162524cdcba123cabfc1facaef`;
+release`5c538677b90c074f36c40ec44b9616942e71ed392ff3368154dbb72a153d575f`.
+Python-only warmup guard27caf33d8 is applied after all builds finish.
+Both existing GPU witnesses pass at nice0 with Metal API validation and
+required-Metal mode after60s settled<=1; observed pressure0. Wide PV covers
+15 cases /13,434,880 strictly compared normalized/inverse-RoPE components,
+including production query aliasing and guards. The masked-MMA witness
+checks allowed-score bits, selection, offsets, tails, all/none masks and guards.
+`2026-11-13-v41-attention-bundle/data/functional-summary.json` keeps raw hashes.
+
+Build commands use nice-n10. The manifest's immediate post-Popen `nice` sample
+for build commands occurs before exec of the nice wrapper; it records0 and
+is not a ps witness of cargo. Functional and native children inherit nice0;
+serve models/warmups additionally verify ps-o nice=. No build timing claim.
+The warmup CPU smoke checks both witnesses, inherited lease FD, debug-layer
+removal, nice0 and pressure3 refusal. Archived reducer replay preserves every
+matched row and produces both predeclared append bins. Native cells pending.

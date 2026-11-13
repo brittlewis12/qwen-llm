@@ -1,0 +1,57 @@
+{
+  "source": "67b3ebaf44ceebdd1b98c914f3730e12da810de0",
+  "binaries": {
+    "iter": {
+      "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-bundle/target/iter/examples/v41_prefill_census",
+      "sha256": "19d9adf78d3a53f7f8d209386a1c06e0d4da10162524cdcba123cabfc1facaef"
+    },
+    "release": {
+      "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-bundle/target/release/qwen",
+      "sha256": "5c538677b90c074f36c40ec44b9616942e71ed392ff3368154dbb72a153d575f"
+    },
+    "tokenizer": {
+      "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-bundle/target/release/qwen-tok",
+      "sha256": "eb94be08eb27fb5dfb0feaa423c83f958323970686e946b9f99e752fd7fc000e"
+    },
+    "test": {
+      "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-bundle/target/debug/deps/qwen_llm-87ff9931c93a8d26",
+      "sha256": "a83fa4a6639aeb0d8579f1cdc8413e22ef8d9a77152aec61fb45d8e850ddfc10"
+    }
+  },
+  "functional_tests": [
+    {
+      "name": "functional-0",
+      "pid": 10615,
+      "nice": 0,
+      "command": [
+        "/Users/tito/code/qwen-llm-v41-prefill/target/debug/deps/qwen_llm-87ff9931c93a8d26",
+        "deepseek_v41::forward::attention_gpu::tests::radix_select::masked_mma_index_preserves_allowed_scores_and_selection",
+        "--exact",
+        "--nocapture"
+      ]
+    },
+    {
+      "name": "functional-1",
+      "pid": 10675,
+      "nice": 0,
+      "command": [
+        "/Users/tito/code/qwen-llm-v41-prefill/target/debug/deps/qwen_llm-87ff9931c93a8d26",
+        "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::tensor64_sink_tile_matches_tensor32_sink",
+        "--exact",
+        "--nocapture"
+      ]
+    }
+  ],
+  "thermal_max": 0,
+  "wide_cases": 15,
+  "strict_normalized_and_rope_components": 13434880,
+  "artifacts": {
+    "functional-0.stdout": "7a9d05b8cdc0a3ff428c406cc72283ebd836c17b6993f3a20071f834bd47869a",
+    "build-manifest.json": "2d5c2798963f6f878889843e46f98cfd541dfbcc221342d28e982f0dfc3d674c",
+    "functional-0.stderr": "1b704add57a4fbb9bd34243a161618a0bdb82dbf47f919c907daffee06ad0ca9",
+    "functional-1.stdout": "a86a014f2823a8b6cd11826f43f08b9bc87dce11fd9717b51cb2c499c4e33a2e",
+    "functional-thermal.jsonl": "1f13ddd9c82e2180047bfeb4cad11f73f2f25962b1a3bbb9fef8a888030a88f8",
+    "build-functional-done.json": "e64e9f7a2c72e7fc68fc91cbb5ddc996dfcbeee60253e2e189ab6c3f7e78b132",
+    "functional-1.stderr": "47f8fea3099f3d91b196c7bf593a052386c26a41c1add38e059ae81846a72635"
+  }
+}

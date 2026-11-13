@@ -28,6 +28,21 @@ fn masked_reindex_enabled() -> bool {
     crate::env_flag::read_default_on(MASKED_REINDEX_ENV)
 }
 
+crate::env_flag!(
+    /// Extend exact mask-skipping index scoring to ordinary 512..2048-row appends at 48K..128K on M5 Ultra. Qualified bitwise, native and three-agent serve; 0 restores the 128K eligibility threshold. The existing MASKED_REINDEX rollback still vetoes it.
+    default_on masked_reindex_mid_env,
+    "QWEN_V41_MASKED_REINDEX_MID"
+);
+fn masked_reindex_mid_enabled() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    if let Some(super::super::PrefillExperiment::MaskedReindexMid(enabled)) =
+        super::super::PREFILL_EXPERIMENT.with(|s| s.get())
+    {
+        return enabled;
+    }
+    masked_reindex_mid_env()
+}
+
 #[cfg(test)]
 thread_local! {
     static OLD_HOST_LOOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1347,7 +1362,7 @@ impl Workspace {
                 && c.candidate_block == 8
                 && c.candidate_topk == 2048
                 && c.index_topk == 512
-                && start >= 131_072
+                && (start >= 131_072 || start >= 49_152 && masked_reindex_mid_enabled())
                 && (512..=2048).contains(&rows.rows)
                 && super::index_ilp_supported(c)
                 && super::select_grid_enabled()

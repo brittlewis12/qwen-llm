@@ -34,6 +34,31 @@ pub use preflight::{
 mod planning;
 pub use planning::{PrefillAdmission, PrefillGeometry, PrefillIntent, RequestPlan};
 pub mod profile;
+
+/// Exact prefill dataflow experiments, scoped to the encoding thread.
+/// Prefix construction stays on the production path in the paired probe.
+#[cfg(feature = "perf-ablations")]
+#[derive(Clone, Copy, Debug)]
+pub enum PrefillExperiment {
+    Production,
+    MaskedReindexMid(bool),
+}
+#[cfg(feature = "perf-ablations")]
+thread_local! {
+    static PREFILL_EXPERIMENT: std::cell::Cell<Option<PrefillExperiment>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(feature = "perf-ablations")]
+pub fn with_prefill_experiment<T>(experiment: PrefillExperiment, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<PrefillExperiment>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PREFILL_EXPERIMENT.with(|s| s.set(self.0));
+        }
+    }
+    let _restore = Restore(PREFILL_EXPERIMENT.with(|s| s.replace(Some(experiment))));
+    f()
+}
+
 mod token_map;
 pub use memory::RequestMemoryEstimate;
 pub use token_map::build_compressed_token_map;

@@ -206,6 +206,20 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Raw `metagross:~/qwen-runs/2026-11-12-qos-nice0/`; record
   [bench note](bench/2026-11-12-serve-qos-nice0.md). Aven note on `SRV-2K0Y`:
   `JQFK6MMVXBWTG93N`.
+## 2026-11-13 - GLM Sorted Expert-Major Prefill: Rejected
+
+- Same restored 49K prefix and 2,048 real rows, three interleaved stage
+  profiles per arm: routed experts **721.45 -> 705.56 ms (1.023x)**. The 1.25x
+  isolated-stage gate failed. No paired ordinary-wall or serve run was made.
+- The extended IQ3_S sorted-down kernel passed the existing M5 differential
+  bitwise against the rectangular path. The candidate reused admitted scratch
+  and added no session allocation. Removed the candidate path; V4.1 retains its
+  original dtype selector.
+- Next lever: sparse MLA score and attention spans (377 / 396 ms) from the 49K
+  + 2,048 census; TensorOps feasibility is the next discriminator.
+- **Evidence:** [sorted expert-major rejection](bench/2026-11-13-glm-sorted-expert-major.md),
+  raw runs under `docs/bench/2026-11-13-glm-prefill/sorted-expert-major/`.
+
 ## 2026-11-13 - GLM Q6 F16 Prefill Cache: Rejected
 
 - At the M5 49K + 2,048 screening cell, the F16 cache missed the required

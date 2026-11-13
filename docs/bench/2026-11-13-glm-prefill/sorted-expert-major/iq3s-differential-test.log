@@ -1,0 +1,588 @@
+metal: waiting for process lease /tmp/qwen-llm-501/metal.lock (pid=89850 executable=timeout opencode_session=none started=2026-11-13T11:54:01Z task=v41-prefill expected=12m; held 3m21s)
+   Compiling libc v0.2.186
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling version_check v0.9.5
+   Compiling bitflags v2.11.1
+   Compiling crossbeam-utils v0.8.21
+   Compiling memchr v2.8.0
+   Compiling glob v0.3.4
+   Compiling shlex v2.0.1
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.48
+   Compiling find-msvc-tools v0.1.11
+   Compiling objc2 v0.6.4
+   Compiling prettyplease v0.2.37
+   Compiling rustix v1.1.4
+   Compiling serde_core v1.0.228
+   Compiling once_cell v1.21.4
+   Compiling regex-syntax v0.8.10
+   Compiling anyhow v1.0.102
+   Compiling minimal-lexical v0.2.1
+   Compiling objc2-encode v4.1.0
+   Compiling typenum v1.20.1
+   Compiling zmij v1.0.21
+   Compiling bindgen v0.72.1
+   Compiling autocfg v1.5.0
+   Compiling parking_lot_core v0.9.12
+   Compiling itoa v1.0.18
+   Compiling either v1.15.0
+   Compiling serde v1.0.228
+   Compiling rayon-core v1.13.0
+   Compiling utf8parse v0.2.2
+   Compiling smallvec v1.15.1
+   Compiling libloading v0.8.9
+   Compiling equivalent v1.0.2
+   Compiling anstyle-parse v1.0.0
+   Compiling same-file v1.0.6
+   Compiling generic-array v0.14.7
+   Compiling itertools v0.10.5
+   Compiling anstyle-query v1.1.5
+   Compiling shlex v1.3.0
+   Compiling log v0.4.29
+   Compiling clang-sys v1.8.1
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling rustc-hash v2.1.2
+   Compiling serde_json v1.0.149
+   Compiling hashbrown v0.17.1
+   Compiling colorchoice v1.0.5
+   Compiling anstyle v1.0.14
+   Compiling scopeguard v1.2.0
+   Compiling walkdir v2.5.0
+   Compiling aho-corasick v1.1.4
+   Compiling nom v7.1.3
+   Compiling find_cuda_helper v0.2.0
+   Compiling time-core v0.1.8
+   Compiling num-traits v0.2.19
+   Compiling powerfmt v0.2.0
+   Compiling heck v0.5.0
+   Compiling clap_lex v1.1.0
+   Compiling lock_api v0.4.14
+   Compiling num-conv v0.2.1
+   Compiling litrs v1.0.0
+   Compiling strsim v0.11.1
+   Compiling tracing-core v0.1.36
+   Compiling bit-vec v0.8.0
+   Compiling anstream v1.0.0
+   Compiling time-macros v0.2.27
+   Compiling deranged v0.5.8
+   Compiling ciborium-io v0.2.2
+   Compiling plotters-backend v0.3.7
+   Compiling fastrand v2.4.1
+   Compiling unicode-width v0.2.2
+   Compiling pin-project-lite v0.2.17
+   Compiling fnv v1.0.7
+   Compiling bit-set v0.8.0
+   Compiling cast v0.3.0
+   Compiling colored v3.1.1
+   Compiling unicode-segmentation v1.13.2
+   Compiling lazy_static v1.5.0
+   Compiling clap_builder v4.6.0
+   Compiling thiserror v2.0.18
+   Compiling unicode-general-category v1.1.0
+   Compiling quick-error v1.2.3
+   Compiling crossbeam-epoch v0.9.18
+   Compiling plotters-svg v0.3.7
+   Compiling indexmap v2.14.0
+   Compiling sharded-slab v0.1.7
+   Compiling document-features v0.2.12
+   Compiling crossbeam-queue v0.3.12
+   Compiling crossbeam-channel v0.5.15
+   Compiling jobserver v0.1.34
+   Compiling errno v0.3.14
+   Compiling cpufeatures v0.2.17
+   Compiling regex-automata v0.4.14
+   Compiling rand_core v0.9.5
+   Compiling crossbeam-deque v0.8.6
+   Compiling cc v1.4.4
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling parking_lot v0.12.5
+   Compiling num_threads v0.1.7
+   Compiling wait-timeout v0.2.1
+   Compiling syn v2.0.117
+   Compiling digest v0.10.7
+   Compiling rand v0.9.4
+   Compiling rand_xorshift v0.4.0
+   Compiling is-terminal v0.4.17
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.9
+   Compiling block2 v0.6.2
+   Compiling objc2-core-foundation v0.3.2
+   Compiling dispatch2 v0.3.1
+   Compiling sha2 v0.10.9
+   Compiling tinyvec v1.13.3
+   Compiling arrayvec v0.7.8
+   Compiling anes v0.1.6
+   Compiling plotters v0.3.7
+   Compiling time v0.3.47
+   Compiling constant_time_eq v0.4.2
+   Compiling oorandom v11.1.5
+   Compiling arrayref v0.3.9
+   Compiling nu-ansi-term v0.50.3
+   Compiling unarray v0.1.4
+   Compiling byteorder v1.5.0
+   Compiling crossbeam v0.8.4
+   Compiling memmap2 v0.9.10
+   Compiling cexpr v0.6.0
+   Compiling qwen-llm v0.0.1 (/Users/tito/qwen-runs/2026-11-12-glm-prefill/worktree/crates/qwen-llm)
+   Compiling mach2 v0.6.0
+   Compiling rayon v1.12.0
+   Compiling criterion-plot v0.5.0
+   Compiling unicode-normalization v0.1.25
+   Compiling cmake v0.1.58
+   Compiling blake3 v1.8.5
+   Compiling objc2-foundation v0.3.2
+   Compiling tempfile v3.27.0
+   Compiling crossterm v0.29.0
+   Compiling regex v1.12.3
+   Compiling rusty-fork v0.3.1
+   Compiling simple_logger v5.2.0
+   Compiling comfy-table v7.2.2
+   Compiling zerocopy-derive v0.8.48
+   Compiling bytemuck_derive v1.10.2
+   Compiling serde_derive v1.0.228
+   Compiling clap_derive v4.6.1
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v2.0.18
+   Compiling matchers v0.2.0
+   Compiling fancy-regex v0.14.0
+   Compiling bytemuck v1.25.0
+   Compiling tracing v0.1.44
+   Compiling tracing-subscriber v0.3.23
+   Compiling clap v4.6.1
+   Compiling tinytemplate v1.2.1
+   Compiling gguf-rs v0.2.0 (https://github.com/brittlewis12/gguf.git?rev=525d582a7086a7b28be9e3a05aeffb8beb0fe9d3#525d582a)
+   Compiling llama-cpp-sys-2 v0.1.139 (https://github.com/brittlewis12/llama-cpp-rs.git?rev=4460cc7197c1abbe40a07ab2a1914b6f5da37206#4460cc71)
+   Compiling half v2.7.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.9.0
+   Compiling ciborium-ll v0.2.2
+   Compiling proptest v1.11.0
+   Compiling ciborium v0.2.2
+   Compiling criterion v0.5.1
+   Compiling objc2-metal v0.3.2
+   Compiling objc2-metal-performance-shaders v0.3.2
+warning: qwen-llm@0.0.1: Metal 4.1 compiler probe passed; no 4.1-only tensor sources are present
+warning: unused imports: `encode_attn_decode_v4_f32`, `encode_topk_logits_softmax_dot_sigmoid_f32`, `encode_topk_logits_softmax_f32`, and `encode_topk_logits_softmax_parallel_f32`
+  --> crates/qwen-llm/src/metal_forward/mod.rs:39:35
+   |
+39 |     encode_attn_decode_f16kv_f32, encode_attn_decode_v4_f32, encode_axpy_scalar_f32,
+   |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+62 |     encode_topk_logits_softmax_dot_sigmoid_f32, encode_topk_logits_softmax_dot_sigmoid_f32_status,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+63 |     encode_topk_logits_softmax_f32, encode_topk_logits_softmax_f32_status,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+64 |     encode_topk_logits_softmax_parallel_f32, encode_topk_logits_softmax_parallel_f32_status,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `encode_topk_logits_softmax_dot_sigmoid_f32`
+  --> crates/qwen-llm/src/metal_mtp.rs:40:30
+   |
+40 |     encode_split_q_gate_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
+   |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `encode_topk_logits_softmax_f32`
+  --> crates/qwen-llm/src/qwen4exp_moe.rs:22:63
+   |
+22 |     encode_topk_logits_softmax_dot_sigmoid_packed_f32_status, encode_topk_logits_softmax_f32,
+   |                                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated struct `libc::mach_timebase_info`: Use the `mach2` crate instead
+  --> crates/qwen-llm/src/metal/timeline.rs:71:30
+   |
+71 |         let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
+   |                              ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated function `libc::mach_timebase_info`: Use the `mach2` crate instead
+  --> crates/qwen-llm/src/metal/timeline.rs:73:24
+   |
+73 |         unsafe { libc::mach_timebase_info(&mut info) };
+   |                        ^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `libc::mach_absolute_time`: Use the `mach2` crate instead
+  --> crates/qwen-llm/src/metal/timeline.rs:77:20
+   |
+77 |     unsafe { libc::mach_absolute_time() as f64 * scale }
+   |                    ^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated field `libc::mach_timebase_info::numer`: Use the `mach2` crate instead
+  --> crates/qwen-llm/src/metal/timeline.rs:71:51
+   |
+71 |         let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
+   |                                                   ^^^^^^^^
+
+warning: use of deprecated field `libc::mach_timebase_info::denom`: Use the `mach2` crate instead
+  --> crates/qwen-llm/src/metal/timeline.rs:71:61
+   |
+71 |         let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
+   |                                                             ^^^^^^^^
+
+warning: use of deprecated field `libc::mach_timebase_info::numer`: Use the `mach2` crate instead
+  --> crates/qwen-llm/src/metal/timeline.rs:74:19
+   |
+74 |         f64::from(info.numer) / f64::from(info.denom) / 1e9
+   |                   ^^^^^^^^^^
+
+warning: use of deprecated field `libc::mach_timebase_info::denom`: Use the `mach2` crate instead
+  --> crates/qwen-llm/src/metal/timeline.rs:74:43
+   |
+74 |         f64::from(info.numer) / f64::from(info.denom) / 1e9
+   |                                           ^^^^^^^^^^
+
+warning: unreachable statement
+    --> crates/qwen-llm/src/metal/expert_native.rs:1148:9
+     |
+1129 | /         return super::decode_bounds::expert(
+1130 | |             ctx,
+1131 | |             enc,
+1132 | |             super::decode_bounds::Expert {
+...    |
+1144 | |             original,
+1145 | |         );
+     | |_________- any code following this expression is unreachable
+...
+1148 |           return Ok(());
+     |           ^^^^^^^^^^^^^^ unreachable statement
+     |
+     = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `ctx`
+   --> crates/qwen-llm/src/deepseek_v41/forward/ffn_gpu.rs:809:9
+    |
+809 |         ctx: &MetalContext,
+    |         ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced.rs:912:9
+    |
+912 |         mut chunk: EncoderChunk,
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `h`
+    --> crates/qwen-llm/src/glm5_next_metal.rs:1723:13
+     |
+1723 |         let h = c.hidden_size as usize;
+     |             ^ help: if this is intentional, prefix it with an underscore: `_h`
+
+warning: unused variable: `count`
+   --> crates/qwen-llm/src/glm5_next_metal/batch.rs:431:13
+    |
+431 |         let count = sessions.len();
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_count`
+
+warning: variable does not need to be mutable
+   --> crates/qwen-llm/src/glm5_next_metal/batch.rs:690:17
+    |
+690 |             let mut next = next.expect("a continuing burst prepared a frame");
+    |                 ----^^^^
+    |                 |
+    |                 help: remove this `mut`
+
+warning: unused variable: `name`
+   --> crates/qwen-llm/src/metal/token_feedback.rs:706:14
+    |
+706 |         for (name, logits) in &distributions {
+    |              ^^^^ help: if this is intentional, prefix it with an underscore: `_name`
+
+warning: unused variable: `preset`
+   --> crates/qwen-llm/src/metal/token_feedback.rs:714:18
+    |
+714 |             for (preset, config) in presets {
+    |                  ^^^^^^ help: if this is intentional, prefix it with an underscore: `_preset`
+
+warning: unused variable: `online`
+    --> crates/qwen-llm/src/metal/dflash.rs:1368:22
+     |
+1368 |                 for (online, split) in [(false, false), (true, false), (false, true)] {
+     |                      ^^^^^^ help: if this is intentional, prefix it with an underscore: `_online`
+
+warning: unused variable: `name`
+   --> crates/qwen-llm/src/metal/indexer_pool.rs:166:17
+    |
+166 |         for (t, name) in [(*pending, "pending"), (*pooled, "pooled")] {
+    |                 ^^^^ help: if this is intentional, prefix it with an underscore: `_name`
+
+warning: unused variable: `line`
+   --> crates/qwen-llm/src/metal/moe_grouped_generic/tests/staging_ownership.rs:197:17
+    |
+197 |             let line = source
+    |                 ^^^^ help: if this is intentional, prefix it with an underscore: `_line`
+
+warning: unreachable pattern
+   --> crates/qwen-llm/src/metal/fn_batch_probe.rs:151:13
+    |
+ 94 |             "hc" => name.contains("hc_"),
+    |             ---- matches all the relevant values
+...
+151 |             "hc" => name.contains("hc_") || name.contains("mhc"),
+    |             ^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `weights`
+   --> crates/qwen-llm/src/qwen4exp_topk.rs:324:27
+    |
+324 |                 let (ids, weights, status) = run(&ctx, kernel, &logits);
+    |                           ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_weights`
+
+warning: type `metal::causal::Node` is more private than the item `record_plan`
+   --> crates/qwen-llm/src/metal/causal/graph.rs:144:1
+    |
+144 | pub(crate) fn record_plan(nodes: &[Node], spans: &[Vec<Access>], waves: &[Vec<usize>]) {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `record_plan` is reachable at visibility `pub(in crate::metal)`
+    |
+note: but type `metal::causal::Node` is only usable at visibility `pub(self)`
+   --> crates/qwen-llm/src/metal/causal.rs:72:1
+    |
+ 72 | struct Node {
+    | ^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `metal::causal::Access` is more private than the item `record_plan`
+   --> crates/qwen-llm/src/metal/causal/graph.rs:144:1
+    |
+144 | pub(crate) fn record_plan(nodes: &[Node], spans: &[Vec<Access>], waves: &[Vec<usize>]) {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `record_plan` is reachable at visibility `pub(in crate::metal)`
+    |
+note: but type `metal::causal::Access` is only usable at visibility `pub(self)`
+   --> crates/qwen-llm/src/metal/causal.rs:180:1
+    |
+180 | struct Access {
+    | ^^^^^^^^^^^^^
+
+warning: type `GpuInputs` is more private than the item `encode_gpu`
+   --> crates/qwen-llm/src/qwen4exp_text_session/decode_batch.rs:91:1
+    |
+ 91 | / pub(crate) fn encode_gpu(
+ 92 | |     ctx: &MetalContext,
+ 93 | |     enc: &mut KernelEncoder,
+ 94 | |     feedback: &[&MetalTensor],
+...   |
+102 | |     validate: bool,
+103 | | ) -> Result<(), Qwen4ExpTextSessionError> {
+    | |_________________________________________^ function `encode_gpu` is reachable at visibility `pub(crate)`
+    |
+note: but type `GpuInputs` is only usable at visibility `pub(in crate::qwen4exp_text_session)`
+   --> crates/qwen-llm/src/qwen4exp_text_session/gpu_inputs.rs:42:1
+    |
+ 42 | pub(super) struct GpuInputs {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `sha256_path` is never used
+   --> crates/qwen-llm/src/checkpoint_store.rs:518:8
+    |
+518 |     fn sha256_path(path: &Path) -> String {
+    |        ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `diagnostic_copy` and `encode_diagnostic_copy` are never used
+   --> crates/qwen-llm/src/deepseek_v41/forward/attention_gpu/ced.rs:261:29
+    |
+259 | impl QueryControlView {
+    | --------------------- methods in this implementation
+260 |     #[cfg(test)]
+261 |     pub(in super::super) fn diagnostic_copy(&self, ctx: &MetalContext) -> Result<Self> {
+    |                             ^^^^^^^^^^^^^^^
+...
+269 |     pub(in super::super) fn encode_diagnostic_copy(
+    |                             ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `encode_ced_test_nonfinite` and `retire_ced_group` are never used
+    --> crates/qwen-llm/src/deepseek_v41/forward/attention_gpu/ced.rs:919:29
+     |
+ 893 | impl Workspace {
+     | -------------- methods in this implementation
+...
+ 919 |     pub(in super::super) fn encode_ced_test_nonfinite(
+     |                             ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1015 |     pub(in super::super) fn retire_ced_group(
+     |                             ^^^^^^^^^^^^^^^^
+
+warning: method `encode_rows_with` is never used
+    --> crates/qwen-llm/src/deepseek_v41/forward/ffn_gpu.rs:1064:19
+     |
+ 523 | impl Workspace {
+     | -------------- method in this implementation
+...
+1064 |     pub(super) fn encode_rows_with(
+     |                   ^^^^^^^^^^^^^^^^
+
+warning: method `ced_stream_encoder` is never used
+    --> crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced.rs:1930:29
+     |
+ 582 | impl Workspace {
+     | -------------- method in this implementation
+...
+1930 |     pub(in super::super) fn ced_stream_encoder(
+     |                             ^^^^^^^^^^^^^^^^^^
+
+warning: method `ced_decoder_groups` is never used
+   --> crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches.rs:102:19
+    |
+101 | impl Workspace {
+    | -------------- method in this implementation
+102 |     pub(super) fn ced_decoder_groups(
+    |                   ^^^^^^^^^^^^^^^^^^
+
+warning: constant `CANARY_BITS` is never used
+  --> crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches/tests.rs:96:7
+   |
+96 | const CANARY_BITS: u32 = 0x4b1af03d;
+   |       ^^^^^^^^^^^
+
+warning: function `initialize_status_canaries` is never used
+  --> crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches/tests.rs:98:15
+   |
+98 | pub(super) fn initialize_status_canaries(
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `check_status_canaries` is never used
+   --> crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches/tests.rs:112:15
+    |
+112 | pub(super) fn check_status_canaries(statuses: &[StatusUnit]) -> Result<()> {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `Diagnostics` is never constructed
+   --> crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches/tests.rs:143:19
+    |
+143 | pub(super) struct Diagnostics(
+    |                   ^^^^^^^^^^^
+
+warning: associated items `new`, `fault`, `encode`, and `complete` are never used
+   --> crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches/tests.rs:149:19
+    |
+148 | impl Diagnostics {
+    | ---------------- associated items in this implementation
+149 |     pub(super) fn new(model: &Forward<'_>, storage: &Storage, units: &[Unit]) -> Result<Self> {
+    |                   ^^^
+...
+177 |     pub(super) fn fault(
+    |                   ^^^^^
+...
+232 |     pub(super) fn encode(
+    |                   ^^^^^^
+...
+255 |     pub(super) fn complete(
+    |                   ^^^^^^^^
+
+warning: function `after_copies` is never used
+   --> crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches/tests.rs:288:15
+    |
+288 | pub(super) fn after_copies() {
+    |               ^^^^^^^^^^^^
+
+warning: function `completed_statuses` is never used
+   --> crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches/tests.rs:295:15
+    |
+295 | pub(super) fn completed_statuses(
+    |               ^^^^^^^^^^^^^^^^^^
+
+warning: function `group_retired` is never used
+   --> crates/qwen-llm/src/deepseek_v41/forward/gpu_step/ced/batches/tests.rs:318:15
+    |
+318 | pub(super) fn group_retired(attention: &attention_gpu::Workspace) {
+    |               ^^^^^^^^^^^^^
+
+warning: constant `PACKED_ROUTE_RECORD_WIDTH` is never used
+  --> crates/qwen-llm/src/deepseek_v4_metal/prefill.rs:24:7
+   |
+24 | const PACKED_ROUTE_RECORD_WIDTH: usize = 4;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `PACKET_HALF_INCUMBENT_MAX_ROWS` is never used
+    --> crates/qwen-llm/src/glm5_next_metal/packed.rs:1125:7
+     |
+1125 | const PACKET_HALF_INCUMBENT_MAX_ROWS: usize = 8;
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variant `ConvertedF16` is never constructed
+   --> crates/qwen-llm/src/metal_forward/mod.rs:820:5
+    |
+814 | enum SourceMaterialization {
+    |      --------------------- variant in this enum
+...
+820 |     ConvertedF16,
+    |     ^^^^^^^^^^^^
+    |
+    = note: `SourceMaterialization` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: function `mat_mat_output_product_is_checked_for_every_dtype` is never used
+   --> crates/qwen-llm/src/metal_forward/dispatch.rs:858:4
+    |
+858 | fn mat_mat_output_product_is_checked_for_every_dtype() {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: comparison is useless due to type limits
+    --> crates/qwen-llm/src/glm5_next_metal.rs:2773:13
+     |
+2773 |     assert!(mask <= 255);
+     |             ^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_comparisons)]` on by default
+
+warning: `qwen-llm` (lib test) generated 45 warnings (run `cargo fix --lib -p qwen-llm --tests` to apply 14 suggestions)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 31s
+     Running unittests src/lib.rs (target/debug/deps/qwen_llm-3e7f5c1abd928217)
+
+running 1 test
+test metal::moe_grouped_generic::tests::sorted_experts::sorted_iq_experts_match_rectangular_and_preserve_scratch_guards ... 2026-11-13 07:00:45.779 qwen_llm-3e7f5c1abd928217[6803:187469519] Metal API Validation Enabled
+IQ2_XXS inner: max_abs=0e0, components=66048
+IQ2_XXS / IQ2_XXS down: max_abs=0e0, components=66048
+IQ2_XXS inner: max_abs=0e0, components=66048
+IQ2_XXS / IQ2_XXS down: max_abs=0e0, components=66048
+IQ2_XXS inner: max_abs=0e0, components=66048
+IQ2_XXS / IQ2_XS down: max_abs=0e0, components=66048
+IQ2_XXS inner: max_abs=0e0, components=66048
+IQ2_XXS / IQ2_XS down: max_abs=0e0, components=66048
+IQ2_XS inner: max_abs=0e0, components=66048
+IQ2_XS / IQ2_XS down: max_abs=0e0, components=66048
+IQ2_XS inner: max_abs=0e0, components=66048
+IQ2_XS / IQ2_XS down: max_abs=0e0, components=66048
+IQ2_XS inner: max_abs=0e0, components=66048
+IQ2_XS / IQ2_S down: max_abs=0e0, components=66048
+IQ2_XS inner: max_abs=0e0, components=66048
+IQ2_XS / IQ2_S down: max_abs=0e0, components=66048
+IQ2_S inner: max_abs=0e0, components=66048
+IQ2_S / IQ2_S down: max_abs=0e0, components=66048
+IQ2_S inner: max_abs=0e0, components=66048
+IQ2_S / IQ2_S down: max_abs=0e0, components=66048
+IQ2_S inner: max_abs=0e0, components=66048
+IQ2_S / IQ3_XXS down: max_abs=0e0, components=66048
+IQ2_S inner: max_abs=0e0, components=66048
+IQ2_S / IQ3_XXS down: max_abs=0e0, components=66048
+IQ3_XXS inner: max_abs=0e0, components=66048
+IQ3_XXS / IQ3_XXS down: max_abs=0e0, components=66048
+IQ3_XXS inner: max_abs=0e0, components=66048
+IQ3_XXS / IQ3_XXS down: max_abs=0e0, components=66048
+IQ3_XXS inner: max_abs=0e0, components=66048
+IQ3_XXS / IQ3_S down: max_abs=0e0, components=66048
+IQ3_XXS inner: max_abs=0e0, components=66048
+IQ3_XXS / IQ3_S down: max_abs=0e0, components=66048
+IQ3_S inner: max_abs=0e0, components=66048
+IQ3_S / IQ3_S down: max_abs=0e0, components=66048
+IQ3_S inner: max_abs=0e0, components=66048
+IQ3_S / IQ3_S down: max_abs=0e0, components=66048
+IQ3_S inner: max_abs=0e0, components=66048
+IQ3_S / IQ2_XXS down: max_abs=0e0, components=66048
+IQ3_S inner: max_abs=0e0, components=66048
+IQ3_S / IQ2_XXS down: max_abs=0e0, components=66048
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3176 filtered out; finished in 0.70s
+

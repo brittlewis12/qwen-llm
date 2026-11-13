@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 - Serve QoS Covers Every GPU-Feeding Path; V4.1 +10.7%
+
+- **Shipped `68559c950`, branch `perf/serve-qos-coverage`, M5 Ultra, three-agent
+  48K V4.1 serve, production max-active4 / three sampler workers, release,
+  180 s windows, three interleaved pairs A1 B1 B2 A2 A3 B3.** A = branch point
+  `9c0dc6013`, B = candidate. Each arm settled to pressure<=1 for 60 s inside
+  its lease; pressure 2 was allowed and 3 aborted.
+- **Audit:** on the branch point, V4.1 only guarded the opt-in sliced prefill
+  and cold layered path. Plain prefill, non-layered CED, solo decode,
+  `step_batch` and `step_batch_sampled` fed and waited on the GPU unguarded.
+  The shared GLM/Flash-Next driver guarded decode and advance but not admission
+  or plain prefill; their serial and DFlash paths had no scope.
+- **Fix:** one scope per scheduler round in `backend_v41::scheduler::pump` and
+  `batching::driver::pump`, one per serial request in V4.1
+  `execute_with_engine` and the GLM/Flash-Next `generate` bodies, one per
+  DFlash packet burst, plus the three startup warm-ups. Existing layered/group
+  scopes remain as nested no-ops. Default-on through `QWEN_GPU_THREAD_QOS`;
+  `0` is still the global rollback. Two CPU tests record the thread class
+  inside scripted V4.1 and shared-driver rounds.
+- **V4.1 result:** tok/s 77.86/77.24/82.28 (A) vs 86.29/85.53/91.01 (B).
+  Paired relative mean **+10.72%**, 95% CI **[+10.45%, +10.99%]**, df2;
+  absolute **+8.48 tok/s [7.92, 9.04]**. The interval excludes zero, so the
+  ship gate passes. ITL p99 ratio mean 0.903 (CI [0.699, 1.107]); worst-gap
+  mean -0.071 s (CI [-4.917, +4.774]); append TTFT p95 mean -20.4% with one
+  pair +11.2%. Output coherent in every arm.
+- **GLM check:** same three-pair protocol. tok/s +0.16% / +9.28% / -3.18%,
+  paired mean **+2.09%**, 95% CI **[-13.93%, +18.10%]**; p99 ratio mean 0.938,
+  worst-gap mean -0.066 s. Inconclusive on throughput, slightly better latency;
+  no GLM throughput claim. Flash-Next uses the same driver/serial/DFlash
+  scopes but was not separately gated.
+- **Records:** `docs/bench/2026-11-12-serve-qos-coverage.md`; raw
+  `metagross:~/qwen-runs/2026-11-12-serve-qos/`. No roadmap change. Aven note
+  on `SRV-2K0Y`: `B4DV97X43WQZEEPE`.
+
 ## 2026-11-12 - Serve Standing: Three Agents On Main, Like-For-Like And Sustained
 
 - **Question / builds.** A fresh three-agent standing for all tier-1 families,
@@ -166,40 +200,6 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   767 tokens, 38.35 tok/s, gap p99 245 ms, thermal 1. No serve A/B was needed.
 - Evidence: [adapter policy note](bench/2026-11-12-glm-adapter-policy.md);
   raw data `metagross:~/qwen-runs/2026-11-12-glm-adapter/`.
-## 2026-11-12 - Serve QoS Covers Every GPU-Feeding Path; V4.1 +10.7%
-
-- **Shipped `68559c950`, branch `perf/serve-qos-coverage`, M5 Ultra, three-agent
-  48K V4.1 serve, production max-active4 / three sampler workers, release,
-  180 s windows, three interleaved pairs A1 B1 B2 A2 A3 B3.** A = branch point
-  `9c0dc6013`, B = candidate. Each arm settled to pressure<=1 for 60 s inside
-  its lease; pressure 2 was allowed and 3 aborted.
-- **Audit:** on the branch point, V4.1 only guarded the opt-in sliced prefill
-  and cold layered path. Plain prefill, non-layered CED, solo decode,
-  `step_batch` and `step_batch_sampled` fed and waited on the GPU unguarded.
-  The shared GLM/Flash-Next driver guarded decode and advance but not admission
-  or plain prefill; their serial and DFlash paths had no scope.
-- **Fix:** one scope per scheduler round in `backend_v41::scheduler::pump` and
-  `batching::driver::pump`, one per serial request in V4.1
-  `execute_with_engine` and the GLM/Flash-Next `generate` bodies, one per
-  DFlash packet burst, plus the three startup warm-ups. Existing layered/group
-  scopes remain as nested no-ops. Default-on through `QWEN_GPU_THREAD_QOS`;
-  `0` is still the global rollback. Two CPU tests record the thread class
-  inside scripted V4.1 and shared-driver rounds.
-- **V4.1 result:** tok/s 77.86/77.24/82.28 (A) vs 86.29/85.53/91.01 (B).
-  Paired relative mean **+10.72%**, 95% CI **[+10.45%, +10.99%]**, df2;
-  absolute **+8.48 tok/s [7.92, 9.04]**. The interval excludes zero, so the
-  ship gate passes. ITL p99 ratio mean 0.903 (CI [0.699, 1.107]); worst-gap
-  mean -0.071 s (CI [-4.917, +4.774]); append TTFT p95 mean -20.4% with one
-  pair +11.2%. Output coherent in every arm.
-- **GLM check:** same three-pair protocol. tok/s +0.16% / +9.28% / -3.18%,
-  paired mean **+2.09%**, 95% CI **[-13.93%, +18.10%]**; p99 ratio mean 0.938,
-  worst-gap mean -0.066 s. Inconclusive on throughput, slightly better latency;
-  no GLM throughput claim. Flash-Next uses the same driver/serial/DFlash
-  scopes but was not separately gated.
-- **Records:** `docs/bench/2026-11-12-serve-qos-coverage.md`; raw
-  `metagross:~/qwen-runs/2026-11-12-serve-qos/`. No roadmap change. Aven note
-  on `SRV-2K0Y`: `B4DV97X43WQZEEPE`.
-
 ## 2026-11-12 - V4.1 Engram Admission Prefetch: I/O Real, Stall Not; Deleted
 
 - **Measured `d8602c89`, branch `perf/v41-engram-prefetch`, M5 Ultra, three-agent

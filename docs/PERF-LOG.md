@@ -31,6 +31,19 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw captures and generated tables:
   `metagross:~/qwen-runs/2026-11-12-waste-audit/`. Branch `perf/waste-audit`;
   not merged.
+## 2026-11-13 - V4.1 Attention Finish: Row Cache Composed, Pin Block Remains
+
+- Rebased onto mainc2935fa36 after the independent Engram host row-cache
+  landing. Generated ENV conflicts resolved by regeneration; no attention
+  conflict. Contracts pass2e8efa847, ENV828 knobs, no polarity conflict.
+- Measurement remains pinned to9877b6f25/67b3ebaf4. No original executable
+  archive found in recorded directories; rebuild host SHAs differ despite
+  exact metallibs/tokenizer. Await archive location or pin clarification.
+- No model loaded, no new timings, pair1/prior evidence unchanged. Prepared
+  one-arm and per-run-purge scheduling is committed; no landing recommendation.
+  M5 worktree/target/bundles cleaned and idle controller stopped by exact PID.
+  [Reviewable work and blocker](bench/2026-11-13-v41-attention-finish.md).
+
 ## 2026-11-13 - V4.1 Attention Finish: Stop Pending Original Executables
 
 - No new model run or timing. Exact executable pins cannot currently be

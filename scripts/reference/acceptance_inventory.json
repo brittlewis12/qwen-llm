@@ -3361,6 +3361,41 @@
   },
   {
     "target": "lib",
+    "name": "deepseek_v41::gguf::engram_cache::tests::eviction_stays_within_capacity_and_keeps_remaining_rows_intact",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::engram_cache::tests::hits_return_the_inserted_bytes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::engram_cache::tests::oversized_row_is_not_cached",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::engram_cache::tests::second_chance_retains_a_referenced_row",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::gguf::tests::ple_engram::packed_row_cache_returns_identical_bytes_and_respects_capacity",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Host-only metadata, arithmetic, source contract or synthetic disk fixture; no Metal context."
+  },
+  {
+    "target": "lib",
     "name": "deepseek_v41::gguf::tests::empty_engram_layers_need_no_hash_arrays_or_geometry",
     "class": "cpu",
     "ignored": false,
@@ -6494,8 +6529,7 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Model-free Full and CED cancellation at every layer seam preserves peer lifecycle"
-  }
-,
+  },
   {
     "target": "qwen",
     "name": "serve::backend_v41::scheduler_tests::serve_rounds_hold_user_initiated_qos_for_every_gpu_phase",

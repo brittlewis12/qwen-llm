@@ -20,6 +20,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   fold **678.057/735.361** vs split **788.930/799.782 ms**. One call instead
   of two; **86.8/87.6 ms** median wall saved. Witness only. Raw runs in
   `$HOME/qwen-runs/2026-11-13-fold-band-landing/`.
+
 ## 2026-11-13 - V4.1 Engram Residency: Page Cache Loses the Hot Set; Price a Row Cache
 
 - **Measurement only; no product change.** Off-by-default
@@ -37,6 +38,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `madvise`/wiring negative, **bounded row cache ~4-7%**. Next: prototype a
   2-4 GB F32 (or 0.5-1 GB packed) `(layer,row)` cache and A/B it; do not
   pre-warm or mlock first.
+
 ## 2026-11-13 - V4.1 Engram Row Cache: Default-On, Exact, Native Disk Cut; Serve Inside Host Noise
 
 - Bounded CLOCK cache of packed `(layer,row)` Engram bytes in `DiskEngram`;
@@ -48,9 +50,10 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   physical decode reads **773.7 -> 4.73 MB (-99.4%)** at both depths; all
   endpoint and full-vocabulary hashes identical. Pressure 0-1.
 - Three-agent 48K ABBAAB serve pairs: **+13.38%, -1.44%, +1.75%** tok/s;
-  paired mean **+4.56%**, 95% CI **[-14.81%, +23.93%]**. ITL p99 lower in all
-  three on arms; append TTFT flat; decode disk cut only in one pair because
-  the remaining misses are compulsory and the OS cache already held repeats.
+  paired mean **+4.56%**, 95% CI **[-14.81%, +23.93%]**. ITL p99 lower in
+  2 of 3 pairs (mean 109.8 vs 161.6 ms); append TTFT flat; decode disk cut
+  only in one pair because the remaining misses are compulsory and the OS
+  cache already held repeats.
   Hit rate **69.6%** (6.33M hits / 2.76M misses, 397 MB packed). Every window
   overlapped other lanes' compilers; the CI is the honest serve result.
 - [Details](bench/2026-11-13-v41-engram-row-cache.md); raw
@@ -174,6 +177,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   [census and wide band](bench/2026-11-13-fn-prefill-census/README.md); raw
   `metagross:~/qwen-runs/2026-11-12-fn-prefill/`. No Aven connector was
   available for `SRV-2K0Y`.
+
 ## 2026-11-12 - Serve QoS At Normal Priority: No Throughput Gain, TTFT Stays Lower
 
 - **Question.** The 2026-11-12 coverage gate measured +10.72% V4.1 tok/s, but

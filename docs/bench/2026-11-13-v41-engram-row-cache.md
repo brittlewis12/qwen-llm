@@ -70,7 +70,7 @@ ABBAAB: A1 off, B1 on, B2 on, A2 off, A3 off, B3 on.
 
 Paired relative tok/s: **+13.38%, -1.44%, +1.75%**; mean **+4.56%**, paired
 Student-t 95% CI **[-14.81%, +23.93%]** (df 2). Absolute mean **+3.63 tok/s**,
-CI **[-11.77, +19.04]**. ITL p99 is lower in all three on arms (mean 109.8 vs
+CI **[-11.77, +19.04]**. ITL p99 is lower in 2 of 3 pairs (mean 109.8 vs
 161.6 ms) and append TTFT is flat. Window disk is the sum of
 `process_token_io` + `process_prefill_io` `process_disk_read_bytes` for calls
 that first-token inside the window.

@@ -86,6 +86,10 @@ name = "glm_solo_bounds"
 required-features = ["perf-ablations"]
 
 [[example]]
+name = "glm_q6_probe"
+required-features = ["perf-ablations"]
+
+[[example]]
 name = "dense_band_census"
 required-features = ["perf-ablations"]
 

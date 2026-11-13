@@ -42,7 +42,6 @@ pub mod profile;
 pub enum PrefillExperiment {
     Production,
     MaskedReindexMid(bool),
-    MaskedReindexShort(bool),
 }
 #[cfg(feature = "perf-ablations")]
 thread_local! {

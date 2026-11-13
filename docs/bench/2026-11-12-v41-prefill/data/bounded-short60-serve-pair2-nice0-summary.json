@@ -1,0 +1,366 @@
+{
+  "binary_sha256": "94cadc3065c78572ed92cd396d800e22b7efb4035f28c649fa6b8143f5dc370c",
+  "flag": "QWEN_V41_MASKED_REINDEX_SHORT",
+  "order": "ba",
+  "sampling": "greedy",
+  "arms": [
+    {
+      "arm": "b",
+      "engram_purge": {
+        "file": "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+        "bytes": 110595290816,
+        "resident_pages_before": 1722279,
+        "resident_pages_after": 0,
+        "msync_rc": 0,
+        "msync_errno": 0,
+        "seconds": 0.7762980461120605
+      },
+      "process_disk_read_bytes": 35810758656,
+      "process_disk_counter_note": "maximum live counter sampled every 0.5s; native per-call I/O retained",
+      "root_turns": [
+        {
+          "event": "turn",
+          "label": "a0-warm",
+          "completed": true,
+          "generated": 32,
+          "ttft_s": 35.92511320114136
+        },
+        {
+          "event": "turn",
+          "label": "a1-warm",
+          "completed": true,
+          "generated": 32,
+          "ttft_s": 32.442249059677124
+        },
+        {
+          "event": "turn",
+          "label": "a2-warm",
+          "completed": true,
+          "generated": 32,
+          "ttft_s": 29.727066040039062
+        }
+      ],
+      "model_pids": [
+        26298
+      ],
+      "model_niceness": {
+        "26298": 0
+      },
+      "summary": {
+        "window_begin": 1794590113.960185,
+        "window_end": 1794590173.960185,
+        "window_seconds": 60.0,
+        "window_tokens": 5064,
+        "aggregate_tps": 84.4,
+        "gap_p50_s": 0.027323007583618164,
+        "gap_p95_s": 0.028606176376342773,
+        "gap_p99_s": 0.05593276023864746,
+        "gap_max_s": 1.6813688278198242,
+        "round_budget": {
+          "rounds_est": 1390.3455897352408,
+          "avg_width": 2.9249613812803257,
+          "coverage": 0.8169431279620853,
+          "transition_s": 37.5825725178261,
+          "prefill_s": 12.425864115603959,
+          "partial_prefill_s": 3.125769,
+          "partial_prefill_calls": 3,
+          "capture_s": 0.0004910288283783931,
+          "host_s": 0.4058505743599507,
+          "transition_ms_per_round": 27.031101328542952,
+          "host_ms_per_round": 0.2919062550752116,
+          "host_metric": "median content gap minus native round wall"
+        },
+        "agents": [
+          {
+            "agent": 0,
+            "window_tokens": 1616,
+            "turns_offered": 9,
+            "ttft_p50_s": 0.9441931247711182,
+            "ttft_p95_s": 1.6011857986450195,
+            "carry_in_requests": 0,
+            "pending_at_cutoff": 0,
+            "queue_exposure_s": 8.671691417694092,
+            "censored_ttft": 0
+          },
+          {
+            "agent": 1,
+            "window_tokens": 1714,
+            "turns_offered": 4,
+            "ttft_p50_s": 0.9171798229217529,
+            "ttft_p95_s": 0.9928441047668457,
+            "carry_in_requests": 1,
+            "pending_at_cutoff": 0,
+            "queue_exposure_s": 4.033054828643799,
+            "censored_ttft": 0
+          },
+          {
+            "agent": 2,
+            "window_tokens": 1734,
+            "turns_offered": 2,
+            "ttft_p50_s": 1.233963966369629,
+            "ttft_p95_s": 1.6700761318206787,
+            "carry_in_requests": 1,
+            "pending_at_cutoff": 0,
+            "queue_exposure_s": 2.9040400981903076,
+            "censored_ttft": 0
+          }
+        ],
+        "agent_count": 3,
+        "trace_20s": [
+          {
+            "start_s": 0,
+            "duration_s": 20.0,
+            "gap_p50_s": 0.027451753616333008,
+            "gap_p95_s": 0.028790950775146484,
+            "gap_max_s": 0.7352921962738037,
+            "decode_stream_width_1_s": 0.43245387077331543,
+            "decode_stream_width_2_s": 3.0473625659942627,
+            "decode_stream_width_3_s": 16.520183563232422,
+            "predecode_only_s": 0.0,
+            "idle_s": 0.0
+          },
+          {
+            "start_s": 20,
+            "duration_s": 20.0,
+            "gap_p50_s": 0.027304887771606445,
+            "gap_p95_s": 0.028398990631103516,
+            "gap_max_s": 1.6813688278198242,
+            "decode_stream_width_1_s": 0.0,
+            "decode_stream_width_2_s": 5.649757146835327,
+            "decode_stream_width_3_s": 14.350242853164673,
+            "predecode_only_s": 0.0,
+            "idle_s": 0.0
+          },
+          {
+            "start_s": 40,
+            "duration_s": 20.0,
+            "gap_p50_s": 0.027170181274414062,
+            "gap_p95_s": 0.028390169143676758,
+            "gap_max_s": 1.1472909450531006,
+            "decode_stream_width_1_s": 1.1409521102905273,
+            "decode_stream_width_2_s": 6.771408557891846,
+            "decode_stream_width_3_s": 12.087639331817627,
+            "predecode_only_s": 0.0,
+            "idle_s": 0.0
+          }
+        ],
+        "startup_s": 2.2994329929351807,
+        "warmup_s": 99.48561787605286,
+        "warm_settle_s": 60.791496959049255,
+        "arm": "default",
+        "family": "v41",
+        "seed": 20261112,
+        "thermal_max": 0,
+        "sampling": {
+          "mode": "greedy",
+          "fields": {
+            "temperature": 0,
+            "top_p": 1
+          }
+        },
+        "metric": "delivered text+reasoning tokens retokenized; excludes EOS/format control",
+        "thermal_flagged": false,
+        "timing_thermal_max": 0,
+        "timing_thermal_seconds": {
+          "0": 60.0,
+          "1": 0.0,
+          "2": 0.0,
+          "unknown": 0.0
+        },
+        "compile_observed": true,
+        "compile_overlapped": true,
+        "max_thermal_pressure": 2,
+        "load_after": [
+          20.67431640625,
+          22.81982421875,
+          20.40380859375
+        ],
+        "arm_thermal_seconds": {
+          "0": 237.63315868377686,
+          "1": 0.0,
+          "2": 0.0,
+          "unknown": 0.0
+        }
+      }
+    },
+    {
+      "arm": "a",
+      "engram_purge": {
+        "file": "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+        "bytes": 110595290816,
+        "resident_pages_before": 860778,
+        "resident_pages_after": 0,
+        "msync_rc": 0,
+        "msync_errno": 0,
+        "seconds": 0.435744047164917
+      },
+      "process_disk_read_bytes": 34681307136,
+      "process_disk_counter_note": "maximum live counter sampled every 0.5s; native per-call I/O retained",
+      "root_turns": [
+        {
+          "event": "turn",
+          "label": "a0-warm",
+          "completed": true,
+          "generated": 32,
+          "ttft_s": 51.681880235672
+        },
+        {
+          "event": "turn",
+          "label": "a1-warm",
+          "completed": true,
+          "generated": 32,
+          "ttft_s": 35.79867696762085
+        },
+        {
+          "event": "turn",
+          "label": "a2-warm",
+          "completed": true,
+          "generated": 32,
+          "ttft_s": 27.616090774536133
+        }
+      ],
+      "model_pids": [
+        54143
+      ],
+      "model_niceness": {
+        "54143": 0
+      },
+      "summary": {
+        "window_begin": 1794590453.065581,
+        "window_end": 1794590513.065581,
+        "window_seconds": 60.0,
+        "window_tokens": 4986,
+        "aggregate_tps": 83.1,
+        "gap_p50_s": 0.02773880958557129,
+        "gap_p95_s": 0.02929210662841797,
+        "gap_p99_s": 0.05645895004272461,
+        "gap_max_s": 2.0645599365234375,
+        "round_budget": {
+          "rounds_est": 1397.2915963061737,
+          "avg_width": 2.926485618112883,
+          "coverage": 0.8309265944645006,
+          "transition_s": 38.399523702301714,
+          "prefill_s": 12.44866270104254,
+          "partial_prefill_s": 1.9262600621632928,
+          "partial_prefill_calls": 2,
+          "capture_s": 0.0005123679694705409,
+          "host_s": 0.35968182315419034,
+          "transition_ms_per_round": 27.481396011980042,
+          "host_ms_per_round": 0.25741357359124706,
+          "host_metric": "median content gap minus native round wall"
+        },
+        "agents": [
+          {
+            "agent": 0,
+            "window_tokens": 1591,
+            "turns_offered": 8,
+            "ttft_p50_s": 0.9398009777069092,
+            "ttft_p95_s": 1.2384848594665527,
+            "carry_in_requests": 1,
+            "pending_at_cutoff": 1,
+            "queue_exposure_s": 7.562391519546509,
+            "censored_ttft": 1
+          },
+          {
+            "agent": 1,
+            "window_tokens": 1688,
+            "turns_offered": 4,
+            "ttft_p50_s": 0.9569189548492432,
+            "ttft_p95_s": 1.040182113647461,
+            "carry_in_requests": 1,
+            "pending_at_cutoff": 1,
+            "queue_exposure_s": 3.5102431774139404,
+            "censored_ttft": 1
+          },
+          {
+            "agent": 2,
+            "window_tokens": 1707,
+            "turns_offered": 2,
+            "ttft_p50_s": 1.7472429275512695,
+            "ttft_p95_s": 2.048232078552246,
+            "carry_in_requests": 1,
+            "pending_at_cutoff": 0,
+            "queue_exposure_s": 3.7954750061035156,
+            "censored_ttft": 0
+          }
+        ],
+        "agent_count": 3,
+        "trace_20s": [
+          {
+            "start_s": 0,
+            "duration_s": 20.0,
+            "gap_p50_s": 0.027933120727539062,
+            "gap_p95_s": 0.029343843460083008,
+            "gap_max_s": 0.7422289848327637,
+            "decode_stream_width_1_s": 0.41405177116394043,
+            "decode_stream_width_2_s": 2.8596060276031494,
+            "decode_stream_width_3_s": 16.72634220123291,
+            "predecode_only_s": 0.0,
+            "idle_s": 0.0
+          },
+          {
+            "start_s": 20,
+            "duration_s": 20.0,
+            "gap_p50_s": 0.027765989303588867,
+            "gap_p95_s": 0.02925586700439453,
+            "gap_max_s": 2.0645599365234375,
+            "decode_stream_width_1_s": 0.0,
+            "decode_stream_width_2_s": 6.830246925354004,
+            "decode_stream_width_3_s": 13.169753074645996,
+            "predecode_only_s": 0.0,
+            "idle_s": 0.0
+          },
+          {
+            "start_s": 40,
+            "duration_s": 20.0,
+            "gap_p50_s": 0.027484893798828125,
+            "gap_p95_s": 0.029227018356323242,
+            "gap_max_s": 1.2176101207733154,
+            "decode_stream_width_1_s": 0.4919710159301758,
+            "decode_stream_width_2_s": 6.35991096496582,
+            "decode_stream_width_3_s": 13.148118019104004,
+            "predecode_only_s": 0.0,
+            "idle_s": 0.0
+          }
+        ],
+        "startup_s": 2.325608015060425,
+        "warmup_s": 116.46706199645996,
+        "warm_settle_s": 60.83096024999395,
+        "arm": "default",
+        "family": "v41",
+        "seed": 20261112,
+        "thermal_max": 0,
+        "sampling": {
+          "mode": "greedy",
+          "fields": {
+            "temperature": 0,
+            "top_p": 1
+          }
+        },
+        "metric": "delivered text+reasoning tokens retokenized; excludes EOS/format control",
+        "thermal_flagged": false,
+        "timing_thermal_max": 0,
+        "timing_thermal_seconds": {
+          "0": 60.0,
+          "1": 0.0,
+          "2": 0.0,
+          "unknown": 0.0
+        },
+        "compile_observed": true,
+        "compile_overlapped": true,
+        "max_thermal_pressure": 2,
+        "load_after": [
+          27.80712890625,
+          25.537109375,
+          22.41162109375
+        ],
+        "arm_thermal_seconds": {
+          "0": 255.3535943031311,
+          "1": 0.0,
+          "2": 0.0,
+          "unknown": 0.0
+        }
+      }
+    }
+  ]
+}

@@ -33,20 +33,6 @@ crate::env_flag!(
     default_on masked_reindex_mid_env,
     "QWEN_V41_MASKED_REINDEX_MID"
 );
-crate::env_flag!(
-    /// Extend exact mask-skipping index scoring to ordinary 128..511-row appends on M5 Ultra, using the existing depth threshold and MASKED_REINDEX veto. Experimental, default off; 0 retains the qualified 512..2048-row range. No new tensors or arithmetic changes.
-    default_off masked_reindex_short_env,
-    "QWEN_V41_MASKED_REINDEX_SHORT"
-);
-fn masked_reindex_short_enabled() -> bool {
-    #[cfg(feature = "perf-ablations")]
-    if let Some(super::super::PrefillExperiment::MaskedReindexShort(enabled)) =
-        super::super::PREFILL_EXPERIMENT.with(|s| s.get())
-    {
-        return enabled;
-    }
-    masked_reindex_short_env()
-}
 fn masked_reindex_mid_enabled() -> bool {
     #[cfg(feature = "perf-ablations")]
     if let Some(super::super::PrefillExperiment::MaskedReindexMid(enabled)) =
@@ -1377,8 +1363,7 @@ impl Workspace {
                 && c.candidate_topk == 2048
                 && c.index_topk == 512
                 && (start >= 131_072 || start >= 49_152 && masked_reindex_mid_enabled())
-                && ((512..=2048).contains(&rows.rows)
-                    || (128..512).contains(&rows.rows) && masked_reindex_short_enabled())
+                && (512..=2048).contains(&rows.rows)
                 && super::index_ilp_supported(c)
                 && super::select_grid_enabled()
                 && self.global_mode(id, start, rows.rows)? == GlobalKvMode::Ordinary

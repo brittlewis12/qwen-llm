@@ -106,3 +106,26 @@ its first-token/window boundaries differ; do not interchange those metrics.
 All counters, matched calls, roots, missing-TTFT counts and thermal evidence
 remain in the pair summary/comparison under the earlier bench data directory.
 One pair is insufficient for promotion. Pair2BA acquired after queueing.
+
+
+Pair2BA completed17:21:55 UTC, retaining5 eligible short matches with5
+observed TTFTs. Prefill1.062591x; TTFT1.064259x; root1.173610x; TPS83.1/84.4.
+Both purges0 pages, nice0, pressure0. Process reads baseline34,681,307,136B,
+candidate35,810,758,656B. Load-after baseline27.81/25.54/22.41 and candidate
+20.67/22.82/20.40. Unchanged MID-sized appends also moved1.31106x in mean,
+so do not attribute the entire served difference to the short kernel.
+
+The final AB pair is queued with the same hard17:35 deadline; scheduling
+resumes completed pairs rather than repeating or overwriting them. Windows,
+metrics, minimum observations and acceptance thresholds remain unchanged.
+
+## Current-main disposition
+
+The current-main server composition is not qualified within this stage's
+remaining budget. Remove the short runtime band, env flag and scoped probe
+selector; restore the landed512..2048 range. Keep the generic serve driver
+with an explicit required flag and retain historical analysis support.
+The exact measured source remains at `backup/v41-short-bounded-measured`.
+This is an incomplete qualification, not a measured performance rejection.
+Even a positive pinned-base third pair does not close the composition gate.
+No new default is promoted. Wide PV is deferred to preserve the stage limit.

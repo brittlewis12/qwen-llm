@@ -1,0 +1,199 @@
+{
+  "tag": "bounded-short60-serve-pair2-nice0",
+  "order": "ba",
+  "binary_sha256": "94cadc3065c78572ed92cd396d800e22b7efb4035f28c649fa6b8143f5dc370c",
+  "roots": {
+    "a": [
+      {
+        "prefill_ms": 51571.037,
+        "tokens": 49509,
+        "reused": 0
+      },
+      {
+        "prefill_ms": 35711.085,
+        "tokens": 49164,
+        "reused": 346
+      },
+      {
+        "prefill_ms": 27534.799,
+        "tokens": 49164,
+        "reused": 346
+      }
+    ],
+    "b": [
+      {
+        "prefill_ms": 35825.492,
+        "tokens": 49509,
+        "reused": 0
+      },
+      {
+        "prefill_ms": 32360.935,
+        "tokens": 49164,
+        "reused": 346
+      },
+      {
+        "prefill_ms": 29645.799,
+        "tokens": 49164,
+        "reused": 346
+      }
+    ]
+  },
+  "root_prefill_ratio": 1.1736104318018892,
+  "root_client_ttft_s": {
+    "a": [
+      51.681880235672,
+      35.79867696762085,
+      27.616090774536133
+    ],
+    "b": [
+      35.92511320114136,
+      32.442249059677124,
+      29.727066040039062
+    ]
+  },
+  "matched_short_appends": [
+    {
+      "label": "a0-t10",
+      "new": 1110,
+      "baseline_depth": 55388,
+      "candidate_depth": 55388,
+      "baseline_prefill_rows": 1110,
+      "candidate_prefill_rows": 1110,
+      "short_index_eligible": false,
+      "mid_index_eligible": true,
+      "baseline_prefill_ms": 1131.48,
+      "candidate_prefill_ms": 1059.529833,
+      "baseline_ttft_s": 1.2384848594665527,
+      "candidate_ttft_s": 1.160395860671997
+    },
+    {
+      "label": "a0-t5",
+      "new": 401,
+      "baseline_depth": 52937,
+      "candidate_depth": 52937,
+      "baseline_prefill_rows": 399,
+      "candidate_prefill_rows": 399,
+      "short_index_eligible": true,
+      "mid_index_eligible": false,
+      "baseline_prefill_ms": 748.519083,
+      "candidate_prefill_ms": 746.099334,
+      "baseline_ttft_s": 0.9398009777069092,
+      "candidate_ttft_s": 0.9441931247711182
+    },
+    {
+      "label": "a0-t6",
+      "new": 402,
+      "baseline_depth": 53403,
+      "candidate_depth": 53403,
+      "baseline_prefill_rows": 400,
+      "candidate_prefill_rows": 400,
+      "short_index_eligible": true,
+      "mid_index_eligible": false,
+      "baseline_prefill_ms": 765.5995829999999,
+      "candidate_prefill_ms": 745.867292,
+      "baseline_ttft_s": 0.9637529850006104,
+      "candidate_ttft_s": 0.9277269840240479
+    },
+    {
+      "label": "a0-t8",
+      "new": 486,
+      "baseline_depth": 54450,
+      "candidate_depth": 54450,
+      "baseline_prefill_rows": 484,
+      "candidate_prefill_rows": 484,
+      "short_index_eligible": true,
+      "mid_index_eligible": false,
+      "baseline_prefill_ms": 946.8592090000001,
+      "candidate_prefill_ms": 833.1621260000001,
+      "baseline_ttft_s": 1.165848970413208,
+      "candidate_ttft_s": 1.0306239128112793
+    },
+    {
+      "label": "a1-t3",
+      "new": 219,
+      "baseline_depth": 52668,
+      "candidate_depth": 52668,
+      "baseline_prefill_rows": 217,
+      "candidate_prefill_rows": 217,
+      "short_index_eligible": true,
+      "mid_index_eligible": false,
+      "baseline_prefill_ms": 644.429542,
+      "candidate_prefill_ms": 572.002292,
+      "baseline_ttft_s": 0.7786862850189209,
+      "candidate_ttft_s": 0.697843074798584
+    },
+    {
+      "label": "a1-t4",
+      "new": 749,
+      "baseline_depth": 53091,
+      "candidate_depth": 53091,
+      "baseline_prefill_rows": 749,
+      "candidate_prefill_rows": 749,
+      "short_index_eligible": false,
+      "mid_index_eligible": true,
+      "baseline_prefill_ms": 872.802167,
+      "candidate_prefill_ms": 835.461541,
+      "baseline_ttft_s": 0.9569189548492432,
+      "candidate_ttft_s": 0.9171798229217529
+    },
+    {
+      "label": "a1-t5",
+      "new": 487,
+      "baseline_depth": 53937,
+      "candidate_depth": 53937,
+      "baseline_prefill_rows": 485,
+      "candidate_prefill_rows": 485,
+      "short_index_eligible": true,
+      "mid_index_eligible": false,
+      "baseline_prefill_ms": 862.570083,
+      "candidate_prefill_ms": 837.117749,
+      "baseline_ttft_s": 1.040182113647461,
+      "candidate_ttft_s": 0.9927339553833008
+    },
+    {
+      "label": "a2-t1",
+      "new": 1110,
+      "baseline_depth": 50834,
+      "candidate_depth": 50834,
+      "baseline_prefill_rows": 1110,
+      "candidate_prefill_rows": 1110,
+      "short_index_eligible": false,
+      "mid_index_eligible": true,
+      "baseline_prefill_ms": 1993.751708,
+      "candidate_prefill_ms": 1154.465792,
+      "baseline_ttft_s": 2.048232078552246,
+      "candidate_ttft_s": 1.233963966369629
+    }
+  ],
+  "short_append_client_ttft_observed_matches": 8,
+  "short_index_client_ttft_observed_matches": 5,
+  "short_append_median_pair_ratio": 1.0563011223188012,
+  "short_append_mean_ratio": 1.1742860647477542,
+  "short_append_positive_pairs": 8,
+  "short_append_client_ttft_mean_ratio": 1.1552560659095057,
+  "short_append_client_ttft_median_pair_ratio": 1.057545289701576,
+  "short_append_client_ttft_positive_pairs": 7,
+  "mid_index_eligible_matches": 3,
+  "mid_index_eligible_mean_ratio": 1.311064119731269,
+  "mid_index_eligible_median_pair_ratio": 1.067907636726261,
+  "short_index_eligible_matches": 5,
+  "short_index_eligible_mean_ratio": 1.062590555679668,
+  "short_index_eligible_median_pair_ratio": 1.030404723864002,
+  "short_index_eligible_positive_pairs": 5,
+  "short_index_eligible_client_ttft_mean_ratio": 1.0642591990654944,
+  "short_index_eligible_client_ttft_median_pair_ratio": 1.0477954420787794,
+  "short_index_eligible_client_ttft_positive_pairs": 4,
+  "aggregate_tps": {
+    "a": 83.1,
+    "b": 84.4
+  },
+  "gap_p99_s": {
+    "a": 0.05645895004272461,
+    "b": 0.05593276023864746
+  },
+  "thermal_max": {
+    "a": 0,
+    "b": 0
+  },
+  "note": "Root phases include all three roots; absent visible warm deltas remain null. Short appends match label and exact new-row count, exclude ramp/carry-in and incomplete calls, and retain every matched observation."
+}

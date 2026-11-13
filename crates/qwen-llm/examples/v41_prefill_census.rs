@@ -110,11 +110,9 @@ fn execute(
         let e = match experiment {
             "baseline" => match control_for {
                 "masked-reindex-mid" => E::MaskedReindexMid(false),
-                "masked-reindex-short" => E::MaskedReindexShort(false),
                 _ => E::Production,
             },
             "masked-reindex-mid" => E::MaskedReindexMid(true),
-            "masked-reindex-short" => E::MaskedReindexShort(true),
             _ => anyhow::bail!("experiment"),
         };
         with_prefill_experiment(e, run)
@@ -144,10 +142,7 @@ fn main() -> Result<()> {
     let paired = experiment.starts_with("paired-");
     let candidate = experiment.strip_prefix("paired-").unwrap_or(experiment);
     ensure!(
-        matches!(
-            candidate,
-            "baseline" | "masked-reindex-mid" | "masked-reindex-short"
-        ),
+        matches!(candidate, "baseline" | "masked-reindex-mid"),
         "experiment"
     );
     ensure!(

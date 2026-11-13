@@ -31,6 +31,18 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw captures and generated tables:
   `metagross:~/qwen-runs/2026-11-12-waste-audit/`. Branch `perf/waste-audit`;
   not merged.
+## 2026-11-13 - V4.1 Short Index: Purged Serve Evidence; Current-Main Gate Open
+
+- Rebased onto rewritten and then current main`9877b6f25`. Nice0 native
+  150/256 at80K1.02127x/1.02677x, all8 bitwise; controls/root records retained.
+- Purged serveAB pair1: short prefill1.01352x, TTFT1.01306x, root0.99584x;
+  BA pair2:1.06259x/1.06426x/root1.17361x. Every arm purge0 pages, nice0,
+  pressure0; disk counters retained. Final AB queued under fixed17:35 cutoff.
+- Current main's1..2048 header fold overlaps this short band; pinned old-base
+  results do not qualify the composed server. Remove short runtime/probe flag,
+  keep records; no default promotion. Wide PV deferred. Full contracts passed
+  rebased candidatee4629cf57; withdrawal validation follows.
+  [Protocol and disposition](bench/2026-11-13-v41-short-index-bounded.md).
 
 ## 2026-11-13 - V4.1 Serve: Header Fold Band Widened To 1..=2048
 

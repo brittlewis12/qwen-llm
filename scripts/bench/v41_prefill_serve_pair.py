@@ -68,7 +68,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ("binary","tokenizer","model","corpus","output"):
         p.add_argument("--"+name,type=Path,required=True)
-    p.add_argument("--flag",default="QWEN_V41_MASKED_REINDEX_SHORT")
+    p.add_argument("--flag",required=True)
     p.add_argument("--engram",type=Path,required=True)
     p.add_argument("--tag",required=True);p.add_argument("--order",choices=("ab","ba"),required=True)
     p.add_argument("--port",type=int,default=19973);p.add_argument("--seconds",type=int,default=120)

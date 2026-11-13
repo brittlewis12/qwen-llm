@@ -6,6 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-13 - V4.1 Serve: Header Fold Band Widened To 1..=2048
+
+- Warm-append header folding moves from `512..=2048` to `1..=2048` rows.
+  Sub-512 appends now fold; the 2048-row ceiling is unchanged. Default on;
+  `QWEN_SERVE_V41_FUSE_HEADER=0` restores the separate header call.
+- Reused 11-07 probe, 128 teacher-forced targets, 48K/80K code/prose. All
+  cells pass `|dNLL| <= 0.005` / mean KL `<= 0.01` except 2260 prose:
+  dNLL **+0.00845**, so `2049..=4096` stays split and the cap is 2048.
+  Max mean KL is **1.84e-3**. [Table and method](bench/2026-11-13-v41-fold-band.md).
+- M5 Ultra native ABBA, 48K warm, release probe `109db1c87`, niceness 0:
+  150 rows fold **456.938/462.605** vs split **546.404/546.681 ms**; 427 rows
+  fold **678.057/735.361** vs split **788.930/799.782 ms**. One call instead
+  of two; **86.8/87.6 ms** median wall saved. Witness only. Raw runs in
+  `$HOME/qwen-runs/2026-11-13-fold-band-landing/`.
+
 ## 2026-11-13 - V4.1 Agent-Depth Masked Reindex: Promoted After Exact, Native and Served Gates
 
 - Prototype `95d622e9a`, now-default-on `QWEN_V41_MASKED_REINDEX_MID`.

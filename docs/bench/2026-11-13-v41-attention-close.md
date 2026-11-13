@@ -1,5 +1,17 @@
 # V4.1 attention gate: source/profile pin and final measurements
 
+**Lead correction, 2026-11-13 23:00 UTC:** the loaded-host native packet is
+**unresolved noise in both directions, not a pass**. Its mean point ratio is
+1.064904x, but BA/AB/BA are 0.931764/1.710896/0.862674x and the candidate
+root is 44.912s versus the standing roughly 21.5s. The independent quiet-host
+wide-PV native packet was 20.755584s / 20.505967s = **1.012173x**, 3/3
+positive pairs, with eight full signatures bitwise (iter, nice 10, recorded
+in [the original packet](2026-11-12-v41-prefill/README.md#wide-pv-native-wall--both-cells-pass)).
+These observations supersede every earlier native-pass interpretation below.
+Raw timings and historical threshold outputs remain intact. The lead directs
+completion of only pair 3 B and the unchanged frozen serve rule for pass/fail.
+
+
 Start 21:01:00 UTC; hard report by 23:01, no extension. Measurement cutoff 22:49
 reserves cleanup/records/contracts. The lead clarified that source `67b3ebaf4`
 plus the same iter/release/test profiles and byte-identical metallibs is the

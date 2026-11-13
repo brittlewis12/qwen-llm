@@ -7,6 +7,19 @@ from chat history. Keep entries short, factual, and tied to measurements.
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
 
+
+## 2026-11-13 - V4.1 Final Arm: Native Root Interpretation Corrected
+
+- Lead classifies the loaded native 48K packet as unresolved noise in both
+  directions, not a pass: pairs 0.931764/1.710896/0.862674x, candidate 44.912s
+  versus standing roughly 21.5s. Historical raw point estimate is retained.
+- Quiet-host wide PV root: 20.755584/20.505967s =1.012173x, 3/3 positive,
+  full paired signatures bitwise, iter/nice 10. Cite both packets.
+- Run only archived pair 3 B and apply the frozen served non-regression
+  rule. Cooperative M32/M64 prototype is a separate default-off branch;
+  CPU compile/design work may proceed, M5 functional only after this arm.
+  [Correction and retained evidence](bench/2026-11-13-v41-attention-close.md).
+
 ## 2026-11-13 - V4.1 Attention Close: Native Pass, Final Serve Arm Queued Out
 
 - Purged native 48K passes 1.064904x mean A/B (47.8270/44.9120s); all eight

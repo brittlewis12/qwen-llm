@@ -43,18 +43,22 @@ def reduce(folder,tag):
             mid_index_eligible=all(512<=r["phases"].get("prefill_rows",0)<=2048 and
                 49152<=r["reused"]<131072 for r in (a,b)),baseline_prefill_ms=a["phases"]["prefill_ms"],
             candidate_prefill_ms=b["phases"]["prefill_ms"],baseline_ttft_s=a["ttft_s"],candidate_ttft_s=b["ttft_s"]))
+    visible=[r for r in matched if r["baseline_ttft_s"] is not None and r["candidate_ttft_s"] is not None]
     eligible=[r for r in matched if r["mid_index_eligible"]]
     short_eligible=[r for r in matched if r["short_index_eligible"]]
+    short_visible=[r for r in short_eligible if r["baseline_ttft_s"] is not None and r["candidate_ttft_s"] is not None]
     summary=dict(tag=tag,order=pair["order"],binary_sha256=pair["binary_sha256"],roots=roots,
         root_prefill_ratio=statistics.mean(r["prefill_ms"] for r in roots["a"])/statistics.mean(r["prefill_ms"] for r in roots["b"]),
         root_client_ttft_s={arm:[r["ttft_s"] for r in arms[arm]["root_turns"]] for arm in "ab"},
         matched_short_appends=matched,
+        short_append_client_ttft_observed_matches=len(visible),
+        short_index_client_ttft_observed_matches=len(short_visible),
         short_append_median_pair_ratio=statistics.median(r["baseline_prefill_ms"]/r["candidate_prefill_ms"] for r in matched) if matched else None,
         short_append_mean_ratio=sum(r["baseline_prefill_ms"] for r in matched)/sum(r["candidate_prefill_ms"] for r in matched) if matched else None,
         short_append_positive_pairs=sum(r["baseline_prefill_ms"]>r["candidate_prefill_ms"] for r in matched),
-        short_append_client_ttft_mean_ratio=sum(r["baseline_ttft_s"] for r in matched)/sum(r["candidate_ttft_s"] for r in matched) if matched else None,
-        short_append_client_ttft_median_pair_ratio=statistics.median(r["baseline_ttft_s"]/r["candidate_ttft_s"] for r in matched) if matched else None,
-        short_append_client_ttft_positive_pairs=sum(r["baseline_ttft_s"]>r["candidate_ttft_s"] for r in matched),
+        short_append_client_ttft_mean_ratio=sum(r["baseline_ttft_s"] for r in visible)/sum(r["candidate_ttft_s"] for r in visible) if visible else None,
+        short_append_client_ttft_median_pair_ratio=statistics.median(r["baseline_ttft_s"]/r["candidate_ttft_s"] for r in visible) if visible else None,
+        short_append_client_ttft_positive_pairs=sum(r["baseline_ttft_s"]>r["candidate_ttft_s"] for r in visible),
         mid_index_eligible_matches=len(eligible),
         mid_index_eligible_mean_ratio=sum(r["baseline_prefill_ms"] for r in eligible)/sum(r["candidate_prefill_ms"] for r in eligible) if eligible else None,
         mid_index_eligible_median_pair_ratio=statistics.median(r["baseline_prefill_ms"]/r["candidate_prefill_ms"] for r in eligible) if eligible else None,
@@ -62,9 +66,9 @@ def reduce(folder,tag):
         short_index_eligible_mean_ratio=sum(r["baseline_prefill_ms"] for r in short_eligible)/sum(r["candidate_prefill_ms"] for r in short_eligible) if short_eligible else None,
         short_index_eligible_median_pair_ratio=statistics.median(r["baseline_prefill_ms"]/r["candidate_prefill_ms"] for r in short_eligible) if short_eligible else None,
         short_index_eligible_positive_pairs=sum(r["baseline_prefill_ms"]>r["candidate_prefill_ms"] for r in short_eligible),
-        short_index_eligible_client_ttft_mean_ratio=sum(r["baseline_ttft_s"] for r in short_eligible)/sum(r["candidate_ttft_s"] for r in short_eligible) if short_eligible else None,
-        short_index_eligible_client_ttft_median_pair_ratio=statistics.median(r["baseline_ttft_s"]/r["candidate_ttft_s"] for r in short_eligible) if short_eligible else None,
-        short_index_eligible_client_ttft_positive_pairs=sum(r["baseline_ttft_s"]>r["candidate_ttft_s"] for r in short_eligible),
+        short_index_eligible_client_ttft_mean_ratio=sum(r["baseline_ttft_s"] for r in short_visible)/sum(r["candidate_ttft_s"] for r in short_visible) if short_visible else None,
+        short_index_eligible_client_ttft_median_pair_ratio=statistics.median(r["baseline_ttft_s"]/r["candidate_ttft_s"] for r in short_visible) if short_visible else None,
+        short_index_eligible_client_ttft_positive_pairs=sum(r["baseline_ttft_s"]>r["candidate_ttft_s"] for r in short_visible),
         aggregate_tps={arm:arms[arm]["summary"]["aggregate_tps"] for arm in "ab"},
         gap_p99_s={arm:arms[arm]["summary"]["gap_p99_s"] for arm in "ab"},
         thermal_max={arm:arms[arm]["summary"]["thermal_max"] for arm in "ab"},

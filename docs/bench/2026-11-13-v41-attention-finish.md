@@ -139,3 +139,12 @@ tree00464ff59de61fc942e7cbe64ed1910afa5e1561. ENV has828 knobs, with no
 polarity conflict. Only subsequent documentation changes close this record.
 No new model measurement, no inferred root result, no performance promotion.
 The original executable location or pin interpretation remains required input.
+
+
+## Pin interpretation resolved by lead
+
+At21:01 the lead explicitly accepted source/profile pinning with identical
+metallibs despite different Rust executable hashes. The next bounded turn
+proceeds with that policy and records every hash pair; no executable-content
+identity is silently asserted. Pinned executables are now retained outside
+target until the gate closes. See2026-11-13-v41-attention-close.md.

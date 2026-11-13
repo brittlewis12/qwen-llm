@@ -31,6 +31,18 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw captures and generated tables:
   `metagross:~/qwen-runs/2026-11-12-waste-audit/`. Branch `perf/waste-audit`;
   not merged.
+## 2026-11-13 - V4.1 Attention Gate: Source Pin Clarified, Final Stage Starts
+
+- Lead accepts source67b3ebaf4/profile pin with identical metallibs; Rust
+  executable byte identity is not required. Record all hash pairs. No new
+  kernel work. Archive binaries outside target until the gate closes.
+- New bounded turn21:01UTC, report<=23:01; cutoff22:49, no extension.
+  Purged native48K then BA/AB with one arm per lease; pair1 stands and all
+  frozen non-regression thresholds/warmups remain unchanged.
+- Waste-audit items recorded for next-stage planning only alongside
+  cooperative experts; no action on them in this stage.
+  [Protocol and retention](bench/2026-11-13-v41-attention-close.md).
+
 ## 2026-11-13 - V4.1 Attention Finish: Row Cache Composed, Pin Block Remains
 
 - Rebased onto mainc2935fa36 after the independent Engram host row-cache

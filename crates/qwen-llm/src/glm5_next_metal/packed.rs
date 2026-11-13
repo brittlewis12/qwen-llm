@@ -34,40 +34,6 @@ use crate::metal::{
 };
 use objc2_metal::MTLComputePipelineState;
 
-crate::env_flag!(
-    /// Default-off M5 Fast/Half TensorOps lightning-indexer score for 64 heads
-    /// of width 128 at 1,024..=4,096 command rows. Reuses the existing score
-    /// slab; zero restores the simdgroup-matrix score kernel.
-    default_off indexer_scores_tensor_enabled,
-    "QWEN_GLM53_PREFILL_INDEXER_TENSOR"
-);
-
-#[cfg(any(test, feature = "perf-ablations"))]
-thread_local! {
-    static INDEXER_SCORES_TENSOR_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-fn indexer_scores_tensor_requested() -> bool {
-    #[cfg(any(test, feature = "perf-ablations"))]
-    if let Some(enabled) = INDEXER_SCORES_TENSOR_OVERRIDE.with(std::cell::Cell::get) {
-        return enabled;
-    }
-    indexer_scores_tensor_enabled()
-}
-
-#[cfg(feature = "perf-ablations")]
-pub(super) fn with_indexer_scores_tensor_prefill<R>(enabled: bool, body: impl FnOnce() -> R) -> R {
-    struct Restore(Option<bool>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            INDEXER_SCORES_TENSOR_OVERRIDE.with(|state| state.set(self.0));
-        }
-    }
-    let _restore =
-        Restore(INDEXER_SCORES_TENSOR_OVERRIDE.with(|state| state.replace(Some(enabled))));
-    body()
-}
-
 /// Synchronous research hook. The session stays poisoned and its published
 /// position stays unchanged until every layer and the normal validation finish.
 #[cfg(feature = "perf-ablations")]
@@ -3051,40 +3017,22 @@ impl Glm5NextSession<'_> {
             let status = sp
                 .select_status
                 .view_subrange((mla_index * sp.rows + start) as u64, vec![n as u64]);
-            let score_inputs = crate::metal::LightningScores {
-                queries: &queries_f16,
-                head_weights: &head_weights,
-                keys: pooled,
-                visible_counts: &visible_pools,
-                scores: &scores,
-            };
-            let tensor_scores = indexer_scores_tensor_requested()
-                && p.arith().lineage == PackedLineage::Fast
-                && p.arith().precision == FastPrecision::Half
-                && rows >= 1024
-                && (ih, id) == (64, 128)
-                && crate::metal::encode_lightning_scores_f16_tensorops(
-                    ctx,
-                    enc,
-                    &score_inputs,
-                    ih,
-                    id,
-                    pool_capacity,
-                    max_pools,
-                    n,
-                )?;
-            if !tensor_scores {
-                crate::metal::encode_lightning_scores_f16_matrix(
-                    ctx,
-                    enc,
-                    &score_inputs,
-                    ih,
-                    id,
-                    pool_capacity,
-                    max_pools,
-                    n,
-                )?;
-            }
+            crate::metal::encode_lightning_scores_f16_matrix(
+                ctx,
+                enc,
+                &crate::metal::LightningScores {
+                    queries: &queries_f16,
+                    head_weights: &head_weights,
+                    keys: pooled,
+                    visible_counts: &visible_pools,
+                    scores: &scores,
+                },
+                ih,
+                id,
+                pool_capacity,
+                max_pools,
+                n,
+            )?;
             self.stage(enc, Glm5NextStage::SparseSelect, Some(mla_index))?;
             crate::metal::encode_select_top_k_ids(
                 ctx,

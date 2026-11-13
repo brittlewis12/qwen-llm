@@ -176,11 +176,15 @@ def growth(layer, row, times, begin, end, calls):
     return {"points": points, "distinct_rows_per_token": slope}
 
 
-def disk_read_bytes(calls_path):
+def disk_read_bytes(calls_path, begin=None, end=None):
     total = 0
     with Path(calls_path).open() as handle:
         for line in handle:
-            phases = json.loads(line).get("phases", {})
+            row = json.loads(line)
+            first = row.get("first")
+            if begin is not None and (first is None or not (begin <= first < end)):
+                continue
+            phases = row.get("phases", {})
             for name in ("process_token_io", "process_prefill_io"):
                 total += int(
                     phases.get(name, {})
@@ -190,11 +194,76 @@ def disk_read_bytes(calls_path):
     return total
 
 
+def prefill_stats(path, begin, end):
+    rows = wall = disk = calls = 0
+    means = []
+    for entry in json.loads(Path(path).read_text()):
+        stamp = entry.get("time")
+        if stamp is not None and not (begin <= stamp < end):
+            continue
+        line = entry.get("line", "")
+        if not line.startswith("serve native prefill timing: "):
+            continue
+        profile = json.loads(line.split(": ", 1)[1])["profile"]
+        count = profile["engram_read_rows"]
+        if not count:
+            continue
+        calls += 1
+        rows += count
+        wall += profile["engram_read_wall_ms"]
+        disk += profile["process_disk_read_bytes"] or 0
+        means.append(profile["engram_read_wall_ms"] * 1000 / count)
+    if not rows:
+        return {}
+    mean_us = wall * 1000 / rows
+    hit = max(0.0, min(1.0, (65.0 - mean_us) / (65.0 - 0.5)))
+    buckets = {}
+    for low, high in ((0, 1), (1, 2), (2, 5), (5, 20), (20, 100), (100, 1e9)):
+        buckets[f"{low}-{high if high < 1e9 else 'inf'}"] = sum(
+            1 for mean in means if low <= mean < high
+        )
+    return {
+        "calls": calls,
+        "rows": rows,
+        "wall_ms": wall,
+        "us_per_row": mean_us,
+        "disk_read_bytes": disk,
+        "estimated_cached_share": hit,
+        "call_buckets": buckets,
+    }
+
+
+def residency_stats(path, begin, end):
+    samples = [json.loads(line) for line in Path(path).open()]
+    if not samples:
+        return {}
+    before = [s for s in samples if s["time"] <= begin]
+    during = [s for s in samples if s["time"] <= end]
+    post = [s for s in samples if s["time"] > end]
+    start = before[-1] if before else samples[0]
+    stop = during[-1] if during else samples[-1]
+    window = [s for s in samples if begin <= s["time"] <= end]
+    return {
+        "start": {k: start[k] for k in ("time", "resident_pages", "resident_bytes")},
+        "end": {k: stop[k] for k in ("time", "resident_pages", "resident_bytes")},
+        "post": {k: post[0][k] for k in ("time", "resident_pages", "resident_bytes")}
+        if post
+        else None,
+        "new_pages": stop["resident_pages"] - start["resident_pages"],
+        "window_min_pages": min((s["resident_pages"] for s in window), default=None),
+        "window_max_pages": max((s["resident_pages"] for s in window), default=None),
+        "vm_start": start["vm"],
+        "vm_end": stop["vm"],
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prefix", type=Path)
     parser.add_argument("--summary", type=Path)
     parser.add_argument("--calls", type=Path)
+    parser.add_argument("--native-lines", type=Path)
+    parser.add_argument("--residency", type=Path)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--row-bytes", type=int, default=144)
     parser.add_argument("--page-bytes", type=int, default=16384)
@@ -287,20 +356,29 @@ def main():
     if args.calls:
         calls = load_calls(args.calls)
         session_disk = disk_read_bytes(args.calls)
-        session = {
-            "disk_read_bytes": session_disk,
-            "estimated_page_misses": session_disk // args.page_bytes,
-            "miss_share_of_accesses": (session_disk / args.page_bytes) / total
-            if total
-            else None,
-            "hit_rate_one_page_per_access": 1 - (session_disk / args.page_bytes) / total
-            if total
-            else None,
-            "hit_rate_full_pages": 1 - session_disk / (total * args.page_bytes)
-            if total
-            else None,
+        window_disk = disk_read_bytes(args.calls, args.window_begin, args.window_end)
+        result["disk"] = {
+            "session_read_bytes": session_disk,
+            "window_read_bytes": window_disk,
+            "window_bytes_per_access": window_disk / total if total else None,
         }
-        result["disk"] = session
+        if args.native_lines:
+            prefill = prefill_stats(
+                args.native_lines, args.window_begin, args.window_end
+            )
+            result["prefill"] = prefill
+            result["decode"] = {
+                "rows": total - prefill.get("rows", 0),
+                "disk_read_bytes": window_disk - prefill.get("disk_read_bytes", 0),
+            }
+        if args.residency:
+            result["residency"] = residency_stats(
+                args.residency, args.window_begin, args.window_end
+            )
+            new_pages = result["residency"].get("new_pages", 0)
+            result["residency"]["retained_share_of_distinct_pages"] = (
+                new_pages / int(pages.size) if pages.size else None
+            )
         result["growth_with_tokens"] = growth(
             all_layer,
             all_row,

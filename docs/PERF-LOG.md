@@ -20,6 +20,23 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   fold **678.057/735.361** vs split **788.930/799.782 ms**. One call instead
   of two; **86.8/87.6 ms** median wall saved. Witness only. Raw runs in
   `$HOME/qwen-runs/2026-11-13-fold-band-landing/`.
+## 2026-11-13 - V4.1 Engram Residency: Page Cache Loses the Hot Set; Price a Row Cache
+
+- **Measurement only; no product change.** Off-by-default
+  `QWEN_V41_ENGRAM_TRACE` row tap on branch `research/v41-engram-residency`
+  (`2953dc7c`, main `56a1e8fe5`). [Packet](bench/2026-11-13-v41-engram-residency.md).
+- Three-agent 48K, 600 s greedy: **1.58-1.60M distinct rows**, **1.40-1.41M
+  distinct 16 KiB pages (23.0-23.1 GB)**. 90% hot set: **0.89-0.91M rows,
+  0.82-0.84M pages (13.4-13.7 GB)**; same rows are **0.23 GB packed / 1.6 GB
+  F32**. Growth ~33 distinct rows per 1k tokens, ~0.47 MB pages/token.
+- Target-purged cold vs back-to-back warm, both thermal max 1: **77.45 ->
+  62.57 GB** window disk (-19.2%), **79.76 -> 80.92 tok/s (+1.45%)**. Engram
+  resident only **4.7-7.7 GB** with ~59 GB free+inactive+speculative. Decode
+  is the problem: 4.26M rows, 56-62 GB reads, ~7 GB retained.
+- QoS slope `-0.448 tok/s/GB` (r2 0.858). Price: pre-warm ~1% or less,
+  `madvise`/wiring negative, **bounded row cache ~4-7%**. Next: prototype a
+  2-4 GB F32 (or 0.5-1 GB packed) `(layer,row)` cache and A/B it; do not
+  pre-warm or mlock first.
 
 ## 2026-11-13 - V4.1 Agent-Depth Masked Reindex: Promoted After Exact, Native and Served Gates
 

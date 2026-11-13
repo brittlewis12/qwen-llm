@@ -116,11 +116,13 @@ def model_weight_warmup(binary,model,corpus,log_path,deadline,fd):
         child=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,pass_fds=(fd,))
         try:
             nice=int(subprocess.check_output(["ps","-o","nice=","-p",str(child.pid)],text=True,timeout=5).strip())
+            log_path.with_suffix(".model-pids.json").write_text(json.dumps(dict(time=time.time(),model_pids=[child.pid],model_niceness={child.pid:nice},binary=str(binary.resolve()))))
             if nice!=0:raise RuntimeError("weight warmup model niceness is not0")
             while child.poll() is None:
                 level=packet.thermal();levels.append(level)
                 if level>=3 or time.monotonic()>=deadline:raise RuntimeError("weight warmup thermal/budget abort")
                 if value:=usage(child.pid):samples.append(dict(time=time.time(),pid=child.pid,**value))
+                log_path.with_suffix(".process-io.jsonl").write_text("".join(json.dumps(r)+"\n" for r in samples))
                 time.sleep(.5)
         finally:
             if child.poll() is None:

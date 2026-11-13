@@ -206,6 +206,24 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Raw `metagross:~/qwen-runs/2026-11-12-qos-nice0/`; record
   [bench note](bench/2026-11-12-serve-qos-nice0.md). Aven note on `SRV-2K0Y`:
   `JQFK6MMVXBWTG93N`.
+## 2026-11-13 - GLM 4K/128-Query Prefill Candidate: Rejected
+
+- Baseline census on M5: 49K + 2,048 rows, 80K + 256, and 80K + 1,024.
+  Largest 49K spans were routed experts 721 ms, KDA 408 ms, sparse index
+  scores 377 ms, and sparse attention 396 ms. The full chunk averaged 56.9
+  routed rows/expert versus 7.1 / 28.4 at the append widths.
+- Candidate: 4,096-row packed chunks plus 128-query sparse tiles. Three
+  interleaved same-cell pairs at 49K over the same 4,096 tokens: routed stage
+  **1,441 -> 2,619 ms (0.55x throughput)**; ordinary wall **4,056 -> 5,753 ms
+  (0.705x)**. Append widths also regressed 8% / 15%. Logits and persistent
+  state were not bitwise equal. Both required performance gates fail; no
+  non-inferiority or serve gate was run.
+- Removed the 4K/128 candidate code. Next lever is the resident Q6 F16 cache;
+  it needs its own 1.25x isolated-stage gate and 14–15 GiB / three-session
+  memory check.
+- **Evidence:** [baseline census](bench/2026-11-13-glm-prefill-baseline.md),
+  [candidate rejection](bench/2026-11-13-glm-prefill-4096-row-candidate.md),
+  raw records at `docs/bench/2026-11-13-glm-prefill/`.
 
 ## 2026-11-12 - Solo Routed-Expert Prefetch: Closed (2.4-3.6 ms/Token Worse)
 

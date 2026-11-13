@@ -1,0 +1,8 @@
+m5_worktree_commit=c7ad7c9202b0a0cd55fd4da91095a62289d8ecbc
+model=/Users/tito/models/glm-stock-iq3-download/glm5-next/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf
+corpus=/Users/tito/qwen-runs/2026-11-12-glm-prefill/metal-code-corpus.txt
+profile=iter
+mode=candidate
+prefill_rows=4096
+sparse_query_rows=128
+cells=49152:4096,81920:256,81920:1024

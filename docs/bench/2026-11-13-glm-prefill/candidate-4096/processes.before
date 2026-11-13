@@ -1,0 +1,358 @@
+    1     0   0.4 /sbin/launchd    /sbin/launchd
+  378     1   0.1 /usr/libexec/log /usr/libexec/logd
+  381     1   0.0 /usr/libexec/Use /usr/libexec/UserEventAgent (System)
+  383     1   0.1 /System/Library/ /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+  388     1   0.0 /usr/sbin/system /usr/sbin/systemstats --daemon
+  392     1   0.0 /usr/libexec/con /usr/libexec/configd
+  394     1   0.0 /System/Library/ /System/Library/CoreServices/powerd.bundle/powerd
+  395     1   0.0 /usr/libexec/IOM /usr/libexec/IOMFB_bics_daemon
+  399     1   0.0 /usr/libexec/rem /usr/libexec/remoted
+  403     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd_system
+  405     1   0.0 /usr/libexec/wat /usr/libexec/watchdogd
+  407     1   0.0 /usr/libexec/war /usr/libexec/warmd
+  408     1  70.7 /System/Library/ /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds
+  410     1   0.0 /usr/libexec/ker /usr/libexec/kernelmanagerd
+  411     1   0.0 /usr/libexec/dis /usr/libexec/diskarbitrationd
+  415     1   0.0 /usr/sbin/syslog /usr/sbin/syslogd
+  417     1   0.0 /usr/libexec/the /usr/libexec/thermalmonitord
+  418     1   0.7 /System/Library/ /System/Library/PrivateFrameworks/CoreDuetContext.framework/Resources/contextstored
+  419     1   0.0 /usr/libexec/xpr /usr/libexec/xprotectd
+  420     1 198.4 /usr/libexec/ope /usr/libexec/opendirectoryd
+  421     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/ApplePushService.framework/apsd
+  422     1   0.0 /System/Library/ /System/Library/CoreServices/launchservicesd
+  423     1   0.0 /usr/libexec/tim /usr/libexec/timed
+  425     1   0.0 /usr/sbin/securi /usr/sbin/securityd -i
+  427     1   0.0 /usr/libexec/loc /usr/libexec/locationd
+  430     1   0.0 autofsd          autofsd
+  431     1   0.0 /usr/libexec/das /usr/libexec/dasd
+  432     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/Heimdal.framework/Helpers/kdc
+  435     1   0.0 /usr/sbin/distno /usr/sbin/distnoted daemon
+  438     1   0.0 /System/Library/ /System/Library/CoreServices/logind
+  439     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/GenerationalStorage.framework/Versions/A/Support/revisiond
+  440     1   0.0 /usr/sbin/Kernel /usr/sbin/KernelEventAgent
+  445     1   0.0 /usr/sbin/notify /usr/sbin/notifyd
+  447     1   0.0 /usr/libexec/cor /usr/libexec/corebrightnessd --launchd
+  448     1   0.0 /System/Library/ /System/Library/Frameworks/CoreMediaIO.framework/Versions/A/Resources/com.apple.cmio.registerassistantservice
+  451     1   0.7 /System/Library/ /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer -daemon
+  454     1   0.0 /usr/sbin/cfpref /usr/sbin/cfprefsd daemon
+  457     1   0.0 /System/Library/ /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console
+  458     1   0.0 /usr/libexec/run /usr/libexec/runningboardd
+  471     1   0.0 /System/Library/ /System/Library/CoreServices/coreservicesd
+  480     1   0.0 /usr/libexec/Pow /usr/libexec/PowerUIAgent
+  483     1   0.0 /usr/libexec/clo /usr/libexec/clocksyncd
+  490     1   0.0 /usr/libexec/air /usr/libexec/airportd
+  496     1   0.0 /usr/sbin/mDNSRe /usr/sbin/mDNSResponder
+  506     1   0.0 /usr/libexec/lsd /usr/libexec/lsd runAsRoot
+  511     1   0.0 /usr/libexec/apf /usr/libexec/apfsd
+  513     1   0.0 /usr/sbin/netbio /usr/sbin/netbiosd
+  523     1   0.0 /usr/libexec/cry /usr/libexec/cryptexd
+  526     1   0.0 /System/Library/ /System/Library/Frameworks/Security.framework/Versions/A/XPCServices/authd.xpc/Contents/MacOS/authd
+  527     1   0.0 /usr/libexec/sym /usr/libexec/symptomsd
+  534     1   0.0 /usr/libexec/sys /usr/libexec/syspolicyd
+  538     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+  540     1   0.0 /usr/libexec/App /usr/libexec/ApplicationFirewall/socketfilterfw
+  542     1   0.0 /usr/sbin/mDNSRe /usr/sbin/mDNSResponderHelper
+  543     1   4.5 /System/Library/ /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+  546     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+  549     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/BackgroundTaskManagement.framework/Resources/backgroundtaskmanagementd -daemon
+  552     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+  554     1   0.0 /usr/libexec/eli /usr/libexec/eligibilityd
+  561     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+  563     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+  578     1   0.0 /Users/tito/.loc /Users/tito/.local/share/mise/installs/github-raine-aven/latest/aven server --data /Users/tito/.local/state/aven/server/sync-server.sqlite --bind 127.0.0.1:3746
+  579     1   0.0 /usr/local/bin/n /usr/local/bin/nextdns run -config-file /etc/nextdns.conf
+  581     1   0.0 /usr/local/bin/t /usr/local/bin/tailscaled
+  585     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+  589     1   0.0 /usr/libexec/com /usr/libexec/com.apple.cmio.videodriverkithostextension.systemextension/Contents/MacOS/com.apple.cmio.videodriverkithostextension
+  591     1   0.0 /usr/libexec/cam /usr/libexec/cameracaptured
+  592     1   0.0 /System/Library/ /System/Library/Frameworks/CoreMediaIO.framework/Versions/A/Resources/UVCAssistant.systemextension/Contents/MacOS/UVCAssistant
+  595     1   0.0 /System/Library/ /System/Library/CoreServices/MenuBarAgent.app/Contents/MacOS/MenuBarAgent
+  596     1   0.0 /System/Library/ /System/Library/Frameworks/InputMethodKit.framework/Resources/imklaunchagent
+  597     1   0.0 /usr/libexec/Use /usr/libexec/UserEventAgent (LoginWindow)
+  598     1   0.0 /usr/sbin/univer /usr/sbin/universalaccessd launchd -s
+  600     1   0.0 /System/Library/ /System/Library/CoreServices/Software Update.app/Contents/Resources/suhelperd
+  603     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+  605     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+  608     1   0.0 /usr/sbin/coreau /usr/sbin/coreaudiod
+  618     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+  619     1   0.0 /System/Library/ /System/Library/CoreServices/appleeventsd --server
+  628     1   0.0 /System/Library/ /System/Library/DriverExtensions/com.apple.DriverKit-IOUserDockChannelSerial.dext/com.apple.DriverKit-IOUserDockChannelSerial com.apple.IOUserDockChannelSerial 0x100001a64 com.apple.DriverKit-IOUserDockChannelSerial
+  632     1   0.0 /System/Library/ /System/Library/DriverExtensions/com.apple.AppleUserHIDDrivers.dext/com.apple.AppleUserHIDDrivers com.apple.driverkit.AppleUserHIDDrivers 0x100001a76 com.apple.AppleUserHIDDrivers
+  636   388   0.0 /usr/sbin/system /usr/sbin/systemstats --logger-helper /private/var/db/systemstats
+  638     1   0.0 /usr/libexec/fsk /usr/libexec/fskitd
+  642     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+  649     1   0.0 /System/Library/ /System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/MacOS/SecurityAgent
+  655     1   0.0 /usr/libexec/aud /usr/libexec/audiomxd
+  660     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+  664     1   0.0 /System/Library/ /System/Library/DriverExtensions/AppleCentauriControl.dext/AppleCentauriControl com.apple.driver.AppleCentauriControl 0x100001b1f com.apple.driver.AppleCentauriControl
+  666     1   0.0 /System/Library/ /System/Library/DriverExtensions/AppleCentauriBeta.dext/AppleCentauriBeta com.apple.driver.AppleCentauriBeta 0x100001b21 com.apple.driver.AppleCentauriBeta
+  667     1   0.0 /System/Library/ /System/Library/DriverExtensions/AppleCentauriAlpha.dext/AppleCentauriAlpha com.apple.driver.AppleCentauriAlpha 0x100001b20 com.apple.driver.AppleCentauriAlpha
+  671     1   0.0 /System/Library/ /System/Library/Frameworks/CryptoTokenKit.framework/ctkahp.bundle/Contents/MacOS/ctkahp -d
+  672     1   0.0 /System/Library/ /System/Library/Frameworks/CryptoTokenKit.framework/ctkahp.bundle/Contents/MacOS/ctkahp
+  674     1   0.0 /System/Library/ /System/Library/Frameworks/CryptoTokenKit.framework/ctkd -tw
+  675     1   0.0 /System/Library/ /System/Library/Frameworks/CryptoTokenKit.framework/ctkd -st
+  678     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+  778     1   0.0 /System/Library/ /System/Library/CoreServices/WiFiAgent.app/Contents/MacOS/WiFiAgent
+ 1005     1   0.0 /System/Library/ /System/Library/CoreServices/SubmitDiagInfo server-init
+ 1663     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+ 1676     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+ 1677     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/SystemMigration.framework/Resources/systemmigrationd
+ 1691     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+ 1921     1   0.0 /usr/sbin/blueto /usr/sbin/bluetoothd
+ 2011     1   0.0 /System/Library/ /System/Library/DriverExtensions/IOUserBluetoothSerialDriver.dext/IOUserBluetoothSerialDriver com.apple.IOUserBluetoothSerialDriver 0x100001cf4 com.apple.IOUserBluetoothSerialDriver
+ 5821     1   0.0 /Library/Develop /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Resources/bin/simdiskimaged
+ 6526     1   0.0 /usr/libexec/rtc /usr/libexec/rtcreportingd
+ 7630     1   0.0 sshd-session: ti sshd-session: tito [priv]  
+ 7631  7630   0.0 <defunct>        <defunct>
+ 7642  7630   0.0 sshd-session: ti sshd-session: tito@notty  
+ 7643  7642   0.0 zsh              zsh -c cd ~/qwen-runs/2026-11-13-mid-landing; i=0; while kill -0 7103 2>/dev/null; do i=$((i+1)); if [ $((i % 12)) -eq 0 ]; then echo "waiting $(date -u +%FT%TZ) lease=$(cat /tmp/qwen-llm-$(id -u)/metal.lock 2>/dev/null | head -c 140)"; fi; sleep 5; done; echo "=== witness finished at $(date -u +%FT%TZ) ==="; tail -60 witness.log
+ 9182     1   1.1 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 launch.py --name ab-scope-base --runner /Users/tito/ghost/host-cache/hosts/44d4fe0f506f7e2854b6d96345d22bbac7d6456e35f536a749b7ef40d2954123/headless/Headless.app/Contents/MacOS/shadps4 --pack /Users/tito/ps4-dump/build/pack-store/entries/21037b048349861d62968b690e9c04a9a46af4dd0b69f26cd8e07042b53f25f4/pack --recovery /Users/tito/ps4-dump/build/pack-store/entries/21037b048349861d62968b690e9c04a9a46af4dd0b69f26cd8e07042b53f25f4/recovery --run
+ 9183     1   0.6 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 launch.py --name ab-scope-cand --runner /Users/tito/ghost/host-cache/hosts/8933c248546e51122de0af9d2876710e0e2913dba8227ffdfe162c620aac0845/headless/Headless.app/Contents/MacOS/shadps4 --pack /Users/tito/ps4-dump/build/pack-store/entries/26b877b8fa98c868ac44b9f52259c6591b1a074e763c352ae2128842385fa84b/pack --recovery /Users/tito/ps4-dump/build/pack-store/entries/26b877b8fa98c868ac44b9f52259c6591b1a074e763c352ae2128842385fa84b/recovery --run
+ 9190     1   0.0 sshd-session: ti sshd-session: tito [priv]  
+ 9191  9190   0.0 <defunct>        <defunct>
+ 9195  9190   0.0 sshd-session: ti sshd-session: tito@notty  
+ 9196  9195   0.0 bash             bash -s
+ 9197  9196   0.0 /Users/tito/.loc /Users/tito/.local/share/mise/installs/uv/0.13.1/uv-aarch64-apple-darwin/uv run launch.py --plan plans/top16-sample --run
+ 9200  9197   4.2 /Users/tito/.cac /Users/tito/.cache/uv/builds-v0/.tmpKymfye/bin/python launch.py --plan plans/top16-sample --run
+ 9208  9200   0.0 /Users/tito/.cac /Users/tito/.cache/uv/builds-v0/.tmpKymfye/bin/python /Users/tito/ghost/headless-agr/launch.py --reap-run /Users/tito/ghost/headless-agr/runs/top16-sample --reap-parent 9200
+ 9217  9200   0.0 /Users/tito/ghos /Users/tito/ghost/headless-agr/bin/d1-responder --bind 127.0.0.1 --http-ports 38080 --tls-ports  --bap-port 38075 --npid OfflineTester --account-id 1234605616436508552
+ 9220  9200   0.0 /Users/tito/ghos /Users/tito/ghost/headless-agr/bin/d1-activity-host-3764b11 serve --bind 127.0.0.1:38110
+ 9221  9200   0.0 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/review5-services/title/stun-working/stun_stub.py --bind 127.0.0.1 --port 38174 --d1-133 --mapped-ip 10.0.0.2 --mapped-port 3074 --server-ip 10.0.0.5 --server-port 3074
+ 9222  9200   1.0 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/runs/top16-sample/recovery/tooling/scripts/recovery.py serve --capsule /Users/tito/ghost/headless-agr/runs/top16-sample/recovery/capsule.json --spool /Users/tito/ghost/headless-agr/runs/top16-sample/recovery/spool --stop-file /Users/tito/ghost/headless-agr/runs/top16-sample/recovery/helper.stop
+ 9239  9182   0.0 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/launch.py --reap-run /Users/tito/ghost/headless-agr/runs/ab-scope-base --reap-parent 9182
+ 9242  9182   0.0 /Users/tito/ghos /Users/tito/ghost/headless-agr/bin/d1-responder --bind 127.0.0.1 --http-ports 38480 --tls-ports  --bap-port 38475 --npid OfflineTester --account-id 1234605616436508552
+ 9243  9182   3.3 /Users/tito/ghos /Users/tito/ghost/headless-agr/bin/d1-activity-host serve --bind 127.0.0.1:38510
+ 9244  9183   0.0 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/launch.py --reap-run /Users/tito/ghost/headless-agr/runs/ab-scope-cand --reap-parent 9183
+ 9246  9182   0.0 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/review5-services/title/stun-working/stun_stub.py --bind 127.0.0.1 --port 38574 --d1-133 --mapped-ip 10.0.0.2 --mapped-port 3074 --server-ip 10.0.0.5 --server-port 3074
+ 9248  9182   1.0 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/runs/ab-scope-base/recovery/tooling/scripts/recovery.py serve --capsule /Users/tito/ghost/headless-agr/runs/ab-scope-base/recovery/capsule.json --spool /Users/tito/ghost/headless-agr/runs/ab-scope-base/recovery/spool --stop-file /Users/tito/ghost/headless-agr/runs/ab-scope-base/recovery/helper.stop
+ 9249  9183   0.0 /Users/tito/ghos /Users/tito/ghost/headless-agr/bin/d1-responder --bind 127.0.0.1 --http-ports 38880 --tls-ports  --bap-port 38875 --npid OfflineTester --account-id 1234605616436508552
+ 9250  9183   2.4 /Users/tito/ghos /Users/tito/ghost/headless-agr/bin/d1-activity-host serve --bind 127.0.0.1:38910
+ 9251  9183   0.0 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/review5-services/title/stun-working/stun_stub.py --bind 127.0.0.1 --port 38974 --d1-133 --mapped-ip 10.0.0.2 --mapped-port 3074 --server-ip 10.0.0.5 --server-port 3074
+ 9252  9183   1.0 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/runs/ab-scope-cand/recovery/tooling/scripts/recovery.py serve --capsule /Users/tito/ghost/headless-agr/runs/ab-scope-cand/recovery/capsule.json --spool /Users/tito/ghost/headless-agr/runs/ab-scope-cand/recovery/spool --stop-file /Users/tito/ghost/headless-agr/runs/ab-scope-cand/recovery/helper.stop
+ 9277     1   0.0 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/census-sample.py /Users/tito/ghost/headless-agr/runs/ab-scope-base 280 60
+ 9278     1   0.0 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/census-sample.py /Users/tito/ghost/headless-agr/runs/ab-scope-cand 280 60
+ 9296     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+ 9309  9200   0.0 /Users/tito/ghos /Users/tito/ghost/host-cache/hosts/44d4fe0f506f7e2854b6d96345d22bbac7d6456e35f536a749b7ef40d2954123/headless/Headless.app/Contents/MacOS/shadps4 --aot-config /Users/tito/ghost/headless-agr/runs/top16-sample/launch.json
+ 9310  9200  12.5 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/drive.py --launch /Users/tito/ghost/headless-agr/runs/top16-sample/launch.json --agr-inputs
+ 9312  9309 464.4 /Users/tito/ghos /Users/tito/ghost/host-cache/hosts/44d4fe0f506f7e2854b6d96345d22bbac7d6456e35f536a749b7ef40d2954123/headless/Headless.app/Contents/MacOS/shadps4 --aot-worker /Users/tito/ghost/headless-agr/runs/top16-sample/launch.json
+ 9322  9182   0.0 /Users/tito/ghos /Users/tito/ghost/host-cache/hosts/44d4fe0f506f7e2854b6d96345d22bbac7d6456e35f536a749b7ef40d2954123/headless/Headless.app/Contents/MacOS/shadps4 --aot-config /Users/tito/ghost/headless-agr/runs/ab-scope-base/launch.json
+ 9323  9182  12.5 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/drive.py --launch /Users/tito/ghost/headless-agr/runs/ab-scope-base/launch.json --agr-inputs
+ 9326  9322 480.2 /Users/tito/ghos /Users/tito/ghost/host-cache/hosts/44d4fe0f506f7e2854b6d96345d22bbac7d6456e35f536a749b7ef40d2954123/headless/Headless.app/Contents/MacOS/shadps4 --aot-worker /Users/tito/ghost/headless-agr/runs/ab-scope-base/launch.json
+ 9327  9183   0.0 /Users/tito/ghos /Users/tito/ghost/host-cache/hosts/8933c248546e51122de0af9d2876710e0e2913dba8227ffdfe162c620aac0845/headless/Headless.app/Contents/MacOS/shadps4 --aot-config /Users/tito/ghost/headless-agr/runs/ab-scope-cand/launch.json
+ 9328  9183  15.2 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/drive.py --launch /Users/tito/ghost/headless-agr/runs/ab-scope-cand/launch.json --agr-inputs
+ 9330  9327 446.7 /Users/tito/ghos /Users/tito/ghost/host-cache/hosts/8933c248546e51122de0af9d2876710e0e2913dba8227ffdfe162c620aac0845/headless/Headless.app/Contents/MacOS/shadps4 --aot-worker /Users/tito/ghost/headless-agr/runs/ab-scope-cand/launch.json
+ 9937  9220   0.1 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/sidecar-tap.py /Users/tito/.local/share/mise/installs/node/26.12.0/bin/node /Users/tito/ghost/creator-agr/runtime/tools/script-host/src/sidecar.mjs
+ 9938  9937   0.1 /Users/tito/.loc /Users/tito/.local/share/mise/installs/node/26.12.0/bin/node /Users/tito/ghost/creator-agr/runtime/tools/script-host/src/sidecar.mjs
+ 9960  9243   0.2 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/sidecar-tap.py /Users/tito/.local/share/mise/installs/node/26.12.0/bin/node /Users/tito/ghost/creator-agr/runtime/tools/script-host/src/sidecar.mjs
+ 9961  9960   0.1 /Users/tito/.loc /Users/tito/.local/share/mise/installs/node/26.12.0/bin/node /Users/tito/ghost/creator-agr/runtime/tools/script-host/src/sidecar.mjs
+ 9996  9250   0.2 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/sidecar-tap.py /Users/tito/.local/share/mise/installs/node/26.12.0/bin/node /Users/tito/ghost/creator-agr/runtime/tools/script-host/src/sidecar.mjs
+ 9997  9996   0.4 /Users/tito/.loc /Users/tito/.local/share/mise/installs/node/26.12.0/bin/node /Users/tito/ghost/creator-agr/runtime/tools/script-host/src/sidecar.mjs
+12822     1   0.0 /usr/sbin/cfpref /usr/sbin/cfprefsd agent
+15822     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/UARPAssetManager.framework/XPCServices/UARPAssetManagerServiceiCloud.xpc/Contents/MacOS/UARPAssetManagerServiceiCloud
+15823     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/UARPAssetManager.framework/XPCServices/UARPAssetManagerServiceMobileAsset.xpc/Contents/MacOS/UARPAssetManagerServiceMobileAsset
+15882     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/AssetCacheServices.framework/Versions/A/XPCServices/AssetCacheLocatorService.xpc/Contents/MacOS/AssetCacheLocatorService -d
+15894     1   0.0 /usr/libexec/Ass /usr/libexec/AssetCache/AssetCache
+15900     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/AssetCacheServicesExtensions.framework/XPCServices/AssetCacheTetheratorService.xpc/Contents/MacOS/AssetCacheTetheratorService
+16023     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/StreamingZip.framework/Versions/A/XPCServices/com.apple.StreamingUnzipService.privileged.xpc/Contents/MacOS/com.apple.StreamingUnzipService.privileged
+16317     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/SoftwareUpdateCore.framework/Versions/A/XPCServices/SUCoreHelperService.xpc/Contents/MacOS/SUCoreHelperService
+18167     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/SoftwareUpdate.framework/Resources/SoftwareUpdateNotificationManager.app/Contents/MacOS/SoftwareUpdateNotificationManager
+18892     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XProtectBridgeService.xpc/Contents/MacOS/XProtectBridgeService
+20254  9196   0.0 sleep            sleep 280
+21459     1   0.0 sshd-session: ti sshd-session: tito [priv]  
+21460 21459   0.0 <defunct>        <defunct>
+21502 21459   0.0 sshd-session: ti sshd-session: tito@ttys004  
+21974     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/AppleNeuralEngine.framework/XPCServices/ANEStorageMaintainer.xpc/Contents/MacOS/ANEStorageMaintainer
+21975     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/AppleNeuralEngine.framework/XPCServices/ANEStorageMaintainer.xpc/Contents/MacOS/ANEStorageMaintainer
+21977     1   0.0 /usr/sbin/distno /usr/sbin/distnoted agent
+21978     1   0.0 /usr/sbin/cfpref /usr/sbin/cfprefsd agent
+23498     1   0.0 /Users/tito/.loc /Users/tito/.local/share/mise/installs/uv/0.13.1/uv-aarch64-apple-darwin/uv run --script launch.py --name agr-rt-2 --revision d77d1e590 --time-scale 1.0 --run
+23500 23498   0.3 /Users/tito/.cac /Users/tito/.cache/uv/builds-v0/.tmpObpzZg/bin/python launch.py --name agr-rt-2 --revision d77d1e590 --time-scale 1.0 --run
+24821     1   0.0 aslmanager       aslmanager
+26549 94489   0.0 zsh              zsh -c cd ~/qwen-runs/2026-11-12-glm-prefill/worktree && timeout 3500s env QWEN_METAL_LEASE_WAIT=1 scripts/bench/with-metal-lease --task glm-prefill --for 12m -- sh ~/qwen-runs/2026-11-12-glm-prefill/candidate-4096/run_candidate.sh; result=$?; cat ~/qwen-runs/2026-11-12-glm-prefill/candidate-4096/run.status 2>/dev/null || true; tail -20 ~/qwen-runs/2026-11-12-glm-prefill/candidate-4096/candidate.stderr 2>/dev/null || true; exit $result
+26550 26549   0.0 timeout          timeout 3500s env QWEN_METAL_LEASE_WAIT=1 scripts/bench/with-metal-lease --task glm-prefill --for 12m -- sh /Users/tito/qwen-runs/2026-11-12-glm-prefill/candidate-4096/run_candidate.sh
+26551 26550   0.0 /Users/tito/.loc /Users/tito/.local/share/mise/installs/uv/0.13.1/uv-aarch64-apple-darwin/uv run --quiet --script scripts/bench/with-metal-lease --task glm-prefill --for 12m -- sh /Users/tito/qwen-runs/2026-11-12-glm-prefill/candidate-4096/run_candidate.sh
+26557 26551   0.0 sh               sh /Users/tito/qwen-runs/2026-11-12-glm-prefill/candidate-4096/run_candidate.sh
+27390     1   0.0 sh               sh -c QWEN_METAL_LEASE_WAIT=1 scripts/bench/with-metal-lease --task fn-prefill-serve --for 15m -- timeout 1000 sh /Users/tito/qwen-runs/2026-11-12-fn-prefill/run-serve-ab.sh > /Users/tito/qwen-runs/2026-11-12-fn-prefill/serve-ab.log 2>&1; echo serve-code=$? >> /Users/tito/qwen-runs/2026-11-12-fn-prefill/serve-ab.log
+27392 27390   0.0 /Users/tito/.loc /Users/tito/.local/share/mise/installs/uv/0.13.1/uv-aarch64-apple-darwin/uv run --quiet --script scripts/bench/with-metal-lease --task fn-prefill-serve --for 15m -- timeout 1000 sh /Users/tito/qwen-runs/2026-11-12-fn-prefill/run-serve-ab.sh
+27396 27392   0.0 /Users/tito/.cac /Users/tito/.cache/uv/environments-v2/with-metal-lease-4d6d49fb0b2c42ea/bin/python scripts/bench/with-metal-lease --task fn-prefill-serve --for 15m -- timeout 1000 sh /Users/tito/qwen-runs/2026-11-12-fn-prefill/run-serve-ab.sh
+28462 23500   0.0 /Users/tito/.cac /Users/tito/.cache/uv/builds-v0/.tmpObpzZg/bin/python /Users/tito/ghost/headless-agr/launch.py --reap-run /Users/tito/ghost/headless-agr/runs/agr-rt-2 --reap-parent 23500
+28465 23500   0.0 /Users/tito/ghos /Users/tito/ghost/headless-agr/bin/d1-responder --bind 127.0.0.1 --http-ports 39680 --tls-ports  --bap-port 39675 --npid OfflineTester --account-id 1234605616436508552
+28466 23500  15.9 /Users/tito/ghos /Users/tito/ghost/headless-agr/bin/d1-activity-host-521e97c serve --bind 127.0.0.1:39710
+28467 23500   0.0 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/review5-services/title/stun-working/stun_stub.py --bind 127.0.0.1 --port 39774 --d1-133 --mapped-ip 10.0.0.2 --mapped-port 3074 --server-ip 10.0.0.5 --server-port 3074
+28468 23500   1.0 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/runs/agr-rt-2/recovery/tooling/scripts/recovery.py serve --capsule /Users/tito/ghost/headless-agr/runs/agr-rt-2/recovery/capsule.json --spool /Users/tito/ghost/headless-agr/runs/agr-rt-2/recovery/spool --stop-file /Users/tito/ghost/headless-agr/runs/agr-rt-2/recovery/helper.stop
+32783 23500   0.0 /Users/tito/ghos /Users/tito/ghost/host-cache/hosts/44d4fe0f506f7e2854b6d96345d22bbac7d6456e35f536a749b7ef40d2954123/headless/Headless.app/Contents/MacOS/shadps4 --aot-config /Users/tito/ghost/headless-agr/runs/agr-rt-2/launch.json
+32784 23500  10.8 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/drive.py --launch /Users/tito/ghost/headless-agr/runs/agr-rt-2/launch.json --agr-inputs
+32785 32783 189.8 /Users/tito/ghos /Users/tito/ghost/host-cache/hosts/44d4fe0f506f7e2854b6d96345d22bbac7d6456e35f536a749b7ef40d2954123/headless/Headless.app/Contents/MacOS/shadps4 --aot-worker /Users/tito/ghost/headless-agr/runs/agr-rt-2/launch.json
+33053 28466   0.0 /Users/tito/.loc /Users/tito/.local/share/uv/python/cpython-3.12-macos-aarch64-none/bin/python3.12 /Users/tito/ghost/headless-agr/sidecar-tap.py /Users/tito/.local/share/mise/installs/node/26.12.0/bin/node /Users/tito/ghost/creator-agr/runtime/tools/script-host/src/sidecar.mjs
+33054 33053   0.0 /Users/tito/.loc /Users/tito/.local/share/mise/installs/node/26.12.0/bin/node /Users/tito/ghost/creator-agr/runtime/tools/script-host/src/sidecar.mjs
+33283  7643   0.0 sleep            sleep 5
+33395 26557   0.0 ps               ps -axo pid=,ppid=,pcpu=,comm=,args=
+33669     1   0.0 /System/Library/ /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport -s mdworker-bundle -c MDSImporterBundleFinder -m com.apple.metadata.mdbulkimport
+33673     1   0.0 /usr/libexec/pkd /usr/libexec/pkd
+33676     1   0.0 /usr/libexec/lsd /usr/libexec/lsd
+33679     1   0.0 /usr/libexec/sec /usr/libexec/secd
+33680     1   0.0 /usr/libexec/con /usr/libexec/containermanagerd --runmode=agent --user-container-mode=current --bundle-container-mode=proxy --system-container-mode=none
+33700     1   0.0 /usr/libexec/tru /usr/libexec/trustd --agent
+34515     1   0.0 sshd-session: ti sshd-session: tito [priv]  
+34529 34515   0.0 <defunct>        <defunct>
+34898 34515   0.0 sshd-session: ti sshd-session: tito@ttys005  
+37313     1   0.0 /usr/libexec/pow /usr/libexec/powerexperienced
+38168     1   0.0 /Library/Develop /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/XPCServices/com.apple.CoreSimulator.CoreSimulatorService.xpc/Contents/MacOS/com.apple.CoreSimulator.CoreSimulatorService
+38172     1   0.0 /Library/Develop /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/XPCServices/SimulatorTrampoline.xpc/Contents/MacOS/SimulatorTrampoline
+38173     1   0.0 /Library/Develop /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/XPCServices/SimLaunchHost.arm64.xpc/Contents/MacOS/SimLaunchHost.arm64
+38245     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/FindMyDevice.framework/XPCServices/FindMyDeviceSharedConfigurationXPCService.xpc/Contents/MacOS/FindMyDeviceSharedConfigurationXPCService
+46477     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/AppleNeuralEngine.framework/XPCServices/ANECompilerService.xpc/Contents/MacOS/ANECompilerService
+47841     1   0.0 /System/Library/ /System/Library/CoreServices/CrashReporterSupportHelper server-init
+50490     1   0.0 sshd-session: ti sshd-session: tito [priv]  
+50491 50490   0.0 <defunct>        <defunct>
+50493 50490   0.0 sshd-session: ti sshd-session: tito@ttys003  
+55930     1   0.0 /usr/libexec/tas /usr/libexec/taskgated
+57212     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/MobileDevice.framework/Versions/A/Resources/usbmuxd -launchd
+64047     1   0.0 /usr/libexec/Per /usr/libexec/PerfPowerServices
+67882     1   0.0 /usr/libexec/dbt /usr/libexec/dbtelemetryd
+72415     1   0.0 /usr/libexec/san /usr/libexec/sandboxd
+73558     1   0.0 /usr/libexec/app /usr/libexec/applekeystored
+86516     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/AppleCredentialManager.framework/AppleCredentialManagerDaemon
+91811     1   0.0 /usr/libexec/ker /usr/libexec/kernelmanager_helper
+91812     1   0.0 /usr/libexec/mob /usr/libexec/mobileassetd
+91813     1   0.0 /usr/libexec/tru /usr/libexec/trustd
+91814     1   0.0 /usr/libexec/sea /usr/libexec/searchpartyd
+91815     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/GeoServices.framework/Versions/A/XPCServices/com.apple.geod.xpc/Contents/MacOS/com.apple.geod
+91816     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/GeoServices.framework/Versions/A/XPCServices/com.apple.geod.xpc/Contents/MacOS/com.apple.geod
+91817     1   0.0 /usr/libexec/mod /usr/libexec/modelmanagerd
+91818     1   0.0 /usr/libexec/tru /usr/libexec/trustd --agent
+91819     1   0.0 /usr/libexec/cor /usr/libexec/coreduetd
+91821     1   0.0 /System/Library/ /System/Library/CoreServices/Software Update.app/Contents/Resources/softwareupdated
+91822     1   0.0 /usr/libexec/fin /usr/libexec/findmydeviced
+91823     1   0.0 /usr/libexec/wif /usr/libexec/wifip2pd
+91824     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/CoreAnalytics.framework/Support/analyticsd
+91825     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/AppSSO.framework/Support/AppSSODaemon
+91826     1   0.0 /System/Library/ /System/Library/Frameworks/ManagedAppDistribution.framework/Support/managedappdistributiond
+91827     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/AuthKit.framework/Versions/A/Support/akd
+91828     1   0.0 /usr/libexec/ass /usr/libexec/assetsubscriptiond
+91829     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/TCC.framework/Support/tccd system
+91830     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/BiomeStreams.framework/Support/biomed
+91831     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/ModelCatalogRuntime.framework/Versions/A/modelcatalogd
+91832     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/CloudKitDaemon.framework/Support/cloudd --system
+91833     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/CloudTelemetry.framework/Support/cloudtelemetryd
+91834     1   0.0 /usr/libexec/sym /usr/libexec/symptomsd-diag
+91835     1   0.0 /usr/libexec/tri /usr/libexec/triald_system
+91836     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/remotemanagementd
+91837     1   0.0 /usr/libexec/con /usr/libexec/containermanagerd_system --runmode=privileged --user-container-mode=current --bundle-container-mode=global --system-container-mode=none
+91838     1   0.0 /usr/libexec/gam /usr/libexec/gamepolicyd
+91839     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/MediaRemote.framework/Support/mediaremoted
+91840     1   0.0 /System/Library/ /System/Library/CoreServices/osanalyticshelper server-init
+91842     1   0.0 /usr/libexec/amf /usr/libexec/amfid
+91843     1   0.0 /usr/libexec/sto /usr/libexec/storagekitd
+91845     1   0.0 /usr/libexec/mma /usr/libexec/mmaintenanced
+91846     1   0.0 /usr/libexec/neh /usr/libexec/nehelper
+91847     1   0.0 /usr/libexec/fin /usr/libexec/findmybeaconingd
+91848     1   0.0 /usr/libexec/aud /usr/libexec/audioanalyticsd
+91849     1   0.0 /usr/libexec/cen /usr/libexec/centaurid
+91850     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/MobileSoftwareUpdate.framework/Support/softwareupdated
+91851     1   0.0 /usr/libexec/nes /usr/libexec/nesessionmanager
+91854     1   0.0 /usr/libexec/wif /usr/libexec/wifianalyticsd
+91856     1   0.0 /usr/libexec/dpr /usr/libexec/dprivacyd
+91857     1   0.0 /usr/libexec/sec /usr/libexec/securityd_system
+91859     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/PowerLog.framework/Versions/A/XPCServices/PerfPowerTelemetryClientRegistrationService.xpc/Contents/MacOS/PerfPowerTelemetryClientRegistrationService
+91860     1   0.0 /Library/Apple/S /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/XPCServices/XProtectPluginService.xpc/Contents/MacOS/XProtectPluginService
+91861     1   0.0 /System/Library/ /System/Library/CoreServices/diagnosticservicesd
+91863     1   0.0 /usr/sbin/spindu /usr/sbin/spindump
+91865     1   0.0 /usr/sbin/Wirele /usr/sbin/WirelessRadioManagerd
+91866     1   0.0 /usr/libexec/nfc /usr/libexec/nfcd
+91867     1   0.0 /System/Library/ /System/Library/Frameworks/LocalAuthentication.framework/Support/coreauthd
+91868     1   0.0 /usr/libexec/pkd /usr/libexec/pkd
+91869     1   0.0 /usr/libexec/uar /usr/libexec/uarpd
+91870     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/SystemStatusServer.framework/Support/systemstatusd
+91871     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/ViewBridge.framework/Versions/A/XPCServices/ViewBridgeAuxiliary.xpc/Contents/MacOS/ViewBridgeAuxiliary
+91872     1   0.0 /System/Library/ /System/Library/Frameworks/GSS.framework/Helpers/GSSCred
+91873     1   0.0 /usr/libexec/sec /usr/libexec/secinitd
+91874     1   0.0 /usr/libexec/sec /usr/libexec/secinitd
+91875     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/DeviceConfiguration.framework/Versions/A/deviceconfigurationd
+91876     1   0.0 /usr/libexec/cap /usr/libexec/captiveagent
+91877     1   0.0 /usr/libexec/cou /usr/libexec/countryd
+91878     1   0.0 /usr/libexec/mob /usr/libexec/mobileactivationd
+91879     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/CoreLSKD.framework/Versions/A/lskdd
+91880     1   0.0 /System/Library/ /System/Library/CoreServices/iconservicesagent runAsRoot
+91883     1   0.0 /usr/libexec/xpc /usr/libexec/xpcroleaccountd -launchd
+91885     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/CoreADI.framework/adid
+91886     1   0.0 /System/Library/ /System/Library/CoreServices/TimeMachine/backupd
+91887     1   0.0 /usr/libexec/con /usr/libexec/containermanagerd --runmode=agent --user-container-mode=current --bundle-container-mode=proxy --system-container-mode=none
+91888     1   0.0 /usr/libexec/con /usr/libexec/containermanagerd --runmode=agent --user-container-mode=current --bundle-container-mode=proxy --system-container-mode=none
+91889     1   0.0 /System/Library/ /System/Library/Frameworks/SystemExtensions.framework/Versions/A/Helpers/sysextd
+91890     1   0.0 /System/Library/ /System/Library/CoreServices/TimeMachine/backupd-helper -launchd
+91891     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/MobileSoftwareUpdate.framework/Versions/A/XPCServices/com.apple.MobileSoftwareUpdate.CleanupPreparePathService.xpc/Contents/MacOS/com.apple.MobileSoftwareUpdate.CleanupPreparePathService
+91892     1   0.0 /System/Library/ /System/Library/Frameworks/AudioToolbox.framework/AudioComponentRegistrar -daemon
+91894     1   0.0 /System/Library/ /System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/XPCServices/com.apple.hiservices-xpcservice.xpc/Contents/MacOS/com.apple.hiservices-xpcservice
+91895     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/InstallCoordination.framework/Support/installcoordinationd
+91896     1   0.0 /usr/libexec/ane /usr/libexec/aned
+91897     1   0.0 /usr/libexec/fpa /usr/libexec/fpassetmanagerd
+91898     1   0.0 /System/Library/ /System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/XPCServices/com.apple.hiservices-xpcservice.xpc/Contents/MacOS/com.apple.hiservices-xpcservice
+91899     1   0.0 /usr/libexec/ane /usr/libexec/aneuserd
+91900     1   0.0 endpointsecurity endpointsecurityd
+91901     1   0.0 /usr/libexec/ASP /usr/libexec/ASPCarryLog
+91902     1   0.0 /Library/Apple/S /Library/Apple/System/Library/CoreServices/XProtect.app/Contents/MacOS/XProtect
+91903     1   0.0 /System/Library/ /System/Library/CoreServices/iconservicesd
+91905     1   0.0 /usr/libexec/uar /usr/libexec/uarpassetmanagerd
+91909     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/MobileInstallation.framework/XPCServices/com.apple.MobileInstallationHelperService.xpc/Contents/MacOS/com.apple.MobileInstallationHelperService
+91911     1   0.0 /usr/libexec/onl /usr/libexec/online-auth-agent
+91912     1   0.0 /System/Library/ /System/Library/Frameworks/Security.framework/Versions/A/XPCServices/com.apple.CodeSigningHelper.xpc/Contents/MacOS/com.apple.CodeSigningHelper
+91914     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/AssetCacheServicesExtensions.framework/XPCServices/AssetCacheManagerService.xpc/Contents/MacOS/AssetCacheManagerService
+91916     1   0.0 /usr/libexec/smd /usr/libexec/smd
+91918     1   0.0 /usr/libexec/mic /usr/libexec/microstackshot
+91919     1   0.0 /usr/libexec/use /usr/libexec/usermanagerd -t 15
+91920     1   0.0 /System/Library/ /System/Library/CoreServices/ReportCrash daemon
+91921     1   0.0 /usr/sbin/cfpref /usr/sbin/cfprefsd agent
+91922     1   0.0 /usr/sbin/cfpref /usr/sbin/cfprefsd agent
+91923     1   0.0 /usr/sbin/cfpref /usr/sbin/cfprefsd agent
+91925     1   0.0 /usr/sbin/cfpref /usr/sbin/cfprefsd agent
+91926     1   0.0 /usr/sbin/cfpref /usr/sbin/cfprefsd agent
+91927     1   0.0 /usr/sbin/cfpref /usr/sbin/cfprefsd agent
+91928     1   0.0 /usr/sbin/cfpref /usr/sbin/cfprefsd agent
+91931     1   0.0 /usr/libexec/sep /usr/libexec/seputil --daemonize-reseed
+91932     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/CacheDelete.framework/deleted_helper
+91933     1   0.0 /usr/libexec/pea /usr/libexec/peakpowermanagerd
+91935     1   0.0 /System/Library/ /System/Library/CoreServices/liquiddetectiond.app/liquiddetectiond
+91936     1   0.0 /usr/libexec/sys /usr/libexec/sysmond
+91938     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/CoreSymbolication.framework/coresymbolicationd
+91939     1   0.0 /usr/sbin/cfpref /usr/sbin/cfprefsd agent
+91940     1   0.0 /usr/sbin/cfpref /usr/sbin/cfprefsd agent
+91941     1   0.0 /usr/libexec/tzd /usr/libexec/tzd
+91942     1   0.0 /usr/sbin/cfpref /usr/sbin/cfprefsd agent
+91943     1   0.0 /usr/libexec/dir /usr/libexec/dirhelper
+91945     1   0.0 /usr/libexec/bio /usr/libexec/biometrickitd --launchd
+91946     1   0.0 /usr/libexec/nsu /usr/libexec/nsurlsessiond --privileged
+91952     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/NearFieldPrivateServices.framework/Versions/A/XPCServices/NFStorageServer.xpc/Contents/MacOS/NFStorageServer
+91972     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/MobileAssetDaemon.framework/Versions/A/XPCServices/com.apple.MobileAsset.DownloadService.Builtin.xpc/Contents/MacOS/com.apple.MobileAsset.DownloadService.Builtin
+91981     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/TrialServer.framework/Versions/A/XPCServices/TrialArchivingService.xpc/Contents/MacOS/TrialArchivingService
+91998     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/SecuritySubscriber.xpc/Contents/MacOS/SecuritySubscriber
+91999     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/InteractiveLegacyProfilesSubscriber.xpc/Contents/MacOS/InteractiveLegacyProfilesSubscriber
+92000     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/ScreenSharingSubscriber.xpc/Contents/MacOS/ScreenSharingSubscriber
+92001     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/LegacyProfilesSubscriber.xpc/Contents/MacOS/LegacyProfilesSubscriber
+92002     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/PasscodeSettingsSubscriber.xpc/Contents/MacOS/PasscodeSettingsSubscriber
+92003     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/DiskManagementSubscriber.xpc/Contents/MacOS/DiskManagementSubscriber
+92004     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/ManagedPreferencesSubscriber.xpc/Contents/MacOS/ManagedPreferencesSubscriber
+92005     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/SoftwareUpdateSubscriber.xpc/Contents/MacOS/SoftwareUpdateSubscriber
+92006     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/MigrationSubscriber.xpc/Contents/MacOS/MigrationSubscriber
+92007     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/DeviceConfigurationSubscriber.xpc/Contents/MacOS/DeviceConfigurationSubscriber
+92008     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/ManagedAppsSubscriber.xpc/Contents/MacOS/ManagedAppsSubscriber
+92009     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/NetworkExtensionSubscriber.xpc/Contents/MacOS/NetworkExtensionSubscriber
+92010     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/ManagementTestSubscriber.xpc/Contents/MacOS/ManagementTestSubscriber
+92011     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/ManagedConfigurationFilesSubscriber.xpc/Contents/MacOS/ManagedConfigurationFilesSubscriber
+92012     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/AssetCacheSubscriber.xpc/Contents/MacOS/AssetCacheSubscriber
+92013     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/RemoteManagement.framework/XPCServices/ExtensibleSSOSubscriber.xpc/Contents/MacOS/ExtensibleSSOSubscriber
+92045     1   0.0 /System/Library/ /System/Library/PrivateFrameworks/XprotectFramework.framework/Versions/A/XPCServices/XprotectService.xpc/Contents/MacOS/XprotectService
+92048     1   0.0 /usr/libexec/log /usr/libexec/logd_helper
+93003     1   0.0 /usr/libexec/osp /usr/libexec/ospredictiond
+94486     1   0.0 sshd-session: ti sshd-session: tito [priv]  
+94487 94486   0.0 <defunct>        <defunct>
+94489 94486   0.0 sshd-session: ti sshd-session: tito@notty  
+94704     1   0.0 /usr/libexec/key /usr/libexec/keybagd -t 15
+94824     1   0.0 /Users/tito/.loc /Users/tito/.local/share/mise/installs/mosh/1.4.0/bin/mosh-server new -s -c 256 -l LANG=en_US.UTF-8
+94942     1   0.0 tmux             tmux
+94943 94942   0.0 /Users/tito/.loc /Users/tito/.local/bin/fish
+94825 94824   0.0 /Users/tito/.loc /Users/tito/.local/bin/fish
+94940 94825   0.0 tmux             tmux
+50494 50493   0.0 /bin/bash        /bin/bash --noprofile --norc
+21511 21502   0.0 bash             bash --noprofile --norc
+34925 34898   0.0 bash             bash --noprofile --norc

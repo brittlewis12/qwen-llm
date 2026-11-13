@@ -25,7 +25,7 @@
 //!  6. `kda-prep`: paired serial/parallel KDA preparation stage samples, then
 //!     three interleaved ordinary-wall pairs if the 1.25x stage gate passes.
 //!
-//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy|kda-prep] [depth]`
+//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy|kda-prep|kda-prep-appends] [depth]`
 
 #[cfg(not(feature = "perf-ablations"))]
 fn main() {
@@ -1378,6 +1378,99 @@ mod probe {
         Ok(())
     }
 
+    /// Three interleaved ordinary-wall A/B pairs at the two 80K append cells.
+    /// Each arm is forced only for the duration of one call in this process,
+    /// so the binary, model load, prefix snapshot, and host environment match.
+    fn kda_prep_append_gates(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        ids: &[u32],
+        depth: usize,
+        capacity: usize,
+    ) -> anyhow::Result<()> {
+        const WIDTHS: [usize; 2] = [256, 1024];
+        anyhow::ensure!(
+            ids.len() > depth + WIDTHS[1],
+            "prefix/corpus too short for KDA append gates"
+        );
+        let mut session = new_session(ctx, weights, ids, depth, capacity)?;
+        let snapshot = session.capture_snapshot()?;
+        for width in WIDTHS {
+            let tokens = &ids[depth..depth + width];
+            for enabled in [false, true] {
+                gate();
+                session.restore_snapshot(&snapshot)?;
+                let logits = session.prefill_chunk_kda_parallel_prep(ctx, tokens, enabled)?;
+                anyhow::ensure!(
+                    logits.iter().all(|value| value.is_finite()),
+                    "non-finite KDA append warm logits"
+                );
+            }
+
+            let mut wall_samples = [Vec::new(), Vec::new()];
+            let mut last_logits: [Option<Vec<f32>>; 2] = [None, None];
+            let mut last_states: [Option<Glm5NextSnapshot>; 2] = [None, None];
+            for rep in 0..3 {
+                let order = if rep % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                };
+                for enabled in order {
+                    gate();
+                    session.restore_snapshot(&snapshot)?;
+                    let started = Instant::now();
+                    let logits = session.prefill_chunk_kda_parallel_prep(ctx, tokens, enabled)?;
+                    let index = if enabled { 1 } else { 0 };
+                    wall_samples[index].push(started.elapsed().as_secs_f64() * 1e3);
+                    anyhow::ensure!(
+                        logits.iter().all(|value| value.is_finite()),
+                        "non-finite KDA append logits"
+                    );
+                    if rep == 2 {
+                        last_logits[index] = Some(logits);
+                        last_states[index] = Some(session.capture_snapshot()?);
+                    }
+                }
+            }
+            let serial_logits = last_logits[0].as_ref().expect("serial append logits");
+            let parallel_logits = last_logits[1].as_ref().expect("parallel append logits");
+            let bitwise = serial_logits.len() == parallel_logits.len()
+                && serial_logits
+                    .iter()
+                    .zip(parallel_logits)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+                && last_states[0]
+                    .as_ref()
+                    .expect("serial append state")
+                    .same_state(last_states[1].as_ref().expect("parallel append state"));
+            anyhow::ensure!(
+                bitwise,
+                "parallel KDA prep changed append logits or state bits"
+            );
+            let paired_speedups = (0..3)
+                .map(|pair| wall_samples[0][pair] / wall_samples[1][pair])
+                .collect::<Vec<_>>();
+            let serial_median = median(wall_samples[0].clone());
+            let parallel_median = median(wall_samples[1].clone());
+            emit(json!({
+                "kind": "kda_parallel_prep_append_wall_gate",
+                "depth": depth,
+                "rows": width,
+                "serial_wall_ms": wall_samples[0],
+                "parallel_wall_ms": wall_samples[1],
+                "paired_speedups": paired_speedups,
+                "serial_median_ms": serial_median,
+                "parallel_median_ms": parallel_median,
+                "speedup": serial_median / parallel_median,
+                "bitwise_logits_and_state": bitwise,
+                "pressure": pressure(),
+                "loadavg": loadavg(),
+            }));
+        }
+        Ok(())
+    }
+
     fn read_f32(t: &MetalTensor) -> Vec<f32> {
         let bytes = t.n_bytes() as usize;
         assert_eq!(bytes % 4, 0, "F32 view");
@@ -1544,6 +1637,7 @@ mod probe {
                     | "route-quality"
                     | "occupancy"
                     | "kda-prep"
+                    | "kda-prep-appends"
             ),
             "unknown mode {mode}"
         );
@@ -1552,7 +1646,10 @@ mod probe {
         } else {
             Vec::new()
         };
-        let capacity = if matches!(mode, "routes" | "route-quality" | "occupancy") {
+        let capacity = if matches!(
+            mode,
+            "routes" | "route-quality" | "occupancy" | "kda-prep-appends"
+        ) {
             std::env::var("GLM_APPEND_CAPACITY")
                 .ok()
                 .and_then(|value| value.parse().ok())
@@ -1562,6 +1659,8 @@ mod probe {
         };
         let needed_width = if mode == "kda-prep" {
             2048
+        } else if mode == "kda-prep-appends" {
+            1024
         } else if mode == "routes" || mode == "occupancy" {
             *route_widths().iter().max().expect("route widths")
         } else if mode == "route-quality" {
@@ -1630,6 +1729,9 @@ mod probe {
         }
         if mode == "kda-prep" {
             kda_prep_gate(&ctx, &weights, &ids, depth)?;
+        }
+        if mode == "kda-prep-appends" {
+            kda_prep_append_gates(&ctx, &weights, &ids, depth, capacity)?;
         }
         emit(json!({
             "kind": "done", "pressure": pressure(), "loadavg": loadavg(),

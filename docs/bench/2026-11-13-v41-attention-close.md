@@ -1,5 +1,7 @@
 # V4.1 attention gate: source/profile pin and final measurements
 
+**Completion:** [the frozen served gate passes](2026-11-13-v41-attention-final.md). Only the final B arm ran in the closing stage; prior observations stand.
+
 **Lead correction, 2026-11-13 23:00 UTC:** the loaded-host native packet is
 **unresolved noise in both directions, not a pass**. Its mean point ratio is
 1.064904x, but BA/AB/BA are 0.931764/1.710896/0.862674x and the candidate
@@ -180,6 +182,7 @@ with observed client TTFT. Null TTFT is retained in raw calls, never imputed.
 |---|---:|---:|---:|---:|---:|---:|
 | 1 AB | 1.166676x | 87.350000 / 88.316667 | 1.053301x / 1.032870x | 6 / 6 | 1.045457x / 1.058349x | 3 / 3 |
 | 2 BA | 0.902509x | 87.083333 / 88.100000 | 1.018921x / 0.983220x | 6 / 6 | 0.995344x / 0.987286x | 3 / 3 |
+| 3 AB | 0.932233x | 87.600000 / 86.833333 | 1.023664x / 1.007011x | 6 / 6 | 1.006919x / 1.009326x | 3 / 3 |
 
 Process counters are maximum live values sampled every 0.5s. Warmup and
 measured-server reads are separate; bytes are total process reads, not an
@@ -192,9 +195,18 @@ Engram-only counter. Every listed arm has a zero-page purge and actual nice 0.
 | 2 | b | 34273374208 | 159334612992 | 30.966365, 29.407303, 40.897552 | 19.99 → 14.89 | 0 / 1 | False / False |
 | 2 | a | 189054726144 | 159337021440 | 37.820759, 26.780003, 26.810891 | 12.17 → 17.10 | 0 / 0 | True / False |
 | 3 | a | 188321980416 | 157310173184 | 31.039243, 25.165384, 25.605822 | 13.11 → 13.83 | 0 / 0 | True / True |
+| 3 | b | 33103966208 | 157293551616 | 30.253172, 31.344943, 26.141006 | 18.37 → 20.88 | 0 / 0 | True / True |
 
-The three-pair gate is **pending**: 2 complete pairs, 5 complete arms.
-No aggregate promotion decision is made from an incomplete packet.
+Independent three-pair result: **PASS**. Loaded native mean point 1.064903853x (unresolved noise, not a pass).
+
+| Metric | Geomean ratio | Required |
+|---|---:|---:|
+| root | 0.993822521x | 0.98x |
+| tps | 1.004618096x | 0.98x |
+| short_prefill_ratio | 1.031850574x | 1.00x |
+| short_ttft_ratio | 1.007496626x | 1.00x |
+| 1k_prefill_ratio | 1.015682641x | 1.00x |
+| 1k_ttft_ratio | 1.017890587x | 1.00x |
 
 <!-- SERVE_RESULTS_END -->
 

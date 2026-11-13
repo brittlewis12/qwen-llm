@@ -8,6 +8,21 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
 
 
+
+## 2026-11-13 - V4.1 Short Index + Wide PV: Frozen Serve Gate Passes
+
+- Only archived pair 3 B ran. Three-pair AB/BA/AB geomeans: TPS 1.004618x,
+  root prefill 0.993823x (floors 0.98x); short prefill/TTFT
+  1.031851/1.007497x and 1K 1.015683/1.017891x (floors 1.00x). All six
+  arms pass controls; every matched/observed call remains. Both default-on
+  flags retain independent =0 rollbacks.
+- Loaded native root remains unresolved noise in both directions, not a
+  pass (0.932/1.711/0.863x; bundle 44.912s versus standing roughly 21.5s).
+  Quiet-host wide PV was 1.012173x, 20.755584/20.505967s, 3/3 bitwise pairs.
+- Ready to land after final composed contracts at the rebased attention
+  tip; cooperative experts is separate and default-off. No pushes/merges.
+  [Full frozen rule, all pairs and disk bytes](bench/2026-11-13-v41-attention-final.md).
+
 ## 2026-11-13 - V4.1 Final Arm: Native Root Interpretation Corrected
 
 - Lead classifies the loaded native 48K packet as unresolved noise in both

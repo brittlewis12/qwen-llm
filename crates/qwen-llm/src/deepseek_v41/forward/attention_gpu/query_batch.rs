@@ -34,7 +34,7 @@ crate::env_flag!(
     "QWEN_V41_MASKED_REINDEX_MID"
 );
 crate::env_flag!(
-    /// Extend exact mask-skipping index scoring to ordinary 128..511-row appends on M5 Ultra, using the existing depth threshold and MASKED_REINDEX veto. Bitwise bundle candidate, default on; 0 retains the qualified 512..2048-row range. No new tensors or arithmetic changes.
+    /// Extend exact mask-skipping index scoring to ordinary 128..511-row appends on M5 Ultra, using the existing depth threshold and MASKED_REINDEX veto. Qualified bitwise bundle, default on; 0 retains the qualified 512..2048-row range. No new tensors or arithmetic changes.
     default_on masked_reindex_short_env,
     "QWEN_V41_MASKED_REINDEX_SHORT"
 );
@@ -50,7 +50,7 @@ fn masked_reindex_short_enabled() -> bool {
     masked_reindex_short_env()
 }
 crate::env_flag!(
-    /// Use a D256/sixteen-simdgroup PV tile with normalized inverse-RoPE writeback on the M5 Ultra H64/D512/R64 tensor tier; K32 update order is retained. Bitwise bundle candidate, default on; 0 keeps D128/four-group PV.
+    /// Use a D256/sixteen-simdgroup PV tile with normalized inverse-RoPE writeback on the M5 Ultra H64/D512/R64 tensor tier; K32 update order is retained. Qualified bitwise bundle, default on; 0 keeps D128/four-group PV.
     default_on pv_wide_env,
     "QWEN_V41_ATTN_PV_WIDE"
 );

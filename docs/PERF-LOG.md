@@ -37,6 +37,25 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `madvise`/wiring negative, **bounded row cache ~4-7%**. Next: prototype a
   2-4 GB F32 (or 0.5-1 GB packed) `(layer,row)` cache and A/B it; do not
   pre-warm or mlock first.
+## 2026-11-13 - V4.1 Engram Row Cache: Default-On, Exact, Native Disk Cut; Serve Inside Host Noise
+
+- Bounded CLOCK cache of packed `(layer,row)` Engram bytes in `DiskEngram`;
+  hits decode through the unchanged codec call, so values are bitwise.
+  1 GiB packed default, `QWEN_V41_ENGRAM_ROW_CACHE_MB=0` rollback, one cache
+  per resident model shared by all serve sessions.
+- Native 3-wide 512-round probe after `msync(MS_INVALIDATE)`: 32K
+  **29.620 -> 28.242 ms/round (+4.88%)**, 48K **29.058 -> 27.966 (+3.76%)**;
+  physical decode reads **773.7 -> 4.73 MB (-99.4%)** at both depths; all
+  endpoint and full-vocabulary hashes identical. Pressure 0-1.
+- Three-agent 48K ABBAAB serve pairs: **+13.38%, -1.44%, +1.75%** tok/s;
+  paired mean **+4.56%**, 95% CI **[-14.81%, +23.93%]**. ITL p99 lower in all
+  three on arms; append TTFT flat; decode disk cut only in one pair because
+  the remaining misses are compulsory and the OS cache already held repeats.
+  Hit rate **69.6%** (6.33M hits / 2.76M misses, 397 MB packed). Every window
+  overlapped other lanes' compilers; the CI is the honest serve result.
+- [Details](bench/2026-11-13-v41-engram-row-cache.md); raw
+  `metagross:~/qwen-runs/2026-11-13-v41-engram-cache/`. Branch
+  `perf/v41-engram-row-cache` from `56a1e8fe5`, not merged.
 
 ## 2026-11-13 - V4.1 Agent-Depth Masked Reindex: Promoted After Exact, Native and Served Gates
 

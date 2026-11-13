@@ -21,10 +21,10 @@ signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
 
 
-def nice_command(command):
+def nice_command(command, niceness=0):
     current=os.getpriority(os.PRIO_PROCESS,0)
-    if current>10:raise RuntimeError(f"runner niceness {current} exceeds required 10")
-    return ["nice","-n",str(10-current),*command] if current<10 else command
+    if current>niceness:raise RuntimeError(f"runner niceness {current} exceeds required {niceness}")
+    return ["nice","-n",str(niceness-current),*command] if current<niceness else command
 
 
 def thermal():

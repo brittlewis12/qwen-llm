@@ -10,6 +10,7 @@ import subprocess
 import time
 
 import v41_prefill_packet as packet
+from glm_residency import usage
 
 
 def resident_check():
@@ -20,7 +21,8 @@ def resident_check():
 
 
 def run_harness(command,log_path,binary,deadline,fd):
-    model_pids=set();model_niceness={}
+    model_pids=set();model_niceness={};io=[]
+    samples=log_path.with_suffix(".process-io.jsonl")
     with log_path.open("w") as log:
         child=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,pass_fds=(fd,))
         try:
@@ -32,10 +34,12 @@ def run_harness(command,log_path,binary,deadline,fd):
                         f=line.split(None,2)
                         if len(f)==3 and int(f[1])==child.pid and f[2]==str(binary.resolve()):
                             model_pids.add(int(f[0]))
-                            model_niceness[int(f[0])]=os.getpriority(os.PRIO_PROCESS,int(f[0]))
-                            if model_niceness[int(f[0])]!=10:
-                                raise RuntimeError("model niceness is not 10")
-                time.sleep(2)
+                            model_niceness[int(f[0])]=int(subprocess.check_output(["ps","-o","nice=","-p",f[0]],text=True,timeout=5).strip())
+                            if model_niceness[int(f[0])]!=0:
+                                raise RuntimeError("model niceness is not 0")
+                for pid in model_pids:
+                    if value:=usage(pid):io.append(dict(time=time.time(),pid=pid,**value))
+                time.sleep(.5)
         finally:
             if child.poll() is None:
                 child.send_signal(signal.SIGINT)
@@ -53,6 +57,7 @@ def run_harness(command,log_path,binary,deadline,fd):
                         if subprocess.run(["kill","-0",str(pid)],capture_output=True).returncode:break
                         time.sleep(1)
                     else:os.kill(pid,signal.SIGKILL)
+        samples.write_text("".join(json.dumps(r)+"\n" for r in io))
         if child.returncode:raise RuntimeError(f"serve phase failed: {log_path.name} ({child.returncode})")
     return model_pids,model_niceness
 
@@ -61,7 +66,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ("binary","tokenizer","model","corpus","output"):
         p.add_argument("--"+name,type=Path,required=True)
-    p.add_argument("--flag",default="QWEN_V41_MASKED_REINDEX_MID")
+    p.add_argument("--flag",default="QWEN_V41_MASKED_REINDEX_SHORT")
+    p.add_argument("--engram",type=Path,required=True)
     p.add_argument("--tag",required=True);p.add_argument("--order",choices=("ab","ba"),required=True)
     p.add_argument("--port",type=int,default=19973);p.add_argument("--seconds",type=int,default=120)
     p.add_argument("--warm-reply-tokens",type=int,default=8)
@@ -76,6 +82,10 @@ def main():
     for arm in a.order:
         processes=resident_check()
         (out/f"{a.tag}-{arm}-processes.txt").write_text(processes)
+        purge=out/f"{a.tag}-{arm}-purge.jsonl"
+        subprocess.run(["python3","scripts/bench/invalidate_file_cache.py",str(a.engram),"--out",str(purge)],check=True,timeout=60)
+        reset=json.loads(purge.read_text().splitlines()[-1])
+        if reset["msync_rc"] or reset["resident_pages_after"]!=0:raise RuntimeError("Engram purge did not reach zero resident pages")
         dest=out/f"{a.tag}-{arm}"
         command=packet.nice_command(["python3","scripts/bench/serve_realistic.py","run",
             "--binary",str(a.binary.resolve()),"--tokenizer",str(a.tokenizer.resolve()),
@@ -90,7 +100,10 @@ def main():
         model_pids,model_niceness=run_harness(command,out/f"{a.tag}-{arm}.log",a.binary,deadline,fd)
         events=[json.loads(line) for line in (out/f"{a.tag}-{arm}.log").read_text().splitlines() if line.startswith("{")]
         roots=[e for e in events if e.get("event")=="turn" and e.get("label","").endswith("-warm")]
-        result["arms"].append(dict(arm=arm,root_turns=roots,model_pids=sorted(model_pids),model_niceness=model_niceness,
+        io=[json.loads(line) for line in (out/f"{a.tag}-{arm}.process-io.jsonl").read_text().splitlines()]
+        disk=max((r["disk_read"] for r in io),default=None)
+        if disk is None:raise RuntimeError("no process disk counter captured")
+        result["arms"].append(dict(arm=arm,engram_purge=reset,process_disk_read_bytes=disk,root_turns=roots,model_pids=sorted(model_pids),model_niceness=model_niceness,
             summary=json.loads((dest/"summary.json").read_text())))
         (out/f"{a.tag}-summary.json").write_text(json.dumps(result,indent=2)+"\n")
     print(json.dumps(result),flush=True)

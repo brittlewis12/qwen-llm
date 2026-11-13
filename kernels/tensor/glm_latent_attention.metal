@@ -68,6 +68,74 @@ kernel void kernel_glm_latent_score_tensor(
         }
     }
 }
+
+// Lightning-indexer score tile: one query's 64 x 128 F16 heads by 32 pooled
+// F16 keys, then the original positive-dot/head-weight reduction in F32.
+kernel void kernel_glm_indexer_scores_tensor(
+    constant uint4 &dims [[buffer(0)]], device const half *queries [[buffer(1)]],
+    device const float *head_weights [[buffer(2)]], device const half *keys [[buffer(3)]],
+    device const int *visible_counts [[buffer(4)]], device float *scores [[buffer(5)]],
+    uint2 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    // dims = row_capacity, query_count, max_dispatched_rows, score_stride.
+    threadgroup half qb[64 * 128];
+    threadgroup half kb[32 * 128];
+    threadgroup float sb[64 * 32];
+    const uint query = group.y, key0 = group.x * 32;
+    if (query >= dims.y || key0 >= dims.z) return;
+    const int visible_i = visible_counts[query];
+    const uint visible = visible_i > 0 ? uint(visible_i) : 0u;
+    if (key0 >= visible) {
+        for (uint key = tid; key < 32; key += 128) {
+            const uint row = key0 + key;
+            if (row < dims.z) scores[ulong(query) * dims.w + row] = -INFINITY;
+        }
+        return;
+    }
+    for (uint element = tid; element < 64 * 128 / 4; element += 128) {
+        const uint head = element / 32, column = element % 32;
+        ((threadgroup half4 *)qb)[element] =
+            ((device const half4 *)(queries + ulong(query) * 64 * 128 + head * 128 + column * 4))[0];
+    }
+    for (uint element = tid; element < 32 * 128 / 4; element += 128) {
+        const uint key = element / 32, column = element % 32, row = key0 + key;
+        half4 value = half4(0);
+        if (row < visible && row < dims.x)
+            value = ((device const half4 *)(keys + ulong(row) * 128 + column * 4))[0];
+        ((threadgroup half4 *)kb)[element] = value;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    constexpr auto desc = tensor_ops::matmul2d_descriptor(
+        64, 32, 128, false, true, false,
+        tensor_ops::matmul2d_descriptor::mode::multiply);
+    tensor_ops::matmul2d<desc, execution_simdgroups<4>> op;
+    using Q = tensor<threadgroup half, extents<int, 128, 64>, tensor_inline>;
+    using K = tensor<threadgroup half, extents<int, 128, 32>, tensor_inline>;
+    using S = tensor<threadgroup float, extents<int, 32, 64>, tensor_inline>;
+    Q qt(qb, extents<int, 128, 64>());
+    K kt(kb, extents<int, 128, 32>());
+    S st(sb, extents<int, 32, 64>());
+    auto accum = op.get_destination_cooperative_tensor<Q, K, float>();
+    op.run(qt, kt, accum);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    accum.store(st);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 32) {
+        const uint row = key0 + tid;
+        if (row < dims.z) {
+            if (row >= visible || row >= dims.x) {
+                scores[ulong(query) * dims.w + row] = -INFINITY;
+            } else {
+                float score = 0.0f;
+                for (uint head = 0; head < 64; ++head)
+                    score += max(sb[head * 32 + tid], 0.0f)
+                        * head_weights[ulong(query) * 64 + head];
+                scores[ulong(query) * dims.w + row] = score;
+            }
+        }
+    }
+}
+
 kernel void kernel_glm_latent_softmax(
     constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
     device const int *ids [[buffer(5)]], device const int *counts [[buffer(6)]],

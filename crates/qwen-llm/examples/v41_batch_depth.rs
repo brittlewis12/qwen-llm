@@ -137,10 +137,14 @@ fn main() -> Result<()> {
     let tok = NativeTokenizer::from_gguf(&g)?;
     let prose = args.get(6).is_some_and(|v| v == "prose");
     let text = corpus(prose)?;
+    let long_suffix = matches!(
+        args.get(5).map(String::as_str),
+        Some("append-nodes" | "cells")
+    );
     let mut repeats = 1;
     let common = loop {
         let x = tok.encode(&text.repeat(repeats), false)?;
-        if x.len() > 70000 {
+        if x.len() > if long_suffix { 84_000 } else { 70_000 } {
             break x.into_iter().map(|v| v as u32).collect::<Vec<_>>();
         }
         repeats *= 2;
@@ -157,45 +161,68 @@ fn main() -> Result<()> {
     ensure!([32768, 49152, 65536].contains(&depth), "depth 32K/48K/64K");
     let is_prefill_nodes = args.get(5).is_some_and(|s| s == "prefill-nodes");
     let is_append_nodes = args.get(5).is_some_and(|s| s == "append-nodes");
-    if is_prefill_nodes || is_append_nodes {
-        let rows = if is_prefill_nodes { 2048 } else { 1024 };
-        let at = 49152usize;
-        let prefix = if is_prefill_nodes { at - rows } else { at };
-        ensure!(common.len() >= prefix + rows, "corpus covers capture chunk");
-        f.prefill_with_execution(
-            &mut base,
-            &common[..prefix],
-            Some(&CANCEL),
-            PrefillExecution::ShrinkingCed,
-        )?;
-        let snap = f.capture_snapshot(&base)?;
-        let chunk = &common[prefix..prefix + rows];
-        let expected = f.prefill(&mut base, chunk, Some(&CANCEL))?;
-        f.restore_snapshot(&mut base, &snap)?;
-        let guard = metal::causal_node_graph_begin(&ctx, 16384)?;
-        let actual = f.prefill(&mut base, chunk, Some(&CANCEL))?;
+    let is_cells = args.get(5).is_some_and(|s| s == "cells");
+    if is_prefill_nodes || is_append_nodes || is_cells {
+        let chunk_at = 49152usize;
+        let chunk_rows = 2048usize;
+        let append_at = 81920usize;
+        let append_rows = 1024usize;
         ensure!(
-            expected
-                .iter()
-                .zip(&actual)
-                .all(|(a, b)| a.to_bits() == b.to_bits()),
-            "prefill node capture changed V4.1 logits"
+            common.len() >= append_at + append_rows,
+            "corpus covers both capture cells"
         );
-        let mut value = metal::causal_graph_finish(&ctx, guard)?;
-        value["phase"] = serde_json::json!(if is_prefill_nodes {
-            "prefill"
-        } else {
-            "append"
-        });
-        value["capture_rows"] = serde_json::json!(rows);
-        value["depth"] = serde_json::json!(at);
-        value["width"] = serde_json::json!(1);
-        value["rounds"] = serde_json::json!(1);
-        value["bitwise"] = serde_json::json!(true);
-        value["hashes"] = serde_json::json!([blake3::hash(bytemuck::cast_slice(&actual))
-            .to_hex()
-            .to_string()]);
-        println!("{value}");
+        macro_rules! capture_here {
+            ($label:expr, $at:expr, $rows:expr) => {{
+                let at: usize = $at;
+                let rows: usize = $rows;
+                ensure!(base.position() == at - rows, "capture prefix position");
+                let snap = f.capture_snapshot(&base)?;
+                let chunk = &common[at - rows..at];
+                let started = Instant::now();
+                let expected = f.prefill(&mut base, chunk, Some(&CANCEL))?;
+                let reference_ms = started.elapsed().as_secs_f64() * 1e3;
+                f.restore_snapshot(&mut base, &snap)?;
+                let guard = metal::causal_node_graph_begin(&ctx, 16384)?;
+                let actual = f.prefill(&mut base, chunk, Some(&CANCEL))?;
+                ensure!(
+                    expected
+                        .iter()
+                        .zip(&actual)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "prefill node capture changed V4.1 logits"
+                );
+                let mut value = metal::causal_graph_finish(&ctx, guard)?;
+                value["phase"] = serde_json::json!($label);
+                value["capture_rows"] = serde_json::json!(rows);
+                value["depth"] = serde_json::json!(at);
+                value["width"] = serde_json::json!(1);
+                value["rounds"] = serde_json::json!(1);
+                value["bitwise"] = serde_json::json!(true);
+                value["reference_wall_ms_chunk"] = serde_json::json!([reference_ms]);
+                value["hashes"] = serde_json::json!([blake3::hash(bytemuck::cast_slice(&actual))
+                    .to_hex()
+                    .to_string()]);
+                println!("{value}");
+            }};
+        }
+        if is_prefill_nodes || is_cells {
+            let prefix = chunk_at - chunk_rows;
+            f.prefill_with_execution(
+                &mut base,
+                &common[..prefix],
+                Some(&CANCEL),
+                PrefillExecution::ShrinkingCed,
+            )?;
+            capture_here!("prefill", chunk_at, chunk_rows);
+        }
+        if is_append_nodes || is_cells {
+            let prefix = append_at - append_rows;
+            let from = base.position();
+            if from < prefix {
+                f.prefill(&mut base, &common[from..prefix], Some(&CANCEL))?;
+            }
+            capture_here!("append", append_at, append_rows);
+        }
         return Ok(());
     }
     for depth in [depth] {

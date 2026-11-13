@@ -124,6 +124,7 @@ class Capture:
 
     def summary_wall(self):
         for key in (
+            "reference_wall_ms_chunk",
             "reference_wall_ms_token",
             "reference_wall_ms_round",
             "wall_ms_round",
@@ -490,6 +491,9 @@ def ledger(results):
                     "per_unit_share": share,
                     "share_percent": 100 * share,
                     "capture_unit_ms": mult,
+                    "capture_rounds": result["rounds"],
+                    "cell_wall_ms": result["reference_wall_ms_unit"],
+                    "capture_unit": result["unit"],
                 }
             )
     ranked = sorted(detailed, key=lambda x: -x["gpu_ms"])
@@ -624,12 +628,63 @@ def self_test():
     print("waste_audit self-tests: passed")
 
 
+FIX = {
+    "dead_write": "drop the write, or stop overwriting before a reader",
+    "recomputation": "delete the duplicate dispatch and reuse the first result",
+    "data_movement": "have the producer write the consumer format / bind the source",
+    "fusable_chain": "fuse the producer into its single consumer",
+    "per_member_duplication": "share one weight stream across members",
+    "head_output": "keep only the rows that can be sampled",
+}
+
+
+def _label(item):
+    if item.get("producer"):
+        return f"{item['producer']} -> {item['consumer']}"
+    return item.get("kernel", item["category"])
+
+
+def markdown_tables(results, top):
+    lines = ["# Waste audit tables", ""]
+    for result in results:
+        wall = result["reference_wall_ms_unit"]
+        lines.append(
+            f"## `{Path(result['file']).name}`: {result['phase']}, "
+            f"width {result['width']}, {result['rows']} rows"
+        )
+        lines.append("")
+        lines.append(
+            f"GPU service {result['gpu_ms_total']:.3f} ms "
+            f"({result['gpu_ms_per_unit']:.3f} ms/{result['unit']}); "
+            f"uninstrumented wall {wall if wall else 'n/a'} ms/{result['unit']}"
+        )
+        lines.append("")
+        lines.append(
+            "| category | node / kernel | ms/call | share of cell wall | "
+            "proposed fix | expected gain |"
+        )
+        lines.append("|---|---|---:|---:|---|---|")
+        ranked = sorted(result["items"], key=lambda x: -x["gpu_ms"])
+        for item in ranked[:top]:
+            per_call = item["gpu_ms"] / max(1, result["rounds"])
+            share = 100 * per_call / wall if wall else float("nan")
+            node = f"[{item.get('scope')}:{item.get('node')}] {_label(item)}"
+            lines.append(
+                f"| {item['category']} | `{node}` | {per_call:.4f} | "
+                f"{share:.2f}% | {FIX.get(item['category'], 'review')} | "
+                f"{per_call:.4f} ms/call ({share:.2f}% wall) |"
+            )
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("captures", nargs="*", type=Path)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--json", action="store_true", help="emit full JSON")
     parser.add_argument("--top", type=int, default=40)
+    parser.add_argument("--markdown", type=Path)
     args = parser.parse_args()
     if args.self_test:
         self_test()
@@ -639,6 +694,8 @@ def main():
     results = [analyze(path) for path in args.captures]
     ranked = ledger(results)
     out = {"captures": results, "ledger": ranked[: args.top]}
+    if args.markdown:
+        args.markdown.write_text(markdown_tables(results, args.top))
     if args.json:
         print(json.dumps(out, indent=2))
         return

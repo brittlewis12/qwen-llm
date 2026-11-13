@@ -59,44 +59,64 @@ fn main() -> anyhow::Result<()> {
         .split_whitespace()
         .map(|s| s.parse().unwrap())
         .collect();
-    if mode == "prefill-nodes" || mode == "append-nodes" {
-        let rows = if mode == "prefill-nodes" { 2048 } else { 1024 };
-        let at = 49152usize;
-        let prefix = if mode == "prefill-nodes" {
-            at - rows
-        } else {
-            at
-        };
-        let prompt: Vec<u32> = ids.iter().copied().cycle().take(prefix + rows).collect();
-        let cap = at + rows + 1024;
+    if mode == "prefill-nodes" || mode == "append-nodes" || mode == "cells" {
+        let chunk_at = 49152usize;
+        let chunk_rows = 2048usize;
+        let append_at = 81920usize;
+        let append_rows = 1024usize;
+        let prompt: Vec<u32> = ids
+            .iter()
+            .copied()
+            .cycle()
+            .take(append_at + append_rows)
+            .collect();
+        let cap = append_at + append_rows + 1024;
         let mut s = Glm5NextSession::with_prefill_rows(&ctx, &w, cap, 2048)?;
-        let _ = s.prefill_packed(&ctx, &prompt[..prefix])?;
-        let entry = s.capture_snapshot()?;
-        let chunk = &prompt[prefix..];
-        let expected = s.prefill_packed(&ctx, chunk)?;
-        s.restore_snapshot(&entry)?;
-        let guard = causal_node_graph_begin(&ctx, 16384)?;
-        let actual = s.prefill_packed(&ctx, chunk)?;
-        anyhow::ensure!(
-            expected
-                .iter()
-                .zip(&actual)
-                .all(|(a, b)| a.to_bits() == b.to_bits()),
-            "prefill node capture changed GLM logits"
-        );
-        let mut value = causal_graph_finish(&ctx, guard)?;
-        value["phase"] = json!(if mode == "prefill-nodes" {
-            "prefill"
-        } else {
-            "append"
-        });
-        value["capture_rows"] = json!(rows);
-        value["depth"] = json!(at);
-        value["width"] = json!(1);
-        value["rounds"] = json!(1);
-        value["bitwise"] = json!(true);
-        value["production_path"] = json!("packed prefill");
-        emit(value);
+        macro_rules! capture_here {
+            ($label:expr, $at:expr, $rows:expr) => {{
+                let at: usize = $at;
+                let rows: usize = $rows;
+                anyhow::ensure!(s.position() == at - rows, "capture prefix position");
+                let entry = s.capture_snapshot()?;
+                let chunk = &prompt[at - rows..at];
+                let started = Instant::now();
+                let expected = s.prefill_packed(&ctx, chunk)?;
+                let reference_ms = started.elapsed().as_secs_f64() * 1e3;
+                s.restore_snapshot(&entry)?;
+                let guard = causal_node_graph_begin(&ctx, 16384)?;
+                let actual = s.prefill_packed(&ctx, chunk)?;
+                anyhow::ensure!(
+                    expected
+                        .iter()
+                        .zip(&actual)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "prefill node capture changed GLM logits"
+                );
+                let mut value = causal_graph_finish(&ctx, guard)?;
+                value["phase"] = json!($label);
+                value["capture_rows"] = json!(rows);
+                value["depth"] = json!(at);
+                value["width"] = json!(1);
+                value["rounds"] = json!(1);
+                value["bitwise"] = json!(true);
+                value["reference_wall_ms_chunk"] = json!([reference_ms]);
+                value["production_path"] = json!("packed prefill");
+                emit(value);
+            }};
+        }
+        if mode == "prefill-nodes" || mode == "cells" {
+            let prefix = chunk_at - chunk_rows;
+            let _ = s.prefill_packed(&ctx, &prompt[..prefix])?;
+            capture_here!("prefill", chunk_at, chunk_rows);
+        }
+        if mode == "append-nodes" || mode == "cells" {
+            let prefix = append_at - append_rows;
+            let from = s.position();
+            if from < prefix {
+                let _ = s.prefill_packed(&ctx, &prompt[from..prefix])?;
+            }
+            capture_here!("append", append_at, append_rows);
+        }
         return Ok(());
     }
     let prompt: Vec<_> = ids.iter().copied().cycle().take(depth).collect();

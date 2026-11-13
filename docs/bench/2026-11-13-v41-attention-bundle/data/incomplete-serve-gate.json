@@ -1,0 +1,318 @@
+{
+  "disposition": "not qualified; no landing recommendation",
+  "complete_pairs": 1,
+  "required_pairs": 3,
+  "failure": "860-second pair budget exhausted during pair2 baseline window",
+  "pair2_arms": [
+    {
+      "arm": "a",
+      "complete": false,
+      "window_done": false,
+      "root_turns": [
+        {
+          "event": "turn",
+          "label": "a0-warm",
+          "completed": true,
+          "generated": 32,
+          "ttft_s": 36.10082983970642
+        },
+        {
+          "event": "turn",
+          "label": "a1-warm",
+          "completed": true,
+          "generated": 32,
+          "ttft_s": 36.92457914352417
+        },
+        {
+          "event": "turn",
+          "label": "a2-warm",
+          "completed": true,
+          "generated": 32,
+          "ttft_s": 28.32614231109619
+        }
+      ],
+      "sampled_server_read_bytes": 187206246400,
+      "startup_and_warm": [
+        {
+          "event": "warmed",
+          "startup_s": 20.36928701400757,
+          "warmup_s": 102.7309639453888
+        }
+      ],
+      "settle": [
+        {
+          "event": "thermal_settle_done",
+          "phase": "before_load",
+          "waited_s": 60.774095834000036,
+          "thermal": 0
+        },
+        {
+          "event": "thermal_settle_done",
+          "phase": "after_warm",
+          "waited_s": 60.78648308396805,
+          "thermal": 1
+        }
+      ]
+    },
+    {
+      "arm": "b",
+      "complete": true,
+      "window_done": true,
+      "root_turns": [
+        {
+          "event": "turn",
+          "label": "a0-warm",
+          "completed": true,
+          "generated": 32,
+          "ttft_s": 34.76047205924988
+        },
+        {
+          "event": "turn",
+          "label": "a1-warm",
+          "completed": true,
+          "generated": 32,
+          "ttft_s": 31.262706756591797
+        },
+        {
+          "event": "turn",
+          "label": "a2-warm",
+          "completed": true,
+          "generated": 32,
+          "ttft_s": 28.151447057724
+        }
+      ],
+      "sampled_server_read_bytes": 33979658240,
+      "startup_and_warm": [
+        {
+          "event": "warmed",
+          "startup_s": 2.3427960872650146,
+          "warmup_s": 95.54940795898438
+        }
+      ],
+      "settle": [
+        {
+          "event": "thermal_settle_done",
+          "phase": "before_load",
+          "waited_s": 60.834692000062205,
+          "thermal": 0
+        },
+        {
+          "event": "thermal_settle_done",
+          "phase": "after_warm",
+          "waited_s": 112.44260841608047,
+          "thermal": 1
+        }
+      ]
+    }
+  ],
+  "complete_pair2_candidate": {
+    "arm": "b",
+    "model_weight_warmup": {
+      "pid": 50941,
+      "niceness": 0,
+      "thermal_max": 0,
+      "seconds": 30.315326929092407,
+      "binary_sha256": "19d9adf78d3a53f7f8d209386a1c06e0d4da10162524cdcba123cabfc1facaef",
+      "process_disk_read_bytes": 157310439424,
+      "exact_signatures": 2,
+      "log": "bundle-serve-pair2-b-weight-warmup.log"
+    },
+    "attention_warmup": [
+      {
+        "test": "deepseek_v41::forward::attention_gpu::tests::radix_select::masked_mma_index_preserves_allowed_scores_and_selection",
+        "pid": 63516,
+        "niceness": 0,
+        "seconds": 0.35106992721557617,
+        "thermal_max": 0,
+        "log": "bundle-serve-pair2-b-attention-warmup-0.log"
+      },
+      {
+        "test": "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::tensor64_sink_tile_matches_tensor32_sink",
+        "pid": 63693,
+        "niceness": 0,
+        "seconds": 0.35119009017944336,
+        "thermal_max": 0,
+        "log": "bundle-serve-pair2-b-attention-warmup-1.log"
+      }
+    ],
+    "engram_purge": {
+      "file": "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+      "bytes": 110595290816,
+      "resident_pages_before": 125893,
+      "resident_pages_after": 0,
+      "msync_rc": 0,
+      "msync_errno": 0,
+      "seconds": 0.09653592109680176
+    },
+    "process_disk_read_bytes": 33979658240,
+    "process_disk_counter_note": "maximum live counter sampled every 0.5s; native per-call I/O retained",
+    "root_turns": [
+      {
+        "event": "turn",
+        "label": "a0-warm",
+        "completed": true,
+        "generated": 32,
+        "ttft_s": 34.76047205924988
+      },
+      {
+        "event": "turn",
+        "label": "a1-warm",
+        "completed": true,
+        "generated": 32,
+        "ttft_s": 31.262706756591797
+      },
+      {
+        "event": "turn",
+        "label": "a2-warm",
+        "completed": true,
+        "generated": 32,
+        "ttft_s": 28.151447057724
+      }
+    ],
+    "model_pids": [
+      86923
+    ],
+    "model_niceness": {
+      "86923": 0
+    },
+    "summary": {
+      "window_begin": 1794597197.295226,
+      "window_end": 1794597257.295226,
+      "window_seconds": 60.0,
+      "window_tokens": 4750,
+      "aggregate_tps": 79.16666666666667,
+      "gap_p50_s": 0.02793097496032715,
+      "gap_p95_s": 0.02962803840637207,
+      "gap_p99_s": 0.032833099365234375,
+      "gap_max_s": 6.086647987365723,
+      "round_budget": {
+        "rounds_est": 1323.1828497848858,
+        "avg_width": 2.933359025535396,
+        "coverage": 0.8326315789473684,
+        "transition_s": 36.937932100141474,
+        "prefill_s": 14.026205643538646,
+        "partial_prefill_s": 7.483052,
+        "partial_prefill_calls": 3,
+        "capture_s": 0.00047301129313931975,
+        "host_s": 0.01985494513449025,
+        "transition_ms_per_round": 27.915969517097803,
+        "host_ms_per_round": 0.015005443229345161,
+        "host_metric": "median content gap minus native round wall"
+      },
+      "agents": [
+        {
+          "agent": 0,
+          "window_tokens": 1528,
+          "turns_offered": 7,
+          "ttft_p50_s": 0.6923978328704834,
+          "ttft_p95_s": 1.2340342998504639,
+          "carry_in_requests": 1,
+          "pending_at_cutoff": 0,
+          "queue_exposure_s": 6.079358816146851,
+          "censored_ttft": 0
+        },
+        {
+          "agent": 1,
+          "window_tokens": 1618,
+          "turns_offered": 3,
+          "ttft_p50_s": 0.7964870929718018,
+          "ttft_p95_s": 0.9303419589996338,
+          "carry_in_requests": 1,
+          "pending_at_cutoff": 0,
+          "queue_exposure_s": 2.7720248699188232,
+          "censored_ttft": 0
+        },
+        {
+          "agent": 2,
+          "window_tokens": 1604,
+          "turns_offered": 2,
+          "ttft_p50_s": 1.114804983139038,
+          "ttft_p95_s": 5.730296850204468,
+          "carry_in_requests": 1,
+          "pending_at_cutoff": 0,
+          "queue_exposure_s": 6.845101833343506,
+          "censored_ttft": 0
+        }
+      ],
+      "agent_count": 3,
+      "trace_20s": [
+        {
+          "start_s": 0,
+          "duration_s": 20.0,
+          "gap_p50_s": 0.02783203125,
+          "gap_p95_s": 0.029475927352905273,
+          "gap_max_s": 0.7478556632995605,
+          "decode_stream_width_1_s": 0.4478189945220947,
+          "decode_stream_width_2_s": 2.6707565784454346,
+          "decode_stream_width_3_s": 16.88142442703247,
+          "predecode_only_s": 0.0,
+          "idle_s": 0.0
+        },
+        {
+          "start_s": 20,
+          "duration_s": 20.0,
+          "gap_p50_s": 0.027840137481689453,
+          "gap_p95_s": 0.029334068298339844,
+          "gap_max_s": 6.086647987365723,
+          "decode_stream_width_1_s": 0.0,
+          "decode_stream_width_2_s": 9.213600873947144,
+          "decode_stream_width_3_s": 10.786399126052856,
+          "predecode_only_s": 0.0,
+          "idle_s": 0.0
+        },
+        {
+          "start_s": 40,
+          "duration_s": 20.0,
+          "gap_p50_s": 0.028133869171142578,
+          "gap_p95_s": 0.030054092407226562,
+          "gap_max_s": 1.227632761001587,
+          "decode_stream_width_1_s": 0.0,
+          "decode_stream_width_2_s": 5.3104939460754395,
+          "decode_stream_width_3_s": 14.68950605392456,
+          "predecode_only_s": 0.0,
+          "idle_s": 0.0
+        }
+      ],
+      "startup_s": 2.3427960872650146,
+      "warmup_s": 95.54940795898438,
+      "warm_settle_s": 112.44260841608047,
+      "arm": "default",
+      "family": "v41",
+      "seed": 20261112,
+      "thermal_max": 2,
+      "sampling": {
+        "mode": "greedy",
+        "fields": {
+          "temperature": 0,
+          "top_p": 1
+        }
+      },
+      "metric": "delivered text+reasoning tokens retokenized; excludes EOS/format control",
+      "thermal_flagged": true,
+      "timing_thermal_max": 1,
+      "timing_thermal_seconds": {
+        "0": 0.0,
+        "1": 60.0,
+        "2": 0.0,
+        "unknown": 0.0
+      },
+      "compile_observed": true,
+      "compile_overlapped": true,
+      "max_thermal_pressure": 2,
+      "load_after": [
+        33.4990234375,
+        34.97314453125,
+        37.8642578125
+      ],
+      "arm_thermal_seconds": {
+        "0": 118.92501997947693,
+        "1": 136.94485306739807,
+        "2": 29.101923942565918,
+        "unknown": 0.0
+      }
+    }
+  },
+  "third_pair_started": false,
+  "candidates": "staged default-on on perf/v41-prefill as requested; neither promoted nor numerically rejected",
+  "next": "use one-arm lease packets or in-process warmup; finish full served gate before performance promotion"
+}

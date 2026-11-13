@@ -31,6 +31,23 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw captures and generated tables:
   `metagross:~/qwen-runs/2026-11-12-waste-audit/`. Branch `perf/waste-audit`;
   not merged.
+## 2026-11-13 - V4.1 Attention Bundle: Bitwise Pass, Serve Campaign Incomplete
+
+- All6 native cells bitwise, one iter19d9adf78d3a. Ratios48K0.885815x,
+  150/256/1K@80K1.075886/1.043968/1.010128x, pp4K/8K1.020736/1.026329x.
+  The native root regression remains; no cross-cell averaging hides it.
+- Full purged AB pair1: root1.166676x, short prefill/TTFT1.053301/1.032870x,
+  1K1.045457/1.058349x; TPS87.35/88.3167. Measured reads52.268/33.156GB;
+  substantial I/O asymmetry prevents attributing the full root gain to attention.
+- BA pair2 candidate completed79.1667TPS at allowed pressure2. Its112.443s
+  post-root settle plus baseline20.369s startup exhausted the860s packet
+  during baseline window. Pair3 not run; only1/3 complete pairs. No promotion,
+  no served GM verdict, no selective retry/sub-bisection. Both candidates
+  remain staged on the branch with rollbacks; **not ready to land**.
+- Contracts passe51141aba; ENV regenerated. Exact-PID/process checks empty;
+  M5 worktree, private build output and bundles deleted. No pushes/merges.
+  [Every native cell, served arm and budget failure](bench/2026-11-13-v41-attention-bundle.md).
+
 ## 2026-11-13 - V4.1 Attention Bundle: Bitwise Cold Cells, Root Regression Retained
 
 - Functional M5 witnesses pass,15 wide cases/13,434,880 strict components.

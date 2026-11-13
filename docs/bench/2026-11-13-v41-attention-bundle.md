@@ -179,3 +179,46 @@ pairs with a19:44 measurement cutoff, leaving8 minutes for cleanup/report
 before the user's19:52 hard stop. Target remains19:37. Same release/iter,
 plans, windows, ordering and metric thresholds; no partial/complete arm is
 rerun or overwritten. `grace-reschedule.json` preserves the exact-PID facts.
+
+
+## Bounded stage disposition: not qualified
+
+Pair2's860s budget expired during the baseline steady window. CandidateB
+completed its60s window; baselineA did not emit window_done or a summary.
+No partial window is counted. Pair3 never started. The required3-pair gate
+is incomplete; no served geometric-mean pass/fail is inferred from1 pair.
+
+Completed pair2B: root TTFT34.760/31.263/28.151s; TPS79.1667, allowed
+pressure2. Its post-root thermal settle took112.443s to obtain the required
+60 continuous seconds<=1. Process reads33,979,658,240B; separate warmup
+157,310,439,424B,2 exact signatures/nice0. BaselineA startup20.369s,
+root TTFT36.101/36.925/28.326s, post-root settle60.786s; its partial
+process read counter187,206,246,400B. These complete roots and partial calls
+remain evidence, not a qualified arm or substituted steady-window result.
+
+The added separate-process model warmups, thermal settling and slow startup
+did not fit the two-arm lease envelope. Planning a two-arm packet this tightly
+was a harness-budget mistake. Do not relax thermal limits, extend a lease,
+discard the valid pressure2 candidate arm, rerun selectively, or extrapolate
+its interrupted baseline. Separate-process warmup also did not equalize
+measured reads; it cannot be claimed to normalize GGUF residency. A future
+campaign needs one-arm lease packets or warmup inside the measured process,
+with its budget frozen before the campaign starts. All current raw records
+are retained. No further GPU work or sub-bisection in this stage.
+
+Both bitwise candidates remain staged default-on on perf/v41-prefill, with
+independent0 rollbacks, as requested for this bundle. Neither is promoted;
+**this branch is not ready to land**. There is no complete served-root
+non-regression verdict, so do not label wide PV rejected by that gate.
+Short and wide isolation/native/functional evidence remains intact.
+
+Contracts passed code67b3ebaf4 and full warmup drivere51141aba; subsequent
+commits add records only. ENV regenerated825 knobs,224 default-on. No new
+ignored tests, no PERF-ROADMAP edits, no pushes or merges. Main remains
+9877b6f25; no Engram cache rebase was triggered in this stage.
+
+Cleanup19:29:30: every recorded stage PID exited; guarded process scan empty;
+M5 worktree/private target and3 transfer bundles deleted. Raw logs, partial
+request artifacts, counters, thermal traces and driver sources remain under
+qwen-runs/2026-11-12-v41-prefill/attention-bundle. Local copies are under
+target/v41-raw/attention-bundle. Final process verification follows this record.

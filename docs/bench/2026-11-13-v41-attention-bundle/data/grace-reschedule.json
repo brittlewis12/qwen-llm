@@ -1,0 +1,8 @@
+{
+  "time": 1794596320.335375,
+  "controller_pid": 18008,
+  "verified_command": "/Users/tito/.local/share/mise/installs/python/3.15.0/bin/python3 /Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-bundle/run-attention-bundle.py",
+  "reason": "authorized hard-cap grace; pair2 queued, no model; preserve completed pair1",
+  "measurement_cutoff": "19:44 UTC",
+  "report_hard_stop": "19:52 UTC"
+}

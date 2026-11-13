@@ -6,6 +6,12 @@ crate::env_flag!(
     "QWEN_FN_PREFILL_EXPERT_WIDE"
 );
 
+crate::env_flag!(
+    /// Extend the qualified 64-slot routed gate/up to the 512..=2047-row append band (A/B opt-in). Same half operand, F32 sums and dead-scratch reuse as the M2048 route; zero keeps the 32-slot incumbent below 2048.
+    default_off short_enabled,
+    "QWEN_FN_PREFILL_EXPERT_WIDE_SHORT"
+);
+
 pub(super) fn try_encode(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -19,15 +25,16 @@ pub(super) fn try_encode(
     g: Qwen4ExpMoeMetalGeometry,
     tokens: usize,
 ) -> Result<bool, MetalError> {
+    let rows_qualified = tokens == 2048 || (short_enabled() && (512..=2047).contains(&tokens));
     if !enabled()
+        || !rows_qualified
         || !ctx.tensor_ops_status().is_available()
         || (
             g.hidden_size,
             g.routed_intermediate_size,
             g.expert_count,
             g.experts_per_token,
-            tokens,
-        ) != (2560, 640, 512, 10, 2048)
+        ) != (2560, 640, 512, 10)
         || gate.dtype != up.dtype
         || !ROUTED_GATE_UP_DTYPES.contains(&gate.dtype)
     {

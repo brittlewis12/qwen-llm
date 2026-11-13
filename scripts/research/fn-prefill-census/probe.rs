@@ -13,6 +13,13 @@ use serde_json::json;
 use std::io::Write;
 use std::time::Instant;
 
+fn hash(values: &[f32]) -> String {
+    assert!(values.iter().all(|value| value.is_finite()));
+    blake3::hash(bytemuck::cast_slice(values))
+        .to_hex()
+        .to_string()
+}
+
 fn emit(v: serde_json::Value) {
     println!("{v}");
     std::io::stdout().flush().unwrap();
@@ -117,6 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "3".into())
         .parse()?;
     let skip_root = std::env::var("FN_CENSUS_SKIP_ROOT").is_ok_and(|v| v != "0");
+    let dispatch_census = std::env::var("FN_CENSUS_DISPATCH").is_ok_and(|v| v != "0");
 
     let ctx = MetalContext::new()?;
     let g = GgufFile::open(&args[1])?;
@@ -197,7 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let wall = start.elapsed().as_secs_f64() * 1e3;
             let t = runner.last_prefill_timing().ok_or("missing timing")?;
             emit(
-                json!({"kind":"root","cell":"root","depth":depth,"rows":depth,"wall_ms":wall,"timing":timing(&t),"pressure":pressure()}),
+                json!({"kind":"root","cell":"root","depth":depth,"rows":depth,"wall_ms":wall,"timing":timing(&t),"pressure":pressure(),"logits_hash":hash(&runner.logits()?.to_vec())}),
             );
         } else {
             runner.reset()?;
@@ -211,7 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let wall = start.elapsed().as_secs_f64() * 1e3;
             let t = runner.last_prefill_timing().ok_or("missing timing")?;
             emit(
-                json!({"kind":"extend","cell":"root","from":previous,"depth":depth,"rows":depth-previous,"wall_ms":wall,"timing":timing(&t),"pressure":pressure()}),
+                json!({"kind":"extend","cell":"root","from":previous,"depth":depth,"rows":depth-previous,"wall_ms":wall,"timing":timing(&t),"pressure":pressure(),"logits_hash":hash(&runner.logits()?.to_vec())}),
             );
         }
         snapshot = Some(runner.capture_snapshot()?);
@@ -230,8 +238,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let wall = start.elapsed().as_secs_f64() * 1e3;
                 let t = runner.last_prefill_timing().ok_or("missing timing")?;
                 emit(
-                    json!({"kind":"append","cell":"cell","depth":depth,"rows":n,"rep":rep,"wall_ms":wall,"encode_cpu_ms":t.encode_cpu_ms,"gpu_ms":t.gpu_ms,"wait_ms":t.completion_wait_ms,"commands":t.command_count,"pressure":pressure()}),
+                    json!({"kind":"append","cell":"cell","depth":depth,"rows":n,"rep":rep,"wall_ms":wall,"encode_cpu_ms":t.encode_cpu_ms,"gpu_ms":t.gpu_ms,"wait_ms":t.completion_wait_ms,"commands":t.command_count,"pressure":pressure(),"logits_hash":hash(&runner.logits()?.to_vec())}),
                 );
+            }
+            if dispatch_census {
+                runner.restore_snapshot_with_logits(snap, &snapshot_logits)?;
+                let guard = qwen_llm::metal::dispatch_profile_begin(&ctx, 400_000)?;
+                let start = Instant::now();
+                runner
+                    .prefill_continuation_with_command_checkpoint(&ids[depth..depth + n], || {
+                        Ok(())
+                    })?;
+                let wall = start.elapsed().as_secs_f64() * 1e3;
+                let report = qwen_llm::metal::dispatch_profile_finish(&ctx, guard)?;
+                emit(
+                    json!({"kind":"dispatch","cell":"append","depth":depth,"rows":n,"wall_ms":wall,"overflow":report.overflow,"dispatches":report.rows,"logits_hash":hash(&runner.logits()?.to_vec())}),
+                );
+                continue;
             }
             runner.restore_snapshot_with_logits(snap, &snapshot_logits)?;
             research::routes_begin();
@@ -249,13 +272,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 snapshot.as_ref().ok_or("missing snapshot")?,
                 &snapshot_logits,
             )?;
-            research::routes_begin();
-            let out = runner.prefill_continuation_profiled(&ids[depth..depth + root_rows])?;
-            let routes = research::routes_finish(root_rows, config.moe.experts_per_token as usize);
-            emit(profile_json("chunk", depth, root_rows, &out));
-            emit(
-                json!({"kind":"routes","cell":"chunk","depth":depth,"rows":root_rows,"layers":routes}),
-            );
+            if dispatch_census {
+                let guard = qwen_llm::metal::dispatch_profile_begin(&ctx, 400_000)?;
+                let start = Instant::now();
+                runner.prefill_continuation_with_command_checkpoint(
+                    &ids[depth..depth + root_rows],
+                    || Ok(()),
+                )?;
+                let wall = start.elapsed().as_secs_f64() * 1e3;
+                let report = qwen_llm::metal::dispatch_profile_finish(&ctx, guard)?;
+                emit(
+                    json!({"kind":"dispatch","cell":"chunk","depth":depth,"rows":root_rows,"wall_ms":wall,"overflow":report.overflow,"dispatches":report.rows,"logits_hash":hash(&runner.logits()?.to_vec())}),
+                );
+            } else {
+                research::routes_begin();
+                let out = runner.prefill_continuation_profiled(&ids[depth..depth + root_rows])?;
+                let routes =
+                    research::routes_finish(root_rows, config.moe.experts_per_token as usize);
+                emit(profile_json("chunk", depth, root_rows, &out));
+                emit(
+                    json!({"kind":"routes","cell":"chunk","depth":depth,"rows":root_rows,"layers":routes}),
+                );
+            }
         }
         if ordinal + 1 == depths.len() {
             break;

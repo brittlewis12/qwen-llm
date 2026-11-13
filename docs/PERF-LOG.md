@@ -326,6 +326,47 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - **Evidence:** [baseline census](bench/2026-11-13-glm-prefill-baseline.md),
   [candidate rejection](bench/2026-11-13-glm-prefill-4096-row-candidate.md),
   raw records at `docs/bench/2026-11-13-glm-prefill/`.
+## 2026-11-12 - Prefill Standing: V4.1 CED 2,891/2,700, GLM 1,143, FN 2,219
+
+- **Fresh prefill on main `5ee5c8c4f`, M5 Ultra, all three tier-1 families.**
+  Same artifacts as the scoreboard: V4.1 GSQ-RCO IQ2_XS + IQ4_NL Engram, GLM
+  stock UD-IQ3_XXS, Flash-Next GSQ-RCO IQ3_S. `qwen`/`qwen-bench` cleaned
+  built (`build_dirty=false`). `qwen-bench suite`, seed 1, cold cells with
+  fresh state and 180 s cold-arm gaps, 128K as two cooled singles; appends
+  after the untimed fill. Roofline uses `2 × active params/token × tok/s`
+  against the measured **131.7 TFLOP/s** Metal 4 peak; active params came from
+  the GGUF headers (dense once, routed at top-k/experts, one embedding row,
+  head excluded, FN PLE table excluded).
+- **Cold CED/prefill tok/s (TFLOP/s, % of 131.7):** V4.1 4K/8K/32K/128K
+  **1,912.7 / 2,425.4 / 2,891.3 / 2,699.6** (59.2 / 75.0 / 89.5 / 83.5;
+  44.9 / 57.0 / 67.9 / 63.4%). GLM 4K/8K/32K/128K **1,142.6 / 1,127.0 /
+  1,096.7 / 1,003.3** (37.7 / 37.2 / 36.2 / 33.1; 28.6 / 28.2 / 27.5 /
+  25.1%). Flash-Next 4K/8K/32K **2,218.6 / 1,930.5 / 1,878.9** (26.8 / 23.3 /
+  22.7; 20.3 / 17.7 / 17.2%). The 8K CED row moves 2,315 -> **2,425**; cold
+  32K/128K move 2,302/1,981 -> **2,891/2,700**; GLM 4K 1,031 -> **1,143**;
+  FN 4K is **2,219**, level with the scoreboard.
+- **V4.1 48K appends (256/1024/2048 new rows):** **583.9 / 1,093.6 /
+  1,227.7** tok/s (18.1 / 33.8 / 38.0 TFLOP/s; 13.7 / 25.7 / 28.8%). At 80K:
+  **470.5 / skipped / 1,048.5** tok/s; the 1024-row cell hit pressure 2 twice
+  and is not accepted. **V4.1 48K serve cold root: 21.47 s TTFT**
+  (21.585/21.356 s, 49,182 tokens, `shrinking_ced+full`, prefill
+  21.49/21.26 s), about 2,291 tok/s TTFT-equivalent.
+- **Not completed:** GLM and Flash-Next append cells, GLM/Flash-Next serve
+  TTFT, and FN 128K. The shared M5 was continuously queued by other lanes; the
+  raw cells remain open, not measured zeros. The corrected shared-host rule
+  (settle <=1, accept 0–1, abort at 2, skip after two failures) was used for
+  the later cells.
+- **MLX-Serve 26.11.2 is blocked on this artifact.** The ds4 bridge rejects
+  the four split shards (`SplitGgufUnsupported`); after a valid 155.2 GB merge
+  it rejects the production IQ4_NL Engram (`unsupported V4.1 Engram row
+  encoding`). The MLX-native GGUF path queued but did not get the lease before
+  the deadline. The earlier ~1,800 non-replay / ~2,790 bounded-replay
+  comparison therefore needs a supported Engram encoding or an MLX pack; no
+  local MLX number is claimed. Public competitor rows were not re-measured.
+- **Evidence:** `metagross:~/qwen-runs/2026-11-12-prefill-standing/`, packet
+  `docs/bench/2026-11-12-prefill-standing/README.md`. No merge; branch
+  `bench/prefill-standing-2026-11-12`. Builds/model loads held the canonical
+  lease (<=15 m); measurement processes ran at normal priority.
 
 ## 2026-11-12 - Solo Routed-Expert Prefetch: Closed (2.4-3.6 ms/Token Worse)
 

@@ -125,6 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
     let skip_root = std::env::var("FN_CENSUS_SKIP_ROOT").is_ok_and(|v| v != "0");
     let dispatch_census = std::env::var("FN_CENSUS_DISPATCH").is_ok_and(|v| v != "0");
+    let staged_census = std::env::var("FN_CENSUS_STAGED").is_ok_and(|v| v != "0");
 
     let ctx = MetalContext::new()?;
     let g = GgufFile::open(&args[1])?;
@@ -254,6 +255,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 emit(
                     json!({"kind":"dispatch","cell":"append","depth":depth,"rows":n,"wall_ms":wall,"overflow":report.overflow,"dispatches":report.rows,"logits_hash":hash(&runner.logits()?.to_vec())}),
                 );
+                continue;
+            }
+            if !staged_census {
                 continue;
             }
             runner.restore_snapshot_with_logits(snap, &snapshot_logits)?;

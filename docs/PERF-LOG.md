@@ -206,6 +206,24 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Raw `metagross:~/qwen-runs/2026-11-12-qos-nice0/`; record
   [bench note](bench/2026-11-12-serve-qos-nice0.md). Aven note on `SRV-2K0Y`:
   `JQFK6MMVXBWTG93N`.
+## 2026-11-13 - GLM Full-Chunk IQ Repack: Rejected
+
+- At 49K + 2,048 rows, three interleaved routed-expert spans were **719.21 ms**
+  on GGUF banks and **737.19 ms** on the aligned IQ2_S/IQ3_S repack (**0.976x**).
+  This misses the 1.25x isolated-stage gate.
+- The artifact has mixed routed dtypes: 82 IQ2_S / 2 IQ3_S gate-up banks and
+  39 IQ3_S / 3 IQ4_XS down banks. The final probe retained IQ4_XS on its
+  incumbent kernel and included those layers in the full stage. Two initial
+  eligibility checks exposed the format mix; both refusals happened before
+  tensor allocation or timing.
+- Three-session memory preflight passed: 11.90 GB of session buffers plus
+  227.44 GB retained weights and repack. Pressure stayed at 0; load average was
+  12–14. No paired wall, quality, or serve gate was run after the stage failure.
+- Removed the repack. Next lever: TensorOps chunked KDA recurrence, aimed at
+  the 78 ms recurrence span in the 49K + 2,048 baseline.
+- **Evidence:** [IQ repack rejection](bench/2026-11-13-glm-iq-repack.md),
+  raw attempts under `bench/2026-11-13-glm-prefill/iq-repack/`.
+
 ## 2026-11-13 - GLM TensorOps Indexer Scores: Rejected
 
 - Same restored 49K prefix and 2,048-row full chunk, three interleaved

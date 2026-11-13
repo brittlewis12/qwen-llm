@@ -1,0 +1,5 @@
+metal: waiting for process lease /tmp/qwen-llm-501/metal.lock (pid=1278 executable=timeout opencode_session=none started=2026-11-13T14:04:30Z task=v41-prefill expected=15m; held 2m54s)
+From /Users/tito/qwen-runs/2026-11-12-glm-prefill/glm-prefill-iq-repack.bundle
+ * branch                perf/glm-prefill -> FETCH_HEAD
+Previous HEAD position was 9802ffd95 docs: refresh environment knobs for mixed IQ repack
+HEAD is now at 8509e6ea0 docs: refresh repack route reference

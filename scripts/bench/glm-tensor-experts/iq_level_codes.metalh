@@ -1,0 +1,55 @@
+// Lossless stored level-code decoders for the GLM expert limiter probe.
+// The packer expands each IQ codebook vector once into scalar magnitude-level
+// codes and a separate sign plane. d and per-subblock scale bytes are copied
+// unchanged. This changes the stored representation; it is not a new decoder
+// over the native IQ bytes.
+#pragma once
+
+inline uint qt_level2(device const uchar *p, uint i) {
+    return (uint(p[i >> 2u]) >> (2u * (i & 3u))) & 3u;
+}
+inline uint qt_level3(device const uchar *p, uint i) {
+    const uint bit = 3u * i;
+    const uint byte = bit >> 3u;
+    const uint shift = bit & 7u;
+    uint word = uint(p[byte]);
+    if (shift > 5u) word |= uint(p[byte + 1u]) << 8u;
+    return (word >> shift) & 7u;
+}
+inline float qt_level_sign(device const uchar *p, uint i) {
+    return ((uint(p[i >> 3u]) >> (i & 7u)) & 1u) != 0u ? -1.0f : 1.0f;
+}
+
+inline void qt_dequantize_iq2_s_level(device const uchar *blk, short il,
+                                      thread half4x4 &reg) {
+    const half d_h = *((device const half *)blk);
+    device const uchar *scales = blk + 2;
+    device const uchar *levels = blk + 10;
+    device const uchar *signs = blk + 74;
+    const uint ib32 = uint(il >> 1);
+    const uint ih = uint(il & 1);
+    const uint scale = (uint(scales[ib32]) >> (4u * ih)) & 15u;
+    const float dl = float(d_h) * (0.5f + float(scale)) * 0.25f;
+    QT_FOR_UNROLL (uint i = 0; i < 16u; ++i) {
+        const uint idx = uint(il) * 16u + i;
+        const uint level = qt_level2(levels, idx);
+        const float mag = level == 0u ? 8.0f : level == 1u ? 25.0f : 43.0f;
+        reg[i / 4u][i % 4u] = (half)(dl * mag * qt_level_sign(signs, idx));
+    }
+}
+
+inline void qt_dequantize_iq3_s_level(device const uchar *blk, short il,
+                                      thread half4x4 &reg) {
+    const half d_h = *((device const half *)blk);
+    device const uchar *scales = blk + 2;
+    device const uchar *levels = blk + 6;
+    device const uchar *signs = blk + 102;
+    const uint ib32 = uint(il >> 1);
+    const uint scale = (uint(scales[ib32 >> 1u]) >> (4u * (ib32 & 1u))) & 15u;
+    const float dl = float(d_h) * (1.0f + 2.0f * float(scale));
+    QT_FOR_UNROLL (uint i = 0; i < 16u; ++i) {
+        const uint idx = uint(il) * 16u + i;
+        const float mag = 1.0f + 2.0f * float(qt_level3(levels, idx));
+        reg[i / 4u][i % 4u] = (half)(dl * mag * qt_level_sign(signs, idx));
+    }
+}

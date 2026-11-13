@@ -146,6 +146,7 @@ fn main() -> Result<()> {
     ensure!(
         matches!(
             candidate,
+            "baseline" | "masked-reindex-mid" | "masked-reindex-short"
         ),
         "experiment"
     );

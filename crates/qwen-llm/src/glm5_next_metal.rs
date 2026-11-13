@@ -28,12 +28,65 @@ use crate::metal::{
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 crate::env_flag!(
     /// Default-on M5 GLM KDA decode fusion of the three Q8_0 input projections. Preserves each singleton LCPP kernel's F32 operations and reduction order, with no weight copies or added scratch. Zero restores three dispatches; the global Q8_0 LCPP rollback also disables fusion. Packed Exact/F32 arithmetic is unchanged.
     default_on kda_fanout_requested,
     "QWEN_GLM53_KDA_FANOUT"
 );
+
+crate::env_flag!(
+    /// Materialize Q6_K dense projection weights once as resident F16 and use
+    /// the cache for Fast packed chunks of at least 512 rows. The cache is
+    /// memory-priced with the model; zero disables both allocation and use.
+    default_off glm_q6_prefill_f16_cache_enabled,
+    "QWEN_GLM53_Q6_PREFILL_F16_CACHE"
+);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct Q6PrefillCacheKey(usize, u64);
+
+fn q6_prefill_cache_key(tensor: &MetalTensor) -> Q6PrefillCacheKey {
+    Q6PrefillCacheKey(tensor.buffer.contents().as_ptr() as usize, tensor.offset)
+}
+
+pub(super) type Q6PrefillCache = HashMap<Q6PrefillCacheKey, MetalTensor>;
+
+thread_local! {
+    static ACTIVE_Q6_PREFILL_CACHE: std::cell::RefCell<Option<Arc<Q6PrefillCache>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Installs the model cache for the dynamic extent of one packed prefill.
+pub(super) struct Q6PrefillCacheScope(Option<Arc<Q6PrefillCache>>);
+
+impl Q6PrefillCacheScope {
+    pub(super) fn new(cache: &Arc<Q6PrefillCache>) -> Self {
+        Self(
+            ACTIVE_Q6_PREFILL_CACHE
+                .with(|active| active.replace((!cache.is_empty()).then(|| Arc::clone(cache)))),
+        )
+    }
+}
+
+impl Drop for Q6PrefillCacheScope {
+    fn drop(&mut self) {
+        ACTIVE_Q6_PREFILL_CACHE.with(|active| {
+            active.replace(self.0.take());
+        });
+    }
+}
+
+pub(super) fn cached_q6_prefill_weight(tensor: &MetalTensor) -> Option<MetalTensor> {
+    ACTIVE_Q6_PREFILL_CACHE.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .and_then(|cache| cache.get(&q6_prefill_cache_key(tensor)))
+            .cloned()
+    })
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Glm5NextMetalError {
@@ -334,6 +387,8 @@ pub struct Glm5NextWeights {
     /// Process-unique id of this load (snapshot identity).
     instance: u64,
     _backings: Vec<MetalGgufBacking>,
+    q6_f16_arena: Option<MetalTensor>,
+    q6_f16_cache: Arc<Q6PrefillCache>,
 }
 
 /// Source of [`Glm5NextWeights::instance`] ids.
@@ -345,6 +400,7 @@ impl Glm5NextWeights {
         self._backings
             .iter()
             .map(|backing| &backing.buffer)
+            .chain(self.q6_f16_arena.iter().map(|arena| &arena.buffer))
             .collect()
     }
 
@@ -358,14 +414,33 @@ impl Glm5NextWeights {
             .is_ok();
         let (page, max_buffer) = retained_geometry(ctx)?;
         let (plan, retained_bytes) = model.plan_retained(gguf, page, max_buffer)?;
+        let q6_cache_sources = if glm_q6_prefill_f16_cache_enabled() {
+            glm_q6_prefill_projection_sources(&model.blocks)
+        } else {
+            Vec::new()
+        };
+        let q6_cache_layout = q6_prefill_cache_layout(&q6_cache_sources)?;
+        let q6_cache_bytes = if q6_cache_layout.total_elements == 0 {
+            0
+        } else {
+            let logical_bytes = (q6_cache_layout.total_elements as u64)
+                .checked_mul(2)
+                .ok_or_else(|| Glm5NextMetalError::Invalid("Q6 F16 cache size overflow".into()))?;
+            ctx.price_shared_buffer_upper(logical_bytes)
+                .map_err(|e| Glm5NextMetalError::Invalid(format!("Q6 F16 cache price: {e}")))?
+                .priced_upper_bytes
+        };
+        let admitted_retained_bytes = retained_bytes
+            .checked_add(q6_cache_bytes)
+            .ok_or_else(|| Glm5NextMetalError::Invalid("retained byte count overflow".into()))?;
         crate::half_range::audit_or_refuse(gguf, crate::half_range::HalfRangeScope::Generic)?;
         // Admission and the allocations it prices form one transaction.
         let _allocation = ctx.begin_allocation_transaction();
         let admission =
-            evaluate_metal_memory_admission(retained_bytes, 0, ctx.memory_signals(), true);
+            evaluate_metal_memory_admission(admitted_retained_bytes, 0, ctx.memory_signals(), true);
         if !admission.is_admitted() {
             return invalid(format!(
-                "weights do not fit: reason={:?} required={retained_bytes}",
+                "weights do not fit: reason={:?} required={admitted_retained_bytes}",
                 admission.reason
             ));
         }
@@ -410,6 +485,40 @@ impl Glm5NextWeights {
             tensor.shape = bound.execution_shape().to_vec();
             views.insert(desc.name.clone(), tensor);
         }
+        let (q6_f16_arena, q6_f16_cache) = if q6_cache_layout.total_elements == 0 {
+            (None, Arc::new(HashMap::new()))
+        } else {
+            let arena = MetalTensor::zeros_dtype_unstaged(
+                ctx,
+                vec![q6_cache_layout.total_elements as u64],
+                GgmlType::F16,
+            )?;
+            let command = ctx
+                .queue
+                .commandBuffer()
+                .ok_or_else(|| Glm5NextMetalError::Invalid("Q6 F16 cache command buffer".into()))?;
+            let enc = KernelEncoder::begin(&command);
+            let mut cache = HashMap::with_capacity(q6_cache_layout.entries.len());
+            for entry in &q6_cache_layout.entries {
+                let source = views.get(&entry.name).ok_or_else(|| {
+                    Glm5NextMetalError::Invalid(format!("missing Q6 cache source {}", entry.name))
+                })?;
+                let destination =
+                    arena.view_subrange(entry.offset_elements as u64, vec![entry.elements as u64]);
+                crate::metal::encode_glm_dequant_q6_k_f16(
+                    ctx,
+                    &enc,
+                    source,
+                    &destination,
+                    entry.n_in,
+                    entry.n_out,
+                )?;
+                cache.insert(q6_prefill_cache_key(source), destination);
+            }
+            enc.end();
+            crate::metal::commit_and_wait(&command)?;
+            (Some(arena), Arc::new(cache))
+        };
         let mut take = |desc: &&TensorDesc| -> Result<MetalTensor> {
             views.remove(&desc.name).ok_or_else(|| {
                 Glm5NextMetalError::Invalid(format!("missing realized {}", desc.name))
@@ -432,12 +541,117 @@ impl Glm5NextWeights {
             output_norm,
             output,
             blocks,
-            retained_bytes,
+            retained_bytes: admitted_retained_bytes,
             packed_prefill_admitted,
             instance: WEIGHTS_INSTANCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             _backings: backings,
+            q6_f16_arena,
+            q6_f16_cache,
         })
     }
+}
+
+struct Q6PrefillCacheEntry {
+    name: String,
+    n_in: usize,
+    n_out: usize,
+    elements: usize,
+    offset_elements: usize,
+}
+
+struct Q6PrefillCacheLayout {
+    entries: Vec<Q6PrefillCacheEntry>,
+    total_elements: usize,
+}
+
+fn q6_prefill_cache_layout(sources: &[&TensorDesc]) -> Result<Q6PrefillCacheLayout> {
+    let mut entries = Vec::with_capacity(sources.len());
+    let mut cursor = 0usize;
+    for source in sources {
+        let n_in = source.shape[0] as usize;
+        let n_out = source.shape[1] as usize;
+        let elements = n_in
+            .checked_mul(n_out)
+            .ok_or_else(|| Glm5NextMetalError::Invalid("Q6 F16 cache extent overflow".into()))?;
+        // Keep every projection's base aligned to 256 bytes for Metal tensor
+        // access; gaps are included in the arena and memory admission.
+        cursor = cursor
+            .checked_add(127)
+            .map(|offset| offset / 128 * 128)
+            .ok_or_else(|| Glm5NextMetalError::Invalid("Q6 F16 cache offset overflow".into()))?;
+        entries.push(Q6PrefillCacheEntry {
+            name: source.name.clone(),
+            n_in,
+            n_out,
+            elements,
+            offset_elements: cursor,
+        });
+        cursor = cursor
+            .checked_add(elements)
+            .ok_or_else(|| Glm5NextMetalError::Invalid("Q6 F16 cache size overflow".into()))?;
+    }
+    Ok(Q6PrefillCacheLayout {
+        entries,
+        total_elements: cursor,
+    })
+}
+
+fn glm_q6_prefill_projection_sources<'a>(
+    blocks: &[Glm5NextBlock<&'a TensorDesc>],
+) -> Vec<&'a TensorDesc> {
+    let mut sources = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |tensor: &'a TensorDesc| {
+        if tensor.dtype == GgmlType::Q6_K
+            && tensor.shape.len() == 2
+            && tensor.shape[0] != 0
+            && tensor.shape[1] != 0
+            && tensor.shape[0].is_multiple_of(256)
+            && seen.insert((tensor.shard_idx, tensor.data_offset, tensor.n_bytes))
+        {
+            sources.push(tensor);
+        }
+    };
+    for block in blocks {
+        match &block.mixer {
+            MixerTensors::Kda(kda) => {
+                for tensor in [
+                    kda.query,
+                    kda.key,
+                    kda.value,
+                    kda.decay_a,
+                    kda.decay_b,
+                    kda.beta,
+                    kda.gate_a,
+                    kda.gate_b,
+                    kda.output,
+                ] {
+                    push(tensor);
+                }
+            }
+            MixerTensors::Mla(mla) => {
+                for tensor in [mla.query_a, mla.query_b, mla.latent, mla.output] {
+                    push(tensor);
+                }
+                for tensor in [mla.indexer.query, mla.indexer.key, mla.indexer.pool_gate] {
+                    push(tensor);
+                }
+            }
+        }
+        match &block.ffn {
+            FfnTensors::Dense(dense) => {
+                for tensor in [dense.gate, dense.up, dense.down] {
+                    push(tensor);
+                }
+            }
+            FfnTensors::Moe(moe) => {
+                for tensor in [moe.shared.gate, moe.shared.up, moe.shared.down] {
+                    push(tensor);
+                }
+            }
+        }
+    }
+    sources
 }
 
 /// Per-layer persistent state.

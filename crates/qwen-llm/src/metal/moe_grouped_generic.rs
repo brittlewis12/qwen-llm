@@ -292,10 +292,28 @@ fn generic_mm_args(
     max_count: u32,
 ) -> Result<GenericMmArgs, MetalError> {
     let l = generic_layout_for(kernel, weight, n_in, n_out, n_expert)?;
-    mm_args_with_layout(
+    let mut args = mm_args_with_layout(
         kernel, l, src, counts, ids, out, n_in, n_out, n_expert, n_tokens, b_div, min_count,
         max_count,
-    )
+    )?;
+    if weight.provenance() == MetalTensorProvenance::RepackedExpertWeightReadOnly {
+        let bytes = match weight.dtype {
+            GgmlType::IQ2_S => 84,
+            GgmlType::IQ3_S => 116,
+            _ => {
+                return Err(MetalError::BadShape {
+                    kernel,
+                    detail: format!("no repacked grouped stride for {:?}", weight.dtype),
+                });
+            }
+        };
+        args.nb01 =
+            u32::try_from((n_in / l.block_elems) * bytes).map_err(|_| MetalError::BadShape {
+                kernel,
+                detail: "repacked weight row stride exceeds u32".into(),
+            })?;
+    }
+    Ok(args)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -635,6 +635,15 @@ TT_INSTANTIATE(iq2_xxs, QT_IQ2_XXS_BYTES, QT_IQ2_XXS_NL, qt_dequantize_iq2_xxs)
 TT_INSTANTIATE(iq1_s,   QT_IQ1_S_BYTES,   QT_IQ1_S_NL,   qt_dequantize_iq1_s)
 TT_INSTANTIATE(iq1_m,   QT_IQ1_M_BYTES,   QT_IQ1_M_NL,   qt_dequantize_iq1_m)
 
+// GLM full-chunk aligned IQ block repack: padded strides keep every packed
+// control/code vector load naturally aligned without changing decoded halves.
+template [[host_name("kernel_moe_down_iq2_s_f16act_grouped_slots_tensor_repacked")]]
+kernel moe_grouped_slots_mm_tensor_f16act_t kernel_moe_grouped_slots_mm_tensor_f16act<84, 16, qt_dequantize_iq2_s_repacked, 0>;
+template [[host_name("kernel_moe_up_clamped_iq2_s_f16act_grouped_slots_tensor_repacked")]]
+kernel moe_up_clamped_grouped_slots_tensor_f16act_t kernel_moe_up_clamped_grouped_slots_tensor_f16act<84, 16, qt_dequantize_iq2_s_repacked>;
+template [[host_name("kernel_moe_down_iq3_s_f32_grouped_slots_tensor_repacked")]]
+kernel moe_grouped_slots_mm_tensor_t kernel_moe_grouped_slots_mm_tensor<116, 16, qt_dequantize_iq3_s_repacked, 0>;
+
 // The wide dense tile is instantiated for the Q8_0 projections V4.1 uses
 // (q/kv/output and the shared expert). Additional forms below are explicit-only.
 typedef decltype(kernel_mat_mat_tensor_wide<QT_Q8_0_BYTES, QT_Q8_0_NL, qt_dequantize_q8_0>) mat_mat_tensor_wide_t;
@@ -686,6 +695,9 @@ TT_INSTANTIATE_WIDE(iq2_xs,  QT_IQ2_XS_BYTES,  QT_IQ2_XS_NL,  qt_dequantize_iq2_
 TT_INSTANTIATE_WIDE(iq2_xxs, QT_IQ2_XXS_BYTES, QT_IQ2_XXS_NL, qt_dequantize_iq2_xxs)
 TT_INSTANTIATE_WIDE(iq1_s,   QT_IQ1_S_BYTES,   QT_IQ1_S_NL,   qt_dequantize_iq1_s)
 TT_INSTANTIATE_WIDE(iq1_m,   QT_IQ1_M_BYTES,   QT_IQ1_M_NL,   qt_dequantize_iq1_m)
+
+template [[host_name("kernel_moe_wide_probe_iq2_s_f16act_repacked")]]
+kernel moe_wide_probe_t kernel_moe_wide_probe_f16act<84, 16, qt_dequantize_iq2_s_repacked>;
 
 // Natural-row-major Q5_K -> F16 dequant for the dense preweight route.
 // One thread dequantizes one 16-element sub-tile with `qt_dequantize_q5_K`
@@ -857,6 +869,13 @@ kernel void kernel_glm_iq3_down_n16(
  threadgroup uchar *memory [[threadgroup(0)]],uint3 group [[threadgroup_position_in_grid]],uint tid [[thread_index_in_threadgroup]]) {
  moe_glm_iq3_n16_body<QT_IQ3_S_BYTES,QT_IQ3_S_NL,qt_dequantize_iq3_s,0,false,false>(a,w,(device const uchar*)x,counts,ids,y,memory,group,tid,0.0f);
 }
+kernel void kernel_glm_iq3_down_n16_repacked(
+ constant moe_group_generic_mm_args &a [[buffer(0)]],device const uchar *w [[buffer(1)]],
+ device const float *x [[buffer(2)]],device const int *counts [[buffer(3)]],
+ device const int *ids [[buffer(4)]],device float *y [[buffer(5)]],
+ threadgroup uchar *memory [[threadgroup(0)]],uint3 group [[threadgroup_position_in_grid]],uint tid [[thread_index_in_threadgroup]]) {
+ moe_glm_iq3_n16_body<116,16,qt_dequantize_iq3_s_repacked,0,false,false>(a,w,(device const uchar*)x,counts,ids,y,memory,group,tid,0.0f);
+}
 template <int BYTES, short NL,
           void (*DEQ)(device const uchar *, short, thread half4x4 &)>
 kernel void kernel_glm_iq3_n64_f32_impl(
@@ -989,3 +1008,5 @@ kernel void kernel_glm_iq3_n64_f32_impl(
 
 typedef decltype(kernel_glm_iq3_n64_f32_impl<QT_IQ3_S_BYTES,QT_IQ3_S_NL,qt_dequantize_iq3_s>) glm_iq3_n64_t;
 template [[host_name("kernel_glm_iq3_down_n64")]] kernel glm_iq3_n64_t kernel_glm_iq3_n64_f32_impl<QT_IQ3_S_BYTES,QT_IQ3_S_NL,qt_dequantize_iq3_s>;
+typedef decltype(kernel_glm_iq3_n64_f32_impl<116,16,qt_dequantize_iq3_s_repacked>) glm_iq3_n64_repacked_t;
+template [[host_name("kernel_glm_iq3_down_n64_repacked")]] kernel glm_iq3_n64_repacked_t kernel_glm_iq3_n64_f32_impl<116,16,qt_dequantize_iq3_s_repacked>;

@@ -84,9 +84,40 @@ pub fn moe_grouped_tensor_pipeline_name(
     ))
 }
 
+pub fn moe_grouped_tensor_pipeline_name_for_weight(
+    role: MoeGroupedTensorRole,
+    weight: &MetalTensor,
+    activation: TensorActivation,
+) -> Option<String> {
+    if weight.provenance() == MetalTensorProvenance::RepackedExpertWeightReadOnly {
+        let suffix = match (role, weight.dtype, activation) {
+            (MoeGroupedTensorRole::Down, GgmlType::IQ2_S, TensorActivation::F16) => {
+                "kernel_moe_down_iq2_s_f16act_grouped_slots_tensor_repacked"
+            }
+            (MoeGroupedTensorRole::UpClamped, GgmlType::IQ2_S, TensorActivation::F16) => {
+                "kernel_moe_up_clamped_iq2_s_f16act_grouped_slots_tensor_repacked"
+            }
+            (MoeGroupedTensorRole::Down, GgmlType::IQ3_S, TensorActivation::F32) => {
+                "kernel_moe_down_iq3_s_f32_grouped_slots_tensor_repacked"
+            }
+            _ => return None,
+        };
+        return Some(suffix.to_owned());
+    }
+    moe_grouped_tensor_pipeline_name(role, weight.dtype, activation)
+}
+
 /// 64-slot gate/up probe pipeline for a generic dtype.
 pub fn wide_probe_pipeline_name(dtype: GgmlType) -> Option<String> {
     moe_grouped_generic_layout(dtype).map(|l| format!("kernel_moe_wide_probe_{}_f16act", l.suffix))
+}
+
+pub fn wide_probe_pipeline_name_for_weight(weight: &MetalTensor) -> Option<String> {
+    if weight.provenance() == MetalTensorProvenance::RepackedExpertWeightReadOnly {
+        return (weight.dtype == GgmlType::IQ2_S)
+            .then(|| "kernel_moe_wide_probe_iq2_s_f16act_repacked".to_owned());
+    }
+    wide_probe_pipeline_name(weight.dtype)
 }
 
 /// True when the tensor tile can run on this context.
@@ -195,7 +226,7 @@ pub fn encode_moe_down_f32_grouped_slots_tensor(
     )?;
     let activation = TensorActivation::of(inner, KERNEL)?;
     let name =
-        moe_grouped_tensor_pipeline_name(MoeGroupedTensorRole::Down, weight.dtype, activation)
+        moe_grouped_tensor_pipeline_name_for_weight(MoeGroupedTensorRole::Down, weight, activation)
             .expect("layout lookup succeeded in generic_mm_args");
     #[cfg(feature = "perf-ablations")]
     if weight.dtype == GgmlType::IQ3_S
@@ -273,8 +304,8 @@ pub fn encode_moe_swiglu_f32_grouped_slots_tensor(
         && let Some(limit) = clamp
         && moe_grouped_tensor_selected(ctx)
         && std::env::var_os("QWEN_V41_EXPERT_WIDE").is_none_or(|v| v != "0")
-        && wide_probe_pipeline_name(w_gate.dtype).is_some()
-        && wide_probe_pipeline_name(w_up.dtype).is_some()
+        && wide_probe_pipeline_name_for_weight(w_gate).is_some()
+        && wide_probe_pipeline_name_for_weight(w_up).is_some()
     {
         return encode_moe_swiglu_wide_probe(
             ctx, enc, w_gate, w_up, x_pack, counts, ids, inner, n_hidden, n_ffn, n_expert, topk,
@@ -313,14 +344,14 @@ pub fn encode_moe_swiglu_f32_grouped_slots_tensor(
         i32::MAX as u32,
     )?;
     let gate =
-        moe_grouped_tensor_pipeline_name(MoeGroupedTensorRole::Down, w_gate.dtype, activation)
+        moe_grouped_tensor_pipeline_name_for_weight(MoeGroupedTensorRole::Down, w_gate, activation)
             .expect("layout lookup succeeded in generic_mm_args");
     let up_role = if clamp.is_some() {
         MoeGroupedTensorRole::UpClamped
     } else {
         MoeGroupedTensorRole::UpSiluMul
     };
-    let up = moe_grouped_tensor_pipeline_name(up_role, w_up.dtype, activation)
+    let up = moe_grouped_tensor_pipeline_name_for_weight(up_role, w_up, activation)
         .expect("layout lookup succeeded in generic_mm_args");
     // Resolve both pipelines before the first dispatch so a missing up
     // instantiation cannot leave the gate projection half applied.
@@ -1088,20 +1119,21 @@ pub fn encode_moe_swiglu_adaptive_tensor(
         33,
         i32::MAX as u32,
     )?;
-    let gate_name = moe_grouped_tensor_pipeline_name(
+    let gate_name = moe_grouped_tensor_pipeline_name_for_weight(
         MoeGroupedTensorRole::Down,
-        w_gate.dtype,
+        w_gate,
         TensorActivation::F16,
     )
     .expect("validated gate layout");
-    let up_name = moe_grouped_tensor_pipeline_name(
+    let up_name = moe_grouped_tensor_pipeline_name_for_weight(
         MoeGroupedTensorRole::UpClamped,
-        w_up.dtype,
+        w_up,
         TensorActivation::F16,
     )
     .expect("validated up layout");
-    let wide_gate_name = wide_probe_pipeline_name(w_gate.dtype).expect("validated gate layout");
-    let wide_up_name = wide_probe_pipeline_name(w_up.dtype).expect("validated up layout");
+    let wide_gate_name =
+        wide_probe_pipeline_name_for_weight(w_gate).expect("validated gate layout");
+    let wide_up_name = wide_probe_pipeline_name_for_weight(w_up).expect("validated up layout");
     let psos = [
         ctx.tensor_pipeline(&gate_name)?,
         ctx.tensor_pipeline(&wide_gate_name)?,
@@ -1212,9 +1244,9 @@ pub fn encode_moe_down_iq3_adaptive(
     if w.dtype != GgmlType::IQ3_S || x.dtype != GgmlType::F32 {
         return Ok(false);
     }
-    let narrow = moe_grouped_tensor_pipeline_name(
+    let narrow = moe_grouped_tensor_pipeline_name_for_weight(
         MoeGroupedTensorRole::Down,
-        GgmlType::IQ3_S,
+        w,
         TensorActivation::F32,
     )
     .unwrap();
@@ -1224,11 +1256,14 @@ pub fn encode_moe_down_iq3_adaptive(
         (64, 33, i32::MAX as u32),
     ];
     let mut passes = Vec::with_capacity(bands.len());
+    let repacked = w.provenance() == MetalTensorProvenance::RepackedExpertWeightReadOnly;
     for (rows, min, max) in bands {
         let args = generic_mm_args(K, w, x, counts, ids, out, k, m, e, n, 1, min, max)?;
         let name = match rows {
+            16 if repacked => "kernel_glm_iq3_down_n16_repacked",
             16 => "kernel_glm_iq3_down_n16",
             32 => narrow.as_str(),
+            64 if repacked => "kernel_glm_iq3_down_n64_repacked",
             _ => "kernel_glm_iq3_down_n64",
         };
         let bytes = match rows {

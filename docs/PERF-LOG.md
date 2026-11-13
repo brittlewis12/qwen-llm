@@ -31,6 +31,25 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw captures and generated tables:
   `metagross:~/qwen-runs/2026-11-12-waste-audit/`. Branch `perf/waste-audit`;
   not merged.
+
+## 2026-11-13 - V4.1 Purged Root Passes; Served Packet at Five Arms
+
+- Source/profile pin `67b3ebaf4` rebuilt; all nine metallibs match the
+  original. Original/rebuilt executable hashes are recorded; binaries are
+  archived outside target for the open gate.
+- Purged native 48K root passes: mean main/bundle 1.064904x, floor 0.98x;
+  pair geomean 1.112053x, individual BA/AB/BA 0.931764/1.710896/0.862674x.
+  All eight endpoints exact; every purge zero, nice 0, thermal <=2.
+  Load/read variability is retained, without isolated attention attribution.
+- Pair 1 AB stands. Fresh pair 2 BA: TPS 87.0833 ->88.1; root 0.902509x;
+  short prefill/TTFT 1.018921/0.983220x; 1K 0.995344/0.987286x.
+  Pair 3 A complete; B queued. Frozen three-pair decision remains pending.
+- Full contracts pass `e64d364d5`; that separate commit fixes the current-main
+  Q6 probe feature declaration. ENV regenerated: 828 knobs, no polarity
+  conflicts. Scheduling log collision fixed before any served model load;
+  no timing repeated. No promotion decision or next-lever implementation.
+  [Native runs, pins and per-arm I/O](bench/2026-11-13-v41-attention-close.md).
+
 ## 2026-11-13 - V4.1 Attention Gate: Source Pin Clarified, Final Stage Starts
 
 - Lead accepts source67b3ebaf4/profile pin with identical metallibs; Rust

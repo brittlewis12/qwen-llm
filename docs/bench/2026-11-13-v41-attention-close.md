@@ -1,26 +1,28 @@
 # V4.1 attention gate: source/profile pin and final measurements
 
-Start21:01:00 UTC; hard report<=23:01, no extension. Measurement cutoff22:49
-reserves cleanup/records/contracts. The lead clarified that source67b3ebaf4
+Start 21:01:00 UTC; hard report by 23:01, no extension. Measurement cutoff 22:49
+reserves cleanup/records/contracts. The lead clarified that source `67b3ebaf4`
 plus the same iter/release/test profiles and byte-identical metallibs is the
 program pin; executable SHA identity is not required. Record original,
 previous-rebuild and current executable hashes. No Rust/kernel/probe changes
-are made for this measurement, and pair1AB stands exactly as recorded.
+are made for this measurement, and pair 1 AB stands exactly as recorded.
 
 ## Artifact lifecycle
 
-Rebuild source67b at the original M5 worktree/target paths. Require all9
+Rebuild source `67b` at the original M5 worktree/target paths. Require all nine
 main/research/tensor metallibs across profiles to match the old hashes.
 Copy each executable into attention-close/pins outside target, verify its
 SHA and make it read-only. Both arms use those same archived executables.
 Keep pins while any gate remains open across stages; cleanup removes bulk
 build output, worktree and bundles, not open-gate pins. Delete pins only after
 the gate closes. The manifest keeps build and archived paths and all hashes.
+The metallibs are embedded with `include_bytes!`; the archived executables
+retain their GPU code when the original target directory is removed.
 
 ## Unchanged measurement protocol
 
-Use the prepared finish-stage protocol: purge Engram0 before EVERY fresh
-single native48K process; warmupAB and retainedBA/AB/BA; nice0 verified by ps,
+Use the prepared finish-stage protocol: purge Engram to zero resident pages before EVERY fresh
+single native 48K process; warmup AB and retained BA/AB/BA; nice 0 verified by ps,
 60s continuously<=1 before each load, allow2/abort3. Record per-run load,
 Engram prepare wall and completed-submit encode time, process reads and
 endpoint digest. Existing full-state/following-step witnesses from the same
@@ -29,36 +31,36 @@ The ratio of retained mean A/B wall times must be>=0.98; also report the
 geometric pair ratio. One<=15m hold if it fits, otherwise checkpoint at a
 pair boundary and use a lease per remaining pair. Do not repeat completed runs.
 
-If native passes, finish fresh pair2BA and pair3AB, one ARM per<=15m lease,
-with symmetric paired4K model warmup, both GPU witnesses, Engram purge0,
-fresh server, greedy/cap32,3x48K agents,60s windows/15s ramp, active4,
-sample-workers3/fair1 and the original thermal rules. Each arm has its own
-860s internal budget inside885s/15m. Warmup and measured process reads remain
+If native passes, finish fresh pair 2 BA and pair 3 AB, one ARM per<=15m lease,
+with symmetric paired 4K model warmup, both GPU witnesses, Engram purge to zero resident pages,
+fresh server, greedy/root reply cap 32, three 48K agents, 60s windows/15s ramp, active 4,
+sample-workers 3/fair 1 and the original thermal rules. Each arm has its own
+860s internal budget inside 885s/15m. Warmup and measured process reads remain
 separate. Refuse arm overwrites; require identical pair metadata and plan.
 Both arms differ only by SHORT=0/PV_WIDE=0 versus SHORT=1/PV_WIDE=1.
-MASKED_REINDEX and MID remain1. Pair1's old executable hash is legitimate
+MASKED_REINDEX and MID remain1. Pair 1's old executable hash is legitimate
 under the explicitly approved source/profile+metallib pin.
 
-Across complete AB/BA/AB: geometric means TPS>=0.98, root prefill>=0.98,
-short128..511 and1K-class512..2000 prefill AND client TTFT each>=1.00, with
+Across complete AB/BA/AB: geometric means TPS >=0.98, root prefill >=0.98,
+short 128..511 and 1K-class 512..2000 prefill AND client TTFT each>=1.00, with
 at least one matched/observed call per bin per pair. All equal-new-row
 completed offered calls, roots, counts/null TTFT, compiler/load/thermal and
 I/O evidence retained. Native pass plus served pass => ready to land.
 Purged root failure drops wide PV; short remains default-on only if its own
 150/256 cells hold. Prepared fallback uses PV=0/SHORT=1 and scoped MID
-false/true at80K/sub512 rows, exactly main versus short eligibility, with
+false/true at 80K/sub-512 rows, exactly main versus short eligibility, with
 full paired signatures. No wider sub-bisection or next-lever implementation.
 If the queue prevents completion within the stage, report; do not extend.
 
-The independent Engram cache is already composed on local mainc2935fa36,
-with contracts passing2e8efa847. Measurement remains on9877/67b as authorized.
+The independent Engram cache is already composed on local main `c2935fa36`,
+with contracts passing `2e8efa847`. Measurement remains on `9877/67b` as authorized.
 
 ## Planning only: lead-forwarded waste audit
 
 For the next stage, cooperative experts shares priority with the forwarded
 perf/waste-audit findings (not acted on or remeasured here): score-to-softmax
-round trip~34/17ms at2048@48K/1024@80K; scatter_offset_f32_to_f16 in indexer
-and expert input plus v41_sorted_pack~71/34ms GPU (4.2% of chunk GPU); three
+round trip~34/17ms at 2048@48K/1024@80K; scatter_offset_f32_to_f16 in indexer
+and expert input plus v41_sorted_pack ~71/34ms GPU (4.2% of chunk GPU); three
 apparently duplicated attention_index_heads_rows_mma append dispatches~7.5ms,
 0.68%, same inputs and no intervening write. Wide PV already covers PV to
 normalization. Audit reference: perf/waste-audit:docs/bench/2026-11-13-waste-audit.md.
@@ -96,3 +98,96 @@ The full manifest is `build-functional-done.json` in that run directory.
 A missing harness-bundle path stopped the first controller before any model
 load. The transferred source bundle was linked to that path and scheduling
 restarted without repeating any measurements.
+
+## Composed branch checks
+
+Fresh `scripts/check-contracts.sh --full` first failed in the unchanged main
+probe `examples/glm_q6_probe.rs`: its unconditional call to
+`diagnostic_q6k_r1` requires `perf-ablations`, but Cargo had no corresponding
+example declaration. This was raised on SRV-2K0Y (RYKTR82QETD596DD) and fixed
+separately in `e64d364d5` by declaring the existing feature requirement. No test
+was ignored and no measured attention code changed. The full contract retry
+passed for commit `e64d364d5`, tree
+`968e09349aa1f234d6c9aac38a05f5ba751c4e46`, including the generated ENV check,
+CPU inventory, workspace test-profile compilation, source-cache tests and
+release/README checks. The first failure remains in the raw contract log.
+
+The targeted iter-profile check of `glm_q6_probe` with `perf-ablations` also
+passed, so the feature declaration preserves compilation of the actual probe.
+
+## Purged native root result
+
+The frozen native gate **passes**: mean main 47.8270s / bundle 44.9120s =
+**1.064904x**, floor 0.98x. Geometric mean of pair ratios: 1.112053x.
+Retained BA/AB/BA pairs are 0.931764x / 1.710896x / 0.862674x; one of three favors
+the bundle. No observation is filtered. All eight endpoint hashes match the
+previous golden (`a4c13784ef52ffb732b3620e94e4d215b33926c29dd84be2a6204b17aea746ab`).
+An independent reduction checks raw SHA-256 values, the eight identical
+endpoints, actual nice 0, max thermal <=2, zero-page purges, and the final
+continuous 60s settle at <=1 before every load. Prior full-state/following-step
+paired witnesses remain those of the identical pinned GPU program.
+
+| Pair/order | Arm | Wall s | Engram prep s | Completed-submit encode s | Load (1m) before → after | Sampled process read bytes | Max thermal |
+|---|---|---:|---:|---:|---|---:|---:|
+| warmup AB | a | 54.439069 | 5.945468 | 6.594666 | 23.91 → 24.56 | 166988447744 | 2 |
+| warmup AB | b | 53.829119 | 6.352373 | 6.821413 | 24.69 → 31.72 | 168350732288 | 0 |
+| 1 BA | b | 43.201008 | 7.286036 | 8.744070 | 45.13 → 55.28 | 13104295936 | 0 |
+| 1 BA | a | 40.253152 | 6.726028 | 7.865286 | 55.93 → 55.19 | 13103611904 | 0 |
+| 2 AB | a | 48.939206 | 5.641880 | 5.698442 | 29.18 → 28.69 | 171385593856 | 2 |
+| 2 AB | b | 28.604424 | 4.307222 | 4.706500 | 16.26 → 14.49 | 13103640576 | 0 |
+| 3 BA | b | 62.930679 | 8.050408 | 7.884928 | 20.67 → 23.61 | 172307513344 | 2 |
+| 3 BA | a | 54.288647 | 6.604858 | 7.037885 | 26.60 → 29.91 | 166279540736 | 0 |
+
+Full 1/5/15-minute load vectors and half-second run traces remain in each
+`purged-root-p*-*-result.json` / `-thermal.json` under the run directory.
+Per-run disk reads are maximum live process counters sampled every 0.5s, not
+Engram-only bytes. Reads and load vary sharply even after uniform Engram purge;
+the 6.49% native aggregate is a gate result, not isolated attention attribution.
+There is no quality relaxation or adjusted timing threshold.
+
+## Serve scheduling checkpoint
+
+The first served launch stopped before warmup/model loading because the private
+controller opened the arm's own `.log` as its outer lease log. The public
+harness's no-overwrite guard correctly rejected it. The failed launch log is
+preserved as `finish-serve-pair2-b-bootstrap.log`; no model/warmup directory or
+arm summary existed. The private scheduler now uses `.lease.log`, preserves
+completed native/arm checkpoints on restart, and resumed with native unchanged.
+This changes scheduling only; no benchmark threshold, warmup, measurement
+binary, order or sampling rule changed.
+
+<!-- SERVE_RESULTS_START -->
+## Served observations
+
+Latency ratios are main/bundle; TPS columns are delivered tokens per second.
+All completed paired observations are retained. The short bin uses actual
+128..511 rows; the 1K bin uses 512..2000 rows. Counts are matched calls / pairs
+with observed client TTFT. Null TTFT is retained in raw calls, never imputed.
+
+| Pair/order | Root prefill | TPS main / bundle | Short prefill / TTFT | Short counts | 1K prefill / TTFT | 1K counts |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 AB | 1.166676x | 87.350000 / 88.316667 | 1.053301x / 1.032870x | 6 / 6 | 1.045457x / 1.058349x | 3 / 3 |
+| 2 BA | 0.902509x | 87.083333 / 88.100000 | 1.018921x / 0.983220x | 6 / 6 | 0.995344x / 0.987286x | 3 / 3 |
+
+Process counters are maximum live values sampled every 0.5s. Warmup and
+measured-server reads are separate; bytes are total process reads, not an
+Engram-only counter. Every listed arm has a zero-page purge and actual nice 0.
+
+| Pair | Arm | Server read bytes | 4K warmup read bytes | Root client TTFT s | Load (1m) before → after | Max thermal (server / warmup) | Compiler observed / overlapped |
+|---|---|---:|---:|---|---|---|---|
+| 1 | a | 52267646976 | 159335890944 | 33.048588, 32.029116, 29.378886 | 21.26 → 15.86 | 1 / 0 | True / True |
+| 1 | b | 33156030464 | 496418816 | 28.110331, 27.191419, 25.680483 | 14.48 → 12.44 | 0 / 1 | True / True |
+| 2 | b | 34273374208 | 159334612992 | 30.966365, 29.407303, 40.897552 | 19.99 → 14.89 | 0 / 1 | False / False |
+| 2 | a | 189054726144 | 159337021440 | 37.820759, 26.780003, 26.810891 | 12.17 → 17.10 | 0 / 0 | True / False |
+| 3 | a | 188321980416 | 157310173184 | 31.039243, 25.165384, 25.605822 | 13.11 → 13.83 | 0 / 0 | True / True |
+
+The three-pair gate is **pending**: 2 complete pairs, 5 complete arms.
+No aggregate promotion decision is made from an incomplete packet.
+
+<!-- SERVE_RESULTS_END -->
+
+ENV was regenerated in this stage: 828 knobs, no polarity conflicts. Only
+the source-revision header changed. The other pinned native cells and their
+full-state/following-step bitwise witnesses stand as recorded in
+[the bundle packet](2026-11-13-v41-attention-bundle.md); this stage replaces
+its unpurged native root timing with the per-run-purged packet above.

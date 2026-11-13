@@ -49,6 +49,13 @@ pooled median for both eligible prefill and client TTFT. Root prefill and
 aggregate throughput geometric means must each remain within2% of baseline.
 Report every pair/order, matched call, missing-TTFT count and disk counter.
 
+At16:42 UTC, before any served arm/model started, amend the fixed steady
+window from120s to60s for all6 arms to fit the shared lease queue inside the
+two-hour stage. Stop only the waiting controller by its recorded exact PID;
+use fresh `bounded-short60-serve-pair*` tags. Keep the3-pair and>=3 observed
+eligible-match requirements. Earlier recorded runs' first60s contain5/6
+eligible matches, a planning check only. No new served result was inspected.
+
 ## Rebased build and nice0 deep gate
 
 Source `4ba3c377b` based on rewritten main `56a1e8fe5`. Full contracts pass.

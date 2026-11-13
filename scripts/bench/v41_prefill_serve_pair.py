@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one interleaved realistic three-agent pair inside a <=14-minute lease."""
+"""Run a three-agent pair or one arm inside a <=15-minute lease."""
 import argparse
 import hashlib
 import json
@@ -152,6 +152,7 @@ def main():
     p.add_argument("--model-warmup-binary",type=Path)
     p.add_argument("--engram",type=Path,required=True)
     p.add_argument("--tag",required=True);p.add_argument("--order",choices=("ab","ba"),required=True)
+    p.add_argument("--only-arm",choices=("a","b"),help="run the next arm of this ordered pair; refuse any overwrite")
     p.add_argument("--port",type=int,default=19973);p.add_argument("--seconds",type=int,default=120)
     p.add_argument("--warm-reply-tokens",type=int,default=32)
     p.add_argument("--sampling",choices=("agent","greedy"),default="greedy")
@@ -162,8 +163,22 @@ def main():
     subprocess.run(["python3","scripts/bench/serve_realistic.py","plan","--family","v41",
         "--seconds",str(a.seconds),"--seed","20261112","--out",str(plan)],check=True,timeout=10)
     sha=hashlib.sha256(a.binary.read_bytes()).hexdigest()
-    result=dict(binary_sha256=sha,flags=a.flag,order=a.order,sampling=a.sampling,arms=[])
-    for arm in a.order:
+    result=dict(binary_sha256=sha,flags=a.flag,order=a.order,sampling=a.sampling,seconds=a.seconds,
+                warm_reply_tokens=a.warm_reply_tokens,plan_sha256=hashlib.sha256(plan.read_bytes()).hexdigest(),arms=[])
+    summary=out/f"{a.tag}-summary.json"
+    if summary.exists():
+        if not a.only_arm:raise RuntimeError("pair summary already exists; refusing overwrite")
+        previous=json.loads(summary.read_text())
+        if any(previous[k]!=result[k] for k in ("binary_sha256","flags","order","sampling","seconds","warm_reply_tokens","plan_sha256")):
+            raise RuntimeError("one-arm pair metadata differs")
+        result=previous
+    if a.only_arm:
+        done=[r["arm"] for r in result["arms"]]
+        if done!=list(a.order[:len(done)]) or len(done)>=2 or a.order[len(done)]!=a.only_arm:
+            raise RuntimeError("one-arm call is not the next incomplete arm")
+    for arm in (a.only_arm if a.only_arm else a.order):
+        if (out/f"{a.tag}-{arm}.log").exists() or (out/f"{a.tag}-{arm}").exists():
+            raise RuntimeError("arm artifacts already exist; refusing overwrite")
         processes=resident_check()
         (out/f"{a.tag}-{arm}-processes.txt").write_text(processes)
         weight_binary=a.model_warmup_binary or a.binary.resolve().parents[1]/"iter/examples/v41_prefill_census"

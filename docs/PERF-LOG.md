@@ -31,6 +31,16 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw captures and generated tables:
   `metagross:~/qwen-runs/2026-11-12-waste-audit/`. Branch `perf/waste-audit`;
   not merged.
+## 2026-11-13 - V4.1 Attention Bundle: Purged Root and One-Arm Serve Gate Start
+
+- New bounded stage19:42:05UTC, report<=21:42, no extension. Restore exact
+  pinned binary SHAs from source67b3ebaf4; no Rust/kernel changes.
+- Purge Engram0 before every fresh native48K run, warmupAB+retainedBA/AB/BA,
+  record exposed Engram prep and load. Mean A/B>=0.98 is the native gate.
+- Pair1 stands. Remaining BA/AB use one arm per<=15m lease; all symmetric
+  warmup, purge, windows and served non-regression thresholds unchanged.
+  [Frozen protocol](bench/2026-11-13-v41-attention-finish.md).
+
 ## 2026-11-13 - V4.1 Attention Bundle: Bitwise Pass, Serve Campaign Incomplete
 
 - All6 native cells bitwise, one iter19d9adf78d3a. Ratios48K0.885815x,

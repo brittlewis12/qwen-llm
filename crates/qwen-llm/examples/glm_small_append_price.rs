@@ -552,6 +552,7 @@ mod probe {
     }
 
     fn occupancy_cells(depths: &[usize], widths: &[usize]) -> anyhow::Result<Vec<(usize, usize)>> {
+        // Benchmark filter: comma-separated depth:width pairs; default to all pairs.
         let mut cells = if let Ok(value) = std::env::var("GLM_ROUTE_CELLS") {
             value
                 .split(',')

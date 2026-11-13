@@ -85,6 +85,41 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `docs/bench/2026-11-12-v41-serve-regression.md`; raw
   `metagross:~/qwen-runs/2026-11-12-v41-regression/`. No roadmap edit. Aven
   note on `SRV-2K0Y`: `VW68R006QF6PNMRC`.
+## 2026-11-13 - Flash-Next Wide Expert Band Shipped; QSA Leads The Census
+
+- **Shipped, bitwise.** The 64-slot routed gate/up tile was qualified only at
+  exactly 2048 rows, so 1024..2047-row appends took the 32-slot route and paid
+  a second weight-dequant pass once a bucket exceeded 32 slots. Admit the same
+  tile at 1024..=2047 rows. Operands, F32 sums and dead-scratch reuse are
+  unchanged; endpoint logits are bitwise in every retained arm. Rollback:
+  `QWEN_FN_PREFILL_EXPERT_WIDE_SHORT=0`; the original
+  `QWEN_FN_PREFILL_EXPERT_WIDE=0` still disables every wide route. Source
+  `0d2cfaf9b`, branch `perf/fn-prefill`, base `5ee5c8c4f`.
+- **Paired A/B, three interleaved pairs, 48K depth, iter, thermal 0:** 1,000
+  rows 604.5 -> 601.3 ms (**-0.46%**), 1,383 795.2 -> 781.4 (**-1.75%**), 2,000
+  1,110.6 -> 1,076.7 (**-3.04%**). Dispatch profiling prices the isolated
+  gate/up at 2,000 rows at **175.2 -> 139.0 ms (1.26x)**; the whole routed
+  family is 1.14x because down is unchanged. The default band starts at 1,024,
+  so 256-row appends keep the narrow route.
+- **Census.** A 2,048-row continuation at 48K is **32.0% QSA selected
+  value/logits** (336.6 ms; `qsa_selected_value_vec8_f32` 140.0 +
+  `qsa_logits_reuse4_f32` 121.8), **24.6% routed** (gate/up 136.3, down 108.7),
+  **19.9% dense mixer** (Q6 wide 101.3), HC 7.9%, GDN 6.5%, router 3.5%.
+  Routed gate/up is **5.4x** above its byte roof at 218 GB/s and down **6.2x**
+  at 189 GB/s: IQ decode/ALU, not HBM. QSA selected attention is far off any
+  roof and is the next numerical-change candidate, not a bitwise one.
+  Cold 48K root: **26.774 s / 26.243 s GPU over 25 commands**.
+- **Parked.** An opt-in 4,096-row packed command (`QWEN_FN_PACKED_ROWS`) was
+  built but not qualified: the 2,051-token dense-frontier split shifts GDN
+  chunk boundaries (not bitwise), and the 4,096-row A/B did not complete. Code
+  removed from the ship branch; reopening needs the non-inferiority protocol
+  and an aligned command plan or a sorted expert-major kernel.
+- Tests: full `qwen-llm` lib **2,496 passed / 678 ignored**, fmt clean,
+  `scripts/check-contracts.sh` pass. Serve gate (three-agent TTFT/append) is
+  recorded separately if it completed. Evidence:
+  [census and wide band](bench/2026-11-13-fn-prefill-census/README.md); raw
+  `metagross:~/qwen-runs/2026-11-12-fn-prefill/`. No Aven connector was
+  available for `SRV-2K0Y`.
 
 ## 2026-11-12 - Solo Routed-Expert Prefetch: Closed (2.4-3.6 ms/Token Worse)
 

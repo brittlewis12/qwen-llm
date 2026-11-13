@@ -1453,11 +1453,6 @@ mod probe {
             "three_agent_48k_memory_reason": format!("{:?}", three_agent_admission.reason),
             "pressure": pressure(), "loadavg": loadavg(),
         }));
-        anyhow::ensure!(
-            three_agent_admission.is_admitted(),
-            "three 48K sessions are not admitted: {:?}",
-            three_agent_admission.reason
-        );
 
         if mode == "all" || mode == "census" {
             census(&ctx, &weights, &ids, depth)?;

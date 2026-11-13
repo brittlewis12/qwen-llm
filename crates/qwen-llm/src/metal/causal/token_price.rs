@@ -264,11 +264,11 @@ pub(super) fn after_wave(
                 continue;
             }
             let mut outputs = Vec::new();
-            for &(slot, write) in ctx
+            for &(slot, mode) in ctx
                 .buffer_accesses(n.state.pipeline.as_ref().unwrap())?
                 .iter()
             {
-                if !write {
+                if mode == 0 {
                     continue;
                 }
                 if let Some(Binding::Buffer {
@@ -346,7 +346,7 @@ pub(super) fn after_wave(
                 for &(slot, _) in ctx
                     .buffer_accesses(n.state.pipeline.as_ref().unwrap())?
                     .iter()
-                    .filter(|(_, write)| !write)
+                    .filter(|(_, mode)| *mode != 2)
                 {
                     if let Some(Binding::Buffer { offset, len, .. }) = n.state.buffer(slot) {
                         if best.is_none_or(|(_, _, l)| *len > l) {
@@ -376,8 +376,8 @@ pub(super) fn after_wave(
                 inputs: ctx
                     .buffer_accesses(n.state.pipeline.as_ref().unwrap())?
                     .iter()
-                    .filter_map(|&(slot, write)| {
-                        if write {
+                    .filter_map(|&(slot, mode)| {
+                        if mode != 0 {
                             None
                         } else {
                             match n.state.buffer(slot) {

@@ -57,12 +57,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = MetalContext::new()?;
     let gguf = GgufFile::open(&args[1])?;
     let config = Qwen4ExpConfig::from_gguf(&gguf)?;
-    let limit = depth + steps + 256;
+    let prefill_nodes = mode == "prefill-nodes";
+    let append_nodes = mode == "append-nodes";
+    let capture_at = 49152usize;
+    let capture_rows = if prefill_nodes { 2048 } else { 1024 };
+    let limit = if prefill_nodes || append_nodes {
+        capture_at + capture_rows + 256
+    } else {
+        depth + steps + 256
+    };
     let cap = Qwen4ExpSessionCapacity::for_forward_limit(&config, limit)?;
     let mut model = Qwen4ExpLoadedModel::load_with_packed_prefill(&ctx, &gguf, cap, limit)?;
     let mut runner = model.create_runner(&ctx)?;
     runner.configure_causal_executor(true);
     runner.configure_gpu_token_loop(true);
+    if prefill_nodes || append_nodes {
+        let prefix = if prefill_nodes {
+            capture_at - capture_rows
+        } else {
+            capture_at
+        };
+        let all = ids(
+            capture_at + capture_rows,
+            config.vocab_size,
+            1 ^ 0x9e3779b97f4a7c15,
+        );
+        runner.prefill(&all[..prefix])?;
+        let entry = runner.capture_snapshot()?;
+        let entry_logits = runner.logits()?.to_vec();
+        let chunk = &all[prefix..];
+        let expected = runner
+            .prefill_continuation_with_command_checkpoint(chunk, || Ok(()))?
+            .to_vec();
+        runner.restore_snapshot_with_logits(&entry, &entry_logits)?;
+        let guard = metal::causal_node_graph_begin(&ctx, 16384)?;
+        let actual = runner
+            .prefill_continuation_with_command_checkpoint(chunk, || Ok(()))?
+            .to_vec();
+        assert!(
+            expected
+                .iter()
+                .zip(&actual)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "prefill node capture changed Flash-Next logits"
+        );
+        let mut value = metal::causal_graph_finish(&ctx, guard)?;
+        value["phase"] = json!(if prefill_nodes { "prefill" } else { "append" });
+        value["capture_rows"] = json!(capture_rows);
+        value["depth"] = json!(capture_at);
+        value["width"] = json!(1);
+        value["rounds"] = json!(1);
+        value["bitwise"] = json!(true);
+        value["production_path"] = json!("packed prefill");
+        println!("{value}");
+        return Ok(());
+    }
     runner.prefill(&ids(64, config.vocab_size, 1))?;
     runner.reset()?;
     runner.prefill(&ids(depth, config.vocab_size, 1 ^ 0x9e3779b97f4a7c15))?;

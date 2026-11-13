@@ -59,6 +59,46 @@ fn main() -> anyhow::Result<()> {
         .split_whitespace()
         .map(|s| s.parse().unwrap())
         .collect();
+    if mode == "prefill-nodes" || mode == "append-nodes" {
+        let rows = if mode == "prefill-nodes" { 2048 } else { 1024 };
+        let at = 49152usize;
+        let prefix = if mode == "prefill-nodes" {
+            at - rows
+        } else {
+            at
+        };
+        let prompt: Vec<u32> = ids.iter().copied().cycle().take(prefix + rows).collect();
+        let cap = at + rows + 1024;
+        let mut s = Glm5NextSession::with_prefill_rows(&ctx, &w, cap, 2048)?;
+        let _ = s.prefill_packed(&ctx, &prompt[..prefix])?;
+        let entry = s.capture_snapshot()?;
+        let chunk = &prompt[prefix..];
+        let expected = s.prefill_packed(&ctx, chunk)?;
+        s.restore_snapshot(&entry)?;
+        let guard = causal_node_graph_begin(&ctx, 16384)?;
+        let actual = s.prefill_packed(&ctx, chunk)?;
+        anyhow::ensure!(
+            expected
+                .iter()
+                .zip(&actual)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "prefill node capture changed GLM logits"
+        );
+        let mut value = causal_graph_finish(&ctx, guard)?;
+        value["phase"] = json!(if mode == "prefill-nodes" {
+            "prefill"
+        } else {
+            "append"
+        });
+        value["capture_rows"] = json!(rows);
+        value["depth"] = json!(at);
+        value["width"] = json!(1);
+        value["rounds"] = json!(1);
+        value["bitwise"] = json!(true);
+        value["production_path"] = json!("packed prefill");
+        emit(value);
+        return Ok(());
+    }
     let prompt: Vec<_> = ids.iter().copied().cycle().take(depth).collect();
     let cap = depth + steps + 1024;
     let mut s = Glm5NextSession::with_prefill_rows(&ctx, &w, cap, 2048)?;

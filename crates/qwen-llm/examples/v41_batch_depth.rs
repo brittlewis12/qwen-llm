@@ -155,6 +155,49 @@ fn main() -> Result<()> {
     let mut base = f.new_state(98304)?;
     let depth: usize = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(32768);
     ensure!([32768, 49152, 65536].contains(&depth), "depth 32K/48K/64K");
+    let is_prefill_nodes = args.get(5).is_some_and(|s| s == "prefill-nodes");
+    let is_append_nodes = args.get(5).is_some_and(|s| s == "append-nodes");
+    if is_prefill_nodes || is_append_nodes {
+        let rows = if is_prefill_nodes { 2048 } else { 1024 };
+        let at = 49152usize;
+        let prefix = if is_prefill_nodes { at - rows } else { at };
+        ensure!(common.len() >= prefix + rows, "corpus covers capture chunk");
+        f.prefill_with_execution(
+            &mut base,
+            &common[..prefix],
+            Some(&CANCEL),
+            PrefillExecution::ShrinkingCed,
+        )?;
+        let snap = f.capture_snapshot(&base)?;
+        let chunk = &common[prefix..prefix + rows];
+        let expected = f.prefill(&mut base, chunk, Some(&CANCEL))?;
+        f.restore_snapshot(&mut base, &snap)?;
+        let guard = metal::causal_node_graph_begin(&ctx, 16384)?;
+        let actual = f.prefill(&mut base, chunk, Some(&CANCEL))?;
+        ensure!(
+            expected
+                .iter()
+                .zip(&actual)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "prefill node capture changed V4.1 logits"
+        );
+        let mut value = metal::causal_graph_finish(&ctx, guard)?;
+        value["phase"] = serde_json::json!(if is_prefill_nodes {
+            "prefill"
+        } else {
+            "append"
+        });
+        value["capture_rows"] = serde_json::json!(rows);
+        value["depth"] = serde_json::json!(at);
+        value["width"] = serde_json::json!(1);
+        value["rounds"] = serde_json::json!(1);
+        value["bitwise"] = serde_json::json!(true);
+        value["hashes"] = serde_json::json!([blake3::hash(bytemuck::cast_slice(&actual))
+            .to_hex()
+            .to_string()]);
+        println!("{value}");
+        return Ok(());
+    }
     for depth in [depth] {
         if probe_load == 0 {
             thermal()?;

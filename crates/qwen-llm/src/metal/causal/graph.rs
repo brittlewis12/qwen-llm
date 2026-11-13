@@ -147,7 +147,16 @@ pub(crate) fn record_plan(nodes: &[Node], spans: &[Vec<Access>], waves: &[Vec<us
         let Some(a) = g.as_mut() else { return };
         let rows: Vec<_> = nodes.iter().enumerate().map(|(i,n)| {
             let predecessors: Vec<_> = (0..i).filter(|&j| spans[j].iter().any(|&x|spans[i].iter().any(|&y|conflict(x,y)))).collect();
-            serde_json::json!({"id":i,"kernel":n.name(),"label":n.label,"grid":[n.grid.width,n.grid.height,n.grid.depth],"threads":[n.threads.width,n.threads.height,n.threads.depth],"predecessors":predecessors,"spans":spans[i].iter().map(|s|serde_json::json!({"buffer":s.buffer,"lo":s.lo,"hi":s.hi,"write":s.write})).collect::<Vec<_>>()})
+            // An in-place (read-write) binding becomes one read span and one
+            // write span so the waste analyzer can see both edges. Read-only
+            // and write-only bindings emit one span each.
+            let encoded: Vec<_> = spans[i].iter().flat_map(|s| {
+                let mut out = Vec::with_capacity(2);
+                if s.read { out.push(serde_json::json!({"buffer":s.buffer,"lo":s.lo,"hi":s.hi,"write":false})); }
+                if s.write { out.push(serde_json::json!({"buffer":s.buffer,"lo":s.lo,"hi":s.hi,"write":true})); }
+                out
+            }).collect();
+            serde_json::json!({"id":i,"kernel":n.name(),"label":n.label,"grid":[n.grid.width,n.grid.height,n.grid.depth],"threads":[n.threads.width,n.threads.height,n.threads.depth],"predecessors":predecessors,"spans":encoded})
         }).collect();
         a.plans.push(serde_json::json!({"scope":a.scope,"nodes":rows,"waves":waves}));
     });

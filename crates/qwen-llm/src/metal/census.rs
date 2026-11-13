@@ -370,7 +370,7 @@ pub struct Pipeline {
     pub(crate) function: Retained<ProtocolObject<dyn MTLFunction>>,
     pub(crate) raw: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     pub(crate) name: Arc<str>,
-    pub(crate) accesses: Arc<OnceLock<Arc<Vec<(usize, bool)>>>>,
+    pub(crate) accesses: Arc<OnceLock<Arc<Vec<(usize, u8)>>>>,
 }
 
 impl std::ops::Deref for Pipeline {

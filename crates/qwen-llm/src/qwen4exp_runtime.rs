@@ -2210,6 +2210,13 @@ fn execute_qwen4exp_text_packed_with_row_outputs_sync(
     let command = ctx.queue.commandBuffer().ok_or_else(|| {
         Qwen4ExpRuntimeError::Invalid("Metal command queue returned no command buffer".into())
     })?;
+    #[cfg(feature = "perf-ablations")]
+    let encoder = if crate::metal::causal_node_graph_active() {
+        KernelEncoder::begin_causal(&command)
+    } else {
+        KernelEncoder::begin(&command)
+    };
+    #[cfg(not(feature = "perf-ablations"))]
     let encoder = KernelEncoder::begin(&command);
     let encoded = if row_logits.is_some() {
         encode_qwen4exp_text_packed_with_row_outputs(
@@ -2250,6 +2257,17 @@ fn execute_qwen4exp_text_packed_with_row_outputs_sync(
         }
     };
     drop(pending);
+    #[cfg(feature = "perf-ablations")]
+    if encoder.causal_mode {
+        if let Err(error) = encoder.finish_causal_scope(ctx, false) {
+            encoder.cancel_causal_scope();
+            encoder.end();
+            unsafe {
+                workspace.abandon_uncommitted()?;
+            }
+            return Err(Qwen4ExpTextSessionError::from(error).into());
+        }
+    }
     encoder.end();
     let encode_cpu_ms = wall_started.elapsed().as_secs_f64() * 1e3;
     let wait_started = Instant::now();

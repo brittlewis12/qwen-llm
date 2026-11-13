@@ -182,13 +182,17 @@ struct Access {
     lo: usize,
     hi: usize,
     write: bool,
+    read: bool,
 }
 fn conflict(a: Access, b: Access) -> bool {
     a.buffer == b.buffer && (a.write || b.write) && a.lo < b.hi && b.lo < a.hi
 }
 
 impl MetalContext {
-    fn buffer_accesses(&self, p: &Pipeline) -> Result<Arc<Vec<(usize, bool)>>, MetalError> {
+    /// Raw `MTLBindingAccess` per used buffer slot: 0 read-only, 1 read-write,
+    /// 2 write-only. Keeping the mode (instead of a single write flag) lets the
+    /// diagnostic graph distinguish an in-place update from a pure output.
+    fn buffer_accesses(&self, p: &Pipeline) -> Result<Arc<Vec<(usize, u8)>>, MetalError> {
         if let Some(a) = p.accesses.get() {
             return Ok(a.clone());
         }
@@ -210,7 +214,7 @@ impl MetalContext {
                 .bindings()
                 .iter()
                 .filter(|b| b.r#type().0 == 0 && b.isUsed())
-                .map(|b| (b.index(), b.access().0 != 0))
+                .map(|b| (b.index(), b.access().0 as u8))
                 .collect(),
         );
         let _ = p.accesses.set(accesses);
@@ -266,7 +270,7 @@ impl KernelEncoder {
             n.state
                 .slots
                 .retain(|(slot, _)| used.iter().any(|(i, _)| i == slot));
-            for &(i, write) in used.iter() {
+            for &(i, mode) in used.iter() {
                 if let Some(Binding::Buffer {
                     buffer,
                     offset,
@@ -277,7 +281,8 @@ impl KernelEncoder {
                         buffer: Retained::as_ptr(buffer) as *const () as usize,
                         lo: *offset,
                         hi: offset + len,
-                        write,
+                        write: mode != 0,
+                        read: mode != 2,
                     });
                 }
             }
@@ -438,6 +443,7 @@ fn access(binding: Option<&Binding>, write: bool) -> Option<Access> {
             lo: *offset,
             hi: offset + len,
             write,
+            read: !write,
         }),
         _ => None,
     }
@@ -449,10 +455,11 @@ fn touches(
     writes_only: bool,
 ) -> Result<bool, MetalError> {
     for n in nodes {
-        for &(slot, write) in ctx
+        for &(slot, mode) in ctx
             .buffer_accesses(n.state.pipeline.as_ref().unwrap())?
             .iter()
         {
+            let write = mode != 0;
             if (!writes_only || write)
                 && access(n.state.buffer(slot), true).is_some_and(|a| conflict(a, range))
             {
@@ -648,6 +655,7 @@ mod tests {
             lo,
             hi,
             write,
+            read: !write,
         };
         let spans = vec![
             vec![a(1, 0, 16, true)],

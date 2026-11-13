@@ -667,7 +667,18 @@ impl Workspace {
                         segment_start * PREFILL_LAYER_SAMPLES + 1,
                         false,
                     ),
-                    None => KernelEncoder::begin(&command),
+                    None => {
+                        #[cfg(feature = "perf-ablations")]
+                        if metal::causal_node_graph_active() {
+                            KernelEncoder::begin_causal(&command)
+                        } else {
+                            KernelEncoder::begin(&command)
+                        }
+                        #[cfg(not(feature = "perf-ablations"))]
+                        {
+                            KernelEncoder::begin(&command)
+                        }
+                    }
                 };
                 let encoded = (|| -> Result<()> {
                     for id in segment_start..segment_end {
@@ -880,6 +891,11 @@ impl Workspace {
                     Ok(())
                 })();
 
+                #[cfg(feature = "perf-ablations")]
+                if enc.causal_mode {
+                    enc.finish_causal_scope(ctx, false)
+                        .map_err(|e| e.to_string())?;
+                }
                 enc.end();
                 encoded?;
                 let pending = prefill_overlap::Submitted::commit(

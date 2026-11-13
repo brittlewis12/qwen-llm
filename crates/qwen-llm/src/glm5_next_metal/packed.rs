@@ -2192,6 +2192,13 @@ impl Glm5NextSession<'_> {
             .queue
             .commandBuffer()
             .ok_or_else(|| Glm5NextMetalError::Invalid("no command buffer".into()))?;
+        #[cfg(feature = "perf-ablations")]
+        let mut enc = if crate::metal::causal_node_graph_active() {
+            KernelEncoder::begin_causal(&command)
+        } else {
+            KernelEncoder::begin(&command)
+        };
+        #[cfg(not(feature = "perf-ablations"))]
         let mut enc = KernelEncoder::begin(&command);
         if range.start == 0 {
             self.stage(&mut enc, Glm5NextStage::Embed, None)?;
@@ -2501,6 +2508,10 @@ impl Glm5NextSession<'_> {
                 && index + 1 < w.blocks.len()
                 && probe.ends.contains(&(index + 1))
             {
+                #[cfg(feature = "perf-ablations")]
+                if enc.causal_mode {
+                    enc.finish_causal_scope(ctx, false)?;
+                }
                 enc.end();
                 command.commit();
                 wait_completed(&command)?;
@@ -2513,7 +2524,15 @@ impl Glm5NextSession<'_> {
                     .queue
                     .commandBuffer()
                     .ok_or_else(|| Glm5NextMetalError::Invalid("no slice command buffer".into()))?;
-                enc = KernelEncoder::begin(&command);
+                #[cfg(feature = "perf-ablations")]
+                let restart_causal = crate::metal::causal_node_graph_active();
+                #[cfg(not(feature = "perf-ablations"))]
+                let restart_causal = false;
+                enc = if restart_causal {
+                    KernelEncoder::begin_causal(&command)
+                } else {
+                    KernelEncoder::begin(&command)
+                };
             }
         }
         if want_logits && range.end == w.blocks.len() {
@@ -2532,6 +2551,10 @@ impl Glm5NextSession<'_> {
                     self.encode_output_tail(ctx, &enc, &residual, &dst)?;
                 }
             }
+        }
+        #[cfg(feature = "perf-ablations")]
+        if enc.causal_mode {
+            enc.finish_causal_scope(ctx, false)?;
         }
         enc.end();
         command.commit();

@@ -1,0 +1,250 @@
+// Losing candidate retained for the record, not used by production kernels.
+//
+// These bitwise-identical IQ2/IQ3 decoder variants were built to test the
+// 2026-11-12 MLX prefill review's swing #1. They are byte-for-byte equal to
+// the incumbents in quant_tiles.h on device, but on the standalone tensor
+// tile they measured 1.03x (IQ2 vector variant) to 1.16x (IQ2 level variant)
+// SLOWER than the incumbent, so the >=1.15x speed gate failed and they never
+// entered a production path. Included only by the counterfactual harness.
+//
+// Requires quant_tiles.h (grids, scales, and the unpack contract) first.
+#pragma once
+
+// ---------------------------------------------------------------------------
+// Bitwise-identical fast decoders.
+//
+// Every IQ2/IQ3 product is `half(dl * float(mag) * sign)` with `sign` a
+// separate +/-1 factor. F32 negation is exact and round-to-nearest-even is
+// sign-symmetric, so the sign can be applied after narrowing by XORing the
+// Half sign bit. Byte magnitudes reach the converter with `as_type`, and the
+// IQ2 grids have only three magnitudes (8/25/43, selected by byte >> 4), so
+// their narrowed levels are computed once per 16 weights. Results are
+// bit-equal to the incumbent decoders by construction; `unpack_*_fast` and
+// the probe witness enforce that on device.
+constant uint2 qt_half4_sign[16] = {
+    {0x00000000u, 0x00000000u}, {0x00008000u, 0x00000000u},
+    {0x80000000u, 0x00000000u}, {0x80008000u, 0x00000000u},
+    {0x00000000u, 0x00008000u}, {0x00008000u, 0x00008000u},
+    {0x80000000u, 0x00008000u}, {0x80008000u, 0x00008000u},
+    {0x00000000u, 0x80000000u}, {0x00008000u, 0x80000000u},
+    {0x80000000u, 0x80000000u}, {0x80008000u, 0x80000000u},
+    {0x00000000u, 0x80008000u}, {0x00008000u, 0x80008000u},
+    {0x80000000u, 0x80008000u}, {0x80008000u, 0x80008000u},
+};
+
+inline half4 qt_sign4(half4 v, uint bits) {
+    uint2 u = as_type<uint2>(v);
+    u ^= qt_half4_sign[bits & 15u];
+    return as_type<half4>(u);
+}
+
+// One 4-weight IQ2 grid word. `byte >> 4` is the level index for the only
+// grid magnitudes (8, 25, 43); the precomputed narrowed levels are selected
+// without any per-weight integer-to-float conversion or multiply.
+inline half4 qt_iq2_level4(uint word, half l0, half l1, half l2, uint bits) {
+    const uchar4 idx = as_type<uchar4>(word) >> 4;
+    const half4 v = select(select(half4(l2), half4(l1), idx == uchar4(1u)),
+                           half4(l0), idx == uchar4(0u));
+    return qt_sign4(v, bits);
+}
+
+// One 4-weight IQ3 grid word: values are not a 2-bit level set, so convert
+// the bytes and narrow one product per weight, then apply the sign.
+inline half4 qt_iq3_value4(uint word, float dl, uint bits) {
+    const float4 mag = float4(as_type<uchar4>(word));
+    return qt_sign4(half4(dl * mag), bits);
+}
+
+inline void qt_iq2_levels(float dl, thread half & l0, thread half & l1,
+                          thread half & l2) {
+    l0 = half(dl * 8.0f);
+    l1 = half(dl * 25.0f);
+    l2 = half(dl * 43.0f);
+}
+
+inline void qt_dequantize_iq2_s_fast(device const uchar * blk_bytes,
+                                     short il,
+                                     thread half4x4 & reg) {
+    const half d_h = *((device const half *)blk_bytes);
+    device const uchar * qbase = blk_bytes + 2;
+    device const uchar * qh = qbase + QT_QK_K / 4;
+    device const uchar * scales = qh + QT_QK_K / 32;
+
+    const uint ib32 = uint(il >> 1);
+    const uint ih = uint(il & 1);
+    device const uchar * qs = qbase + 4u * ib32 + 2u * ih;
+    device const uchar * signs = qs + QT_QK_K / 8;
+
+    const uint qh_lane = uint(qh[ib32]) >> (4u * ih);
+    const uint scale = (uint(scales[ib32]) >> (4u * ih)) & 0x0fu;
+    const float dl = float(d_h) * (0.5f + float(scale)) * 0.25f;
+    half l0, l1, l2;
+    qt_iq2_levels(dl, l0, l1, l2);
+
+    const ulong g1 = qt_iq2s_grid[uint(qs[0]) | ((qh_lane << 8u) & 0x300u)];
+    const ulong g2 = qt_iq2s_grid[uint(qs[1]) | ((qh_lane << 6u) & 0x300u)];
+    const uint s1 = uint(signs[0]), s2 = uint(signs[1]);
+    reg[0] = qt_iq2_level4(uint(g1), l0, l1, l2, s1);
+    reg[1] = qt_iq2_level4(uint(g1 >> 32), l0, l1, l2, s1 >> 4);
+    reg[2] = qt_iq2_level4(uint(g2), l0, l1, l2, s2);
+    reg[3] = qt_iq2_level4(uint(g2 >> 32), l0, l1, l2, s2 >> 4);
+}
+
+inline void qt_dequantize_iq2_xs_fast(device const uchar * blk,
+                                      short il,
+                                      thread half4x4 & reg) {
+    const float d = float(*((device const half *)blk));
+    device const ushort * qs = (device const ushort *)(blk + 2);
+    device const uchar * scales = blk + 66;
+    const uint ib32 = uint(il) >> 1;
+    const uint ih = uint(il) & 1u;
+    const float dl = d * (0.5f + float((uint(scales[ib32]) >> (4u * ih)) & 15u)) * 0.25f;
+    half l0, l1, l2;
+    qt_iq2_levels(dl, l0, l1, l2);
+
+    const uint p0 = uint(qs[4u * ib32 + 2u * ih + 0u]);
+    const uint p1 = uint(qs[4u * ib32 + 2u * ih + 1u]);
+    const ulong g1 = mv_iq2xs_grid[p0 & 511u];
+    const ulong g2 = mv_iq2xs_grid[p1 & 511u];
+    const uint s1 = uint(qt_ksigns_iq2xs[p0 >> 9]);
+    const uint s2 = uint(qt_ksigns_iq2xs[p1 >> 9]);
+    reg[0] = qt_iq2_level4(uint(g1), l0, l1, l2, s1);
+    reg[1] = qt_iq2_level4(uint(g1 >> 32), l0, l1, l2, s1 >> 4);
+    reg[2] = qt_iq2_level4(uint(g2), l0, l1, l2, s2);
+    reg[3] = qt_iq2_level4(uint(g2 >> 32), l0, l1, l2, s2 >> 4);
+}
+
+inline void qt_dequantize_iq2_xxs_fast(device const uchar * block,
+                                       short il,
+                                       thread half4x4 & reg) {
+    device const ushort * q = (device const ushort *)(block + 2) + 4u * (uint(il) / 2u);
+    const uint meta = iq2_xxs_metadata(q);
+    const float dl = float(((device const half *)block)[0]) * (0.5f + float(meta >> 28)) * 0.25f;
+    half l0, l1, l2;
+    qt_iq2_levels(dl, l0, l1, l2);
+
+    const uint part = 2u * (uint(il) % 2u);
+    const uint s1 = uint(iq2_xxs_signs[(meta >> (7u * part)) & 127u]);
+    const uint s2 = uint(iq2_xxs_signs[(meta >> (7u * (part + 1u))) & 127u]);
+    const ulong g1 = iq2_xxs_grid[((device const uchar *)q)[part]];
+    const ulong g2 = iq2_xxs_grid[((device const uchar *)q)[part + 1u]];
+    reg[0] = qt_iq2_level4(uint(g1), l0, l1, l2, s1);
+    reg[1] = qt_iq2_level4(uint(g1 >> 32), l0, l1, l2, s1 >> 4);
+    reg[2] = qt_iq2_level4(uint(g2), l0, l1, l2, s2);
+    reg[3] = qt_iq2_level4(uint(g2 >> 32), l0, l1, l2, s2 >> 4);
+}
+
+// Variant B for IQ2: skip the level-select tree and narrow one product per
+// weight from the packed bytes. Screening arm only.
+inline void qt_dequantize_iq2_s_vec(device const uchar * blk_bytes,
+                                    short il,
+                                    thread half4x4 & reg) {
+    const half d_h = *((device const half *)blk_bytes);
+    device const uchar * qbase = blk_bytes + 2;
+    device const uchar * qh = qbase + QT_QK_K / 4;
+    device const uchar * scales = qh + QT_QK_K / 32;
+    const uint ib32 = uint(il >> 1);
+    const uint ih = uint(il & 1);
+    device const uchar * qs = qbase + 4u * ib32 + 2u * ih;
+    device const uchar * signs = qs + QT_QK_K / 8;
+    const uint qh_lane = uint(qh[ib32]) >> (4u * ih);
+    const uint scale = (uint(scales[ib32]) >> (4u * ih)) & 0x0fu;
+    const float dl = float(d_h) * (0.5f + float(scale)) * 0.25f;
+    const ulong g1 = qt_iq2s_grid[uint(qs[0]) | ((qh_lane << 8u) & 0x300u)];
+    const ulong g2 = qt_iq2s_grid[uint(qs[1]) | ((qh_lane << 6u) & 0x300u)];
+    const uint s1 = uint(signs[0]), s2 = uint(signs[1]);
+    reg[0] = qt_iq3_value4(uint(g1), dl, s1);
+    reg[1] = qt_iq3_value4(uint(g1 >> 32), dl, s1 >> 4);
+    reg[2] = qt_iq3_value4(uint(g2), dl, s2);
+    reg[3] = qt_iq3_value4(uint(g2 >> 32), dl, s2 >> 4);
+}
+
+inline void qt_dequantize_iq2_xs_vec(device const uchar * blk,
+                                     short il,
+                                     thread half4x4 & reg) {
+    const float d = float(*((device const half *)blk));
+    device const ushort * qs = (device const ushort *)(blk + 2);
+    device const uchar * scales = blk + 66;
+    const uint ib32 = uint(il) >> 1;
+    const uint ih = uint(il) & 1u;
+    const float dl = d * (0.5f + float((uint(scales[ib32]) >> (4u * ih)) & 15u)) * 0.25f;
+    const uint p0 = uint(qs[4u * ib32 + 2u * ih + 0u]);
+    const uint p1 = uint(qs[4u * ib32 + 2u * ih + 1u]);
+    const ulong g1 = mv_iq2xs_grid[p0 & 511u];
+    const ulong g2 = mv_iq2xs_grid[p1 & 511u];
+    const uint s1 = uint(qt_ksigns_iq2xs[p0 >> 9]);
+    const uint s2 = uint(qt_ksigns_iq2xs[p1 >> 9]);
+    reg[0] = qt_iq3_value4(uint(g1), dl, s1);
+    reg[1] = qt_iq3_value4(uint(g1 >> 32), dl, s1 >> 4);
+    reg[2] = qt_iq3_value4(uint(g2), dl, s2);
+    reg[3] = qt_iq3_value4(uint(g2 >> 32), dl, s2 >> 4);
+}
+
+inline void qt_dequantize_iq2_xxs_vec(device const uchar * block,
+                                      short il,
+                                      thread half4x4 & reg) {
+    device const ushort * q = (device const ushort *)(block + 2) + 4u * (uint(il) / 2u);
+    const uint meta = iq2_xxs_metadata(q);
+    const float dl = float(((device const half *)block)[0]) * (0.5f + float(meta >> 28)) * 0.25f;
+    const uint part = 2u * (uint(il) % 2u);
+    const uint s1 = uint(iq2_xxs_signs[(meta >> (7u * part)) & 127u]);
+    const uint s2 = uint(iq2_xxs_signs[(meta >> (7u * (part + 1u))) & 127u]);
+    const ulong g1 = iq2_xxs_grid[((device const uchar *)q)[part]];
+    const ulong g2 = iq2_xxs_grid[((device const uchar *)q)[part + 1u]];
+    reg[0] = qt_iq3_value4(uint(g1), dl, s1);
+    reg[1] = qt_iq3_value4(uint(g1 >> 32), dl, s1 >> 4);
+    reg[2] = qt_iq3_value4(uint(g2), dl, s2);
+    reg[3] = qt_iq3_value4(uint(g2 >> 32), dl, s2 >> 4);
+}
+
+inline void qt_dequantize_iq3_xxs_fast(device const uchar * blk_bytes,
+                                       short il,
+                                       thread half4x4 & reg) {
+    const half d_h = *((device const half *)blk_bytes);
+    device const uchar * qs = blk_bytes + 2;
+    const uint ib32 = uint(il >> 1);
+    const uint ih = uint(il & 1);
+    device const uchar * q3 = qs + 8u * ib32;
+    device const ushort * gas = (device const ushort *)(qs + QT_QK_K / 4) + 2u * ib32;
+    const uint aux32 = uint(gas[0]) | (uint(gas[1]) << 16);
+    const float dl = float(d_h) * (0.5f + float(aux32 >> 28)) * 0.5f;
+
+    const uint s0 = uint(qt_ksigns_iq2xs[(aux32 >> (14u * ih)) & 127u]);
+    const uint s1 = uint(qt_ksigns_iq2xs[(aux32 >> (14u * ih + 7u)) & 127u]);
+    const uint g1 = qt_iq3xxs_grid[q3[4u * ih + 0u]];
+    const uint g2 = qt_iq3xxs_grid[q3[4u * ih + 1u]];
+    const uint g3 = qt_iq3xxs_grid[q3[4u * ih + 2u]];
+    const uint g4 = qt_iq3xxs_grid[q3[4u * ih + 3u]];
+    reg[0] = qt_iq3_value4(g1, dl, s0);
+    reg[1] = qt_iq3_value4(g2, dl, s0 >> 4);
+    reg[2] = qt_iq3_value4(g3, dl, s1);
+    reg[3] = qt_iq3_value4(g4, dl, s1 >> 4);
+}
+
+inline void qt_dequantize_iq3_s_fast(device const uchar * blk_bytes,
+                                     short il,
+                                     thread half4x4 & reg) {
+    const half d_h = *((device const half *)blk_bytes);
+    device const uchar * qs_base = blk_bytes + 2;
+    device const uchar * qh = qs_base + QT_QK_K / 4;
+    device const uchar * signs_base = qh + QT_QK_K / 32;
+    device const uchar * scales = signs_base + QT_QK_K / 8;
+
+    const uint ib32 = uint(il >> 1);
+    const uint ih = uint(il & 1);
+    device const uchar * qs = qs_base + 8u * ib32;
+    device const uchar * signs = signs_base + 4u * ib32 + 2u * ih;
+    const uint qh_lane = uint(qh[ib32]) >> (4u * ih);
+    const uint scale = (uint(scales[ib32 >> 1]) >> (4u * (ib32 & 1u))) & 0x0fu;
+    const float dl = float(d_h) * (1.0f + 2.0f * float(scale));
+
+    const uint g1 = qt_iq3s_grid[uint(qs[4u * ih + 0u]) | ((qh_lane << 8u) & 256u)];
+    const uint g2 = qt_iq3s_grid[uint(qs[4u * ih + 1u]) | ((qh_lane << 7u) & 256u)];
+    const uint g3 = qt_iq3s_grid[uint(qs[4u * ih + 2u]) | ((qh_lane << 6u) & 256u)];
+    const uint g4 = qt_iq3s_grid[uint(qs[4u * ih + 3u]) | ((qh_lane << 5u) & 256u)];
+    reg[0] = qt_iq3_value4(g1, dl, uint(signs[0]));
+    reg[1] = qt_iq3_value4(g2, dl, uint(signs[0]) >> 4);
+    reg[2] = qt_iq3_value4(g3, dl, uint(signs[1]));
+    reg[3] = qt_iq3_value4(g4, dl, uint(signs[1]) >> 4);
+}
+

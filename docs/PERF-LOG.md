@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 - IQ Fast Decode: Bitwise, But Slower (Swing #1 Gate Fails)
+
+- **No ship; operator gate failed.** Branch `perf/iq-fast-decode` at
+  `d6948d880`, base `5ee5c8c4f`. Production decoder headers were restored;
+  the losing candidate lives only in the harness.
+  [Details](bench/2026-11-12-iq-fast-decode.md).
+- **Bitwise premise confirmed.** Sign-symmetric Half rounding plus the
+  3-level IQ2 / 8-level IQ3 grid sets make the rewrite exact: 8.4M-half
+  decode witnesses for IQ2_S/XS/XXS, IQ3_S/XXS and 336 tensor-tile witnesses
+  show **0** mismatches on M4 and M5.
+- **But the tile loses 1-16%.** Matched `h0` medians over 42 layers: IQ2_S
+  level variant 1.124-1.163x, IQ2_S vec 1.029-1.034x, IQ3_S vec
+  1.012-1.017x. The gate was >=1.15x **faster**.
+- **Decode is 29-36% of the tile** (`h4 - h3`), so 1.15x needs a 1.5-1.8x
+  decoder. The level tree and the divergent sign-mask load do not cut the
+  critical path. No whole-model pair, wall A/B, 4096-row or decode run; the
+  operator gate stops promotion. M5 bundle/worktree/build output removed.
+
 ## 2026-11-12 - V4.1 Three-Agent −4.9% Is a Cache/Time Artifact; No Code Fix
 
 - **Decision: no product change or revert.** The 2026-11-12 standing's V4.1

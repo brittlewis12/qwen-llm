@@ -70,17 +70,19 @@ struct Fixture {
     Args a;
     int experts, block;
     bool half;
-    id<MTLBuffer> w,x,counts,ids,out,decoded,sink;
+    id<MTLBuffer> w,x,counts,ids,out,decoded,decoded_alt,sink;
     std::vector<int> c;
-    Fixture(id<MTLDevice> d, bool iq2, int m, int k, int e, int n): experts(e), block(iq2?82:110), half(iq2) {
+    Fixture(id<MTLDevice> d, int block_bytes, bool half_act, int m, int k, int e, int n): experts(e), block(block_bytes), half(half_act) {
         a={uint32_t(m),uint32_t(n),uint32_t(k),uint32_t(k/256*block),uint32_t(k),1,UINT32_MAX/2,1,uint32_t(n*8)};
         std::array<uint64_t,7> sizes={uint64_t(e)*m*a.nb01,uint64_t(a.slot_limit)*k*(half?2:4),uint64_t(e)*4,uint64_t(e)*n*4,uint64_t(a.slot_limit)*m*4,uint64_t(e)*m*k*2,uint64_t(e)*((m+63)/64)*((n+15)/16)*128*4};
         auto dm=domains(d); probe_contracts::Price p{sizes};
         for(auto z:sizes)p.metal+=probe_contracts::pages(z,dm.page);
+        // Second decoded bank for the fast-decoder bitwise witness.
+        p.metal+=probe_contracts::pages(sizes[5],dm.page);
         p.cpu_vectors=uint64_t(a.slot_limit)*m*4+uint64_t(e)*4; p.cpu_control=1<<20;
         const auto why=probe_contracts::admit(dm,p); require(!why,why?why:"");
         emit(@{@"event":@"admission",@"metal_bytes":@(p.metal),@"mwss":@(dm.mwss),@"physical":@(dm.physical),@"current_metal":@(dm.current_metal)});
-        w=alloc(d,sizes[0]); x=alloc(d,sizes[1]);counts=alloc(d,sizes[2]);ids=alloc(d,sizes[3]);out=alloc(d,sizes[4]);decoded=alloc(d,sizes[5]);sink=alloc(d,sizes[6]);
+        w=alloc(d,sizes[0]); x=alloc(d,sizes[1]);counts=alloc(d,sizes[2]);ids=alloc(d,sizes[3]);out=alloc(d,sizes[4]);decoded=alloc(d,sizes[5]);sink=alloc(d,sizes[6]);decoded_alt=alloc(d,sizes[5]);
         uint32_t state=11177; auto bytes=(uint8_t*)w.contents;
         for(uint64_t off=0;off<sizes[0];off+=block){
             bytes[off]=0;bytes[off+1]=0x20;
@@ -107,9 +109,9 @@ struct Fixture {
 struct Probe {
     id<MTLDevice> d=MTLCreateSystemDefaultDevice();id<MTLCommandQueue> q;id<MTLLibrary> lib;
     NSMutableDictionary *cache=[NSMutableDictionary new];
-    Probe(const char *path){
+    Probe(const char *path, bool tensor=true){
         require(d!=nil,"Metal device");q=[d newCommandQueue];NSError *err=nil;
-        if (![d supportsFamily:MTLGPUFamilyApple10]) throw std::runtime_error("Apple10 tensor execution required; compile-only on M4");
+        if (tensor && ![d supportsFamily:MTLGPUFamilyApple10]) throw std::runtime_error("Apple10 tensor execution required; compile-only on M4");
         lib=[d newLibraryWithURL:[NSURL fileURLWithPath:@(path)] error:&err];require(lib!=nil,err.description.UTF8String);
         NSMutableArray *sets=[NSMutableArray new];for(id<MTLCounterSet> s in d.counterSets){
             NSMutableArray *names=[NSMutableArray new];for(id<MTLCounter> c in s.counters)[names addObject:c.name];
@@ -123,13 +125,25 @@ struct Probe {
         p=[d newComputePipelineStateWithFunction:f error:&err];require(p!=nil,err.description.UTF8String);cache[name]=p;
         emit(@{@"event":@"pipeline",@"name":name,@"static_tgm":@(p.staticThreadgroupMemoryLength),@"max_threads":@(p.maxTotalThreadsPerThreadgroup),@"simd":@(p.threadExecutionWidth)});return p;
     }
-    void unpack(Fixture &f, NSString *dtype){
-        auto cmd=[q commandBuffer];auto enc=[cmd computeCommandEncoder];auto p=pipeline([@"unpack_" stringByAppendingString:dtype]);
-        [enc setComputePipelineState:p];[enc setBuffer:f.w offset:0 atIndex:0];[enc setBuffer:f.decoded offset:0 atIndex:1];
+    NSString *unpack_name(NSString *dtype, bool fast, bool vec){
+        NSString *suffix=vec?@"_vec":fast?@"_fast":@"";
+        return [NSString stringWithFormat:@"unpack_%@%@",dtype,suffix];
+    }
+    void unpack(Fixture &f, NSString *dtype, bool fast, bool vec, id<MTLBuffer> dst){
+        auto cmd=[q commandBuffer];auto enc=[cmd computeCommandEncoder];auto p=pipeline(unpack_name(dtype,fast,vec));
+        [enc setComputePipelineState:p];[enc setBuffer:f.w offset:0 atIndex:0];[enc setBuffer:dst offset:0 atIndex:1];
         [enc dispatchThreads:MTLSizeMake(uint64_t(f.experts)*f.a.M*f.a.K/16,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
         [enc endEncoding];[cmd commit];[cmd waitUntilCompleted];require(cmd.status==MTLCommandBufferStatusCompleted,cmd.error.description.UTF8String);
     }
-    double run(Fixture &f, NSString *dtype, int hold, bool baseline, int reps, int only_panel=0){
+    double unpack_time(Fixture &f, NSString *dtype, bool fast, bool vec, int reps){
+        auto cmd=[q commandBuffer];auto enc=[cmd computeCommandEncoder];auto p=pipeline(unpack_name(dtype,fast,vec));
+        [enc setComputePipelineState:p];[enc setBuffer:f.w offset:0 atIndex:0];[enc setBuffer:f.decoded offset:0 atIndex:1];
+        for(int rep=0;rep<reps;++rep)
+            [enc dispatchThreads:MTLSizeMake(uint64_t(f.experts)*f.a.M*f.a.K/16,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
+        [enc endEncoding];[cmd commit];[cmd waitUntilCompleted];require(cmd.status==MTLCommandBufferStatusCompleted,cmd.error.description.UTF8String);
+        return (cmd.GPUEndTime-cmd.GPUStartTime)*1000/reps;
+    }
+    double run(Fixture &f, NSString *dtype, int hold, bool baseline, int reps, int only_panel=0, bool fast=false, bool vec=false){
         auto cmd=[q commandBuffer];auto enc=[cmd computeCommandEncoder];float limit=10;int epi=0;
         std::vector<int> panels;
         if(only_panel)panels={only_panel};
@@ -138,7 +152,9 @@ struct Probe {
         for(int rep=0;rep<reps;++rep)for(int n:panels){
             auto a=f.a;
             if(!only_panel && !f.half && f.a.N>=128){a.min_count=n==16?1:n==32?(f.half?1:17):33;a.max_count=n==16?16:n==32?32:UINT32_MAX/2;}
-            NSString *name=[NSString stringWithFormat:@"probe_%@_n%d_h%d",dtype,n,hold];
+            NSString *name=vec ? [NSString stringWithFormat:@"probe_%@_n%d_vec",dtype,n]
+                               : fast ? [NSString stringWithFormat:@"probe_%@_n%d_fast",dtype,n]
+                                      : [NSString stringWithFormat:@"probe_%@_n%d_h%d",dtype,n,hold];
             if(baseline){
                 if(f.half && n==64)name=@"kernel_moe_wide_probe_iq2_s_f16act";
                 else if(!f.half && n==16)name=@"kernel_glm_iq3_down_n16";
@@ -160,15 +176,75 @@ struct Probe {
 };
 int main(int argc,const char **argv){@autoreleasepool{try{
     require(argc==4,"usage: probe library routes.jsonl smoke|holds|empty");require(getenv("QWEN_METAL_LEASE_FD"),"canonical lease required");
-    Probe p(argv[1]); bool smoke=std::string(argv[3])=="smoke"; bool empty_only=std::string(argv[3])=="empty";
+    bool decode=std::string(argv[3])=="decode";
+    Probe p(argv[1],!decode); bool smoke=std::string(argv[3])=="smoke"; bool empty_only=std::string(argv[3])=="empty";
+    if(decode){
+        // M4-safe decoder screen: no tensor ops, only the shared 16-element
+        // dequantizers. Bitwise comparison is the gate; timing is diagnostic.
+        struct Dec { const char *name; int block; bool half; };
+        const Dec formats[]={{"iq2_s",82,true},{"iq2_xs",74,true},{"iq2_xxs",66,true},
+                             {"iq3_s",110,false},{"iq3_xxs",98,true}};
+        for(const Dec &dec:formats){@autoreleasepool{
+            NSString *dtype=@(dec.name);
+            Fixture f(p.d,dec.block,dec.half,2048,4096,1,1);
+            uint64_t elems=uint64_t(f.experts)*f.a.M*f.a.K;
+            p.unpack(f,dtype,false,false,f.decoded);
+            bool iq2=[dtype hasPrefix:@"iq2_"];
+            for(int variant=0;variant<2;++variant){bool fast=variant==0, vec=variant==1;
+                if(vec && !iq2)continue;
+                p.unpack(f,dtype,fast,vec,f.decoded_alt);
+                uint64_t bits=memcmp(f.decoded.contents,f.decoded_alt.contents,elems*2)!=0
+                    ? [&](){ uint64_t n=0; auto a=(const _Float16*)f.decoded.contents, b=(const _Float16*)f.decoded_alt.contents;
+                             for(uint64_t i=0;i<elems;++i)n+=memcmp(&a[i],&b[i],2)!=0; return n; }() : 0;
+                emit(@{@"event":@"decode_witness",@"dtype":dtype,@"arm":vec?@"vec":@"fast",@"elements":@(elems),@"bit_mismatches":@(bits)});
+                require(bits==0,"fast decoder must be bitwise equal");
+                for(int pair=0;pair<3;++pair){
+                    double slow=p.unpack_time(f,dtype,false,false,4);
+                    double candidate=p.unpack_time(f,dtype,fast,vec,4);
+                    emit(@{@"event":@"decode_timing",@"dtype":dtype,@"arm":vec?@"vec":@"fast",@"pair":@(pair),@"slow_ms":@(slow),@"fast_ms":@(candidate)});
+                }
+            }
+        }}
+        return 0;
+    }
+    bool screen=std::string(argv[3])=="screen";
     NSString *data=[NSString stringWithContentsOfFile:@(argv[2]) encoding:NSUTF8StringEncoding error:nil];require(data!=nil,"routes input");
+    if(screen){
+        for(NSString *line in [data componentsSeparatedByString:@"\n"]){
+            NSDictionary *r=[NSJSONSerialization JSONObjectWithData:[line dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+            if(![r[@"kind"] isEqual:@"occupancy"] || [r[@"depth"] intValue]!=81920)continue;
+            int rows=[r[@"width"] intValue];if(rows!=32 && rows!=161 && rows!=512)continue;
+            for(bool iq2:{true,false}){@autoreleasepool{
+                NSString *dtype=iq2?@"iq2_s":@"iq3_s";
+                Fixture f(p.d,iq2?82:110,iq2,iq2?2048:4096,iq2?4096:2048,288,rows);p.unpack(f,dtype,false,false,f.decoded);
+                int layer_index=0;
+                for(NSDictionary *layer in r[@"per_layer"]){
+                    if(layer_index++>=6)break;
+                    int block=[layer[@"block"] intValue];f.buckets(layer[@"distribution"][@"histogram_rows_per_expert"]);
+                    // `code` is the hold index except for production/fast/vec.
+                    struct Arm{int code;bool production;bool fast;bool vec;const char*label;};
+                    std::vector<Arm> arms={{0,true,false,false,"production"},{0,false,false,false,"h0"},
+                                           {3,false,false,false,"h3"},{4,false,false,false,"h4"},
+                                           {0,false,true,false,"fast"}};
+                    if(iq2)arms.push_back({0,false,false,true,"vec"});
+                    for(int rep=0;rep<3;++rep)for(const Arm &arm:arms){
+                        bool baseline=arm.production, fast=arm.fast, vec=arm.vec;
+                        int h=baseline?0:(fast||vec?0:arm.code);
+                        double ms=p.run(f,dtype,h,baseline,4,0,fast,vec);
+                        emit(@{@"event":@"timing",@"rows":@(rows),@"block":@(block),@"dtype":dtype,@"arm":@(arm.label),@"rep":@(rep),@"ms":@(ms)});
+                    }
+                }
+            }}
+        }
+        return 0;
+    }
     for(NSString *line in [data componentsSeparatedByString:@"\n"]){
         NSDictionary *r=[NSJSONSerialization JSONObjectWithData:[line dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
         if(![r[@"kind"] isEqual:@"occupancy"] || [r[@"depth"] intValue]!=81920)continue;
         int rows=[r[@"width"] intValue];if(rows!=32 && rows!=161 && rows!=256 && rows!=512)continue;
         for(bool iq2:{true,false}){@autoreleasepool{
             NSString *dtype=iq2?@"iq2_s":@"iq3_s";
-            Fixture f(p.d,iq2,smoke?128:iq2?2048:4096,smoke?256:iq2?4096:2048,288,rows);p.unpack(f,dtype);
+            Fixture f(p.d,iq2?82:110,iq2,smoke?128:iq2?2048:4096,smoke?256:iq2?4096:2048,288,rows);p.unpack(f,dtype,false,false,f.decoded);
             for(NSDictionary *layer in r[@"per_layer"]){
                 // Match only native dominant types; exceptions are retained by the model stage gate.
                 int block=[layer[@"block"] intValue];f.buckets(layer[@"distribution"][@"histogram_rows_per_expert"]);
@@ -179,13 +255,19 @@ int main(int argc,const char **argv){@autoreleasepool{try{
                     emit(@{@"event":@"witness",@"rows":@(rows),@"block":@(block),@"dtype":dtype,@"hold":@(h),@"max_abs":@(delta),@"reference_max":@(max),@"bit_mismatches":@(bits)});
                     require(delta<=0.002*max+0.00001,"tensor witness tolerance");
                 }
+                p.run(f,dtype,0,false,1,0,true);auto fv=(float*)f.out.contents;uint64_t fbits=0;
+                for(size_t j=0;j<ref.size();++j){fbits+=memcmp(&ref[j],&fv[j],4)!=0;require(std::isfinite(fv[j]),"nonfinite fast witness");}
+                emit(@{@"event":@"witness",@"rows":@(rows),@"block":@(block),@"dtype":dtype,@"arm":@"fast",@"bit_mismatches":@(fbits)});
+                require(fbits==0,"fast decoder must be bitwise equal on the tile");
                 if(smoke)break;
                 // Rotate controls across layers/reps. Four dispatch repetitions per timing sample.
-                for(int rep=0;rep<3;++rep)for(int j=0;j<7;++j){int arm=(j+rep*2+block)%7;bool empty=arm==6;if(empty_only && !empty)continue;bool baseline=arm==0 || empty;int h=baseline?0:arm-1;
+                // Arm 0 production, 1..5 h0..h4, 6 fast decoder, 7 empty grid.
+                for(int rep=0;rep<3;++rep)for(int j=0;j<8;++j){int arm=(j+rep*2+block)%8;bool empty=arm==7;if(empty_only && !empty)continue;bool baseline=arm==0 || empty;bool fast=arm==6;int h=baseline?0:(fast?0:arm-1);
                     if(empty)memset(f.counts.contents,0,f.experts*4);
-                    double ms=p.run(f,dtype,h,baseline,4);
+                    double ms=p.run(f,dtype,h,baseline,4,0,fast);
                     if(empty)memcpy(f.counts.contents,f.c.data(),f.experts*4);
-                    emit(@{@"event":@"timing",@"rows":@(rows),@"block":@(block),@"dtype":dtype,@"arm":empty?@"empty":baseline?@"production":[NSString stringWithFormat:@"h%d",h],@"rep":@(rep),@"ms":@(ms)});
+                    NSString *label=empty?@"empty":baseline?@"production":fast?@"fast":[NSString stringWithFormat:@"h%d",h];
+                    emit(@{@"event":@"timing",@"rows":@(rows),@"block":@(block),@"dtype":dtype,@"arm":label,@"rep":@(rep),@"ms":@(ms)});
                 }
             }
         }}

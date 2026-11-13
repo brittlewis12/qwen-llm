@@ -1,0 +1,36 @@
+[
+  {
+    "arm": "a",
+    "server_lifetime_sampled_read_bytes": 52267646976,
+    "warmup_sampled_read_bytes": 159335890944,
+    "sampled_window_read_delta": 3161849856,
+    "load_after": [
+      15.86181640625,
+      20.939453125,
+      28.1015625
+    ],
+    "root_ttft_s": [
+      33.048588037490845,
+      32.02911615371704,
+      29.378885984420776
+    ],
+    "thermal": 1
+  },
+  {
+    "arm": "b",
+    "server_lifetime_sampled_read_bytes": 33156030464,
+    "warmup_sampled_read_bytes": 496418816,
+    "sampled_window_read_delta": 1464713216,
+    "load_after": [
+      12.43994140625,
+      16.3271484375,
+      23.3330078125
+    ],
+    "root_ttft_s": [
+      28.110331058502197,
+      27.191418886184692,
+      25.680483102798462
+    ],
+    "thermal": 0
+  }
+]

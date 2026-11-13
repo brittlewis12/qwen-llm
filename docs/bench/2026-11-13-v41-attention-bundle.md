@@ -147,3 +147,35 @@ in raw data. No native reruns. The negative48K root is retained alongside
 positive append/pp cells. Serve pair1AB queued18:33:17 behind GLM.
 Contracts with the full symmetric-weight-warmup driver pass sourcee51141aba,
 tree645d2d7c41d9979f76d86e2d6db01e4080a5625a. Main remains9877b6f25.
+
+
+## Purged serve pair1AB, complete18:56:05 UTC
+
+Short prefill1.053301x and TTFT1.032870x,6/6 observed;1K-class prefill
+1.045457x and TTFT1.058349x,3/3 observed. Root prefill1.166676x. Aggregate
+TPS87.35/88.3167. Root TTFT A33.049/32.029/29.379s;
+B28.110/27.191/25.680s. All six roots retained.
+
+Both arms: paired4K warmup2 exact signatures, full+masked index and
+original+wide PV witnesses,15 strict wide cases; warm/model ps nice0;
+purge0 pages; maximum measured pressure1/0. Main/tensor binaries identical
+across fixture/native/release. A/B measured lifetime sampled physical reads
+52,267,646,976 /33,156,030,464B; warmup process159,335,890,944 /496,418,816B.
+The root gain coincides with a substantial I/O difference despite equal
+Engram residency at start; do not attribute the entire difference to attention.
+Arma sampled steady-window read delta3,161,849,856B; load-after[15.86181640625, 20.939453125, 28.1015625].
+Armb sampled steady-window read delta1,464,713,216B; load-after[12.43994140625, 16.3271484375, 23.3330078125].
+
+Counters are max live values sampled every0.5s; full per-call and raw sample
+records remain. Complete comparison, calls, roots, nullable TTFT and all
+protocol proofs retained. No gate decision from one pair.
+
+## Authorized scheduling grace
+
+At18:58:40 UTC, pair2 was still queued with no warmup/model loaded. Stop
+verified exact controller18008, reap exact lease child67196; preserve the
+old queue log and every completed pair1 artifact. Resume only remaining
+pairs with a19:44 measurement cutoff, leaving8 minutes for cleanup/report
+before the user's19:52 hard stop. Target remains19:37. Same release/iter,
+plans, windows, ordering and metric thresholds; no partial/complete arm is
+rerun or overwritten. `grace-reschedule.json` preserves the exact-PID facts.

@@ -85,3 +85,21 @@ tensor SHA256`43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c`.
 Thus model-free warmup dispatches the exact shader binaries used by serving.
 The restored wide shader and extended fixture are byte-identical to archive
 659974115. Per-profile sizes/hashes remain in data/shader-profile-hashes.json.
+
+
+## Symmetric weight-residency warmup amendment, before any served arm
+
+At18:16 UTC no served arm has begun. The discarded native root warmup pair
+is45.701/31.422s and bitwise, showing a possible weight-residency/startup
+confound larger than the candidate. Add identical paired4K AB model warmup
+before EVERY served arm, using the same iter binary with both scoped policies.
+Require2 strict complete signatures, nice0 via ps, and thermal60s<=1 before
+that load; allow2/abort3. Exit the warmup model, then execute both GPU fixtures,
+then purge Engram to0 pages, then load the fresh measured server after its
+normal60s thermal settle. No KV/history survives into a measured process.
+This warms GGUF weights symmetrically while preserving the requested cold
+Engram condition. Record warmup PID, hash, thermal and disk bytes separately
+from measured-server physical reads. Main pair budget860s plus outer885s
+remains below the15-minute lease; all windows, gate thresholds, bins and
+three-pair orders are unchanged. Do not attribute the discarded warmup ratio
+to attention speed. If resource time is insufficient, report incomplete.

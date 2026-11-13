@@ -97,12 +97,57 @@ def attention_warmup(binary,log_path,fd):
     return record
 
 
+def model_weight_warmup(binary,model,corpus,log_path,deadline,fd):
+    """Warm GGUF pages with both policies, then discard all KV and Engram pages."""
+    cool=None
+    while True:
+        level=packet.thermal()
+        if level>=3:raise RuntimeError("weight warmup thermal pressure>=3")
+        if level<=1:
+            cool=cool or time.monotonic()
+            if time.monotonic()-cool>=60:break
+        else:cool=None
+        if time.monotonic()+90>=deadline:raise RuntimeError("weight warmup settle budget exhausted")
+        time.sleep(2)
+    resident_check()
+    command=packet.nice_command([str(binary.resolve()),str(model),str(corpus),"0","4096","native","1","paired-attention-bundle"])
+    started=time.time();samples=[];levels=[]
+    with log_path.open("w") as log:
+        child=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,pass_fds=(fd,))
+        try:
+            nice=int(subprocess.check_output(["ps","-o","nice=","-p",str(child.pid)],text=True,timeout=5).strip())
+            if nice!=0:raise RuntimeError("weight warmup model niceness is not0")
+            while child.poll() is None:
+                level=packet.thermal();levels.append(level)
+                if level>=3 or time.monotonic()>=deadline:raise RuntimeError("weight warmup thermal/budget abort")
+                if value:=usage(child.pid):samples.append(dict(time=time.time(),pid=child.pid,**value))
+                time.sleep(.5)
+        finally:
+            if child.poll() is None:
+                child.send_signal(signal.SIGINT)
+                try:child.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    child.terminate()
+                    try:child.wait(timeout=10)
+                    except subprocess.TimeoutExpired:child.kill();child.wait(timeout=5)
+    log_path.with_suffix(".process-io.jsonl").write_text("".join(json.dumps(r)+"\n" for r in samples))
+    if child.returncode:raise RuntimeError("weight warmup failed: "+str(log_path))
+    events=[json.loads(l) for l in log_path.read_text().splitlines() if l.startswith("{")]
+    exact=[r for r in events if r.get("kind")=="exact"]
+    if len(exact)!=2 or not all(r["exact"] for r in exact):raise RuntimeError("paired weight warmup bitwise witness missing")
+    return dict(pid=child.pid,niceness=nice,thermal_max=max(levels),seconds=time.time()-started,
+                binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+                process_disk_read_bytes=max((r["disk_read"] for r in samples),default=None),
+                exact_signatures=2,log=log_path.name)
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ("binary","tokenizer","model","corpus","output"):
         p.add_argument("--"+name,type=Path,required=True)
     p.add_argument("--flag",action="append",required=True)
     p.add_argument("--attention-warmup-binary",type=Path)
+    p.add_argument("--model-warmup-binary",type=Path)
     p.add_argument("--engram",type=Path,required=True)
     p.add_argument("--tag",required=True);p.add_argument("--order",choices=("ab","ba"),required=True)
     p.add_argument("--port",type=int,default=19973);p.add_argument("--seconds",type=int,default=120)
@@ -110,7 +155,7 @@ def main():
     p.add_argument("--sampling",choices=("agent","greedy"),default="greedy")
     a=p.parse_args();out=a.output.resolve();out.mkdir(parents=True,exist_ok=True)
     fd=int(os.environ["QWEN_METAL_LEASE_FD"])
-    deadline=time.monotonic()+800
+    deadline=time.monotonic()+860
     plan=out/f"{a.tag}-plan.json"
     subprocess.run(["python3","scripts/bench/serve_realistic.py","plan","--family","v41",
         "--seconds",str(a.seconds),"--seed","20261112","--out",str(plan)],check=True,timeout=10)
@@ -119,7 +164,10 @@ def main():
     for arm in a.order:
         processes=resident_check()
         (out/f"{a.tag}-{arm}-processes.txt").write_text(processes)
+        weight_binary=a.model_warmup_binary or a.binary.resolve().parents[1]/"iter/examples/v41_prefill_census"
+        weight_warmup=model_weight_warmup(weight_binary,a.model,a.corpus,out/f"{a.tag}-{arm}-weight-warmup.log",deadline,fd) if a.attention_warmup_binary else None
         warmup=attention_warmup(a.attention_warmup_binary,out/f"{a.tag}-{arm}-attention-warmup",fd) if a.attention_warmup_binary else []
+        resident_check()
         purge=out/f"{a.tag}-{arm}-purge.jsonl"
         subprocess.run(["python3","scripts/bench/invalidate_file_cache.py",str(a.engram),"--out",str(purge)],check=True,timeout=60)
         reset=json.loads(purge.read_text().splitlines()[-1])
@@ -144,7 +192,7 @@ def main():
         io=[json.loads(line) for line in (out/f"{a.tag}-{arm}.process-io.jsonl").read_text().splitlines()]
         disk=max((r["disk_read"] for r in io),default=None)
         if disk is None:raise RuntimeError("no process disk counter captured")
-        result["arms"].append(dict(arm=arm,attention_warmup=warmup,engram_purge=reset,process_disk_read_bytes=disk,process_disk_counter_note="maximum live counter sampled every 0.5s; native per-call I/O retained",root_turns=roots,model_pids=sorted(model_pids),model_niceness=model_niceness,
+        result["arms"].append(dict(arm=arm,model_weight_warmup=weight_warmup,attention_warmup=warmup,engram_purge=reset,process_disk_read_bytes=disk,process_disk_counter_note="maximum live counter sampled every 0.5s; native per-call I/O retained",root_turns=roots,model_pids=sorted(model_pids),model_niceness=model_niceness,
             summary=json.loads((dest/"summary.json").read_text())))
         (out/f"{a.tag}-summary.json").write_text(json.dumps(result,indent=2)+"\n")
     print(json.dumps(result),flush=True)

@@ -64,7 +64,7 @@ fn assert_bits(label: &str, actual: &[f32], reference: &[f32]) {
 }
 
 #[test]
-#[ignore = "self-leased M5 sorted IQ differential; MTL_DEBUG_LAYER=1; five formats, hot/tail/empty runs, aliased dead scratch, guards"]
+#[ignore = "self-leased M5 sorted IQ differential; MTL_DEBUG_LAYER=1; four formats, hot/tail/empty runs, aliased dead scratch, guards"]
 fn sorted_iq_experts_match_rectangular_and_preserve_scratch_guards() {
     assert_eq!(std::env::var("MTL_DEBUG_LAYER").as_deref(), Ok("1"));
     let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
@@ -86,7 +86,6 @@ fn sorted_iq_experts_match_rectangular_and_preserve_scratch_guards() {
         GgmlType::IQ2_XS,
         GgmlType::IQ2_S,
         GgmlType::IQ3_XXS,
-        GgmlType::IQ3_S,
     ];
     for (format, dtype) in types.into_iter().enumerate() {
         let bank = |dt, seed| {

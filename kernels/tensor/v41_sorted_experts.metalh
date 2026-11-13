@@ -223,7 +223,6 @@ typedef decltype(v41_sorted_gu<2, QT_IQ2_S_BYTES, qt_dequantize_iq2_s>) v41_sort
 #define V41_SORTED_GU(suffix, FORMAT, BYTES, DEQ) \
     template [[host_name("v41_sorted_gu_" #suffix)]] kernel v41_sorted_gu_t v41_sorted_gu<FORMAT, BYTES, DEQ>;
 V41_SORTED_GU(iq2_s, 2, QT_IQ2_S_BYTES, qt_dequantize_iq2_s)
-V41_SORTED_GU(iq3_s, 4, QT_IQ3_S_BYTES, qt_dequantize_iq3_s)
 V41_SORTED_GU(iq2_xs, 1, QT_IQ2_XS_BYTES, qt_dequantize_iq2_xs)
 V41_SORTED_GU(iq2_xxs, 0, QT_IQ2_XXS_BYTES, qt_dequantize_iq2_xxs)
 V41_SORTED_GU(iq3_xxs, 3, QT_IQ3_XXS_BYTES, qt_dequantize_iq3_xxs)
@@ -318,7 +317,6 @@ typedef decltype(v41_sorted_down<2, QT_IQ2_S_BYTES, qt_dequantize_iq2_s>) v41_so
 #define V41_SORTED_DOWN(suffix, FORMAT, BYTES, DEQ) \
     template [[host_name("v41_sorted_down_" #suffix)]] kernel v41_sorted_down_t v41_sorted_down<FORMAT, BYTES, DEQ>;
 V41_SORTED_DOWN(iq2_s, 2, QT_IQ2_S_BYTES, qt_dequantize_iq2_s)
-V41_SORTED_DOWN(iq3_s, 4, QT_IQ3_S_BYTES, qt_dequantize_iq3_s)
 V41_SORTED_DOWN(iq2_xs, 1, QT_IQ2_XS_BYTES, qt_dequantize_iq2_xs)
 V41_SORTED_DOWN(iq2_xxs, 0, QT_IQ2_XXS_BYTES, qt_dequantize_iq2_xxs)
 V41_SORTED_DOWN(iq3_xxs, 3, QT_IQ3_XXS_BYTES, qt_dequantize_iq3_xxs)

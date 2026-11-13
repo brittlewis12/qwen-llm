@@ -48,3 +48,11 @@ leased<=15m; Python children inherit pass_fds. Ghost load recorded. No other
 model process may be resident. If root gate fails again, drop wide PV and
 retain short evidence; no sub-bisection in this stage. Engram-only main
 landings need rebase/contracts, no new attention qualification. No pushes.
+
+
+CPU contracts pass source67b3ebaf4. Shader compiler flags are profile-independent;
+the fixture and release build use the same tensor shader functions. Before
+any served arm, additionally enforce pressure<3 throughout model-free warmup,
+record its maximum and verify nice0 via ps. This guard changes only Python;
+binaries remain pinned to67b3ebaf4 and one SHA per profile. No served result
+has been inspected; thresholds and timing windows remain frozen.

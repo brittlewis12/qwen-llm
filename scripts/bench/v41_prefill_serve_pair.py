@@ -74,13 +74,17 @@ def attention_warmup(binary,log_path,fd):
         env=dict(os.environ,QWEN_REQUIRE_METAL_TESTS="1")
         env.pop("MTL_DEBUG_LAYER",None)
         command=packet.nice_command([str(binary.resolve()),name,"--exact","--nocapture"])
-        started=time.time()
+        started=time.time(); thermal_trace=[packet.thermal()]
+        if thermal_trace[-1]>=3:raise RuntimeError("warmup thermal pressure>=3")
         with dest.open("w") as log:
             child=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,env=env,pass_fds=(fd,))
             try:
                 nice=int(subprocess.check_output(["ps","-o","nice=","-p",str(child.pid)],text=True,timeout=5).strip())
                 if nice!=0:raise RuntimeError("warmup niceness is not0")
-                child.wait(timeout=60)
+                while child.poll() is None:
+                    thermal_trace.append(packet.thermal())
+                    if thermal_trace[-1]>=3 or time.time()-started>=60:raise RuntimeError("warmup thermal/budget abort")
+                    time.sleep(.1)
             finally:
                 if child.poll() is None:
                     child.terminate()
@@ -89,7 +93,7 @@ def attention_warmup(binary,log_path,fd):
         text=dest.read_text()
         if child.returncode or "1 passed" not in text:raise RuntimeError("attention warmup failed: "+str(dest))
         if i==1 and text.count("raw_and_rope_bits_exact=true")!=15:raise RuntimeError("wide warmup did not exercise all15 cases")
-        record.append(dict(test=name,pid=child.pid,niceness=nice,seconds=time.time()-started,log=dest.name))
+        record.append(dict(test=name,pid=child.pid,niceness=nice,seconds=time.time()-started,thermal_max=max(thermal_trace),log=dest.name))
     return record
 
 

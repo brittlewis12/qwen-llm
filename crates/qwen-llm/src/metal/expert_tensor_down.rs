@@ -294,13 +294,7 @@ pub(crate) fn prepare<'a>(
             (ids, "ids"),
         ],
     )?;
-    let name = if weight.provenance() == MetalTensorProvenance::RepackedExpertWeightReadOnly
-        && weight.dtype == GgmlType::IQ3_S
-    {
-        "kernel_moe_down_iq3_s_f32_grouped_slots_tensor_repacked".to_owned()
-    } else {
-        pipeline_name(weight.dtype)?.to_owned()
-    };
+    let name = pipeline_name(weight.dtype)?.to_owned();
     #[cfg(test)]
     let name = if matches!(
         FAULT.with(std::cell::Cell::get),

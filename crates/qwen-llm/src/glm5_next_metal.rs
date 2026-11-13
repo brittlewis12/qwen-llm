@@ -17,8 +17,8 @@ use crate::glm5_next::{
 };
 use crate::metal::{
     KdaDecode, KernelEncoder, LearnedRoute, MetalContext, MetalError, MetalGgufBacking,
-    MetalTensor, MetalTensorProvenance, ROUTE_STATUS_READY, RetainedStorageDisposition, RouteScore,
-    encode_add_f32, encode_all_slots_down, encode_all_slots_gate_up_swiglu, encode_clamped_swiglu,
+    MetalTensor, ROUTE_STATUS_READY, RetainedStorageDisposition, RouteScore, encode_add_f32,
+    encode_all_slots_down, encode_all_slots_gate_up_swiglu, encode_clamped_swiglu,
     encode_get_rows_f32, encode_indexer_append, encode_kda_decode, encode_latent_attention,
     encode_mat_vec_q8_0_grouped_f32, encode_mhc4_collapse, encode_mhc4_post, encode_mhc4_repeat,
     encode_moe_weighted_sum_f32, encode_rms_norm_mul_f32, encode_route_learned,
@@ -33,12 +33,6 @@ crate::env_flag!(
     /// Default-on M5 GLM KDA decode fusion of the three Q8_0 input projections. Preserves each singleton LCPP kernel's F32 operations and reduction order, with no weight copies or added scratch. Zero restores three dispatches; the global Q8_0 LCPP rollback also disables fusion. Packed Exact/F32 arithmetic is unchanged.
     default_on kda_fanout_requested,
     "QWEN_GLM53_KDA_FANOUT"
-);
-
-crate::env_flag!(
-    /// Allocate a lossless, aligned IQ2_S/IQ3_S routed-expert bank for the GLM full-chunk prefill probe. Zero skips the repack and its persistent memory cost.
-    default_off glm_prefill_iq_repack_storage_enabled,
-    "QWEN_GLM53_PREFILL_IQ_REPACK"
 );
 
 #[derive(Debug, thiserror::Error)]
@@ -328,166 +322,18 @@ pub fn prefetch_retained_with_cancel(
 }
 
 /// Executed weights as read-only views of retained no-copy GGUF windows.
-pub(crate) struct RepackedMoeWeights {
-    pub(crate) gate: MetalTensor,
-    pub(crate) up: MetalTensor,
-    pub(crate) down: MetalTensor,
-}
-
 pub struct Glm5NextWeights {
     pub config: Glm5NextConfig,
     pub embedding: MetalTensor,
     pub output_norm: MetalTensor,
     pub output: MetalTensor,
     pub blocks: Vec<Glm5NextBlock<MetalTensor>>,
-    /// Optional same-value expert bank with aligned padded IQ blocks.
-    pub(crate) repacked_moe: Vec<Option<RepackedMoeWeights>>,
     pub retained_bytes: u64,
-    /// Persistent bytes in addition to the original retained GGUF windows.
-    pub repacked_bytes: u64,
     /// Whether every executed weight cell has a packed-prefill path.
     pub packed_prefill_admitted: bool,
     /// Process-unique id of this load (snapshot identity).
     instance: u64,
     _backings: Vec<MetalGgufBacking>,
-}
-
-fn repacked_iq_bank_len(desc: &TensorDesc, dtype: GgmlType, bytes_per_block: u64) -> Result<u64> {
-    if desc.dtype != dtype || desc.shape.len() != 3 || desc.shape[0] % 256 != 0 {
-        return invalid(format!(
-            "{} is not a repackable {:?} expert bank: shape={:?} dtype={:?}",
-            desc.name, dtype, desc.shape, desc.dtype
-        ));
-    }
-    let blocks_per_row = desc.shape[0] / 256;
-    let rows = desc.shape[1]
-        .checked_mul(desc.shape[2])
-        .ok_or_else(|| Glm5NextMetalError::Invalid("expert row count overflow".into()))?;
-    blocks_per_row
-        .checked_mul(rows)
-        .and_then(|n| n.checked_mul(bytes_per_block))
-        .ok_or_else(|| Glm5NextMetalError::Invalid("repacked bank byte count overflow".into()))
-}
-
-fn repacked_model_bytes(model: &Glm5NextModel) -> Result<u64> {
-    let mut total = 0u64;
-    for block in &model.blocks {
-        let FfnTensors::Moe(moe) = &block.ffn else {
-            continue;
-        };
-        for (desc, dtype, block_bytes) in [
-            (moe.gate_experts, GgmlType::IQ2_S, 84u64),
-            (moe.up_experts, GgmlType::IQ2_S, 84u64),
-            (moe.down_experts, GgmlType::IQ3_S, 116u64),
-        ] {
-            total = total
-                .checked_add(repacked_iq_bank_len(desc, dtype, block_bytes)?)
-                .ok_or_else(|| {
-                    Glm5NextMetalError::Invalid("repacked total byte overflow".into())
-                })?;
-        }
-    }
-    if total == 0 {
-        return invalid("GLM IQ repack requested, but the model has no routed experts");
-    }
-    Ok(total)
-}
-
-fn repack_expert_tensor(
-    ctx: &MetalContext,
-    src: &MetalTensor,
-    padded_block_bytes: usize,
-) -> Result<MetalTensor> {
-    let (block_elems, source_block_bytes) = src
-        .dtype
-        .storage_layout()
-        .ok_or_else(|| Glm5NextMetalError::Invalid("unknown expert block layout".into()))?;
-    if block_elems != 256 || src.shape.len() != 3 || src.shape[0] % 256 != 0 {
-        return invalid(format!(
-            "unsupported repack shape {:?} {:?}",
-            src.shape, src.dtype
-        ));
-    }
-    let k = usize::try_from(src.shape[0])
-        .map_err(|_| Glm5NextMetalError::Invalid("K exceeds host size".into()))?;
-    let rows = usize::try_from(
-        src.shape[1]
-            .checked_mul(src.shape[2])
-            .ok_or_else(|| Glm5NextMetalError::Invalid("expert row count overflow".into()))?,
-    )
-    .map_err(|_| Glm5NextMetalError::Invalid("row count exceeds host size".into()))?;
-    let blocks_per_row = k / 256;
-    let source_bytes = usize::try_from(src.n_bytes())
-        .map_err(|_| Glm5NextMetalError::Invalid("source bank exceeds host size".into()))?;
-    let src_end = usize::try_from(src.offset)
-        .ok()
-        .and_then(|offset| offset.checked_add(source_bytes))
-        .ok_or_else(|| Glm5NextMetalError::Invalid("source bank extent overflow".into()))?;
-    if src_end > src.buffer.length() {
-        return invalid("source expert bank exceeds its backing buffer");
-    }
-    let source = unsafe {
-        std::slice::from_raw_parts(
-            src.buffer
-                .contents()
-                .as_ptr()
-                .cast::<u8>()
-                .add(src.offset as usize),
-            source_bytes,
-        )
-    };
-    let output_len = rows
-        .checked_mul(blocks_per_row)
-        .and_then(|n| n.checked_mul(padded_block_bytes))
-        .ok_or_else(|| Glm5NextMetalError::Invalid("repacked bank size overflow".into()))?;
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(output_len)
-        .map_err(|e| Glm5NextMetalError::Invalid(format!("repack allocation: {e}")))?;
-    output.resize(output_len, 0);
-    let source_block_bytes = source_block_bytes as usize;
-    for row in 0..rows {
-        for sb in 0..blocks_per_row {
-            let source_offset = (row * blocks_per_row + sb) * source_block_bytes;
-            let target_offset = (row * blocks_per_row + sb) * padded_block_bytes;
-            let block = &source[source_offset..source_offset + source_block_bytes];
-            let target = &mut output[target_offset..target_offset + padded_block_bytes];
-            match src.dtype {
-                GgmlType::IQ2_S => {
-                    // Per il: {qs0, qs1, sign0, sign1}; metadata fuses qh/scale.
-                    for il in 0..16usize {
-                        let at = 4 * il;
-                        target[at] = block[2 + 2 * il];
-                        target[at + 1] = block[3 + 2 * il];
-                        target[at + 2] = block[34 + 2 * il];
-                        target[at + 3] = block[35 + 2 * il];
-                        let qh = (block[66 + (il >> 1)] >> (4 * (il & 1))) & 0x0f;
-                        let scale = (block[74 + (il >> 1)] >> (4 * (il & 1))) & 0x0f;
-                        target[64 + il] = (qh << 4) | scale;
-                    }
-                    target[80..82].copy_from_slice(&block[..2]);
-                }
-                GgmlType::IQ3_S => {
-                    // q/sign planes and fused qh/scale bytes for each il.
-                    for il in 0..16usize {
-                        target[4 * il..4 * il + 4]
-                            .copy_from_slice(&block[2 + 4 * il..2 + 4 * il + 4]);
-                        target[64 + 2 * il] = block[74 + 2 * il];
-                        target[65 + 2 * il] = block[75 + 2 * il];
-                        let qh = (block[66 + (il >> 1)] >> (4 * (il & 1))) & 0x0f;
-                        let scale = (block[106 + (il >> 2)] >> (4 * ((il >> 1) & 1))) & 0x0f;
-                        target[96 + il] = (qh << 4) | scale;
-                    }
-                    target[112..114].copy_from_slice(&block[..2]);
-                }
-                other => return invalid(format!("unsupported repacked expert dtype {other:?}")),
-            }
-        }
-    }
-    let mut tensor =
-        MetalTensor::from_repacked_expert_bytes(ctx, &output, src.shape.clone(), src.dtype)?;
-    tensor.provenance = MetalTensorProvenance::RepackedExpertWeightReadOnly;
-    Ok(tensor)
 }
 
 /// Source of [`Glm5NextWeights::instance`] ids.
@@ -512,24 +358,15 @@ impl Glm5NextWeights {
             .is_ok();
         let (page, max_buffer) = retained_geometry(ctx)?;
         let (plan, retained_bytes) = model.plan_retained(gguf, page, max_buffer)?;
-        let repack_enabled = glm_prefill_iq_repack_storage_enabled();
-        let repacked_bytes = if repack_enabled {
-            repacked_model_bytes(&model)?
-        } else {
-            0
-        };
-        let total_weight_bytes = retained_bytes
-            .checked_add(repacked_bytes)
-            .ok_or_else(|| Glm5NextMetalError::Invalid("weight byte total overflow".into()))?;
         crate::half_range::audit_or_refuse(gguf, crate::half_range::HalfRangeScope::Generic)?;
         // Admission and the allocations it prices form one transaction.
         let _allocation = ctx.begin_allocation_transaction();
         let admission =
-            evaluate_metal_memory_admission(total_weight_bytes, 0, ctx.memory_signals(), true);
+            evaluate_metal_memory_admission(retained_bytes, 0, ctx.memory_signals(), true);
         if !admission.is_admitted() {
             return invalid(format!(
-                "weights do not fit: reason={:?} retained={retained_bytes} repacked={repacked_bytes}",
-                admission.reason,
+                "weights do not fit: reason={:?} required={retained_bytes}",
+                admission.reason
             ));
         }
         let mut backings = Vec::with_capacity(plan.windows.len());
@@ -589,30 +426,13 @@ impl Glm5NextWeights {
         if !views.is_empty() {
             return invalid(format!("{} realized tensors unused", views.len()));
         }
-        let repacked_moe = if repack_enabled {
-            blocks
-                .iter()
-                .map(|block| match &block.ffn {
-                    FfnTensors::Moe(moe) => Ok(Some(RepackedMoeWeights {
-                        gate: repack_expert_tensor(ctx, &moe.gate_experts, 84)?,
-                        up: repack_expert_tensor(ctx, &moe.up_experts, 84)?,
-                        down: repack_expert_tensor(ctx, &moe.down_experts, 116)?,
-                    })),
-                    FfnTensors::Dense(_) => Ok(None),
-                })
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            (0..blocks.len()).map(|_| None).collect()
-        };
         Ok(Self {
             config: model.config.clone(),
             embedding,
             output_norm,
             output,
             blocks,
-            repacked_moe,
-            retained_bytes: total_weight_bytes,
-            repacked_bytes,
+            retained_bytes,
             packed_prefill_admitted,
             instance: WEIGHTS_INSTANCES.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             _backings: backings,
@@ -3089,8 +2909,6 @@ pub use packed::batch::take_last_step_timing;
 pub use packed::batch::{GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch};
 #[cfg(feature = "perf-ablations")]
 pub use packed::batch::{with_batch_attention, with_batch_index, with_batch_waves};
-#[cfg(feature = "perf-ablations")]
-pub use packed::with_iq_repack_prefill;
 pub use packed::{FastPrecision, PackedLineage};
 pub use snapshot::{Glm5NextSnapshot, SNAPSHOT_POLICY_VERSION, snapshot_bytes};
 

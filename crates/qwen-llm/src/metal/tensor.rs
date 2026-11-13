@@ -914,10 +914,6 @@ pub enum MetalTensorProvenance {
     OwnedWritable,
     OwnedWeightReadOnly,
     RetainedGgufReadOnly,
-    /// Same quantized values as the GGUF bank, stored in the GLM prefill
-    /// aligned-block layout. Only the matching repacked expert kernels may
-    /// consume this weight view.
-    RepackedExpertWeightReadOnly,
 }
 
 /// `host` makes `zeros_dtype_unstaged` write zeros over every new buffer from
@@ -1008,34 +1004,6 @@ impl MetalTensor {
             shape,
             dtype,
             provenance: MetalTensorProvenance::OwnedWritable,
-        })
-    }
-
-    /// Build a read-only GLM expert weight with an alternate physical block
-    /// stride. The logical GGUF shape remains typed as IQ2_S/IQ3_S; only the
-    /// explicitly tagged repacked kernels may read its padded blocks.
-    pub(crate) fn from_repacked_expert_bytes(
-        ctx: &MetalContext,
-        bytes: &[u8],
-        shape: Vec<u64>,
-        dtype: GgmlType,
-    ) -> Result<Self, MetalError> {
-        let (_, logical_bytes) = checked_ggml_shape_bytes(&shape, dtype)?;
-        if bytes.len() < logical_bytes {
-            return Err(MetalError::BadShape {
-                kernel: "from_repacked_expert_bytes",
-                detail: format!(
-                    "bytes.len()={} is shorter than shape={shape:?} dtype={dtype:?} logical extent {logical_bytes}",
-                    bytes.len()
-                ),
-            });
-        }
-        Ok(Self {
-            buffer: ctx.buffer_from(bytes)?,
-            offset: 0,
-            shape,
-            dtype,
-            provenance: MetalTensorProvenance::RepackedExpertWeightReadOnly,
         })
     }
 

@@ -833,64 +833,6 @@ inline void qt_dequantize_iq3_s(device const uchar * blk_bytes,
     }
 }
 
-// GLM full-chunk load-time repack. Each 256-value block is padded to 4-byte
-// alignment: IQ2_S {ctrl[64], meta[16], d[2], pad[2]} (84 bytes), IQ3_S
-// {qs[64], signs[32], meta[16], d[2], pad[2]} (116 bytes). The fused meta
-// byte is (qh nibble << 4) | scale nibble for this il. Arithmetic and F32 to
-// Half conversion stay in the canonical order above.
-inline void qt_dequantize_iq2_s_repacked(device const uchar * blk_bytes,
-                                         short il,
-                                         thread half4x4 & reg) {
-    const half d_h = *((device const half *)(blk_bytes + 80));
-    const uchar4 ctrl = *((device const uchar4 *)(blk_bytes + 4u * uint(il)));
-    const uchar meta = blk_bytes[64u + uint(il)];
-    const uint qh_lane = uint(meta) >> 4u;
-    const uint scale = uint(meta) & 0x0fu;
-    const float dl = float(d_h) * (0.5f + float(scale)) * 0.25f;
-    constant uchar * grid1 = (constant uchar *)(qt_iq2s_grid +
-        (uint(ctrl[0]) | ((qh_lane << 8u) & 0x300u)));
-    constant uchar * grid2 = (constant uchar *)(qt_iq2s_grid +
-        (uint(ctrl[1]) | ((qh_lane << 6u) & 0x300u)));
-    QT_FOR_UNROLL (int i = 0; i < 8; ++i) {
-        const float s1 = ((uint(ctrl[2]) & uint(qt_kmask_iq2xs[i])) != 0u) ? -1.0f : 1.0f;
-        const float s2 = ((uint(ctrl[3]) & uint(qt_kmask_iq2xs[i])) != 0u) ? -1.0f : 1.0f;
-        reg[i / 4 + 0][i % 4] = (half)(dl * float(grid1[i]) * s1);
-        reg[i / 4 + 2][i % 4] = (half)(dl * float(grid2[i]) * s2);
-    }
-}
-
-inline void qt_dequantize_iq3_s_repacked(device const uchar * blk_bytes,
-                                         short il,
-                                         thread half4x4 & reg) {
-    const half d_h = *((device const half *)(blk_bytes + 112));
-    device const uchar * qs = blk_bytes + 4u * uint(il);
-    const uchar2 signs = *((device const uchar2 *)(blk_bytes + 64u + 2u * uint(il)));
-    const uchar meta = blk_bytes[96u + uint(il)];
-    const uint qh_lane = uint(meta) >> 4u;
-    const uint scale = uint(meta) & 0x0fu;
-    const float dl = float(d_h) * (1.0f + 2.0f * float(scale));
-    constant uchar * grid1 = (constant uchar *)(qt_iq3s_grid +
-        (uint(qs[0]) | ((qh_lane << 8u) & 256u)));
-    constant uchar * grid2 = (constant uchar *)(qt_iq3s_grid +
-        (uint(qs[1]) | ((qh_lane << 7u) & 256u)));
-    QT_FOR_UNROLL (int i = 0; i < 4; ++i) {
-        const float s1 = ((uint(signs[0]) & uint(qt_kmask_iq2xs[i + 0])) != 0u) ? -1.0f : 1.0f;
-        const float s2 = ((uint(signs[0]) & uint(qt_kmask_iq2xs[i + 4])) != 0u) ? -1.0f : 1.0f;
-        reg[0][i] = (half)(dl * float(grid1[i]) * s1);
-        reg[1][i] = (half)(dl * float(grid2[i]) * s2);
-    }
-    grid1 = (constant uchar *)(qt_iq3s_grid +
-        (uint(qs[2]) | ((qh_lane << 6u) & 256u)));
-    grid2 = (constant uchar *)(qt_iq3s_grid +
-        (uint(qs[3]) | ((qh_lane << 5u) & 256u)));
-    QT_FOR_UNROLL (int i = 0; i < 4; ++i) {
-        const float s1 = ((uint(signs[1]) & uint(qt_kmask_iq2xs[i + 0])) != 0u) ? -1.0f : 1.0f;
-        const float s2 = ((uint(signs[1]) & uint(qt_kmask_iq2xs[i + 4])) != 0u) ? -1.0f : 1.0f;
-        reg[2][i] = (half)(dl * float(grid1[i]) * s1);
-        reg[3][i] = (half)(dl * float(grid2[i]) * s2);
-    }
-}
-
 // Source: mat_mat_iq4_xs.metal dequantize_iq4_xs_half.
 inline void qt_dequantize_iq4_xs(device const uchar * blk_bytes,
                                  short il,

@@ -354,23 +354,23 @@ pub(crate) fn prepare<'a>(
         check_disjoint(K, backing, &[(t, "composition binding")])?;
     }
     let half = backing.view_subrange(0, vec![h as u64, rows as u64]);
-    let gate = moe_grouped_tensor_pipeline_name_for_weight(
+    let gate = moe_grouped_tensor_pipeline_name(
         MoeGroupedTensorRole::Down,
-        b.gate_bank,
+        b.gate_bank.dtype,
         TensorActivation::F16,
     )
     .unwrap();
-    let up = moe_grouped_tensor_pipeline_name_for_weight(
+    let up = moe_grouped_tensor_pipeline_name(
         MoeGroupedTensorRole::UpClamped,
-        b.up_bank,
+        b.up_bank.dtype,
         TensorActivation::F16,
     )
     .unwrap();
     let down_tensor = matches!(route, DownRoute::Tensor | DownRoute::TensorOrSmallCounts);
     let down = if down_tensor {
-        moe_grouped_tensor_pipeline_name_for_weight(
+        moe_grouped_tensor_pipeline_name(
             MoeGroupedTensorRole::Down,
-            b.down_bank,
+            b.down_bank.dtype,
             TensorActivation::F32,
         )
         .unwrap()
@@ -450,7 +450,7 @@ pub(crate) fn prepare<'a>(
         && ctx.device_facts().gpu_families.apple10
         && adaptive_requested()
     {
-        let name = wide_probe_pipeline_name_for_weight(b.gate_bank).unwrap();
+        let name = wide_probe_pipeline_name(b.gate_bank.dtype).unwrap();
         let p = ctx.tensor_pipeline(&name)?;
         capacity(
             p.threadExecutionWidth(),

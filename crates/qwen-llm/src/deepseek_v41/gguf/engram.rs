@@ -338,6 +338,7 @@ impl DiskEngram {
         }
         let t = &table.tensor;
         let stride = row_stride(t)?;
+        trace_read(layer, ids);
         let source = self.source();
         let offsets = ids
             .iter()
@@ -394,6 +395,66 @@ impl DiskEngram {
         self.revalidate_sources()?;
         Ok(output)
     }
+}
+
+/// Opt-in logical row trace for residency studies: `QWEN_V41_ENGRAM_TRACE`
+/// names a prefix. `<prefix>.rows` receives fixed nine-byte `(layer, row)`
+/// records and `<prefix>.times` receives `(epoch_ns, rows_written)` call
+/// boundaries. The trace is written before the timed read loop, so it stays
+/// outside the reported Engram read interval, and it is off unless the
+/// variable is set.
+fn trace_read(layer: usize, ids: &[u64]) {
+    use std::io::Write;
+    struct Trace {
+        rows: std::io::BufWriter<std::fs::File>,
+        times: std::io::BufWriter<std::fs::File>,
+        written: u64,
+    }
+    static TRACE: std::sync::OnceLock<Option<std::sync::Mutex<Trace>>> = std::sync::OnceLock::new();
+    let Some(trace) = TRACE.get_or_init(|| {
+        let prefix = std::env::var_os("QWEN_V41_ENGRAM_TRACE")?;
+        let open = |suffix: &str| {
+            let path = std::path::PathBuf::from(&prefix).with_extension(suffix);
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+                .map(|file| std::io::BufWriter::with_capacity(1 << 20, file))
+        };
+        Some(std::sync::Mutex::new(Trace {
+            rows: open("rows")?,
+            times: open("times")?,
+            written: 0,
+        }))
+    }) else {
+        return;
+    };
+    let Ok(layer) = u8::try_from(layer) else {
+        return;
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos() as u64);
+    let mut trace = trace
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Trace {
+        rows,
+        times,
+        written,
+    } = &mut *trace;
+    for &id in ids {
+        let mut record = [0u8; 9];
+        record[0] = layer;
+        record[1..].copy_from_slice(&id.to_le_bytes());
+        let _ = rows.write_all(&record);
+    }
+    *written = written.saturating_add(ids.len() as u64);
+    let _ = times.write_all(&stamp.to_le_bytes());
+    let _ = times.write_all(&written.to_le_bytes());
+    let _ = rows.flush();
+    let _ = times.flush();
 }
 
 /// Upper bound on the distinct host pages touched by these rows: one page per

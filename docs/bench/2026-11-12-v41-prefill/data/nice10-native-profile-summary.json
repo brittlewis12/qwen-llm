@@ -1,0 +1,46 @@
+[
+  {
+    "depth": 0,
+    "policy": "baseline",
+    "wall_ms": 21256.345833666666,
+    "gpu_ms": 17074.13937500678,
+    "gap_ms": 3771.002541684235,
+    "encode_ms": 1163.8856393333333,
+    "prepare_ms": 1211.6333323333333,
+    "engram_prepare_ms": 735.1564433333334,
+    "disk_read_bytes": 11266730.666666666
+  },
+  {
+    "depth": 0,
+    "policy": "ced-stream-prefetch",
+    "wall_ms": 19912.40166666667,
+    "gpu_ms": 17056.571805888478,
+    "gap_ms": 2474.82122189831,
+    "encode_ms": 231.4220023333333,
+    "prepare_ms": 707.8812646666667,
+    "engram_prepare_ms": 229.05866533333332,
+    "disk_read_bytes": 63788373.333333336
+  },
+  {
+    "depth": 81920,
+    "policy": "baseline",
+    "wall_ms": 1069.125125,
+    "gpu_ms": 1015.402541612275,
+    "gap_ms": 20.72920836508274,
+    "encode_ms": 1.8296243333333333,
+    "prepare_ms": 0,
+    "engram_prepare_ms": 0,
+    "disk_read_bytes": 0
+  },
+  {
+    "depth": 81920,
+    "policy": "ced-stream-prefetch",
+    "wall_ms": 1073.9431526666667,
+    "gpu_ms": 1017.5664166454226,
+    "gap_ms": 21.704722234668832,
+    "encode_ms": 1.8000413333333334,
+    "prepare_ms": 0,
+    "engram_prepare_ms": 0,
+    "disk_read_bytes": 0
+  }
+]

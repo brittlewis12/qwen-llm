@@ -55,6 +55,9 @@ pub struct DispatchProfileRow {
     #[serde(skip)]
     #[cfg(feature = "perf-ablations")]
     bindings: Vec<(usize, serde_json::Value)>,
+    #[serde(skip)]
+    #[cfg(feature = "perf-ablations")]
+    constants: Vec<(usize, Vec<u32>)>,
 }
 
 #[cfg(feature = "perf-ablations")]
@@ -63,6 +66,10 @@ impl DispatchProfileRow {
     /// this dispatch, for bench-only shape attribution.
     pub fn bindings(&self) -> &[(usize, serde_json::Value)] {
         &self.bindings
+    }
+    /// Raw constant-buffer words for bench-only work/traffic accounting.
+    pub fn constants(&self) -> &[(usize, Vec<u32>)] {
+        &self.constants
     }
 }
 
@@ -361,6 +368,24 @@ pub(crate) fn split_for_dispatch(enc: &KernelEncoder, grid: MTLSize, threads: MT
             gpu_end: None,
             #[cfg(feature = "perf-ablations")]
             bindings,
+            #[cfg(feature = "perf-ablations")]
+            constants: replay
+                .slots
+                .iter()
+                .filter_map(|(slot, value)| {
+                    if let Slot::Bytes(bytes) = value {
+                        Some((
+                            *slot,
+                            bytes
+                                .chunks_exact(4)
+                                .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
+                                .collect(),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
         });
     });
 }

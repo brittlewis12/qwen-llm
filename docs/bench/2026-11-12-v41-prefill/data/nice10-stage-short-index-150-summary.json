@@ -1,0 +1,44 @@
+{
+  "source": "stage-short-index-ni10-81920-150-dispatch.jsonl",
+  "sha256": "0b2506d2d69b57f38c6102e62e39239f99f4fdf27655708b6398783f7e4b1a95",
+  "stage": "index",
+  "warmup_pairs": 1,
+  "retained_pairs": 3,
+  "pairs": [
+    {
+      "pair": 1,
+      "baseline_ms": 24.199003,
+      "candidate_ms": 16.193879000000006,
+      "ratio": 1.4943302342817302
+    },
+    {
+      "pair": 2,
+      "baseline_ms": 24.114376,
+      "candidate_ms": 16.136252000000002,
+      "ratio": 1.4944223726798513
+    },
+    {
+      "pair": 3,
+      "baseline_ms": 24.112087,
+      "candidate_ms": 16.14683,
+      "ratio": 1.493301595421516
+    }
+  ],
+  "baseline_ms": 24.141822,
+  "candidate_ms": 16.158987000000003,
+  "ratio": 1.4940182822103882,
+  "positive_pairs": 3,
+  "all_exact": true,
+  "thermal_max": 0,
+  "note": "Isolated dispatch GPU sums; instrumented wall is not a native speedup. All declared warmup arms stay in raw evidence.",
+  "masked_dispatches_by_rep": {
+    "0": 0,
+    "1": 24,
+    "2": 24,
+    "3": 0,
+    "4": 0,
+    "5": 24,
+    "6": 24,
+    "7": 0
+  }
+}

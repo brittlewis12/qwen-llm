@@ -426,6 +426,7 @@ class Arm:
 
     def run(self):
         args = self.args
+        warm_reply_tokens=getattr(args,'warm_reply_tokens',8)
         fd = int(os.environ['QWEN_METAL_LEASE_FD'])
         os.fstat(fd)
         warm, suffix = self.prepare()
@@ -443,7 +444,7 @@ class Arm:
         if occupied.returncode != 1:
             raise RuntimeError('port occupied or lsof failed')
         env = arm_environment(os.environ, self.plan['family'], args.arm, args.env)
-        maximum = max(t['reply_tokens'] for t in self.plan['population'])
+        maximum = max(max(t['reply_tokens'] for t in self.plan['population']),warm_reply_tokens)
         command = [str(args.binary.resolve()),'serve','-m',str(args.model.absolute()),
                    '--addr',f'127.0.0.1:{args.port}','--max-context-tokens',str(args.context),
                    '--max-tokens',str(maximum)]
@@ -453,6 +454,7 @@ class Arm:
              sampling=dict(mode=args.sampling, fields=self.sampling),
              env_overrides=list(args.env),
              cool_seconds=args.cool, warm_cool_seconds=args.warm_cool,
+             warm_reply_tokens=warm_reply_tokens,
              ramp_seconds=args.ramp, context=args.context, agents=args.agents, load_before=os.getloadavg(),
              preflight_thermal=preflight,max_thermal_pressure=args.max_thermal_pressure,
              warmup_max_thermal_pressure=args.warmup_max_thermal_pressure,
@@ -483,7 +485,7 @@ class Arm:
                 raise TimeoutError('startup')
             ready=time.time();histories=[]
             for agent in range(args.agents):
-                body=self.body([dict(role='user',content=f'Independent agent {agent}. Source corpus follows.\n'+warm[agent])],8)
+                body=self.body([dict(role='user',content=f'Independent agent {agent}. Source corpus follows.\n'+warm[agent])],warm_reply_tokens)
                 final=self.request(body,f'a{agent}-warm',warm=True)
                 if final is None:raise RuntimeError('warm-up failed')
                 histories.append(body['input']+history_items(final.get('output',[])))
@@ -837,6 +839,8 @@ def main():
     p.add_argument('--agents',type=int,choices=(1,2,3),default=3)
     p.add_argument('--arm',choices=('serial','default'),required=True);p.add_argument('--ramp',type=float,default=15)
     p.add_argument('--warm-tokens',type=int,default=48000);p.add_argument('--context',type=int,default=196608)
+    p.add_argument('--warm-reply-tokens',type=int,default=8,
+                   help='warm-up output budget; increase when measuring root TTFT to avoid a control-only capped reply')
     p.add_argument('--warm-cool',type=float,default=0,
                    help='seconds to idle between warm roots, to shed heat before a deep window')
     p.add_argument('--port',type=int,default=18737);p.add_argument('--cool',type=float,default=25)
@@ -863,6 +867,8 @@ def main():
         with args.calls_csv.open() as f:plan=make_plan(list(csv.DictReader(f)),args.family,args.seed,args.seconds)
         dump(args.out,plan);print(json.dumps({k:v for k,v in plan.items() if k!='population'}))
     elif args.command=='run':
+        if args.warm_reply_tokens<1:
+            parser.error('--warm-reply-tokens must be positive')
         if not math.isfinite(args.settle_thermal_seconds) or args.settle_thermal_seconds < 0:
             parser.error('--settle-thermal-seconds must be finite and nonnegative')
         arm=Arm(args)

@@ -1,0 +1,60 @@
+{
+  "source": "stage-expert128-fresh-ni10-0-49152-dispatch.jsonl",
+  "sha256": "fdd36a2aed1f3c85b93e06c87fd886301e705aacb5ee0fb4300bf68b15d4d065",
+  "stage": "experts",
+  "warmup_pairs": 1,
+  "retained_pairs": 3,
+  "pairs": [
+    {
+      "pair": 1,
+      "baseline_ms": 479.45862800000003,
+      "candidate_ms": 747.9376239999999,
+      "ratio": 0.641040927231119
+    },
+    {
+      "pair": 2,
+      "baseline_ms": 480.931122,
+      "candidate_ms": 746.325881,
+      "ratio": 0.6443982906710963
+    },
+    {
+      "pair": 3,
+      "baseline_ms": 475.98399799999993,
+      "candidate_ms": 730.8336269999998,
+      "ratio": 0.6512891312265795
+    }
+  ],
+  "baseline_ms": 478.7912493333333,
+  "candidate_ms": 741.6990439999998,
+  "ratio": 0.6455330544194869,
+  "positive_pairs": 0,
+  "all_exact": true,
+  "thermal_max": 0,
+  "note": "Isolated dispatch GPU sums; instrumented wall is not a native speedup. All declared warmup arms stay in raw evidence.",
+  "components": {
+    "baseline": {
+      "gate_up_ms": 312.2298736666667,
+      "down_ms": 166.5613756666667,
+      "wide_ms": 0.0
+    },
+    "candidate": {
+      "gate_up_ms": 488.372932,
+      "down_ms": 253.326112,
+      "wide_ms": 545.9871806666666
+    }
+  },
+  "component_ratios": {
+    "gate_up_ms": 0.6393267382531076,
+    "down_ms": 0.6574978566231131
+  },
+  "wide_dispatches_by_rep": {
+    "0": 0,
+    "1": 40,
+    "2": 40,
+    "3": 0,
+    "4": 0,
+    "5": 40,
+    "6": 40,
+    "7": 0
+  }
+}

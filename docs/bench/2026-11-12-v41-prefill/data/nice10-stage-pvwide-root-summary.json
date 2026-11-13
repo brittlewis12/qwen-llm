@@ -1,0 +1,57 @@
+{
+  "source": "stage-pvwide-ni10-0-49152-dispatch.jsonl",
+  "sha256": "5ab8d1a7ab53079c3dc041a763947cf1590b3a4c23f79439c107328481830130",
+  "stage": "attention-output",
+  "warmup_pairs": 1,
+  "retained_pairs": 3,
+  "pairs": [
+    {
+      "pair": 1,
+      "baseline_ms": 225.902362,
+      "candidate_ms": 132.44766600000008,
+      "ratio": 1.7055971526142248
+    },
+    {
+      "pair": 2,
+      "baseline_ms": 218.77386499999997,
+      "candidate_ms": 132.870541,
+      "ratio": 1.6465189601357908
+    },
+    {
+      "pair": 3,
+      "baseline_ms": 219.24546099999995,
+      "candidate_ms": 132.5745359999999,
+      "ratio": 1.6537524295012438
+    }
+  ],
+  "baseline_ms": 221.3072293333333,
+  "candidate_ms": 132.63091433333332,
+  "ratio": 1.6685946142023504,
+  "positive_pairs": 3,
+  "all_exact": true,
+  "thermal_max": 0,
+  "note": "Isolated dispatch GPU sums; instrumented wall is not a native speedup. All declared warmup arms stay in raw evidence.",
+  "components": {
+    "baseline": {
+      "pv_dispatch_ms": 118.856594,
+      "normalize_ms": 22.55199766666667,
+      "inverse_rope_ms": 79.8986376666667
+    },
+    "candidate": {
+      "pv_dispatch_ms": 132.63091433333332,
+      "normalize_ms": 0.0,
+      "inverse_rope_ms": 0.0
+    }
+  },
+  "wide_dispatches_by_rep": {
+    "0": 0,
+    "1": 160,
+    "2": 160,
+    "3": 0,
+    "4": 0,
+    "5": 160,
+    "6": 160,
+    "7": 0
+  },
+  "component_note": "The candidate PV dispatch includes normalized inverse-RoPE writeback; its matrix-only cost is not isolated."
+}

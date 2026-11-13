@@ -46,6 +46,341 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   fold **678.057/735.361** vs split **788.930/799.782 ms**. One call instead
   of two; **86.8/87.6 ms** median wall saved. Witness only. Raw runs in
   `$HOME/qwen-runs/2026-11-13-fold-band-landing/`.
+## 2026-11-13 - V4.1 Short Index: Native 150/256-Row Walls Pass
+
+- Same `iter` `d207776beaa5`, NI10/pressure0, fixed common flags. 150@80K
+  **391.239 -> 383.846 ms, 1.01926x**; 256@80K **501.584 -> 486.263 ms,
+  1.03151x**, both 3/3 positive and all eight full signatures bitwise.
+- Boundary128/511 queued; inactive127/512/1024/root and fresh release B3
+  remain. Default-off. PIDs79123/83339 exit0.
+- Symmetric-priming controller passes full contracts at `5f69c6098` and
+  all24 Python harness cases; actual M5 controller execution remains pending.
+  [Pairs and provenance](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Short Index: Functional and Both Isolation Gates Pass
+
+- M5 test-profile masked-MMA five-case strict score/selection/guard test
+  passes, NI10/pressure0. Fresh `iter` SHA starts `d207776beaa5`; all eight
+  cooperative expert exports compile, retired wide-PV exports are absent.
+- 150@80K **24.142 -> 16.159 ms, 1.49402x**; 256@80K
+  **40.823 -> 27.117 ms, 1.50543x**, both 3/3 positive, all eight signatures
+  bitwise, no overflow. Baseline masked calls0, candidate24 in every arm.
+- Same-binary native cells queued. Boundaries/controls/release gates remain;
+  default-off. Full contracts pass frozen `1930b69f5`.
+- Subsequent serving uses prospectively symmetric, exited cache-priming
+  processes before fresh measured processes; empty measured KV, explicit
+  disk/pipeline cache condition, one arm per lease. Twenty-four CPU checks
+  pass, including cleanup/abort/identity. [Protocol and pairs](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Wide PV: Reversed Served Root Fails; Remove
+
+- Same release `a365a145f2d5`, cap32, NI10/MID=1. BA keeps all3 roots:
+  **20,949.577 / 27,709.110 ms, 0.75605x**; visible root TTFT **0.73585x**.
+- All15 matched append observations remain positive in mean: prefill
+  **1.03405x**, client TTFT **1.02845x**; 12/15 and 11/15 positive.
+  They do not override the required root failure. Both arms' allowed
+  pressure2, compiler overlap, startup/load differences stay in the record.
+- Remove wide kernels/flag/host override/fixture extensions; preserve
+  archives, MID, cache and process fixes. Short-index M5 qualification
+  follows, then cooperative experts. Predeclare symmetric warmup for
+  future root serving gates. [Both orders](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Cooperative Experts: Prepare M32/M64, Eight Groups
+
+- Default-off `EXPERT_COOPERATIVE`: cooperative GU M32/M64xN64 and down
+  M32/M64xN128, K64 unchanged, 256 threads. Retains short-run M32 work,
+  64-row plan, native dequantization, 18 KiB scratch and existing allocation.
+- Direct volatile F32 activation/weight boundaries then half; F32 down.
+  Existing MIT notice retained. This differs from the rejected M128 kernel.
+- Local `iter` and test-profile type checks pass. Extend the existing GPU
+  differential with both modes; no new ignore. Required M5 exactness,
+  >=1.25x combined expert isolation in both cells, native/PP/B3 gates
+  follow the short-index decision. [Protocol](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Wide PV: Release B3 AB Passes; BA Queued
+
+- Same release `a365a145f2d5`, NI10, cap32 and MID=1. All three roots:
+  **36,946.636 -> 26,183.825 ms, 1.41105x**; two observed warm TTFT
+  deltas/arm ratio **1.37944x**, third remains null.
+- All **20/20** matched short append prefill pairs improve; mean **1.06164x**.
+  Client TTFT **1.04912x**, 19/20 positive; delivered rate 76.183/79.650.
+- Allowed baseline pressure2 and compiler overlap retained; candidate max1,
+  with lower load/startup. No causal claim for the large root difference.
+  BA queued before any promotion. [Complete retained evidence](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Wide PV: PP Controls Pass; Fresh Release B3 Queued
+
+- Same `iter`, NI10/pressure0, MID=1: pp4096 **2,746.094 -> 2,689.707 ms,
+  1.02096x**; 8K **3,709.183 -> 3,636.899 ms, 1.01988x**. Both 3/3
+  positive, all eight full signatures bitwise.
+- Fresh release source `659974115`, wide exports verified, SHA starts
+  `a365a145f2d5`. B3 AB cap32 queued; same binary/MID, only wide flag differs.
+  Reverse BA follows a passing AB; no promotion yet.
+- Separate default-off short-index preparation passes full contracts at
+  frozen `2669c0431`; it is absent from that release.
+  [Pairs, hashes and protocol](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Short Masked Index: Prepare Exact Range Extension
+
+- Qualified MID begins at 512 rows; prepare `MASKED_REINDEX_SHORT`, off by
+  default, for ordinary 128..511-row deep appends using the existing kernel,
+  depth threshold and global veto. No new tensors or arithmetic changes.
+- Local format/`iter` checks pass. Predeclare functional, 150/256-row
+  >=1.25x isolation, full bitwise/native/boundary/control and B3 AB/BA gates.
+- Wide PV comparisons remain pinned to their earlier binary; short-append
+  M5 execution follows that decision. No performance/promotion claim.
+  [Protocol](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Wide PV: Native Root and Deep Append Pass
+
+- Same `iter`/MID=1, NI10, one warmup plus three retained interleaved pairs.
+  Full eight-signature witnesses bitwise in each cell.
+- 48K root **20,755.584 -> 20,505.967 ms, 1.01217x**; 1K@80K
+  **1,014.148 -> 995.341 ms, 1.01890x**, both 3/3 positive.
+- Root final pair at allowed pressure2 retained; append pressure0. Both
+  loads meet continuous <=1/60s settle. Exact child PIDs exit0.
+- PP4K/8K controls queued; fresh release B3 AB/BA remains decisive.
+  Default-off. [Pairs and hashes](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Wide PV: Both Output-Stage Isolation Gates Pass
+
+- Same verified `iter`, NI10/pressure0, MID=1 in both arms. Warmup plus
+  three retained interleaved pairs; all eight full signatures per cell
+  bitwise, no overflow, candidate dispatches active in every arm.
+- Root late-CED output: **221.307 -> 132.631 ms, 1.66859x**; 1K@80K:
+  **100.250 -> 69.519 ms, 1.44205x**. Both 3/3 positive and above 1.25x.
+  Candidate PV includes normalization/inverse RoPE; no matrix-only claim.
+- Native root/append queued on the same binary; PP and release B3 AB/BA
+  gates remain. Default-off. [Pairs and hashes](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Wide PV: Strict Functional Gate Pass
+
+- M5 test profile, MTL debug/required Metal: **15** ragged/offset cases,
+  **13,434,880** normalized and inverse-RoPE components bitwise. Production
+  query alias, guards and actual 512-thread/20 KiB resources pass.
+- NI10, settle pressure1 then execution0. Expected Ghost remains recorded;
+  no model loaded. Fresh verified `iter` exports both wide kernels.
+- Full contracts pass `fceabe46b`, including cache/process regressions.
+  Paired real root/80K isolation queued before any performance/promotion
+  claim. [Functional witness](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - Prefill Harness: Recognize Expected Ghost Background Work
+
+- Wide-PV compiles on M5, but its functional helper stops before test/model
+  work: generic RSS guard mistakes expected Ghost `shadps4` (28,692,432 KiB)
+  for a model. Keep the stopped attempt; no result or performance gate.
+- Classify only the known Ghost executable under `~/ghost/host-cache` as
+  background. Keep its full process/load record; real models and large
+  unknown processes still refuse loads, and memory/thermal admission stays.
+- Three CPU regressions pass and join contracts. No process is killed or
+  experiment sample excluded. [Context](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Wide PV: D256/Sixteen Groups, Default-Off Prototype
+
+- Target the census's low-utilization PV shape: D256/512 threads versus
+  D128/128 threads, retaining H64/K32 and increasing-key updates. Two
+  serial dimension chunks, nominal 32 versus 64 destination floats/thread.
+- 20 KiB shared operands, no expanded GPU allocation; F32 normalization
+  and inverse-RoPE writeback fused. Full MIT attribution retained.
+  M5 Ultra H64/D512/R64, 128..4096 rows; other shapes/decode unchanged.
+- Existing GPU differential extended with strict wide-vs-tensor64 and
+  fused-vs-original-chain bits, ragged/offset/guard/resource checks.
+  Local `iter` and test-profile checks pass; M5 functional gate first,
+  >=1.25x output-stage isolation, native cells and B3 AB/BA still required.
+  [Protocol](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Hot M128 Panels: Exact, Slower; Remove at Isolation
+
+- Fresh verified shader artifact, same `iter`, NI10/pressure0, all eight
+  endpoint/full-state/following-step signatures bitwise, no overflow.
+  Baseline wide calls 0, candidate 40 each arm.
+- Three retained routed GU+down pairs: **478.791 -> 741.699 ms,
+  0.64553x**, 0/3 positive. GU **312.230/488.373**, down
+  **166.561/253.326 ms**. Wide-family work is 545.987 ms.
+- **Fail >=1.25x isolation.** Remove kernel/host/flag/workspace marker and
+  prototype-only fixture extensions; no native/serve run or threshold hunt.
+  Keep the build-cache correction and normal CPU regressions. Continue with
+  attention workgroup geometry. [All pairs](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - Metal AIR Cache: Hash Transitive Local Headers
+
+- Expert M128 guarded GPU differential passes in a fresh test profile, but
+  the cached `iter` library lacks the new export and stops before candidate
+  dispatch. No valid paired performance/quality result from that attempt.
+- Per-source AIR keys omitted included `.metalh`/`.h` bytes despite Cargo
+  directory watches. Hash the transitive local include tree and explicitly
+  watch it; preserve compiler/SDK/language/target/flags and cycle safety.
+- Three normal CPU tests pass, including a nested edit with unchanged mtime
+  and all real kernel tiers without a Metal compiler. Add them to contracts.
+- Retain the failed packet and binary/export evidence, rebuild test+iter,
+  and use a fresh paired packet tag. [Evidence](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Adaptive Hot-Expert Reuse: Prototype, Default Off
+
+- Keep admitted 4K geometry; native-IQ runs >=96 rows get M128 panels,
+  smaller runs M64. Reuse each shared Half K64 operand slab across four
+  products, with unchanged per-output 32x32/K64 accumulation order.
+- Two disjoint panel prefixes fit existing spare routing storage; no new
+  buffer or larger 18 KiB threadgroup slab. Ordinary Full/short/decode
+  unchanged. Existing MIT shader attribution retained.
+- GPU guarded differential first, then >=1.25x combined routed GU+down over
+  three retained interleaved stage pairs and full bitwise witnesses. Native
+  cells/short controls/B3 follow only on success. No promotion.
+- 8K batch review exposes publication-tree changes across nonzero-prefix
+  threshold crossings; it requires lineage or paired teacher-forced NI,
+  rather than changing guards or digest assertions without qualification.
+  [Protocol](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Exact Publication: Reversed Root Serve Fails; Remove Code
+
+- Same release binary, NI10, cap32, both orders pressure0. AB root
+  **24837.304 -> 23767.601 ms (1.04501x)**; reversed BA
+  **20479.822 -> 23280.097 ms (0.87971x)**. All three BA roots regress.
+  Visible root TTFT ratios **1.04501/0.87278x**; third stays null.
+- Inactive short-prefill controls **1.00316/1.00230x**; client TTFT
+  **0.99173/1.01598x**. Keep delivery/gap/load variation in both orders,
+  including BA baseline load-after 8.66. No allowed sample excluded.
+- **Fail the root serve gate.** Remove shader/flag/scoped experiment and
+  restore all publication/BF16 fixture changes to base. Stage/full-depth/
+  native bitwise wins remain recorded; no default or unchanged rerun.
+- Continue with admitted larger CED chunks and expert reuse, rather than
+  leaving a failed candidate in the engine. MID remains the qualified
+  default. [All evidence](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Publication Final Baseline: Root Wall Gate Repeats
+
+- Fresh `4a040db01`, PV removed/MID on, same `iter`, NI10/pressure0.
+  Root **24267.477 -> 23671.029 ms (1.02520x)**, all 3 retained pairs
+  positive. 1K@80K inactive control **998.521/997.444 ms**, no append claim.
+- All eight complete endpoint/state/following-step signatures per cell
+  match bitwise. This replaces the prospective PV-on append control.
+- Opposite-order release B3 gates running before promotion; same cap32,
+  plan and binary SHA recorded. [Final pairs](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Exact Publication: Native Root and Full-Depth Bitwise Pass
+
+- `4298369aa`, same `iter`, NI10/pressure0, three retained pairs:
+  root **24131.437 -> 23558.928 ms (1.02430x)**;
+  deep 4K Full **3221.161 -> 3052.374 ms (1.05530x)**. Both 3/3 positive.
+- All eight arms per cell retain full endpoint/state/following-step bits.
+  Full covers all 40 layers. Both shapes make zero guarded PV calls.
+- Prospective MID=1/PV=1 append control **977.684/975.388 ms** retained.
+  PV is now removed; rebuild and repeat native root/append on the final
+  baseline, then B3 AB/BA. **Publication remains off pending these gates.**
+  [All cells](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Guarded PV: Reject at Realistic Serve; Remove Code
+
+- Same fresh release SHA, NI10/pressure0, two opposite-order B3 blocks.
+  Prefill improves for **21/21 AB and 15/15 BA** matched short appends:
+  means **1.02596/1.01971x**. Preserve all observations.
+- Complete client TTFT mean ratios **0.99097/0.92612x**; medians
+  1.01834/1.01880x do not replace these. BA delivery **87.250/81.933**
+  tok/s, gap p99 **0.05255/0.15198 s**. **Fail the served gate.**
+- Remove shader/flag/scoped experiment/counter and regenerate ENV; tensor
+  shader restored exactly to base. Neither broad nor guarded PV promoted.
+  Continue exact publication with PV off. Root/4K publication witnesses
+  execute zero guarded PV calls; repeat the inactive append control on
+  the final baseline. [All pairs](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Exact Late-4K Publication: Strict Stage Gate Pass
+
+- Default-off `QWEN_V41_PUBLICATION_4K` targets the late root's 51,405
+  dispatches. Pruned ordinary 4096-row batches only, M5 Ultra/32K+;
+  existing compressor rollbacks and BF16_TG=0 veto remain.
+- New bulk variant repeats the per-row latent RMS and split-K BF16 dot8
+  reduction trees, key norm/pooling/RoPE. Existing early bulk arithmetic
+  stays. About 1 KiB extra workgroup scratch, no new session/model backing.
+- First gate is >=1.25x publication-chain GPU sum plus strict complete
+  endpoint/causal/following-step bits, three retained pairs; no promotion
+  or approximate tolerance. Native and B3 gates follow only on success.
+  [Protocol](bench/2026-11-12-v41-prefill/README.md).
+
+- First witness stops on differing retained pending bytes while full endpoint
+  and following-step logits match. Preserve the failed packet; correct the
+  existing pending value/gate bytes rather than excluding them from digest.
+- Corrected `4298369aa`: all eight complete signatures bitwise. Isolated
+  publication chain **167.027 -> 0.334 ms**, three retained pairs,
+  NI10/pressure0. Verified actual launch 2048 groups x256 threads.
+  Counter cadence and removed dispatches dominate this ratio; **not a native
+  or engine 500x claim**. Unsampled 48K/80K wall pairs queued before B3.
+
+## 2026-11-13 - V4.1 Guarded PV Append: Exact Wall Gate Pass, Root Calls Zero
+
+- Broad root eligibility remains rejected. Guarded M5 Ultra/R64 ordinary
+  128..2048-row appends at >=48K only; PV still defaults off.
+- Same `iter` source `64036e4a4`, NI10/pressure0, 1K@80K
+  **994.728 -> 975.203 ms (1.02002x)**, 3/3 retained pairs positive.
+  Candidate fused calls 80 versus baseline 0. All eight arms bitwise at
+  full endpoint, complete stored state and following step.
+- 48K/pp4096/8K controls make **zero fused calls in every arm**, all bitwise.
+  Their ambient timing variation is retained without a performance claim.
+  Fresh guarded B3 AB/BA packets are queued before promotion.
+  [Complete cells](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 Broad PV Root Gate Fails; Late Append Scope Under Validation
+
+- Broad PV AB root **25.338 -> 24.266 s (1.04421x)**; BA
+  **24.160 -> 28.873 s (0.83679x)**. Keep all roots and allowed thermal 2
+  in AB candidate; BA both 0. **No broad/default root promotion.**
+- Matched short append means **1.00757/1.03169x**, 15/20 and 18/20
+  positive; client TTFT **1.03448/1.03353x**. Narrow to ordinary late
+  M5 Ultra H64/D512/R64 appends, 128..2048 rows at >=48K, no CED context.
+  Same append arithmetic; validate zero root fused calls before promotion.
+- pp4096/8K broad gains **1.02734/1.02411x**, bitwise, are retained as
+  rejected-scope data. PV still defaults off. Continue exact publication.
+  [All served phases and pairs](bench/2026-11-12-v41-prefill/README.md).
+
+## 2026-11-13 - V4.1 In-Place Engram Row Permutation: Exact Stage Pass, Native Root Gate Fails
+
+- Default-off `QWEN_V41_ENGRAM_SORTED_ROWS` sorts the existing temporary
+  prefill ID vector, reads/decodes each distinct row once, and scatters exact
+  F32 values to token order. Same codecs/source checks/adaptive advice; no
+  persistent cache or larger GPU/CPU peak. Decode retains its existing path.
+- Require >=1.25x direct read/decode at real 4K@40960 hashes with resident
+  weights, three retained pairs and complete bitwise row digests, then paired
+  native root/append and realistic B3 gates. No promotion.
+- Extended existing CPU fixture passes Q5_K/Q6_K/IQ4_NL row-order, duplicate,
+  block-boundary and late-bad-ID checks. Host `iter` check passes.
+  [Protocol and evidence](bench/2026-11-12-v41-prefill/README.md).
+
+- M5 `db0ef909f`, `iter`, NI10/pressure0: **137.223 -> 109.581 ms
+  (1.25225x)** over three retained pairs. First pair 1.231x; keep it. All
+  50,331,648 output F32 values match per complete digest in every arm.
+  98,304 requested rows/layer become 42,418/42,420 distinct, ~56.85% fewer
+  row reads/dequantizations; no physical disk-byte claim.
+- Native 48K/80K pairs are queued with MID=1/PV_ROPE=1 held in both arms.
+  Both baseline prerequisites still need promotion gates; regate if either
+  is rejected. No default change from this narrow isolated pass.
+
+- Prospective MID+PV baseline, three retained native pairs: 48K root
+  **20443.035/20596.349 ms (0.99256x)**, only 1/3 positive; append
+  **1004.513/1003.584 ms (1.00093x)**, 2/3. NI10, pressure <=1, all
+  complete output/state/following-step bits agree. Exposed preparation+
+  encode improves 1.106x but does not become a root wall win.
+- **Reject at native root.** Remove reader, knob, scoped I/O hook and price
+  example; restore Engram reader/fixture files to base. Keep all evidence,
+  no serve claim. The baseline also matches the earlier PV candidate's
+  signatures, validating global PV through the complete 80K prefix.
+
+## 2026-11-13 - V4.1 PV Accumulator Writeback: Exact Stage and Native Gates Pass
+
+- Default-off `QWEN_V41_ATTN_PV_ROPE` retains H64/K32/D128 matmuls and
+  12 KiB shared operands; normalize rounded F32 accumulator pairs, inverse
+  RoPE and write query layout directly. Same grid, no added backing.
+  Cooperative-pair epilogue adapted from mlx-serve MIT `attn_pv.metal`;
+  checked license and full shader notice retained.
+- M5 `db0ef909f`, same `iter`, NI10/pressure 0: combined output stage
+  **104.667 -> 67.465 ms (1.55143x)**, three retained pairs after warmup.
+- Native with MID=1 fixed: 48K root **20404.178 -> 19959.307 ms
+  (1.02229x)**, 1K@80K **1014.101 -> 991.947 ms (1.02233x)**.
+  Both cells 3/3 positive, pressure <=1. All eight arms/cell bitwise at
+  endpoint, full causal state and following teacher step. Both references
+  also equal the earlier original-production capture.
+- Two opposite-order B3 serve blocks are queued, MID=1 and Engram ordering=0
+  fixed, same release/cap32/120-second windows. PV remains default off.
+  Full CPU contracts pass after MID promotion at `1a206f6b2`.
+  [Census, protocol and compact evidence](bench/2026-11-12-v41-prefill/README.md).
 
 ## 2026-11-13 - V4.1 Engram Residency: Page Cache Loses the Hot Set; Price a Row Cache
 
@@ -93,6 +428,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   512..2048-row appends at 48K..128K. Same arithmetic, masks, selection and
   backing; `=0` restores the 128K threshold and the existing mask rollback
   still vetoes it.
+  backing; the existing mask rollback still vetoes it.
 - Verified-niceness-10 M5 isolation, three retained pairs: score stage
   **162.983 -> 107.521 ms (1.51582x)**. Native 1K@80K, same `iter` binary,
   three retained pairs after one declared warmup pair:
@@ -104,6 +440,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   matched short calls and both order directions at warm reply cap 32.
   [MID-only excerpt, native pairs and served evidence](bench/2026-11-12-v41-prefill/README.md);
   the shared `perf/v41-prefill` note carries the non-MID levers.
+  [Census, licensing, native pairs and evidence](bench/2026-11-12-v41-prefill/README.md).
 
 - Same-release B3, cap32, both directions: AB eligible matched append mean
   **1.03881x**, BA **1.09442x**; all **18/18** eligible calls improve.
@@ -203,6 +540,56 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   [census and wide band](bench/2026-11-13-fn-prefill-census/README.md); raw
   `metagross:~/qwen-runs/2026-11-12-fn-prefill/`. No Aven connector was
   available for `SRV-2K0Y`.
+- **Promote default on, `QWEN_V41_MASKED_REINDEX_MID=0` rollback**. Existing
+  MASKED_REINDEX=0 veto remains. No added memory; three 48K sessions fit.
+  Continue PV accumulator fusion and exact Engram ordering through wall gates.
+
+## 2026-11-13 - V4.1 Normalize/RoPE Fusion: Exact, Native Root Gate Fails
+
+- Prototype `0b3893400` fuses existing attention normalization and inverse
+  RoPE/layout passes, preserving the F32 quotient boundary under fast math.
+  `QWEN_V41_ATTN_NORMALIZE_ROPE` stays default off; no new backing memory.
+- M4 Max development probe, same `iter` profile, 1/127/512 rows: **20,971,520
+  output elements bitwise**, three ABBA blocks, **1.672/1.609/1.901x** isolated.
+  These are sanity results, not the required M5 stage or model gates.
+- Verified-niceness-10 M5 N512 isolation **389.639 -> 311.102 us
+  (1.25245x)**, every output bit equal. Paired 48K/80K cells and release
+  three-agent serving remain.
+  Evidence: `docs/bench/2026-11-12-v41-prefill/README.md`.
+- Initial M5 niceness-19 N512 isolation is **345.858 -> 257.295 us (1.344x)**,
+  bitwise. The verified-10 repetition above replaces this timing screen.
+
+- Verified-10 native 48K root **24412.583/27757.090 ms (0.87951x)**,
+  2/3 retained pairs positive; 1K@80K **1069.475/1061.931 (1.00710x)**,
+  3/3 positive. All eight arms/cell bitwise, pressure 0. Large root I/O
+  variation is retained, not trimmed. **Reject at root wall, remove code,
+  knob and price example; no served claim.** Continue the separate PV
+  accumulator-writeback lever, which removes the intermediate output pass.
+
+## 2026-11-13 - V4.1 Streaming CED Engram Lookahead: Exact Native Gain, Served Gate Fails
+
+- Base `5ee5c8c4f`, prototype `a75e4bce1`, `perf/v41-prefill`; default off.
+  Direct M5 48K streamed CED root is **28,009.48 ms**, pressure 0; exposed
+  encoder Engram preparation is **4,047.03 ms**. Streaming currently supplies
+  no lookahead to the existing scoped prefetch machinery.
+- Cache one next chunk's decoded CPU rows while current GPU work executes,
+  join before yield, validate exact token/start identity, discard on changed
+  quantum. Fits the already admitted second CPU upload envelope; no new GPU
+  backing. `QWEN_V41_CED_STREAM_PREFETCH` is experimental and default off.
+- Verified niceness-10 `iter`, three retained interleaved pairs after one
+  excluded warmup pair: **21256.35 -> 19912.40 ms (1.06749x)**, 3/3 positive,
+  all endpoint/causal state/following logits bitwise, pressure <=1. Exposed
+  Engram preparation + encode **4.124x**; native GPU time stays 17.07/17.06 s.
+  Inactive 1K@80K control **1069.13/1073.94 ms (-0.45%)**.
+- Same-release three-agent serve AB: native root prefill **26.91 -> 20.82 s**,
+  delivery **66.31 -> 68.22 tok/s**, matched short appends flat. Reverse BA:
+  root **21.72 -> 22.25 s**, short append mean ratio **0.9623x**, delivery
+  **82.88 -> 72.89 tok/s**. Candidate reaches pressure 2, which is allowed
+  and retained. Warm reply caps 8/32 are separate blocks, not pooled.
+- **Reject, no promotion.** Removed the cache, knob and execution seam;
+  streaming/encoder CED files match base `5ee5c8c4f`. Keep history/evidence;
+  move to masked index scoring. Earlier niceness-19 screens remain labeled.
+  Evidence and source comparison: `docs/bench/2026-11-12-v41-prefill/README.md`.
 
 ## 2026-11-12 - Serve QoS At Normal Priority: No Throughput Gain, TTFT Stays Lower
 

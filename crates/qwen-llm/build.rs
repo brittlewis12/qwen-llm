@@ -5,7 +5,7 @@
 //! Invoked at `cargo build` time. Recompiles when inputs or the worktree change.
 
 use sha2::{Digest, Sha256};
-use std::fmt::Write as _;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,41 +17,8 @@ const METAL_LANGUAGE: &str = "metal3.1";
 const TENSOR_METAL_LANGUAGE: &str = "metal4.0";
 const TENSOR_METAL_TARGET: &str = "26.0";
 
-fn hash_key_part(hasher: &mut Sha256, label: &str, value: &[u8]) {
-    hasher.update((label.len() as u64).to_be_bytes());
-    hasher.update(label.as_bytes());
-    hasher.update((value.len() as u64).to_be_bytes());
-    hasher.update(value);
-}
-
-fn hex_digest(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(out, "{byte:02x}").unwrap();
-    }
-    out
-}
-
-/// Cache key for one `.metal` source. Source bytes, language, target,
-/// compiler identity, SDK and the fixed optimization flags all participate,
-/// so neither an edit nor a toolchain/flag change can reuse stale AIR.
-fn source_cache_key(
-    src: &Path,
-    language: &str,
-    target: &str,
-    compiler_identity: &str,
-    sdk_version: &str,
-) -> anyhow::Result<String> {
-    let source = std::fs::read(src)?;
-    let mut hasher = Sha256::new();
-    hash_key_part(&mut hasher, "language", language.as_bytes());
-    hash_key_part(&mut hasher, "target", target.as_bytes());
-    hash_key_part(&mut hasher, "compiler", compiler_identity.as_bytes());
-    hash_key_part(&mut hasher, "sdk", sdk_version.as_bytes());
-    hash_key_part(&mut hasher, "flags", b"-O3 -ffast-math");
-    hash_key_part(&mut hasher, "source", &source);
-    Ok(hex_digest(&hasher.finalize()))
-}
+mod metal_source_cache;
+use metal_source_cache::{hash_key_part, hex_digest, source_cache_key};
 
 fn cached(key_path: &Path, artifact: &Path, key: &str) -> bool {
     std::fs::read_to_string(key_path)
@@ -275,12 +242,6 @@ fn compile_metallib_with_language(
             path.file_name().and_then(|name| name.to_str()) != Some("half_staging_telemetry.metal")
         });
     }
-    for path in &metal_files {
-        println!(
-            "cargo:rerun-if-changed={}",
-            watched_dir.join(path.file_name().unwrap()).display()
-        );
-    }
     if metal_files.is_empty() {
         std::fs::write(&metallib, [])?;
         return Ok(());
@@ -293,8 +254,19 @@ fn compile_metallib_with_language(
         })
         .collect();
     let mut library_parts: Vec<(PathBuf, String)> = Vec::with_capacity(metal_files.len());
+    let mut watched_inputs = BTreeSet::new();
     for (src, air) in metal_files.iter().zip(air_files.iter()) {
-        let key = source_cache_key(src, language, target, compiler_identity, sdk_version)?;
+        let source_key = source_cache_key(src, language, target, compiler_identity, sdk_version)?;
+        for dependency in &source_key.dependencies {
+            let watched = dependency
+                .strip_prefix(dir)
+                .map(|path| watched_dir.join(path))
+                .unwrap_or_else(|_| dependency.clone());
+            if watched_inputs.insert(watched.clone()) {
+                println!("cargo:rerun-if-changed={}", watched.display());
+            }
+        }
+        let key = source_key.hash;
         let stem = src.file_stem().unwrap().to_string_lossy();
         let key_path = out_dir.join(format!("{name}_{stem}.key"));
         if cached(&key_path, air, &key) {

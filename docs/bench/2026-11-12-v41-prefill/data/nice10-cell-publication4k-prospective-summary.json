@@ -1,0 +1,119 @@
+[
+  {
+    "source": "cell-publication4k-ni10-0-49152-native.jsonl",
+    "sha256": "ec5924d007f572f8535c5860fbe258707d37e0ca1dded0d14f84044d0a3f3882",
+    "depth": 0,
+    "rows": 49152,
+    "candidate": "publication-4k",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 24223.018875,
+        "candidate_ms": 23680.8935,
+        "ratio": 1.022892944263273
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 24064.747417,
+        "candidate_ms": 23455.031958,
+        "ratio": 1.025995081144711
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 24106.543583,
+        "candidate_ms": 23540.858708000003,
+        "ratio": 1.0240299167509874
+      }
+    ],
+    "baseline_mean_ms": 24131.436625,
+    "candidate_mean_ms": 23558.928055333334,
+    "mean_ratio": 1.0243011298443632,
+    "geometric_pair_ratio": 1.024305179419231,
+    "positive_pairs": 3,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 5324.233168000001,
+    "exposed_engram_prepare_and_encode_candidate_ms": 5282.954278,
+    "exposed_engram_prepare_and_encode_ratio": 1.0078135997072508
+  },
+  {
+    "source": "cell-publication4k-ni10-81920-1024-native.jsonl",
+    "sha256": "17e6333cb91703012a2721cf023d14cae10db366a15e8cc188744adb43749c36",
+    "depth": 81920,
+    "rows": 1024,
+    "candidate": "publication-4k",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 976.8015,
+        "candidate_ms": 975.2107920000001,
+        "ratio": 1.0016311427365745
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 979.5285419999999,
+        "candidate_ms": 975.19,
+        "ratio": 1.0044489196976998
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 976.722916,
+        "candidate_ms": 975.763708,
+        "ratio": 1.0009830330766925
+      }
+    ],
+    "baseline_mean_ms": 977.6843193333333,
+    "candidate_mean_ms": 975.3881666666667,
+    "mean_ratio": 1.002354091166098,
+    "geometric_pair_ratio": 1.0023532367231323,
+    "positive_pairs": 3,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 1.1143746666666667,
+    "exposed_engram_prepare_and_encode_candidate_ms": 1.107014,
+    "exposed_engram_prepare_and_encode_ratio": 1.0066491179575567
+  },
+  {
+    "source": "cell-publication4k-full40k-ni10-40960-4096-native.jsonl",
+    "sha256": "46977793c704e5af63a1142a914dc707da3afeb8d7568de8c3d2e7700f54af2e",
+    "depth": 40960,
+    "rows": 4096,
+    "candidate": "publication-4k",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 3214.882667,
+        "candidate_ms": 3049.5958330000003,
+        "ratio": 1.0541995867817673
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 3231.8561250000002,
+        "candidate_ms": 3053.3188330000003,
+        "ratio": 1.0584731899172746
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 3216.7455,
+        "candidate_ms": 3054.206916,
+        "ratio": 1.0532179346292856
+      }
+    ],
+    "baseline_mean_ms": 3221.1614306666665,
+    "candidate_mean_ms": 3052.373860666667,
+    "mean_ratio": 1.0552971482867877,
+    "geometric_pair_ratio": 1.0552944398068622,
+    "positive_pairs": 3,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 31.584458333333334,
+    "exposed_engram_prepare_and_encode_candidate_ms": 1.6150416666666667,
+    "exposed_engram_prepare_and_encode_ratio": 19.556435592476973
+  }
+]

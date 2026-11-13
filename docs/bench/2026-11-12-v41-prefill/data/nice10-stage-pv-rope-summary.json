@@ -1,0 +1,34 @@
+{
+  "source": "stage-pv-rope-ni10-81920-1024-dispatch.jsonl",
+  "sha256": "cb8b19ef230c9cfd1f517a66127e86fdb7b7b11bd8dda890a7bdf0f925ecec31",
+  "stage": "attention-output",
+  "warmup_pairs": 1,
+  "retained_pairs": 3,
+  "pairs": [
+    {
+      "pair": 1,
+      "baseline_ms": 104.53366500000001,
+      "candidate_ms": 68.43574799999999,
+      "ratio": 1.527471651219477
+    },
+    {
+      "pair": 2,
+      "baseline_ms": 104.6885410000001,
+      "candidate_ms": 67.27896000000003,
+      "ratio": 1.5560368501534516
+    },
+    {
+      "pair": 3,
+      "baseline_ms": 104.77787300000006,
+      "candidate_ms": 66.679878,
+      "ratio": 1.5713566992429118
+    }
+  ],
+  "baseline_ms": 104.66669300000005,
+  "candidate_ms": 67.46486200000001,
+  "ratio": 1.5514252886191338,
+  "positive_pairs": 3,
+  "all_exact": true,
+  "thermal_max": 0,
+  "note": "Isolated dispatch GPU sums; instrumented wall is not a native speedup. All declared warmup arms stay in raw evidence."
+}

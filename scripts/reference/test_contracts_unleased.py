@@ -74,7 +74,11 @@ class UnleasedContracts(unittest.TestCase):
         execution = re.findall(
             r"(?m)^\s*(?:output=\$\()?cargo (?:test|build)\b[^\n]*", source
         )
-        self.assertEqual(len(execution), 4)
+        self.assertEqual(len(execution), 5)
+        self.assertIn(
+            "cargo test --offline --locked -p qwen-llm --test metal_source_cache",
+            [line.strip() for line in execution],
+        )
         for line in execution:
             self.assertIn("--offline", line)
             self.assertIn("--locked", line)

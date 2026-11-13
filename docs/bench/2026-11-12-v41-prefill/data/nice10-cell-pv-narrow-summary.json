@@ -1,0 +1,158 @@
+[
+  {
+    "source": "cell-pv-narrow-ni10-0-49152-native.jsonl",
+    "sha256": "80ebe2ab11dadfd2f6ef105b87a06dd81b253f6ede29f8ed7e02f229d7022e00",
+    "depth": 0,
+    "rows": 49152,
+    "candidate": "pv-rope",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 24157.449875000002,
+        "candidate_ms": 24008.916708,
+        "ratio": 1.0061865834600738
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 24049.300833,
+        "candidate_ms": 24121.907333,
+        "ratio": 0.996990018285135
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 24043.445917,
+        "candidate_ms": 24053.431625,
+        "ratio": 0.9995848530822679
+      }
+    ],
+    "baseline_mean_ms": 24083.398875000003,
+    "candidate_mean_ms": 24061.418555333334,
+    "mean_ratio": 1.0009135088862746,
+    "geometric_pair_ratio": 1.0009130069308625,
+    "positive_pairs": 1,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 5367.267916,
+    "exposed_engram_prepare_and_encode_candidate_ms": 5338.698528666667,
+    "exposed_engram_prepare_and_encode_ratio": 1.0053513767784277
+  },
+  {
+    "source": "cell-pv-narrow-ni10-81920-1024-native.jsonl",
+    "sha256": "ac6a2a3f8b83d43b105bd5f485cfd76d5db9e13cae89676783a919b8b596bc24",
+    "depth": 81920,
+    "rows": 1024,
+    "candidate": "pv-rope",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 993.963417,
+        "candidate_ms": 974.586958,
+        "ratio": 1.0198817138285572
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 995.222292,
+        "candidate_ms": 975.260541,
+        "ratio": 1.020468121246382
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 994.99925,
+        "candidate_ms": 975.762958,
+        "ratio": 1.019714103555876
+      }
+    ],
+    "baseline_mean_ms": 994.7283196666667,
+    "candidate_mean_ms": 975.2034856666667,
+    "mean_ratio": 1.0200212922605096,
+    "geometric_pair_ratio": 1.0200212616581354,
+    "positive_pairs": 3,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 1.1318193333333333,
+    "exposed_engram_prepare_and_encode_candidate_ms": 1.1161806666666667,
+    "exposed_engram_prepare_and_encode_ratio": 1.0140108739863498
+  },
+  {
+    "source": "cell-pv-narrow-ni10-0-4096-native.jsonl",
+    "sha256": "a42ecb2f4f124b5e093c74dfa374f651b58a9849ecf4409978d07acf3b9796a3",
+    "depth": 0,
+    "rows": 4096,
+    "candidate": "pv-rope",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 2746.858791,
+        "candidate_ms": 2842.5386660000004,
+        "ratio": 0.9663399917318837
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 2691.704959,
+        "candidate_ms": 2691.458625,
+        "ratio": 1.0000915243495523
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 2699.6729579999997,
+        "candidate_ms": 2695.04425,
+        "ratio": 1.0017174886831635
+      }
+    ],
+    "baseline_mean_ms": 2712.745569333333,
+    "candidate_mean_ms": 2743.013847,
+    "mean_ratio": 0.9889653208642125,
+    "geometric_pair_ratio": 0.98924755438559,
+    "positive_pairs": 2,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 1.5020556666666667,
+    "exposed_engram_prepare_and_encode_candidate_ms": 1.5089723333333334,
+    "exposed_engram_prepare_and_encode_ratio": 0.9954163065061719
+  },
+  {
+    "source": "cell-pv-narrow-ni10-0-8192-native.jsonl",
+    "sha256": "f1fd60ba92df509f7cae746c9ce9be5e3f8c3cb692d016a27eded1ba31bcf36f",
+    "depth": 0,
+    "rows": 8192,
+    "candidate": "pv-rope",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 3587.029916,
+        "candidate_ms": 3703.0001669999997,
+        "ratio": 0.9686820832379401
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 3665.962209,
+        "candidate_ms": 3734.6832499999996,
+        "ratio": 0.9815992317420762
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 3576.5999170000005,
+        "candidate_ms": 3580.654875,
+        "ratio": 0.9988675373244399
+      }
+    ],
+    "baseline_mean_ms": 3609.864014,
+    "candidate_mean_ms": 3672.7794306666665,
+    "mean_ratio": 0.982869808042013,
+    "geometric_pair_ratio": 0.982971950648146,
+    "positive_pairs": 0,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 207.99366766666665,
+    "exposed_engram_prepare_and_encode_candidate_ms": 275.84182,
+    "exposed_engram_prepare_and_encode_ratio": 0.7540323931544052
+  }
+]

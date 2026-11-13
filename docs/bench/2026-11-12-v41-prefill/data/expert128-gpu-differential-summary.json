@@ -1,0 +1,60 @@
+{
+  "source_commit": "ee6e03913fc14f313420e40f28caca603fd8b795",
+  "profile": "test",
+  "metal_debug_layer": 1,
+  "test": "sorted_iq_experts_match_rectangular_and_preserve_scratch_guards",
+  "test_passed": true,
+  "comparisons": 96,
+  "components_compared": 6340608,
+  "all_bitwise": true,
+  "guards_intact": true,
+  "policies": [
+    "M64",
+    "M64+hotM128"
+  ],
+  "hot_cutoff": 96,
+  "formats": [
+    "IQ2_XXS",
+    "IQ2_XS",
+    "IQ2_S",
+    "IQ3_XXS"
+  ],
+  "mixed_down_formats": true,
+  "route_populations": [
+    [
+      0,
+      1,
+      15,
+      16,
+      31,
+      32,
+      64,
+      99
+    ],
+    [
+      129,
+      0,
+      0,
+      0,
+      129,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      1,
+      0,
+      1,
+      0,
+      65,
+      95,
+      96
+    ]
+  ],
+  "thermal_max": 0,
+  "niceness": 10,
+  "pid": 79851,
+  "log_sha256": "2bacc75b2791126cf028669030f981f52479d3dc329981153aae3272c7bd770f",
+  "monitor_sha256": "b4c9d7b9356b80b1e9da649505e9ed01ca95684bfbb0b2fd2c34d99a62356dbc"
+}

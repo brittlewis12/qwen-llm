@@ -115,6 +115,7 @@ uv run scripts/reference/normalize_paths.py --self-test
 uv run scripts/reference/normalize_paths.py --check
 uv run scripts/reference/acceptance_inventory.py --self-test
 uv run --no-project python scripts/reference/test_contracts_unleased.py
+uv run --no-project python scripts/bench/test_v41_prefill_processes.py
 uv run --no-project python scripts/reference/deepseek_v41/check.py
 # Discovery checks every full name and ignore state before executing only CPU
 # entries. GPU, model, timing and external-fixture witnesses remain explicit
@@ -180,6 +181,7 @@ print(executables[0])
   fi
 fi
 
+cargo test --offline --locked -p qwen-llm --test metal_source_cache
 cargo test --offline --locked -p qwen-llm --test comparison_tripwire
 if [ "$full" -eq 1 ]; then
   readme_test=family_profile::tests::readme_family_table_matches_profiles

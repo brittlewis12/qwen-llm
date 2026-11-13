@@ -35,13 +35,14 @@ mod planning;
 pub use planning::{PrefillAdmission, PrefillGeometry, PrefillIntent, RequestPlan};
 pub mod profile;
 
-/// Exact prefill dataflow experiments, scoped to the encoding thread.
-/// Prefix construction stays on the production path in the paired probe.
+/// Exact prefill dataflow experiments scoped to the encoding thread.
+/// Paired probes build their prefix on the production path.
 #[cfg(feature = "perf-ablations")]
 #[derive(Clone, Copy, Debug)]
 pub enum PrefillExperiment {
     Production,
     MaskedReindexMid(bool),
+    MaskedReindexShort(bool),
 }
 #[cfg(feature = "perf-ablations")]
 thread_local! {

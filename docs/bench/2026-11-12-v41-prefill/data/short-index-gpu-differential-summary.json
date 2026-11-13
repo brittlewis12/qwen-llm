@@ -1,0 +1,32 @@
+{
+  "source": "1930b69f561aba23944ca141564fe29544e28f53",
+  "device": "Apple M5 Ultra",
+  "profile": "test",
+  "test": "deepseek_v41::forward::attention_gpu::tests::radix_select::masked_mma_index_preserves_allowed_scores_and_selection",
+  "cases": 5,
+  "result": "passed",
+  "strict_allowed_score_bits_and_selection": true,
+  "model_loaded": false,
+  "niceness": 10,
+  "thermal_execution_max": 0,
+  "pid": 10794,
+  "exit_code": 0,
+  "iter_sha256": "d207776beaa50fc129dd1dbe64afe6a9531c7cb90604a11a53931b4423a72550",
+  "new_cooperative_exports_compiled": 8,
+  "cooperative_functional_claim": false,
+  "retired_wide_export_absent": true,
+  "evidence": {
+    "short-index-gpu-test.log": {
+      "sha256": "759e1901771c76eb1217fbaafcb05036a038f57d990c296f233c0e8e5c53e4b1",
+      "bytes": 338
+    },
+    "short-index-gpu-test-monitor.jsonl": {
+      "sha256": "6b077f6315621c227dbf8d16f081d1e2bbf9f207f4e99cf195a0051c80a57e06",
+      "bytes": 28889
+    },
+    "build-short-index.log": {
+      "sha256": "e581dae0a6ea25c4df4c691f089d0b6f7c1c1ee6569fe16bf2b88a32b34f8a6b",
+      "bytes": 46231
+    }
+  }
+}

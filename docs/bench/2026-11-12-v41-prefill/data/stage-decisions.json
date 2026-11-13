@@ -1,0 +1,24 @@
+{
+  "stream_prefetch": {
+    "scope": "exposed encoder Engram preparation",
+    "baseline_ms": 918.298542,
+    "candidate_ms": 58.657958,
+    "ratio": 15.655139955605,
+    "pass": true
+  },
+  "masked_reindex_mid": {
+    "scope": "all index scoring dispatches",
+    "baseline_ms": 163.250248,
+    "candidate_ms": 108.30971100000001,
+    "ratio": 1.507254026372575,
+    "pass": true
+  },
+  "normalize_rope": {
+    "kind": "summary",
+    "n": 512,
+    "baseline_us": 345.8576344807322,
+    "fused_us": 257.29514406217885,
+    "speedup": 1.3442058370023144,
+    "pass": true
+  }
+}

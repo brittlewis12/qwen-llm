@@ -1,0 +1,80 @@
+[
+  {
+    "source": "nice10-cell-prefetch-0-49152-native.jsonl",
+    "sha256": "b5a09208115b6a23910222e8fc43fc52c709885a0a2f9921300e6a9bf3db7255",
+    "depth": 0,
+    "rows": 49152,
+    "candidate": "ced-stream-prefetch",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 21304.094291999998,
+        "candidate_ms": 19988.75225,
+        "ratio": 1.0658041095086361
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 21102.019834,
+        "candidate_ms": 19875.541667,
+        "ratio": 1.0617079115401598
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 21362.923375000002,
+        "candidate_ms": 19872.911083,
+        "ratio": 1.074977052218314
+      }
+    ],
+    "baseline_mean_ms": 21256.345833666666,
+    "candidate_mean_ms": 19912.40166666667,
+    "mean_ratio": 1.0674928212828168,
+    "geometric_pair_ratio": 1.067481963552207,
+    "positive_pairs": 3,
+    "all_exact": true,
+    "thermal_max": 1,
+    "exposed_engram_prepare_and_encode_baseline_ms": 1899.0420826666666,
+    "exposed_engram_prepare_and_encode_candidate_ms": 460.48066766666665,
+    "exposed_engram_prepare_and_encode_ratio": 4.124043018547193
+  },
+  {
+    "source": "nice10-cell-prefetch-81920-1024-native.jsonl",
+    "sha256": "3559d9e0a65d27615f67c1c0fdd2eb0cc5a4238d4b0c7d78e2fdfc87f7ed7642",
+    "depth": 81920,
+    "rows": 1024,
+    "candidate": "ced-stream-prefetch",
+    "warmup_pairs": 1,
+    "retained_pairs": 3,
+    "pairs": [
+      {
+        "pair": 1,
+        "baseline_ms": 1070.236083,
+        "candidate_ms": 1076.4523749999998,
+        "ratio": 0.9942252048075979
+      },
+      {
+        "pair": 2,
+        "baseline_ms": 1069.392084,
+        "candidate_ms": 1076.89875,
+        "ratio": 0.9930293669669502
+      },
+      {
+        "pair": 3,
+        "baseline_ms": 1067.7472080000002,
+        "candidate_ms": 1068.478333,
+        "ratio": 0.999315732497872
+      }
+    ],
+    "baseline_mean_ms": 1069.125125,
+    "candidate_mean_ms": 1073.9431526666667,
+    "mean_ratio": 0.9955137032582188,
+    "geometric_pair_ratio": 0.9955197076206594,
+    "positive_pairs": 0,
+    "all_exact": true,
+    "thermal_max": 0,
+    "exposed_engram_prepare_and_encode_baseline_ms": 1.8296243333333335,
+    "exposed_engram_prepare_and_encode_candidate_ms": 1.8000413333333334,
+    "exposed_engram_prepare_and_encode_ratio": 1.0164346226123697
+  }
+]

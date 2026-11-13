@@ -1,0 +1,12 @@
+[
+  {
+    "profile": "test",
+    "sha256": "3f05c7b6ddae05fca7596eb17f980ed354c533ec1446e387854ae0f71a1e3b52",
+    "wide_kernel_export_present": true
+  },
+  {
+    "profile": "iter",
+    "sha256": "4a520c2a2b0ede93a0d3e00d58b6774719bd8d186530134db6b6ff4ee5fb2c30",
+    "wide_kernel_export_present": false
+  }
+]

@@ -1,0 +1,21 @@
+{
+  "source_commit": "fceabe46b11346a0c608a186d920ade4fda2723a",
+  "profile": "test",
+  "metal_debug_layer": 1,
+  "test": "tensor64_sink_tile_matches_tensor32_sink",
+  "test_passed": true,
+  "cases": 15,
+  "components_compared": 13434880,
+  "normalized_bits_exact": true,
+  "inverse_rope_bits_exact": true,
+  "guards_intact": true,
+  "query_alias_exercised": true,
+  "threads": 512,
+  "shared_operand_bytes": 20480,
+  "thermal_max": 1,
+  "niceness": 10,
+  "pid": 62951,
+  "log_sha256": "561dad840ebc5340bc339a9f35e0f7b17d0b1c3252e3377fa2b09fd34812dcb4",
+  "monitor_sha256": "a07273b77312720d1914d7b1cd22b57f0c892dc974e938344144c44c38cafb6f",
+  "iter_sha256": "4505aaad9a7f6521181b67e1dd18bee529d4a3016e8652d9a509fe93de2eeced"
+}

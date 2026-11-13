@@ -1,0 +1,47 @@
+{
+  "source": "stage-engram-permute-ni10-40960-4096-native.jsonl",
+  "sha256": "e8bbc737bd32cebd2c6b7b4c8ac36974d6acdfc9260150fdc2774303c8c80612",
+  "warmup_pairs": 1,
+  "retained_pairs": 3,
+  "pairs": [
+    {
+      "pair": 1,
+      "baseline_ms": 142.050749,
+      "candidate_ms": 115.353709,
+      "ratio": 1.2314363381241604
+    },
+    {
+      "pair": 2,
+      "baseline_ms": 135.623374,
+      "candidate_ms": 107.7365,
+      "ratio": 1.2588433260779772
+    },
+    {
+      "pair": 3,
+      "baseline_ms": 133.99458299999998,
+      "candidate_ms": 105.654125,
+      "ratio": 1.2682380645336846
+    }
+  ],
+  "baseline_ms": 137.222902,
+  "candidate_ms": 109.58144466666667,
+  "all_exact": true,
+  "thermal_max": 0,
+  "layers": [
+    {
+      "layer": 1,
+      "output_bytes": 100663296,
+      "requested_rows": 98304,
+      "distinct_rows": 42418,
+      "digest": "c0f0aa1a748f581d4616dc995fb59df907eb6fbd043916b1f6d56eae20c84122"
+    },
+    {
+      "layer": 14,
+      "output_bytes": 100663296,
+      "requested_rows": 98304,
+      "distinct_rows": 42420,
+      "digest": "6796700c771e1454e5aff4851c00616a527e601e7a231e3f7aa3c3bec35abf5c"
+    }
+  ],
+  "ratio": 1.2522457831927227
+}

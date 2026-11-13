@@ -1,0 +1,341 @@
+{
+  "source": "nice10-census-root-0-49152-dispatch.jsonl",
+  "cells": [
+    {
+      "kind": "cell",
+      "rep": 0,
+      "depth": 0,
+      "rows": 49152,
+      "mode": "dispatch",
+      "policy": "baseline",
+      "wall_ms": 24563.426166999998,
+      "thermal": 0,
+      "logit_digest": "a4c13784ef52ffb732b3620e94e4d215b33926c29dd84be2a6204b17aea746ab"
+    }
+  ],
+  "chunks": [
+    {
+      "kind": "chunk_dispatch",
+      "start": 40960,
+      "rows": 4096,
+      "root_rows": 49152
+    }
+  ],
+  "groups": {
+    "mhc": {
+      "dispatches": 161,
+      "gpu_ms": 121.31745900000004,
+      "matrix_flops": 161061273600,
+      "logical_payload_bytes": 60927574016,
+      "matrix_tflops": 1.3276017724703577,
+      "tensor_peak_percent": 1.008049941131631,
+      "logical_payload_gbps": 502.2160414355528,
+      "tensor_ideal_ms": 1.2229405740318908,
+      "gpu_ms_above_tensor_ideal": 120.09451842596815
+    },
+    "other": {
+      "dispatches": 39375,
+      "gpu_ms": 341.95146199998584,
+      "matrix_flops": 0,
+      "logical_payload_bytes": 0,
+      "matrix_tflops": null,
+      "tensor_peak_percent": null,
+      "logical_payload_gbps": null,
+      "tensor_ideal_ms": null,
+      "gpu_ms_above_tensor_ideal": null
+    },
+    "dense": {
+      "dispatches": 10573,
+      "gpu_ms": 379.34748499999455,
+      "matrix_flops": 27149562019840,
+      "logical_payload_bytes": 39910244352,
+      "matrix_tflops": 71.5691103628653,
+      "tensor_peak_percent": 54.34252874932825,
+      "logical_payload_gbps": 105.20761552432744,
+      "tensor_ideal_ms": 206.14701609597572,
+      "gpu_ms_above_tensor_ideal": 173.20046890401883
+    },
+    "query_index_rope": {
+      "dispatches": 344,
+      "gpu_ms": 43.76712400000001,
+      "matrix_flops": 0,
+      "logical_payload_bytes": 22213033984,
+      "matrix_tflops": null,
+      "tensor_peak_percent": null,
+      "logical_payload_gbps": 507.527841765431,
+      "tensor_ideal_ms": null,
+      "gpu_ms_above_tensor_ideal": null
+    },
+    "attention_qk": {
+      "dispatches": 160,
+      "gpu_ms": 58.166070000000026,
+      "matrix_flops": 3161095929856,
+      "logical_payload_bytes": 116500987904,
+      "matrix_tflops": 54.34604624063477,
+      "tensor_peak_percent": 41.26503131407348,
+      "logical_payload_gbps": 2002.902859072307,
+      "tensor_ideal_ms": 24.00224699966591,
+      "gpu_ms_above_tensor_ideal": 34.16382300033412
+    },
+    "attention_sinks": {
+      "dispatches": 320,
+      "gpu_ms": 49.563955000000014,
+      "matrix_flops": 0,
+      "logical_payload_bytes": 48360325120,
+      "matrix_tflops": null,
+      "tensor_peak_percent": null,
+      "logical_payload_gbps": 975.7156207570599,
+      "tensor_ideal_ms": null,
+      "gpu_ms_above_tensor_ideal": null
+    },
+    "attention_pv": {
+      "dispatches": 160,
+      "gpu_ms": 117.18638000000003,
+      "matrix_flops": 3161095929856,
+      "logical_payload_bytes": 158913789952,
+      "matrix_tflops": 26.974943076627156,
+      "tensor_peak_percent": 20.48211319409807,
+      "logical_payload_gbps": 1356.0773014065282,
+      "tensor_ideal_ms": 24.00224699966591,
+      "gpu_ms_above_tensor_ideal": 93.18413300033411
+    },
+    "attention_inverse_rope": {
+      "dispatches": 160,
+      "gpu_ms": 77.82541300000001,
+      "matrix_flops": 0,
+      "logical_payload_bytes": 21474836480,
+      "matrix_tflops": null,
+      "tensor_peak_percent": null,
+      "logical_payload_gbps": 275.93604263943956,
+      "tensor_ideal_ms": null,
+      "gpu_ms_above_tensor_ideal": null
+    },
+    "routed_gate_up": {
+      "dispatches": 20,
+      "gpu_ms": 309.355792,
+      "matrix_flops": 23192823398400,
+      "logical_payload_bytes": 55144611840,
+      "matrix_tflops": 74.97135660029925,
+      "tensor_peak_percent": 56.92585922573975,
+      "logical_payload_gbps": 178.25627728993675,
+      "tensor_ideal_ms": 176.10344266059226,
+      "gpu_ms_above_tensor_ideal": 133.25234933940774
+    },
+    "routed_down": {
+      "dispatches": 20,
+      "gpu_ms": 164.26712199999997,
+      "matrix_flops": 11596411699200,
+      "logical_payload_bytes": 37386977280,
+      "matrix_tflops": 70.59484307030108,
+      "tensor_peak_percent": 53.60276618853538,
+      "logical_payload_gbps": 227.59866262221362,
+      "tensor_ideal_ms": 88.05172133029613,
+      "gpu_ms_above_tensor_ideal": 76.21540066970384
+    },
+    "engram_gpu": {
+      "dispatches": 4,
+      "gpu_ms": 58.299958999999994,
+      "matrix_flops": 2576980377600,
+      "logical_payload_bytes": 3437494272,
+      "matrix_tflops": 44.20209588140534,
+      "tensor_peak_percent": 33.5627151719099,
+      "logical_payload_gbps": 58.96220736621788,
+      "tensor_ideal_ms": 19.567049184510253,
+      "gpu_ms_above_tensor_ideal": 38.73290981548974
+    },
+    "index_topk": {
+      "dispatches": 72,
+      "gpu_ms": 7.362208000000001,
+      "matrix_flops": 0,
+      "logical_payload_bytes": 1132462080,
+      "matrix_tflops": null,
+      "tensor_peak_percent": null,
+      "logical_payload_gbps": 153.82098413954074,
+      "tensor_ideal_ms": null,
+      "gpu_ms_above_tensor_ideal": null
+    },
+    "index_scores": {
+      "dispatches": 36,
+      "gpu_ms": 78.26112699999999,
+      "matrix_flops": 2164663517184,
+      "logical_payload_bytes": 136549761024,
+      "matrix_tflops": 27.659498401856652,
+      "tensor_peak_percent": 21.001897040134136,
+      "logical_payload_gbps": 1744.7967625613164,
+      "tensor_ideal_ms": 16.43632131498861,
+      "gpu_ms_above_tensor_ideal": 61.82480568501138
+    }
+  },
+  "kernels": {
+    "kernel_deepseek_v41_hc_projection_rows": {
+      "dispatches": 40,
+      "gpu_ms": 37.285754
+    },
+    "kernel_deepseek_v4_hc_controls_batch": {
+      "dispatches": 40,
+      "gpu_ms": 2.9473759999999998
+    },
+    "kernel_deepseek_v4_hc_collapse_batch": {
+      "dispatches": 41,
+      "gpu_ms": 40.406664
+    },
+    "kernel_rms_norm_mul_rows_f32": {
+      "dispatches": 81,
+      "gpu_ms": 10.410000000000004
+    },
+    "kernel_scatter_offset_f32_to_f16": {
+      "dispatches": 140,
+      "gpu_ms": 50.99979200000004
+    },
+    "kernel_mat_mat_q8_0_f16act_tensor_wide": {
+      "dispatches": 40,
+      "gpu_ms": 25.783961
+    },
+    "kernel_mat_mat_f16_f16act_tensor_wide": {
+      "dispatches": 260,
+      "gpu_ms": 292.07025599999986
+    },
+    "kernel_deepseek_v41_attention_rope_rows": {
+      "dispatches": 504,
+      "gpu_ms": 121.59253700000004
+    },
+    "kernel_deepseek_v41_attention_history": {
+      "dispatches": 20,
+      "gpu_ms": 15.198000999999998
+    },
+    "kernel_deepseek_v41_attention_publish_raw": {
+      "dispatches": 20,
+      "gpu_ms": 0.987292
+    },
+    "kernel_deepseek_v41_attention_score_simdgroup_qk": {
+      "dispatches": 160,
+      "gpu_ms": 58.166070000000026
+    },
+    "kernel_deepseek_v41_attention_softmax_rows": {
+      "dispatches": 160,
+      "gpu_ms": 27.440120999999994
+    },
+    "kernel_deepseek_v41_attention_pv_tensor64": {
+      "dispatches": 160,
+      "gpu_ms": 117.18638000000003
+    },
+    "kernel_deepseek_v41_attention_normalize_rows": {
+      "dispatches": 160,
+      "gpu_ms": 22.123834000000006
+    },
+    "kernel_deepseek_v41_group_rows": {
+      "dispatches": 40,
+      "gpu_ms": 27.054126000000004
+    },
+    "kernel_deepseek_v41_attention_finite": {
+      "dispatches": 22,
+      "gpu_ms": 7.958168000000001
+    },
+    "kernel_deepseek_v4_hc_post_batch": {
+      "dispatches": 40,
+      "gpu_ms": 40.677665
+    },
+    "kernel_mat_mat_bf16_f32_tensor": {
+      "dispatches": 21,
+      "gpu_ms": 9.5365
+    },
+    "kernel_deepseek_v4_clamped_swiglu": {
+      "dispatches": 20,
+      "gpu_ms": 2.179582
+    },
+    "kernel_deepseek_v41_route": {
+      "dispatches": 20,
+      "gpu_ms": 5.037870999999999
+    },
+    "kernel_moe_route_bucket_slots_parallel_f32": {
+      "dispatches": 20,
+      "gpu_ms": 1.674585
+    },
+    "v41_sorted_plan": {
+      "dispatches": 20,
+      "gpu_ms": 0.9740420000000001
+    },
+    "v41_sorted_pack": {
+      "dispatches": 20,
+      "gpu_ms": 40.295373999999995
+    },
+    "v41_sorted_gu_iq2_xxs": {
+      "dispatches": 17,
+      "gpu_ms": 259.491709
+    },
+    "v41_sorted_down_iq2_xxs": {
+      "dispatches": 11,
+      "gpu_ms": 93.428957
+    },
+    "kernel_deepseek_v41_sum": {
+      "dispatches": 20,
+      "gpu_ms": 14.355832999999999
+    },
+    "kernel_copy_offset_f32": {
+      "dispatches": 20,
+      "gpu_ms": 1.6700850000000005
+    },
+    "kernel_mat_mat_q5_K_f32_tensor": {
+      "dispatches": 2,
+      "gpu_ms": 55.720709
+    },
+    "kernel_deepseek_v41_engram": {
+      "dispatches": 2,
+      "gpu_ms": 2.57925
+    },
+    "kernel_mat_mat_bf16_f16act_tensor": {
+      "dispatches": 12,
+      "gpu_ms": 7.953501000000001
+    },
+    "kernel_deepseek_v41_attention_copy": {
+      "dispatches": 12288,
+      "gpu_ms": 40.04695199999854
+    },
+    "kernel_deepseek_v41_attention_pool": {
+      "dispatches": 6144,
+      "gpu_ms": 20.119791999999805
+    },
+    "kernel_rms_norm_mul_f32": {
+      "dispatches": 10240,
+      "gpu_ms": 37.202181999998864
+    },
+    "kernel_mat_vec_bf16_f32_tg": {
+      "dispatches": 10240,
+      "gpu_ms": 44.003266999999134
+    },
+    "kernel_deepseek_v41_attention_compress_publish": {
+      "dispatches": 10240,
+      "gpu_ms": 65.78778500000003
+    },
+    "kernel_deepseek_v41_attention_selection_prepare_rows": {
+      "dispatches": 36,
+      "gpu_ms": 4.048874999999999
+    },
+    "kernel_deepseek_v41_attention_index_heads_rows_mma": {
+      "dispatches": 36,
+      "gpu_ms": 78.26112699999999
+    },
+    "kernel_deepseek_v41_attention_select_radix_rows": {
+      "dispatches": 36,
+      "gpu_ms": 3.3133330000000005
+    },
+    "v41_sorted_down_iq2_s": {
+      "dispatches": 3,
+      "gpu_ms": 24.741667
+    },
+    "v41_sorted_gu_iq2_xs": {
+      "dispatches": 2,
+      "gpu_ms": 32.527791
+    },
+    "v41_sorted_down_iq2_xs": {
+      "dispatches": 6,
+      "gpu_ms": 46.096498000000004
+    },
+    "v41_sorted_gu_iq2_s": {
+      "dispatches": 1,
+      "gpu_ms": 17.336292
+    }
+  },
+  "isolated_kernel_sum_ms": 1806.6715559999805,
+  "traffic_note": "Reduce bounded V4.1 dispatch captures; rates describe logical payloads.\n\nTensor peak is a reference, not the scalar/SFU roof. Packed expert traffic is\none complete bank pass, not measured traffic or proof every expert was touched.\nCache hits, padded tiles, repeated dequantization and hardware DRAM traffic are\nnot inferred from tensor bindings. Non-matrix work is not credited as FLOPs.\n"
+}

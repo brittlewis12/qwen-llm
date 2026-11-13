@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 - V4.1 Three-Agent −4.9% Is a Cache/Time Artifact; No Code Fix
+
+- **Decision: no product change or revert.** The 2026-11-12 standing's V4.1
+  −4.94% (`6526a6919` → `f691af6e1`, AB 0.9487 / BA 0.9526) does not reproduce
+  in native decode or in a deterministic serve control. The recorded range did
+  not regress V4.1 decode; the standing arms were not cache- or time-symmetric.
+- **Native decode is flat.** Identical release probe both arms, 128 production
+  rounds at 32K/48K, B=3 `step_batch` and B=1 `Forward::step`, solo causal
+  waves on, `GpuThreadQos` entered as serve does. Current/baseline `ms_round`
+  geomean over 14 paired ratios for baseline vs main `540c0a2ab`: **1.002**
+  (32K B3), **1.004** (32K B1), **0.988** (48K B3), **0.993** (48K B1); range
+  0.966-1.035. Midpoint `a3736629a` is 1.001/0.998/1.003/1.003. No step.
+- **The layer-slice `MS=0` path is inert.** Every V4.1 serve arm reports
+  `layer_rounds=0`; with `between=None` the new wrappers call the incumbent
+  `prefill`/`cold_prefill`, and `run_chunk` sees `interleave=None`. No decode
+  file changes in the range outside `perf-ablations`.
+- **Standing confounds.** In the clean BA pair the first (current) arm read
+  2.99 GB from the Engram companion during decode while the second (baseline)
+  arm read 0.50 GB, inheriting its page cache; in AB, baseline was thermal 0
+  while current was thermal 1. Same-binary AB→BA drift is 3.7-4.2%, as large as
+  the gap. Agent sampling also generated different token streams (3647 vs 3549
+  window tokens, different response hashes).
+- **Greedy control.** Same 40 s protocol with `--sampling greedy` (identical
+  token streams, 2447 transitions/arm, all thermal 0): within-packet
+  current/baseline **1.003** (AB) and **1.018** (BA); same baseline binary
+  moved +4.7% between packets with identical disk reads. No V4.1 regression.
+- **Recommendation:** log `process_disk_read_bytes` and window-token/response
+  hashes per standing arm and add a deterministic greedy control or
+  self-warmed arms before attributing a few-percent V4.1 change. Record:
+  `docs/bench/2026-11-12-v41-serve-regression.md`; raw
+  `metagross:~/qwen-runs/2026-11-12-v41-regression/`. No roadmap edit. Aven
+  note on `SRV-2K0Y`: `VW68R006QF6PNMRC`.
+
 ## 2026-11-12 - Solo Routed-Expert Prefetch: Closed (2.4-3.6 ms/Token Worse)
 
 - **Oracle probe only; no product path.** Probe code is on branch
@@ -214,6 +247,10 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   `6526a6919` on the V4.1 serve path, not flat as in the prior two standings.
 - **Bisect.** The V4.1 -4.94% is being bisected on `fix/v41-serve-regression`;
   the GLM and Flash-Next numbers are not affected by that regression.
+- **Bisect result: no product regression.** The bisect found that the gap is a
+  cache/time measurement artifact. See **V4.1 Three-Agent −4.9% Is a
+  Cache/Time Artifact; No Code Fix** above and
+  [the bench note](bench/2026-11-12-v41-serve-regression.md).
 - **Read: GLM is +4.6%, down from the prior +10%.** AB **+5.76%** (both thermal
   1; baseline compile overlap, current none) and BA **+3.47%** (both compile
   overlap). Gap p50 is 27.6-28.2 ms in all four arms. The gain is real but

@@ -510,6 +510,9 @@ pub(crate) fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
         route_capture_stride,
         file,
         route_capture_token_pattern,
+        route_census_only,
+        route_plan,
+        route_rows_per_agent,
         mut slot_orders,
     } = args;
     if iters == 0 {
@@ -550,6 +553,159 @@ pub(crate) fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
             MetalBlock::Attn(a) => a.ffn_moe.as_ref(),
         })
         .collect();
+    if route_census_only {
+        if file.len() != 1 {
+            return Err(anyhow!(
+                "--route-census-only requires exactly one --file token stream"
+            ));
+        }
+        let plan_path = route_plan
+            .as_ref()
+            .ok_or_else(|| anyhow!("--route-census-only requires --route-plan"))?;
+        if route_rows_per_agent == 0 {
+            return Err(anyhow!("--route-rows-per-agent must be positive"));
+        }
+        let plan: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(plan_path).with_context(|| format!("read {}", plan_path.display()))?,
+        )
+        .with_context(|| format!("parse {}", plan_path.display()))?;
+        let agents = plan["agents"]
+            .as_array()
+            .ok_or_else(|| anyhow!("route plan needs an agents array"))?;
+        if agents.is_empty() {
+            return Err(anyhow!("route plan has no agents"));
+        }
+        let tokenizer = NativeTokenizer::from_gguf(&g).context("open native GGUF tokenizer")?;
+        let text = std::fs::read_to_string(&file[0])
+            .with_context(|| format!("read {}", file[0].display()))?;
+        let ids = tokenizer
+            .encode(&text, false)
+            .with_context(|| format!("tokenize {}", file[0].display()))?;
+        let roots_end = route_capture_ctx
+            .checked_mul(agents.len())
+            .ok_or_else(|| anyhow!("route plan root length overflow"))?;
+        if ids.len() <= roots_end + 2048 {
+            return Err(anyhow!(
+                "token stream has {} tokens; route plan roots need {} plus suffix material",
+                ids.len(),
+                roots_end
+            ));
+        }
+        let mf = MetalForward::new(&ctx, &mm);
+        let mut counts_by_agent = vec![vec![vec![0u64; n_expert]; moe_blocks.len()]; agents.len()];
+        let mut rows_by_agent = vec![0usize; agents.len()];
+        let mut calls_by_agent = vec![0usize; agents.len()];
+        for (agent_index, agent_plan) in agents.iter().enumerate() {
+            let calls = agent_plan["calls"]
+                .as_array()
+                .ok_or_else(|| anyhow!("route plan agent {agent_index} needs calls"))?;
+            let root_start = agent_index * route_capture_ctx;
+            let capacity = route_capture_ctx + route_rows_per_agent + 17;
+            let mut session = MetalSession::fresh(&ctx, &mm, capacity)
+                .with_context(|| format!("route-census agent {agent_index} session"))?;
+            let mut scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, 1024, route_capture_ctx)
+                .context("route-census packed-root scratch")?;
+            prefill_tokens_with_multi_hidden(
+                &mf,
+                &ids[root_start..root_start + route_capture_ctx],
+                0,
+                &mut session,
+                &mut scratch,
+                &[],
+                None,
+            )
+            .with_context(|| format!("route-census agent {agent_index} root prefill"))?;
+            let mut position = route_capture_ctx;
+            'calls: for call in calls {
+                let width = call["append_tokens"]
+                    .as_u64()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .ok_or_else(|| anyhow!("route plan call has invalid append_tokens"))?;
+                if width == 0 {
+                    continue;
+                }
+                let available = ids.len() - width;
+                let suffix_start = (agent_index * 977) % available;
+                let take = width.min(route_rows_per_agent - rows_by_agent[agent_index]);
+                for &token_id in &ids[suffix_start..suffix_start + take] {
+                    let routes = mf.capture_moe_gateup_replay_for_token(
+                        token_id,
+                        position as u32,
+                        &mut session,
+                    )?;
+                    if routes.len() != moe_blocks.len() {
+                        return Err(anyhow!(
+                            "captured {} route rows, expected {} MoE blocks",
+                            routes.len(),
+                            moe_blocks.len()
+                        ));
+                    }
+                    for (block, route) in routes.iter().enumerate() {
+                        if route.topk_idx.len() != topk {
+                            return Err(anyhow!(
+                                "block {block} captured {} routes, expected topk={topk}",
+                                route.topk_idx.len()
+                            ));
+                        }
+                        for &expert in &route.topk_idx {
+                            if expert < 0 || expert as usize >= n_expert {
+                                return Err(anyhow!(
+                                    "block {block} returned invalid expert id {expert}"
+                                ));
+                            }
+                            counts_by_agent[agent_index][block][expert as usize] += 1;
+                        }
+                    }
+                    rows_by_agent[agent_index] += 1;
+                    position += 1;
+                }
+                calls_by_agent[agent_index] += 1;
+                if rows_by_agent[agent_index] >= route_rows_per_agent {
+                    break 'calls;
+                }
+            }
+        }
+        let weights = moe_blocks
+            .iter()
+            .enumerate()
+            .map(|(block, moe)| {
+                serde_json::json!({
+                    "moe_index": block,
+                    "gate_dtype": format!("{:?}", moe.gate_exps.dtype),
+                    "up_dtype": format!("{:?}", moe.up_exps.dtype),
+                    "down_dtype": format!("{:?}", moe.down_exps.dtype),
+                    "gate_bytes_per_expert": moe.gate_exps.n_bytes() / n_expert as u64,
+                    "up_bytes_per_expert": moe.up_exps.n_bytes() / n_expert as u64,
+                    "down_bytes_per_expert": moe.down_exps.n_bytes() / n_expert as u64,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut total_counts = vec![vec![0u64; n_expert]; moe_blocks.len()];
+        for agent in &counts_by_agent {
+            for (block, per_expert) in agent.iter().enumerate() {
+                for (expert, &count) in per_expert.iter().enumerate() {
+                    total_counts[block][expert] += count;
+                }
+            }
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "moe_route_census",
+                "model": model,
+                "root_tokens": route_capture_ctx,
+                "captured_tokens_per_agent": rows_by_agent,
+                "calls_used_per_agent": calls_by_agent,
+                "expert_count": n_expert,
+                "topk": topk,
+                "moe_blocks": weights,
+                "counts_per_moe_block": total_counts,
+                "counts_per_agent_and_moe_block": counts_by_agent,
+                "route_semantics": "serve_realistic CSV population; each agent owns its own packed code-corpus root, append token slices use the same agent*977 offset and call lengths as the serve driver; appended route rows are B1 continuations"
+            })
+        );
+        return Ok(());
+    }
     let q4_moes: Vec<_> = moe_blocks
         .iter()
         .copied()

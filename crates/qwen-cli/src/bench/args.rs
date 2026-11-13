@@ -924,6 +924,17 @@ pub(crate) struct MoeBatchSweepArgs {
     /// Read one or more real prompt token streams from text files.
     #[arg(long)]
     pub(crate) file: Vec<PathBuf>,
+    /// Capture route counts for all MoE layers at one real prefill context and
+    /// continue with the requested token stream; skips dtype-specific tile tests.
+    #[arg(long)]
+    pub(crate) route_census_only: bool,
+    /// JSON plan sampled from serve_realistic's real-call population for the
+    /// route-only mode. Each agent has a warm root and ordered append calls.
+    #[arg(long)]
+    pub(crate) route_plan: Option<PathBuf>,
+    /// New append rows to capture per agent in route-only mode.
+    #[arg(long, default_value = "512")]
+    pub(crate) route_rows_per_agent: usize,
     /// Token-id pattern used for captured replay tokens.
     #[arg(long, value_enum, default_value = "ramp")]
     pub(crate) route_capture_token_pattern: CaptureTokenPattern,

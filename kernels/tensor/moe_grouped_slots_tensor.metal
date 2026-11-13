@@ -710,26 +710,6 @@ kernel void v41_dequant_q5_k_f16(
     for (int i = 0; i < 16; ++i) out[i] = reg[i / 4][i % 4];
 }
 
-// Natural-row-major Q6_K -> F16 materialization for GLM's dense prefill
-// projections. Uses the same quant-tile decoder as the Q6_K tensor tiles.
-kernel void glm_dequant_q6_k_f16(
-        device const uchar * src [[buffer(0)]],
-        device       half  * dst [[buffer(1)]],
-        constant     uint2 & dims [[buffer(2)]],
-        uint2 gid [[thread_position_in_grid]]) {
-    const uint n_in = dims.x;
-    const uint row = gid.y;
-    const uint blocks = n_in / 256;
-    const uint block = gid.x >> 4;
-    const uint il = gid.x & 15;
-    if (block >= blocks) return;
-    const device uchar * blk = src + (row * blocks + block) * QT_Q6_K_BYTES;
-    half4x4 reg;
-    qt_dequantize_q6_K(blk, (short)il, reg);
-    device half * out = dst + row * n_in + block * 256 + il * 16;
-    for (int i = 0; i < 16; ++i) out[i] = reg[i / 4][i % 4];
-}
-
 // Count-adaptive GLM IQ3_S down panels; identical Half operands and K32 sums.
 template <int BYTES, short NL,
           void (*DEQ)(device const uchar *, short, thread half4x4 &),

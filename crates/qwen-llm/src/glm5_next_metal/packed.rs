@@ -1497,14 +1497,6 @@ pub(super) fn matmat(
     n_out: usize,
     rows: usize,
 ) -> Result<()> {
-    if arith.lineage == PackedLineage::Fast && rows >= 512 && weight.dtype == GgmlType::Q6_K {
-        if let Some(cached) = super::cached_q6_prefill_weight(weight) {
-            return crate::metal::encode_mat_mat_f16_f32(
-                ctx, enc, &cached, x, y, n_in, n_out, rows,
-            )
-            .map_err(Into::into);
-        }
-    }
     let mode = projection_mode(arith, stage, weight.dtype, n_in, n_out);
     // F32 routers already have F32 operands: this changes launch geometry,
     // not quantized precision or the configured lineage of any other stage.
@@ -1862,7 +1854,6 @@ impl Glm5NextSession<'_> {
         after_chunk: &mut dyn FnMut(&Glm5NextSession, usize),
     ) -> Result<Vec<f32>> {
         self.validate_request(tokens)?;
-        let _q6_prefill_cache = super::Q6PrefillCacheScope::new(&self.weights.q6_f16_cache);
         self.prepare_prefill(ctx, 0)?;
         let mut check = || before_chunk().map_err(Glm5NextMetalError::Cancelled);
         let Some(rows) = self.packed.as_ref().map(|p| p.rows) else {

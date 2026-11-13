@@ -63,3 +63,25 @@ no production code was changed.
 Raw M5 outputs are under
 `~/qwen-runs/2026-11-12-glm-prefill/kda-parallel-prep/`; the serve arms are in
 `serve-180/` and the operator probe is in `tensorops-mla-probe/`.
+
+## Landing witness
+
+Landed tree `ad590968`, `iter` profile, one binary (sha256
+`5e2a6c311c689a8165f6eb1af78473a82c4cfc602111127ee0f9d282b154b0a6`), M5 Ultra,
+niceness 0, under the canonical Metal lease. The probe forces the arm per call
+so the model load, prefix and host environment match; the serial arm is the
+`QWEN_GLM53_KDA_PARALLEL_PREP=0` path. Three interleaved pairs:
+
+| Cell | Pair | Rollback (`=0`) ms | Default ms | Ratio |
+| --- | ---: | ---: | ---: | ---: |
+| 80K + 1,024 append | 1 | 1,167.904 | 1,151.963 | 1.0138 |
+| 80K + 1,024 append | 2 | 1,168.187 | 1,155.360 | 1.0111 |
+| 80K + 1,024 append | 3 | 1,171.454 | 1,157.543 | 1.0120 |
+| 48K + 2,048 root | 1 | 2,003.321 | 1,964.355 | 1.0198 |
+| 48K + 2,048 root | 2 | 2,023.076 | 1,980.852 | 1.0213 |
+| 48K + 2,048 root | 3 | 2,025.690 | 1,994.152 | 1.0158 |
+
+All runs reported bitwise identical logits and state between arms. Three
+additional processes ran with `QWEN_GLM53_KDA_PARALLEL_PREP=0` in the
+environment and agreed; thermal pressure stayed at or below 2. Raw:
+`metagross:~/qwen-runs/2026-11-13-kda-landing/`.

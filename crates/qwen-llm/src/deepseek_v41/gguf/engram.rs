@@ -172,12 +172,30 @@ pub(super) fn validate_encoding(g: &GgufFile) -> Result<(), LoadError> {
     Ok(())
 }
 
+/// Packed-byte capacity of the in-process Engram row cache in MiB; `0`
+/// disables it. The default 1024 MiB holds about 7.4M IQ4_NL rows (144 B),
+/// more than a ten-minute three-agent working set. Read once per process.
+const ROW_CACHE_MB_ENV: &str = "QWEN_V41_ENGRAM_ROW_CACHE_MB";
+const DEFAULT_ROW_CACHE_MB: usize = 1024;
+
+fn row_cache_capacity_bytes() -> usize {
+    static BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BYTES.get_or_init(|| {
+        std::env::var(ROW_CACHE_MB_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_ROW_CACHE_MB)
+            .saturating_mul(1024 * 1024)
+    })
+}
+
 /// Retains the parsed file handles. Reads only requested rows, never maps a
 /// table into Metal or materializes a full table in host memory.
 pub struct DiskEngram {
     gguf: Arc<GgufFile>,
     context: companion::TableContext,
     tables: BTreeMap<usize, TableView>,
+    cache: Option<std::sync::Mutex<engram_cache::RowCache>>,
 }
 impl DiskEngram {
     pub fn new(gguf: Arc<GgufFile>) -> Result<Self, LoadError> {
@@ -188,6 +206,7 @@ impl DiskEngram {
     }
     pub(super) fn for_tables(gguf: Arc<GgufFile>, mut context: companion::TableContext) -> Self {
         let tables = std::mem::take(&mut context.tables);
+        let capacity = row_cache_capacity_bytes();
         Self {
             gguf,
             context,
@@ -195,13 +214,36 @@ impl DiskEngram {
                 .into_iter()
                 .map(|table| (table.layer, table))
                 .collect(),
+            cache: (capacity > 0)
+                .then(|| std::sync::Mutex::new(engram_cache::RowCache::new(capacity))),
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn set_row_cache_bytes(&mut self, bytes: usize) {
+        self.cache = (bytes > 0).then(|| std::sync::Mutex::new(engram_cache::RowCache::new(bytes)));
+    }
+    #[cfg(test)]
+    pub(crate) fn row_cache_usage(&self) -> Option<(usize, usize, usize)> {
+        self.cache.as_ref().map(|cache| {
+            let cache = cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (cache.len(), cache.bytes(), cache.capacity_bytes())
+        })
     }
     pub fn source_groups(&self) -> &SourceGroups {
         &self.context.stamps
     }
     pub fn revalidate_sources(&self) -> Result<(), LoadError> {
         self.context.revalidate(&self.gguf)
+    }
+    fn cached_row(&self, layer: usize, row: u64) -> bool {
+        self.cache.as_ref().is_some_and(|cache| {
+            let mut cache = cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.get(engram_cache::RowKey { layer, row }).is_some()
+        })
     }
     pub fn decode_rows(&self, layer: usize, ids: &[u64]) -> Result<Vec<f32>, String> {
         self.read_rows(layer, ids).map_err(|e| e.to_string())
@@ -233,6 +275,9 @@ impl DiskEngram {
         }
         let mut advised = 0usize;
         for &id in ids.iter().filter(|&&id| id < table.row_count) {
+            if self.cached_row(layer, id) {
+                continue;
+            }
             if let Ok(offset) = row_offset(table, stride, id) {
                 if active {
                     offsets.push(offset);
@@ -345,8 +390,10 @@ impl DiskEngram {
             .map(|&id| row_offset(table, stride, id))
             .collect::<Result<Vec<_>, _>>()?;
         if advise && concurrent_reads() {
-            for &offset in &offsets {
-                source.advise_shard_read(t.shard_idx, offset, stride);
+            for (&id, &offset) in ids.iter().zip(&offsets) {
+                if !self.cached_row(layer, id) {
+                    source.advise_shard_read(t.shard_idx, offset, stride);
+                }
             }
         }
         let active = crate::deepseek_v41::forward::profile::active();
@@ -374,7 +421,28 @@ impl DiskEngram {
             .zip(&offsets)
             .zip(output.as_chunks_mut::<ROW_WIDTH>().0)
         {
-            source.read_shard_exact_at(t.shard_idx, offset, &mut raw)?;
+            let key = engram_cache::RowKey { layer, row: id };
+            let mut hit = false;
+            if let Some(cache) = &self.cache {
+                let mut cache = cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(data) = cache.get(key) {
+                    if data.len() == raw.len() {
+                        raw.copy_from_slice(data);
+                        hit = true;
+                    }
+                }
+            }
+            if !hit {
+                source.read_shard_exact_at(t.shard_idx, offset, &mut raw)?;
+                if let Some(cache) = &self.cache {
+                    let mut cache = cache
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    cache.insert(key, &raw);
+                }
+            }
             crate::codec::dequant_to_f32_in_place(&row, &raw, destination)
                 .map_err(|e| invalid(format!("Engram row decode {} {:?}: {e}", t.name, t.dtype)))?;
             if destination.iter().any(|v| !v.is_finite()) {

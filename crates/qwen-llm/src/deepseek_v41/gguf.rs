@@ -12,6 +12,7 @@ use std::{collections::BTreeMap, sync::Arc};
 mod companion;
 mod controls;
 mod engram;
+mod engram_cache;
 mod metadata;
 mod names;
 mod resident_storage;

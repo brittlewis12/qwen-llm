@@ -375,6 +375,35 @@ fn q5_and_q6_combined_rows_translate_once_and_retain_handles() {
 }
 
 #[test]
+fn packed_row_cache_returns_identical_bytes_and_respects_capacity() {
+    let g = populated(false, false, GgmlType::Q6_K);
+    let mut uncached = DiskEngram::new(g.clone()).unwrap();
+    uncached.set_row_cache_bytes(0);
+    let mut cached = DiskEngram::new(g).unwrap();
+    let stride = 210;
+    cached.set_row_cache_bytes(2 * stride);
+    let ids = [47, 0, 13, 47, 5, 0, 3, 1];
+    let expected = uncached.read_rows(0, &ids).unwrap();
+    for _ in 0..2 {
+        assert_eq!(cached.read_rows(0, &ids).unwrap(), expected);
+        assert_eq!(
+            cached
+                .decode_rows_batched_with_policy(0, &ids, false)
+                .unwrap(),
+            expected
+        );
+    }
+    let (rows, bytes, capacity) = cached.row_cache_usage().unwrap();
+    assert_eq!(capacity, 2 * stride);
+    assert_eq!(rows, 2);
+    assert_eq!(bytes, 2 * stride);
+    assert_eq!(
+        cached.read_rows(1, &[71, 0, 71, 13]).unwrap(),
+        uncached.read_rows(1, &[71, 0, 71, 13]).unwrap()
+    );
+}
+
+#[test]
 fn combined_table_encoding_is_inferred_but_explicit_conflicts_fail() {
     let (mut kv, tensors) = parts(true, true, GgmlType::Q6_K);
     kv.push(("deepseek41.engram.encoding", Value::Str("Q5_K")));

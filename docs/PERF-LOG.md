@@ -9,6 +9,21 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
 
 
+
+## 2026-11-13 - Cooperative V4.1 Experts: M5 Functional Pass, Still Default-Off
+
+- Existing differential passes 180 cases / 73,048,064 strict components,
+  including H5120/F2304, 16/32 mean populations, M32/M64 boundaries and tails,
+  four IQ families and same/mixed down types. Packing/alias/guards and
+  binding refusals pass. Nice 0, thermal maximum 0; no new ignored test.
+- Source 4b1c4c377; test profile. Contracts pass, ENV831/no polarity
+  conflicts. Separate default-off branch; no isolation/native/serve numbers
+  or promotion. No requantization or persistent allocation.
+- Next: model signatures and >=1.25x GU+down isolation at real 384-expert
+  populations. Input design prices the expert-owned portion of audit
+  scatter+pack and preserves half rounding with a possible direct F32 gather.
+  [Functional hashes and planned stage gate](bench/2026-11-13-v41-cooperative-prepared.md).
+
 ## 2026-11-13 - V4.1 Short Index + Wide PV: Frozen Serve Gate Passes
 
 - Only archived pair 3 B ran. Three-pair AB/BA/AB geomeans: TPS 1.004618x,

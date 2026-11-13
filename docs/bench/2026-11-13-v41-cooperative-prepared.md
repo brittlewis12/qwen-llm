@@ -106,3 +106,37 @@ that dependency.
 [Waste-audit evidence](2026-11-13-waste-audit.md). No direct-F32 path is
 implemented or timed in this stage; its exactness, movement and inclusive
 GPU-time gates remain separate from the current cooperative tile screen.
+
+## M5 functional result
+
+**PASS, functionality only.** Source `4b1c4c377a7b0880b0c38173e17bf7a6eb306d5d`,
+test profile, archived test executable SHA-256
+`8f0b418efe94ae9079fb3a9813d2949ace046e688beecf3089b80665b32a7823`.
+The independent raw-log reduction confirms 180 cases (90 baseline and 90
+cooperative), 360 strict inner/down comparisons totaling **73,048,064
+components**, all max deltas zero and all Rust bitwise assertions passed.
+36 cases use H5120/F2304. Packing/plan/alias/guard assertions and the separate
+existing binding-refusal test pass. No new ignored test was added.
+
+Both GPU test PIDs 24481 and 24764 ran at actual nice 0 and exited 0. Thermal
+maximum was 0; a continuous 60s <=1 settle preceded the packet. The model-free
+process preflight and Ghost/load record are retained. Build used a 12m
+lease with `nice -n 10` Cargo and completed in 2m25s; functional qualification
+used its own 8m lease and inherited FD. No model load, isolation, native wall
+or served performance run was performed for cooperative experts.
+
+The main, tensor and research metallib hashes are respectively
+`d52890108ebc1e3ab428b6d65d5a586158415efe1d697a720aa3f10395b95836`,
+`8d2c02095f75169ee6887aab5a78cb7bbbf76b09f738e31c2e94b1ca5a5ea143`,
+`be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f`.
+The binary and manifest remain under `attention-final/cooperative-pins/`
+for the open expert qualification gate; bulk build output and M5 worktree
+are removed at stage close. Raw logs are in
+`metagross:~/qwen-runs/2026-11-12-v41-prefill/attention-final/`.
+
+Contracts pass source `4b1c4c377`, tree
+`81bb7271eb73d99307b5cbb0460a46c748610c7f`; ENV regenerated with 831 knobs
+and no polarity conflict. The closing commit changes records only. The
+prototype stays **default-off and not qualified for landing** until the
+planned full-model exactness and >=1.25x real-population combined GU+down
+isolation, followed by native/serve gates.

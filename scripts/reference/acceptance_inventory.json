@@ -6495,4 +6495,19 @@
     "ignored": false,
     "reason": "Model-free Full and CED cancellation at every layer seam preserves peer lifecycle"
   }
+,
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::serve_rounds_hold_user_initiated_qos_for_every_gpu_phase",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted engine records the thread QoS class across plain and sampled batch rounds"
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batching::driver::tests::pump_holds_user_initiated_qos_across_prefill_and_decode",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted runtime records the thread QoS class across plain prefill and batch decode"
+  }
 ]

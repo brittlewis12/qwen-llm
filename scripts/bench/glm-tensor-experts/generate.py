@@ -99,9 +99,6 @@ header = (
     + '#include "'
     + str(root / "scripts/bench/glm-tensor-experts/iq_fast_decoders.metalh")
     + '"\n'
-    + '#include "'
-    + str(root / "scripts/bench/glm-tensor-experts/iq_level_codes.metalh")
-    + '"\n'
 )
 # The generated absolute include is build output only, never committed.
 out = header + body
@@ -139,27 +136,6 @@ for dtype, block, half in formats:
     for suffix in unpack_suffixes:
         out += f"""\nkernel void unpack_{dtype}{suffix}(device const uchar *w [[buffer(0)]], device half *h [[buffer(1)]], uint i [[thread_position_in_grid]]) {{
  half4x4 v; qt_dequantize_{dtype}{suffix}(w + ulong(i / 16) * QT_{dtype.upper()}_BYTES, short(i%16), v);
- for (short j=0;j<4;++j) *((device half4 *)(h+ulong(i)*16+4*j))=v[j];
-}}
-"""
-# Stored level-code candidates. The direct magnitude codes replace the native
-# grid-index/codebook gather path while preserving d and block scales.
-for dtype, level_bytes, half, deq in [
-    ("iq2_s", 106, True, "qt_dequantize_iq2_s_level"),
-    ("iq3_s", 134, False, "qt_dequantize_iq3_s_level"),
-]:
-    for panel in [16, 32, 64]:
-        out += f"""\nkernel void probe_{dtype}_level_n{panel}(
- constant moe_group_generic_mm_args &a [[buffer(0)]], device const uchar *w [[buffer(1)]],
- device const uchar *x [[buffer(2)]], device const int *c [[buffer(3)]], device const int *ids [[buffer(4)]],
- device float *o [[buffer(5)]], constant float &limit [[buffer(6)]], device const half *decoded [[buffer(8)]],
- device float *sink [[buffer(9)]], threadgroup uchar *sm [[threadgroup(0)]],
- uint3 grid [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {{
- probe_body<{level_bytes}, 16, {deq}, 0, false, {str(half).lower()}, {panel}, 0>(a,w,x,c,ids,o,sm,grid,tid,limit,decoded,sink);
-}}
-"""
-    out += f"""\nkernel void unpack_{dtype}_level(device const uchar *w [[buffer(0)]], device half *h [[buffer(1)]], uint i [[thread_position_in_grid]]) {{
- half4x4 v; {deq}(w + ulong(i / 16) * {level_bytes}, short(i%16), v);
  for (short j=0;j<4;++j) *((device half4 *)(h+ulong(i)*16+4*j))=v[j];
 }}
 """

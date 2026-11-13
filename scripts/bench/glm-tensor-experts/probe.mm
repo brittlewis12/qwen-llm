@@ -72,8 +72,8 @@ struct Fixture {
     bool half;
     id<MTLBuffer> w,x,counts,ids,out,decoded,decoded_alt,sink;
     std::vector<int> c;
-    Fixture(id<MTLDevice> d, int block_bytes, bool half_act, int m, int k, int e, int n, uint32_t route_limit=0): experts(e), block(block_bytes), half(half_act) {
-        a={uint32_t(m),uint32_t(n),uint32_t(k),uint32_t(k/256*block),uint32_t(k),1,UINT32_MAX/2,1,route_limit?route_limit:uint32_t(n*8)};
+    Fixture(id<MTLDevice> d, int block_bytes, bool half_act, int m, int k, int e, int n): experts(e), block(block_bytes), half(half_act) {
+        a={uint32_t(m),uint32_t(n),uint32_t(k),uint32_t(k/256*block),uint32_t(k),1,UINT32_MAX/2,1,uint32_t(n*8)};
         std::array<uint64_t,7> sizes={uint64_t(e)*m*a.nb01,uint64_t(a.slot_limit)*k*(half?2:4),uint64_t(e)*4,uint64_t(e)*n*4,uint64_t(a.slot_limit)*m*4,uint64_t(e)*m*k*2,uint64_t(e)*((m+63)/64)*((n+15)/16)*128*4};
         auto dm=domains(d); probe_contracts::Price p{sizes};
         for(auto z:sizes)p.metal+=probe_contracts::pages(z,dm.page);
@@ -93,17 +93,6 @@ struct Fixture {
             if(half)((_Float16*)x.contents)[i]=v;else((float*)x.contents)[i]=v;
         }
         memset(out.contents,0,sizes[4]);
-    }
-    void load_weights(const char *path){
-        NSData *data=[NSData dataWithContentsOfFile:@(path)];
-        require(data!=nil && data.length==w.length,"real weight bank length mismatch");
-        memcpy(w.contents,data.bytes,data.length);
-    }
-    void single_routes(int rows){
-        require(experts==1 && rows>0 && rows<=int(a.N) && a.slot_limit==uint32_t(rows),"single-expert route shape");
-        int count=rows; memcpy(counts.contents,&count,sizeof(count));
-        auto ix=(int*)ids.contents; std::fill(ix,ix+experts*a.N,-1);
-        for(int i=0;i<rows;++i)ix[i]=i;
     }
     void buckets(NSDictionary *hist){
         c.clear();
@@ -146,13 +135,6 @@ struct Probe {
         [enc dispatchThreads:MTLSizeMake(uint64_t(f.experts)*f.a.M*f.a.K/16,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
         [enc endEncoding];[cmd commit];[cmd waitUntilCompleted];require(cmd.status==MTLCommandBufferStatusCompleted,cmd.error.description.UTF8String);
     }
-    void unpack_named(Fixture &f, NSString *name, id<MTLBuffer> dst, uint64_t block_bytes){
-        auto cmd=[q commandBuffer];auto enc=[cmd computeCommandEncoder];auto p=pipeline(name);
-        [enc setComputePipelineState:p];[enc setBuffer:f.w offset:0 atIndex:0];[enc setBuffer:dst offset:0 atIndex:1];
-        [enc dispatchThreads:MTLSizeMake(uint64_t(f.experts)*f.a.M*f.a.K/16,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
-        [enc endEncoding];[cmd commit];[cmd waitUntilCompleted];require(cmd.status==MTLCommandBufferStatusCompleted,cmd.error.description.UTF8String);
-        (void)block_bytes;
-    }
     double unpack_time(Fixture &f, NSString *dtype, bool fast, bool vec, int reps){
         auto cmd=[q commandBuffer];auto enc=[cmd computeCommandEncoder];auto p=pipeline(unpack_name(dtype,fast,vec));
         [enc setComputePipelineState:p];[enc setBuffer:f.w offset:0 atIndex:0];[enc setBuffer:f.decoded offset:0 atIndex:1];
@@ -161,7 +143,7 @@ struct Probe {
         [enc endEncoding];[cmd commit];[cmd waitUntilCompleted];require(cmd.status==MTLCommandBufferStatusCompleted,cmd.error.description.UTF8String);
         return (cmd.GPUEndTime-cmd.GPUStartTime)*1000/reps;
     }
-    double run(Fixture &f, NSString *dtype, int hold, bool baseline, int reps, int only_panel=0, bool fast=false, bool vec=false, bool level=false){
+    double run(Fixture &f, NSString *dtype, int hold, bool baseline, int reps, int only_panel=0, bool fast=false, bool vec=false){
         auto cmd=[q commandBuffer];auto enc=[cmd computeCommandEncoder];float limit=10;int epi=0;
         std::vector<int> panels;
         if(only_panel)panels={only_panel};
@@ -170,8 +152,7 @@ struct Probe {
         for(int rep=0;rep<reps;++rep)for(int n:panels){
             auto a=f.a;
             if(!only_panel && !f.half && f.a.N>=128){a.min_count=n==16?1:n==32?(f.half?1:17):33;a.max_count=n==16?16:n==32?32:UINT32_MAX/2;}
-            NSString *name=level ? [NSString stringWithFormat:@"probe_%@_level_n%d",dtype,n]
-                               : vec ? [NSString stringWithFormat:@"probe_%@_n%d_vec",dtype,n]
+            NSString *name=vec ? [NSString stringWithFormat:@"probe_%@_n%d_vec",dtype,n]
                                : fast ? [NSString stringWithFormat:@"probe_%@_n%d_fast",dtype,n]
                                       : [NSString stringWithFormat:@"probe_%@_n%d_h%d",dtype,n,hold];
             if(baseline){
@@ -224,48 +205,6 @@ int main(int argc,const char **argv){@autoreleasepool{try{
                 }
             }
         }}
-        return 0;
-    }
-    if(std::string(argv[3])=="level"){
-        NSString *data=[NSString stringWithContentsOfFile:@(argv[2]) encoding:NSUTF8StringEncoding error:nil];require(data!=nil,"level cases input");
-        for(NSString *line in [data componentsSeparatedByString:@"\n"]){
-            if(line.length==0)continue;
-            NSDictionary *r=[NSJSONSerialization JSONObjectWithData:[line dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
-            NSString *dtype=r[@"dtype"], *role=r[@"role"];
-            bool iq2=[dtype isEqual:@"iq2_s"]; require(iq2 || [dtype isEqual:@"iq3_s"],"real level dtype");
-            int rows=[r[@"rows"] intValue], m=[r[@"m"] intValue], k=[r[@"k"] intValue];
-            int native_bytes=[r[@"native_block_bytes"] intValue], level_bytes=[r[@"level_block_bytes"] intValue];
-            Fixture base(p.d,native_bytes,iq2,m,k,1,rows,uint32_t(rows));
-            Fixture cand(p.d,level_bytes,iq2,m,k,1,rows,uint32_t(rows));
-            base.load_weights([r[@"native_path"] UTF8String]);cand.load_weights([r[@"level_path"] UTF8String]);
-            base.single_routes(rows);cand.single_routes(rows);
-            memcpy(cand.x.contents,base.x.contents,base.x.length);
-            memcpy(cand.counts.contents,base.counts.contents,base.counts.length);
-            memcpy(cand.ids.contents,base.ids.contents,base.ids.length);
-            NSString *native_unpack=iq2?@"unpack_iq2_s":@"unpack_iq3_s";
-            NSString *level_unpack=iq2?@"unpack_iq2_s_level":@"unpack_iq3_s_level";
-            p.unpack_named(base,native_unpack,base.decoded,uint64_t(native_bytes));
-            p.unpack_named(cand,level_unpack,cand.decoded,uint64_t(level_bytes));
-            const uint64_t half_count=uint64_t(m)*k;
-            uint64_t half_mismatches=0;
-            auto nh=(const uint16_t*)base.decoded.contents;auto lh=(const uint16_t*)cand.decoded.contents;
-            for(uint64_t i=0;i<half_count;++i)half_mismatches+=nh[i]!=lh[i];
-            require(half_mismatches==0,"real-weight dequant witness is not bitwise");
-            p.run(base,dtype,0,false,1);p.run(cand,dtype,0,false,1,0,false,false,true);
-            const uint64_t out_count=uint64_t(rows)*m;
-            uint64_t output_mismatches=0;auto no=(const uint32_t*)base.out.contents;auto lo=(const uint32_t*)cand.out.contents;
-            for(uint64_t i=0;i<out_count;++i)output_mismatches+=no[i]!=lo[i];
-            require(output_mismatches==0,"real-weight tile output is not bitwise");
-            emit(@{@"event":@"level_witness",@"rows":@(rows),@"observed_rows":r[@"observed_rows"],@"layer":r[@"layer"],@"expert":r[@"expert"],@"role":role,@"dtype":dtype,@"half_elements":@(half_count),@"half_bit_mismatches":@(half_mismatches),@"tile_outputs":@(out_count),@"tile_bit_mismatches":@(output_mismatches),@"native_block_bytes":@(native_bytes),@"level_block_bytes":@(level_bytes),@"level_file_bytes":r[@"level_bytes"]});
-            p.run(base,dtype,0,false,4);p.run(cand,dtype,0,false,4,0,false,false,true);
-            for(int pair=0;pair<3;++pair){
-                const bool reverse=(pair==1);
-                double a,b;
-                if(!reverse){a=p.run(base,dtype,0,false,4);b=p.run(cand,dtype,0,false,4,0,false,false,true);}
-                else{b=p.run(cand,dtype,0,false,4,0,false,false,true);a=p.run(base,dtype,0,false,4);}
-                emit(@{@"event":@"level_timing",@"rows":@(rows),@"observed_rows":r[@"observed_rows"],@"layer":r[@"layer"],@"expert":r[@"expert"],@"role":role,@"dtype":dtype,@"pair":@(pair),@"order":reverse?@"BA":@"AB",@"native_ms":@(a),@"level_ms":@(b),@"level_speedup":@(a/b)});
-            }
-        }
         return 0;
     }
     bool screen=std::string(argv[3])=="screen";

@@ -91,9 +91,11 @@ mod probe {
     }
 
     fn gate() {
-        while pressure() > 1 {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        }
+        let level = pressure();
+        assert!(
+            (0..=2).contains(&level),
+            "thermal protocol abort at {level}"
+        );
     }
 
     fn median(mut xs: Vec<f64>) -> f64 {
@@ -1053,6 +1055,7 @@ mod probe {
                     "stage_profile_overhead_ratio": stage_profile_wall_ms / ordinary_wall_ms,
                     "command_gpu_ms": command_gpu_ms,
                     "command_gpu_ms_samples": command_gpu_samples,
+                    "stage_profile_wall_minus_command_gpu_ms": stage_profile_wall_ms - command_gpu_ms,
                     "stage_span_sum_ms": span_sum_ms,
                     "stage_unassigned_gap_ms": command_gpu_ms - span_sum_ms,
                     "ordinary_wall_minus_profiled_gpu_ms": ordinary_wall_ms - command_gpu_ms,
@@ -1062,6 +1065,7 @@ mod probe {
                     "stage_cost_semantics": "estimated multiply-add FLOPs from logical weight shapes; logical unique-weight and modeled cache-scan bytes, not physical bus counters",
                     "gate_up_kernel_ms": gate_up_ms,
                     "down_kernel_ms": down_ms,
+                    "serialized_dispatch_total_ms": families.values().map(|(_, ms)| *ms).sum::<f64>(),
                     "dispatches": dispatches, "kernels": kernels,
                     "serialized_dispatch_families": family_json,
                     "pressure": pressure(), "loadavg": loadavg(),

@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-12 - Solo Routed-Expert Prefetch: Closed (2.4-3.6 ms/Token Worse)
+
+- **Oracle probe only; no product path.** Probe code is on branch
+  `research/solo-expert-prefetch` at `3f3616de3` (measured source `4b3c775ad`),
+  base `1edb7e8d8`; only this record and its raw logs are landed, the hooks are
+  not. M5 Ultra, B=1, 32K, `--profile iter --features perf-ablations`, one
+  binary per family, three interleaved/order-alternated pairs, same binary,
+  `nice` 10, canonical Metal lease, thermal **0**. Captured the real per-layer
+  top-k expert ids from a real greedy trajectory, then replayed teacher-forced
+  with a read-only touch over the real gate/up and down rows inside the
+  attention core's causal wave. Both `same`-layer and `next`-layer targets; all
+  logits hashes **bitwise equal**.
+  [Details and tables](bench/2026-11-12-solo-expert-prefetch.md).
+- **Gate was >=0.8 ms/token saved; both families lose.** V4.1 control 14.82 ->
+  touch 17.21/17.28 ms/token (**+2.37/+2.46 ms**); GLM causal control 18.19 ->
+  21.58/21.91 (**+3.40/+3.62 ms**). Touch-only prices one token's touched bytes
+  serially: V4.1 2.329 GB at 868 GB/s = 2.68 ms, GLM 3.052 GB at 651 GB/s =
+  4.69 ms. The token delta is essentially the touch cost: the touch is charged
+  almost in full, not hidden.
+- **Cache physics is real but insufficient.** Cold->hot on one layer: V4.1
+  54.74 MB 795 -> 1,441 GB/s (**1.81x**); GLM 71.83 MB 628 -> 729-736
+  (**1.16-1.17x**, past the useful reuse region). Even a free touch bounds
+  V4.1 at ~1.37 ms saved (routed 3.63 ms at 896 GB/s -> ~2.26 ms hot) and GLM
+  at ~0.2 ms, and neither is reached.
+- **Same mechanism as the 2026-11-08 Flash-Next broad-packet loss.** The
+  attention core is co-scheduled inside the memory-bound dense->routed waves,
+  so there is no idle DRAM window; moving the same bytes earlier adds them to a
+  saturated wave and changes total token traffic not at all. Expert precision
+  (100% of the real routed bytes) beats Flash-Next's mixed packets but cannot
+  create bandwidth. Stage 2 (predictor accuracy) is not started.
+- **Evidence:** M5 `~/qwen-runs/2026-11-12-solo-prefetch/{run-v41,run-glm,
+  build-v41,build-both}.log`, mirrored in
+  `docs/bench/2026-11-12-solo-prefetch/`. V4.1 campaign waited 306.7 s behind
+  the shared regression lane; background `~/ghost` ~291% CPU throughout. M5
+  bundle/worktree/build output removed. Branch unmerged; probe code remains on
+  `research/solo-expert-prefetch` at `3f3616de3` and is not on `main`.
+
 ## 2026-11-12 - GLM Solo NextN Delivered Gate Fails; Product Removed
 
 - **Kill: 1.0533x delivered**, below 1.15x. Single-agent, 49,152 warm source

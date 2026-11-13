@@ -1,0 +1,24 @@
+metal: waiting for process lease /tmp/qwen-llm-501/metal.lock (pid=36919 executable=nice opencode_session=none started=2026-11-13T02:18:38Z task=v41-regression expected=15m; held 1m53s)
+{"kind":"header","depth":32768,"steps":16,"pairs":3,"prefill_ms":13130.739709,"thermal":0,"target":"both"}
+{"kind":"capture","calls":1920,"routed_calls":1280,"layers":40,"bytes_total":37265080320,"bytes_per_step":2329067520}
+{"kind":"oracle","target":"Same","steps":16,"calls":1280,"bytes_step0":2329067520}
+{"kind":"arm","target":"Same","pair":0,"arm":"control","ms_token":14.820278625,"wall_ms":237.124458,"touched_bytes":0,"thermal":0}
+{"kind":"arm","target":"Same","pair":0,"arm":"touch","ms_token":22.1306615,"wall_ms":354.090584,"touched_bytes":37265080320,"thermal":0}
+{"kind":"arm","target":"Same","pair":1,"arm":"touch","ms_token":17.14048175,"wall_ms":274.247708,"touched_bytes":37265080320,"thermal":0}
+{"kind":"arm","target":"Same","pair":1,"arm":"control","ms_token":14.821065124999999,"wall_ms":237.13704199999998,"touched_bytes":0,"thermal":0}
+{"kind":"arm","target":"Same","pair":2,"arm":"control","ms_token":14.8763645625,"wall_ms":238.021833,"touched_bytes":0,"thermal":0}
+{"kind":"arm","target":"Same","pair":2,"arm":"touch","ms_token":17.271059875000002,"wall_ms":276.33695800000004,"touched_bytes":37265080320,"thermal":0}
+{"kind":"bitwise","target":"Same","equal":true}
+{"kind":"touch_only","target":"Same","bytes":2329067520,"gpu_ms":2.6826249668374658,"gb_s":868.2046684839912}
+{"kind":"cold_hot","target":"Same","layer":20,"cold":{"bytes":54743040,"gpu_ms":0.0688750296831131,"gb_s":794.8169351340692},"hot":{"bytes":54743040,"gpu_ms":0.03799994010478258,"gb_s":1440.6085864622237},"hot_over_cold":1.8125036379845414}
+{"kind":"oracle","target":"Next","steps":16,"calls":1280,"bytes_step0":2329067520}
+{"kind":"arm","target":"Next","pair":0,"arm":"control","ms_token":14.804880187499998,"wall_ms":236.87808299999998,"touched_bytes":0,"thermal":0}
+{"kind":"arm","target":"Next","pair":0,"arm":"touch","ms_token":17.306828125,"wall_ms":276.90925,"touched_bytes":36389191680,"thermal":0}
+{"kind":"arm","target":"Next","pair":1,"arm":"touch","ms_token":17.201833375,"wall_ms":275.229334,"touched_bytes":36389191680,"thermal":0}
+{"kind":"arm","target":"Next","pair":1,"arm":"control","ms_token":14.7762265625,"wall_ms":236.419625,"touched_bytes":0,"thermal":0}
+{"kind":"arm","target":"Next","pair":2,"arm":"control","ms_token":14.868098999999999,"wall_ms":237.88958399999999,"touched_bytes":0,"thermal":0}
+{"kind":"arm","target":"Next","pair":2,"arm":"touch","ms_token":17.3237239375,"wall_ms":277.179583,"touched_bytes":36389191680,"thermal":0}
+{"kind":"bitwise","target":"Next","equal":true}
+{"kind":"touch_only","target":"Next","bytes":2329067520,"gpu_ms":2.730750013142824,"gb_s":852.9039673314778}
+{"kind":"cold_hot","target":"Next","layer":20,"cold":{"bytes":54743040,"gpu_ms":0.07087492849677801,"gb_s":772.3893506642286},"hot":{"bytes":54743040,"gpu_ms":0.03883335739374161,"gb_s":1409.6911437490696},"hot_over_cold":1.82510432405209}
+{"kind":"done","bitwise":true,"thermal":0}

@@ -348,9 +348,9 @@ impl Qwen4ExpTextSessionMetalGeometry {
     }
 
     fn packed_capacity(&self) -> Result<usize, Qwen4ExpTextSessionError> {
-        Ok(self
-            .capacity
-            .min(self.packed_qsa_geometry()?.token_budget()))
+        let logical_rows = packed_prefill_rows_override()
+            .unwrap_or_else(|| self.packed_qsa_geometry().map_or(0, |g| g.token_budget()));
+        Ok(self.capacity.min(logical_rows))
     }
 
     fn packed_selected_capable_for_extent(
@@ -3493,6 +3493,19 @@ impl AllocationBuilder {
     ) -> Result<(), Qwen4ExpTextSessionError> {
         self.f32(name, elements)
     }
+}
+
+/// Explicit larger packed-command rows for A/B work. Unset keeps the
+/// incumbent logical cap (the QSA indexer token budget). A value must be a
+/// multiple of 256 in 256..=16384; anything else is ignored.
+fn packed_prefill_rows_override() -> Option<usize> {
+    static ROWS: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *ROWS.get_or_init(|| {
+        std::env::var("QWEN_FN_PACKED_ROWS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&rows| (256..=16_384).contains(&rows) && rows.is_multiple_of(256))
+    })
 }
 
 fn add_packed_allocations(

@@ -82,13 +82,7 @@ fn grouped_iq_repacked<'a>(
         .flatten();
     let (gate_bank, up_bank, down_bank) = repacked.map_or(
         (current.gate_bank, current.up_bank, current.down_bank),
-        |banks| {
-            (
-                banks.gate.as_ref().unwrap_or(current.gate_bank),
-                banks.up.as_ref().unwrap_or(current.up_bank),
-                banks.down.as_ref().unwrap_or(current.down_bank),
-            )
-        },
+        |banks| (&banks.gate, &banks.up, &banks.down),
     );
     GroupedExperts {
         gate_bank,

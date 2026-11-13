@@ -31,6 +31,19 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw captures and generated tables:
   `metagross:~/qwen-runs/2026-11-12-waste-audit/`. Branch `perf/waste-audit`;
   not merged.
+## 2026-11-13 - V4.1 Attention Finish: Exact Executable Pin Blocks Measurement
+
+- Scheduling-only one-arm mode and per-run purge controller are ready.
+  Contracts passcf6652fd1; CPU mocks validate ordering, no overwrite,
+  per-run purge, inherited FD, nice0 and prep-time fields. No Rust/kernel edits.
+- Exact-source67b3ebaf4 rebuild does not reproduce iter19d9adf78d3a or
+  release5c538677b90c (now1fa66184f9a1 /78131445f024). Test fixture differs;
+  tokenizer and every metallib match exactly. Cause not localized.
+- Prior executable copies were deleted with build output. No archive found
+  in recorded run directories and no M5 mbx cache. Archive-location question
+  pending; no model loaded, no new timing, no pin substitution or promotion.
+  [Conflict and prepared protocol](bench/2026-11-13-v41-attention-finish.md).
+
 ## 2026-11-13 - V4.1 Attention Bundle: Purged Root and One-Arm Serve Gate Start
 
 - New bounded stage19:42:05UTC, report<=21:42, no extension. Restore exact

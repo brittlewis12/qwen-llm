@@ -59,3 +59,41 @@ M5 outputs under qwen-runs/2026-11-12-v41-prefill/attention-finish; restored
 build target uses the old attention-bundle/target path for byte reproduction.
 Every build/model load leased, holds<=15m, Python children pass_fds. Raw
 records survive; remove target, worktree and bundles at stage end. No pushes.
+
+
+## Executable pin conflict: no new model measurements
+
+Contracts pass cf6652fd1, treee7b03964c79d423c83dbcfb14fc0286e22c76809.
+The restored source is exactly67b3ebaf4, original worktree and target paths,
+locked dependencies and matching profiles. Rebuild completes but fails the
+exact executable SHA guard before any model or GPU witness loads:
+
+| Artifact | Required SHA prefix | Rebuilt SHA prefix |
+| --- | --- | --- |
+| iter | 19d9adf78d3a | 1fa66184f9a1 |
+| release | 5c538677b90c | 78131445f024 |
+| test fixture | a83fa4a6639a | b253930bc372 |
+| tokenizer | eb94be08eb27 | eb94be08eb27 |
+
+Every main/research/tensor metallib across iter/release/test is byte-identical
+to the previous pinned build. Executable differences are not localized;
+identical GPU libraries alone do not establish identical host executables.
+No mbx tool/cache is configured on the M5. Bounded checks found no executable
+archives in the recorded run directories. The original executables were
+removed with the prior build output; no separate copies were retained.
+A text-input question requests an archive location. Do not silently replace
+the requested pins with new hashes or use elapsed waiting as authorization.
+No native-root run or served arm has started; pair1 remains unchanged.
+
+The one-arm helper preserves warmup/purge/window semantics, checks flags,
+order, sampling, window length, warm reply cap and plan hash, and refuses
+any arm overwrite. CPU mock tests pass BA accumulation and duplicate-arm
+refusal. A separate model-free mock verifies eight one-run processes with
+purge immediately before each launch, inherited lease FD, ps nice0, root
+shape/digest checks, prep/encode fields and pair checkpoints. Synthetic
+scratch data is removed and is not represented as performance evidence.
+
+Complete expected/actual hashes, source/compiler details and rebuilt Mach-O
+section digests are in data/pinned-binary-conflict.json. Existing full-state
+bitwise/native/served evidence is unchanged. No performance or readiness
+verdict can be added without the originals or an explicit pin clarification.

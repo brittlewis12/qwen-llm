@@ -243,7 +243,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if dispatch_census {
                 runner.restore_snapshot_with_logits(snap, &snapshot_logits)?;
-                let guard = qwen_llm::metal::dispatch_profile_begin(&ctx, 60_000)?;
+                let guard = qwen_llm::metal::dispatch_profile_begin(&ctx, 12_000)?;
                 let start = Instant::now();
                 runner
                     .prefill_continuation_with_command_checkpoint(&ids[depth..depth + n], || {
@@ -273,7 +273,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &snapshot_logits,
             )?;
             if dispatch_census {
-                let guard = qwen_llm::metal::dispatch_profile_begin(&ctx, 60_000)?;
+                let guard = qwen_llm::metal::dispatch_profile_begin(&ctx, 12_000)?;
                 let start = Instant::now();
                 runner.prefill_continuation_with_command_checkpoint(
                     &ids[depth..depth + root_rows],

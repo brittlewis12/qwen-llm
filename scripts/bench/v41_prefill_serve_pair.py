@@ -35,10 +35,12 @@ def run_harness(command,log_path,binary,deadline,fd):
                         if len(f)==3 and int(f[1])==child.pid and f[2]==str(binary.resolve()):
                             model_pids.add(int(f[0]))
                             model_niceness[int(f[0])]=int(subprocess.check_output(["ps","-o","nice=","-p",f[0]],text=True,timeout=5).strip())
+                            log_path.with_suffix(".model-pids.json").write_text(json.dumps(dict(time=time.time(),harness_pid=child.pid,model_pids=sorted(model_pids),model_niceness=model_niceness)))
                             if model_niceness[int(f[0])]!=0:
                                 raise RuntimeError("model niceness is not 0")
                 for pid in model_pids:
                     if value:=usage(pid):io.append(dict(time=time.time(),pid=pid,**value))
+                samples.write_text("".join(json.dumps(r)+"\n" for r in io))
                 time.sleep(.5)
         finally:
             if child.poll() is None:
@@ -107,7 +109,7 @@ def main():
         io=[json.loads(line) for line in (out/f"{a.tag}-{arm}.process-io.jsonl").read_text().splitlines()]
         disk=max((r["disk_read"] for r in io),default=None)
         if disk is None:raise RuntimeError("no process disk counter captured")
-        result["arms"].append(dict(arm=arm,engram_purge=reset,process_disk_read_bytes=disk,root_turns=roots,model_pids=sorted(model_pids),model_niceness=model_niceness,
+        result["arms"].append(dict(arm=arm,engram_purge=reset,process_disk_read_bytes=disk,process_disk_counter_note="maximum live counter sampled every 0.5s; native per-call I/O retained",root_turns=roots,model_pids=sorted(model_pids),model_niceness=model_niceness,
             summary=json.loads((dest/"summary.json").read_text())))
         (out/f"{a.tag}-summary.json").write_text(json.dumps(result,indent=2)+"\n")
     print(json.dumps(result),flush=True)

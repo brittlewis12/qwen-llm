@@ -512,6 +512,21 @@ impl PreparedKdaPrefill<'_, '_> {
         Ok(())
     }
 
+    /// Wider independent value panel for the qualified GLM full-chunk screen.
+    /// Returns false when the M5 tier or the pipeline contract declines it.
+    pub(crate) fn select_value8(&mut self, ctx: &MetalContext) -> Result<bool, MetalError> {
+        if !ctx.tensor_ops_status().is_available() {
+            return Ok(false);
+        }
+        let pso = ctx.pipeline("kernel_glm53_kda_prefill_recurrence_value8")?;
+        if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < THREADS {
+            return Ok(false);
+        }
+        self.recurrence = pso;
+        self.values_per_lane = 8;
+        Ok(true)
+    }
+
     pub(crate) fn encode_prepare(&self, enc: &KernelEncoder) -> Result<(), MetalError> {
         require_serial("kda_prefill", enc)?;
         let b = self.b;

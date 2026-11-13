@@ -2876,6 +2876,7 @@ pub use gpu_decode::gpu_token_loop_enabled;
 mod interventions;
 mod kda_half_inputs;
 mod kda_value4;
+mod kda_value8;
 mod lens;
 mod packed;
 mod prefill_attention;
@@ -2903,6 +2904,8 @@ pub use interventions::{
 };
 mod snapshot;
 mod workspace;
+#[cfg(feature = "perf-ablations")]
+pub use kda_value8::with_prefill as with_kda_value8_prefill;
 pub use lens::Glm5NextCapture;
 #[cfg(feature = "perf-ablations")]
 pub use packed::batch::take_last_step_timing;

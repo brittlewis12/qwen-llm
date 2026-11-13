@@ -23,7 +23,7 @@
 //!  5. `occupancy`: capture real per-expert row buckets and per-kernel bytes
 //!     at one or more context depths, using the production route selection.
 //!
-//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy] [depth]`
+//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy|kda-value8-stage|kda-value8-ab] [depth]`
 
 #[cfg(not(feature = "perf-ablations"))]
 fn main() {
@@ -40,6 +40,7 @@ mod probe {
             GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch, Glm5NextCapturedRows, Glm5NextExpertRoute,
             Glm5NextRowBank, Glm5NextRowBankPlan, Glm5NextSession, Glm5NextSnapshot,
             Glm5NextStageReport, Glm5NextWeights, set_expert_packet_max_rows, set_expert_route,
+            with_kda_value8_prefill,
         },
         metal::*,
         tokenizer::Tokenizer,
@@ -194,6 +195,143 @@ mod probe {
         }
         anyhow::ensure!(session.position() == depth, "prefix position mismatch");
         Ok(session)
+    }
+
+    fn kda_value8_stage(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        ids: &[u32],
+        depth: usize,
+        capacity: usize,
+    ) -> anyhow::Result<()> {
+        const WIDTH: usize = 2048;
+        let mut session =
+            with_kda_value8_prefill(false, || new_session(ctx, weights, ids, depth, capacity))?;
+        let snapshot = session.capture_snapshot()?;
+        let tokens = &ids[depth..depth + WIDTH];
+        let mut stages: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+        let mut walls: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+        for enabled in [false, true] {
+            with_kda_value8_prefill(enabled, || -> anyhow::Result<()> {
+                session.restore_snapshot(&snapshot)?;
+                let logits = session.prefill_packed(ctx, tokens)?;
+                anyhow::ensure!(
+                    logits.iter().all(|v| v.is_finite()),
+                    "non-finite KDA warm logits"
+                );
+                Ok(())
+            })?;
+        }
+        for order in [[0usize, 1usize], [1, 0], [0, 1]] {
+            for arm in order {
+                let enabled = arm == 1;
+                with_kda_value8_prefill(enabled, || -> anyhow::Result<()> {
+                    session.restore_snapshot(&snapshot)?;
+                    let start = Instant::now();
+                    let (logits, report) = session.prefill_chunk_stage_profiled(ctx, tokens)?;
+                    walls[arm].push(start.elapsed().as_secs_f64() * 1e3);
+                    anyhow::ensure!(
+                        logits.iter().all(|v| v.is_finite()),
+                        "non-finite KDA stage logits"
+                    );
+                    stages[arm].push(
+                        stage_totals(&report)
+                            .get("packed_kda_recurrence")
+                            .copied()
+                            .ok_or_else(|| anyhow::anyhow!("missing KDA recurrence span"))?,
+                    );
+                    Ok(())
+                })?;
+            }
+        }
+        let baseline_ms = median(stages[0].clone());
+        let value8_ms = median(stages[1].clone());
+        emit(json!({
+            "kind": "kda_value8_stage", "depth": depth, "width": WIDTH,
+            "arms": ["value4", "value8"],
+            "kda_recurrence_stage_ms": [baseline_ms, value8_ms],
+            "kda_recurrence_stage_samples_ms": stages,
+            "stage_speedup": baseline_ms / value8_ms,
+            "stage_profile_wall_ms": [median(walls[0].clone()), median(walls[1].clone())],
+            "stage_profile_wall_samples_ms": walls,
+            "pressure": pressure(), "loadavg": loadavg(),
+        }));
+        Ok(())
+    }
+
+    fn kda_value8_ab(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        ids: &[u32],
+        depth: usize,
+        capacity: usize,
+    ) -> anyhow::Result<()> {
+        const WIDTH: usize = 2048;
+        let mut session =
+            with_kda_value8_prefill(false, || new_session(ctx, weights, ids, depth, capacity))?;
+        let snapshot = session.capture_snapshot()?;
+        let tokens = &ids[depth..depth + WIDTH];
+        for enabled in [false, true] {
+            with_kda_value8_prefill(enabled, || -> anyhow::Result<()> {
+                session.restore_snapshot(&snapshot)?;
+                let logits = session.prefill_packed(ctx, tokens)?;
+                anyhow::ensure!(
+                    logits.iter().all(|v| v.is_finite()),
+                    "non-finite KDA A/B warm logits"
+                );
+                Ok(())
+            })?;
+        }
+        let mut walls = [Vec::new(), Vec::new()];
+        let mut final_logits: [Option<Vec<f32>>; 2] = [None, None];
+        let mut final_states: [Option<Glm5NextSnapshot>; 2] = [None, None];
+        let mut final_routes: [Option<Vec<(usize, Vec<i32>)>>; 2] = [None, None];
+        for (pair, order) in [[0usize, 1usize], [1, 0], [0, 1]].into_iter().enumerate() {
+            for arm in order {
+                let enabled = arm == 1;
+                with_kda_value8_prefill(enabled, || -> anyhow::Result<()> {
+                    session.restore_snapshot(&snapshot)?;
+                    let start = Instant::now();
+                    let logits = session.prefill_packed(ctx, tokens)?;
+                    walls[arm].push(start.elapsed().as_secs_f64() * 1e3);
+                    anyhow::ensure!(
+                        logits.iter().all(|v| v.is_finite()),
+                        "non-finite KDA A/B logits"
+                    );
+                    if pair == 2 {
+                        final_logits[arm] = Some(logits);
+                        final_states[arm] = Some(session.capture_snapshot()?);
+                        final_routes[arm] = Some(session.perf_packed_route_ids(WIDTH)?);
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        let baseline = final_logits[0].as_ref().expect("value4 logits");
+        let value8 = final_logits[1].as_ref().expect("value8 logits");
+        let logits_bitwise_equal = baseline.len() == value8.len()
+            && baseline
+                .iter()
+                .zip(value8)
+                .all(|(a, b)| a.to_bits() == b.to_bits());
+        let state_bitwise_equal = final_states[0]
+            .as_ref()
+            .expect("value4 state")
+            .same_state(final_states[1].as_ref().expect("value8 state"));
+        let routes_equal = final_routes[0] == final_routes[1];
+        let pair_speedups: Vec<f64> = (0..3).map(|i| walls[0][i] / walls[1][i]).collect();
+        emit(json!({
+            "kind": "kda_value8_ab", "depth": depth, "width": WIDTH,
+            "arms": ["value4", "value8"],
+            "wall_samples_ms": walls,
+            "pair_speedups": pair_speedups,
+            "median_speedup": median(walls[0].clone()) / median(walls[1].clone()),
+            "logits_bitwise_equal": logits_bitwise_equal,
+            "persistent_state_bitwise_equal": state_bitwise_equal,
+            "route_ids_equal": routes_equal,
+            "pressure": pressure(), "loadavg": loadavg(),
+        }));
+        Ok(())
     }
 
     fn census(
@@ -1349,7 +1487,7 @@ mod probe {
         let args: Vec<String> = std::env::args().collect();
         let corpus = args.get(1).ok_or_else(|| {
             anyhow::anyhow!(
-                "usage: glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality] [depth]"
+                "usage: glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy|kda-value8-stage|kda-value8-ab] [depth]"
             )
         })?;
         let mode = args.get(2).map(String::as_str).unwrap_or("all");
@@ -1374,7 +1512,15 @@ mod probe {
         anyhow::ensure!(
             matches!(
                 mode,
-                "all" | "census" | "batch" | "threshold" | "routes" | "route-quality" | "occupancy"
+                "all"
+                    | "census"
+                    | "batch"
+                    | "threshold"
+                    | "routes"
+                    | "route-quality"
+                    | "occupancy"
+                    | "kda-value8-stage"
+                    | "kda-value8-ab"
             ),
             "unknown mode {mode}"
         );
@@ -1391,7 +1537,9 @@ mod probe {
         } else {
             CAPACITY
         };
-        let needed_width = if mode == "routes" || mode == "occupancy" {
+        let needed_width = if matches!(mode, "kda-value8-stage" | "kda-value8-ab") {
+            2048
+        } else if mode == "routes" || mode == "occupancy" {
             *route_widths().iter().max().expect("route widths")
         } else if mode == "route-quality" {
             *quality_widths.iter().max().expect("quality widths")
@@ -1456,6 +1604,12 @@ mod probe {
         }
         if mode == "occupancy" {
             occupancy(&ctx, &weights, &ids, &occupancy_depths, capacity)?;
+        }
+        if mode == "kda-value8-stage" {
+            kda_value8_stage(&ctx, &weights, &ids, depth, capacity)?;
+        }
+        if mode == "kda-value8-ab" {
+            kda_value8_ab(&ctx, &weights, &ids, depth, capacity)?;
         }
         emit(json!({
             "kind": "done", "pressure": pressure(), "loadavg": loadavg(),

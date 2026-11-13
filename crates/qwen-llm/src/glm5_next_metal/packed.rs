@@ -2674,7 +2674,10 @@ impl Glm5NextSession<'_> {
             out: &v(&p.kda_out),
         };
         let profiling = self.stage_recorder.borrow().is_some();
-        if profiling || super::kda_value4::selected(p.arith(), c.head_count as usize, rows) {
+        let kda_value8 = ctx.device_facts().gpu_families.apple10
+            && super::kda_value8::selected(p.arith(), c.head_count as usize, rows);
+        let kda_value4 = super::kda_value4::selected(p.arith(), c.head_count as usize, rows);
+        if profiling || kda_value4 || kda_value8 {
             let mut prepared = crate::metal::prepare_kda_prefill(
                 ctx,
                 enc,
@@ -2684,7 +2687,8 @@ impl Glm5NextSession<'_> {
                 c.kda_gate_lower_bound,
                 c.rms_epsilon,
             )?;
-            if super::kda_value4::selected(p.arith(), c.head_count as usize, rows) {
+            let value8_selected = kda_value8 && prepared.select_value8(ctx)?;
+            if !value8_selected && kda_value4 {
                 prepared.select_value4(ctx)?;
             }
             self.stage(enc, Glm5NextStage::PackedKdaPrepare, Some(block))?;

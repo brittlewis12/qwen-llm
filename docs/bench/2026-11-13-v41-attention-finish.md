@@ -120,3 +120,15 @@ Required next input is an archive location for the original executables,
 or clarification that the pin permits an exact-source/profile rebuild with
 identical metallibs despite different executable hashes. A new measurement
 will not be substituted without that clarification.
+
+
+## Independent Engram cache landing composed
+
+During final cleanup main advanced to c2935fa36, bringing the in-process
+packed Engram row cache and its bench/trace records. Rebase onto this main;
+only generated ENV conflicted and is regenerated, with no attention conflict.
+The requested measurement source remains pinned to9877b6f25/67b3ebaf4.
+Per the lead's explicit composition rule, this host-I/O landing requires
+contracts, not a new attention measurement. The executable pin blocker
+remains; no model has been loaded. The pre-rebase source and all records
+remain at backup/v41-attention-finish-before-cache-rebase.

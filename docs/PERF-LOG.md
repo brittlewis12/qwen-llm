@@ -206,6 +206,23 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Raw `metagross:~/qwen-runs/2026-11-12-qos-nice0/`; record
   [bench note](bench/2026-11-12-serve-qos-nice0.md). Aven note on `SRV-2K0Y`:
   `JQFK6MMVXBWTG93N`.
+## 2026-11-13 - GLM Q6 F16 Prefill Cache: Rejected
+
+- At the M5 49K + 2,048 screening cell, the F16 cache missed the required
+  1.25x isolated-stage gate: dense FFN **24.79 -> 65.88 ms**, shared expert
+  **64.61 -> 158.60 ms**, KDA output projection **62.88 -> 171.79 ms**, and
+  MLA output projections **74.44 -> 143.07 ms**. KDA input projections were
+  effectively unchanged (177.92 -> 177.59 ms). Ordinary wall was 2,323 ms
+  candidate versus the earlier 1,999.71 ms baseline median; this was screening,
+  not a paired A/B.
+- The cache passed the preflight memory estimate for three 48K sessions
+  (9.03 GiB of additional session buffers, admitted). Performance failed, so
+  paired wall, quality, and serve gates were not run. Removed the cache code.
+  Next lever: sorted expert-major fused routed experts, aimed at the 721 ms
+  expert stage and 56.9 mean rows/expert in this full chunk.
+- **Evidence:** [Q6 F16 cache rejection](bench/2026-11-13-glm-q6-f16-cache.md),
+  raw run files under `docs/bench/2026-11-13-glm-prefill/q6-f16-cache/`.
+
 ## 2026-11-13 - GLM 4K/128-Query Prefill Candidate: Rejected
 
 - Baseline census on M5: 49K + 2,048 rows, 80K + 256, and 80K + 1,024.

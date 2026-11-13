@@ -37,10 +37,9 @@ was **-4.44 ms**, 95% CI **[-62.23, +53.35 ms]**. All six counted arms
 reported compiler overlap; timing thermal pressure peaked at 2, within the
 protocol limit. All six driver and server processes were verified at nice 0.
 
-**Lead decision:** for this bitwise change, treat serve as a coarse non-regression
-check below its resolution. The paired geometric-mean TPS ratio is **1.01861**
-(above the 0.98 threshold); ship default-on with
-`QWEN_GLM53_KDA_PARALLEL_PREP=0` as the rollback.
+**Lead decision:** ship default-on; the bitwise-change geomean TPS ratio
+**1.01861** clears the **0.98** serve floor, with
+`QWEN_GLM53_KDA_PARALLEL_PREP=0` as rollback.
 
 ## TensorOps sparse MLA attention: isolated operator probe
 

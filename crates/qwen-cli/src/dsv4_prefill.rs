@@ -293,6 +293,8 @@ struct Dsv4PrefillLayer {
     bucket_count: usize,
     /// Per-expert routed-row counts from this exact packed prefill chunk.
     expert_counts: Vec<u16>,
+    /// Per-token top-k expert ids, retained for cache-coverage slicing.
+    route_expert_ids: Vec<u16>,
     active_experts: usize,
     max_routes_per_expert: u16,
     route_count: usize,
@@ -548,6 +550,7 @@ fn summarize_chunk(
             bm16: metadata.bm16,
             bucket_count: metadata.bucket_count,
             expert_counts: metadata.expert_counts.to_vec(),
+            route_expert_ids: metadata.route_expert_ids.clone(),
             active_experts: metadata
                 .expert_counts
                 .iter()

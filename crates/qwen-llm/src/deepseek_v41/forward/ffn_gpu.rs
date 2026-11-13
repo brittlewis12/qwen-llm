@@ -1290,7 +1290,7 @@ impl Workspace {
                 && layer
                     .banks
                     .iter()
-                    .all(|b| metal::sorted_iq_supported(b.dtype))
+                    .all(|b| metal::v41_sorted_iq_supported(b.dtype))
                 && !crate::half_telemetry::enabled()
                 && sorted_experts_enabled()
             {

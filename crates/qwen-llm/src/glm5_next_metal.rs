@@ -2946,5 +2946,11 @@ pub fn set_expert_route(route: Option<Glm5NextExpertRoute>) {
     packed::set_expert_route(route);
 }
 
+/// Probe-only same-thread override for the sorted expert-major prefill path.
+#[cfg(feature = "perf-ablations")]
+pub fn with_sorted_expert_prefill<R>(enabled: bool, body: impl FnOnce() -> R) -> R {
+    packed::with_sorted_expert_prefill(enabled, body)
+}
+
 #[cfg(test)]
 mod tests;

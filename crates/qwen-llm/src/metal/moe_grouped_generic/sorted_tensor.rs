@@ -19,6 +19,14 @@ pub(crate) fn sorted_iq_supported(dtype: GgmlType) -> bool {
     )
 }
 
+/// Keep V4.1's original selector stable while GLM adds IQ3_S down support.
+pub(crate) fn v41_sorted_iq_supported(dtype: GgmlType) -> bool {
+    matches!(
+        dtype,
+        GgmlType::IQ2_XXS | GgmlType::IQ2_XS | GgmlType::IQ2_S | GgmlType::IQ3_XXS
+    )
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct SortedExpertGeometry {
     pub hidden: usize,

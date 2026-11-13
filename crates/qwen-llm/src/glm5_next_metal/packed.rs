@@ -42,31 +42,6 @@ crate::env_flag!(
     "QWEN_GLM53_SORTED_EXPERTS"
 );
 
-#[cfg(any(test, feature = "perf-ablations"))]
-thread_local! {
-    static SORTED_EXPERTS_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-fn sorted_experts_requested() -> bool {
-    #[cfg(any(test, feature = "perf-ablations"))]
-    if let Some(enabled) = SORTED_EXPERTS_OVERRIDE.with(std::cell::Cell::get) {
-        return enabled;
-    }
-    glm_sorted_experts_enabled()
-}
-
-#[cfg(feature = "perf-ablations")]
-pub(super) fn with_sorted_expert_prefill<R>(enabled: bool, body: impl FnOnce() -> R) -> R {
-    struct Restore(Option<bool>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            SORTED_EXPERTS_OVERRIDE.with(|state| state.set(self.0));
-        }
-    }
-    let _restore = Restore(SORTED_EXPERTS_OVERRIDE.with(|state| state.replace(Some(enabled))));
-    body()
-}
-
 /// Synchronous research hook. The session stays poisoned and its published
 /// position stays unchanged until every layer and the normal validation finish.
 #[cfg(feature = "perf-ablations")]
@@ -1277,7 +1252,7 @@ fn encode_experts_with_half(
     let mode = expert_mode(arith, b.gate_bank.dtype, b.up_bank.dtype, b.down_bank.dtype);
     let forced = forced_expert_route();
     if forced.is_none()
-        && sorted_experts_requested()
+        && glm_sorted_experts_enabled()
         && packet_fast_half(arith, mode)
         && crate::metal::moe_grouped_tensor_selected(ctx)
         && !crate::half_telemetry::enabled()

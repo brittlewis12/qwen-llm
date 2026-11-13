@@ -22,10 +22,8 @@
 //!
 //!  5. `occupancy`: capture real per-expert row buckets and per-kernel bytes
 //!     at one or more context depths, using the production route selection.
-//!  6. `sorted-stage` / `sorted-ab`: profile the sorted expert-major route
-//!     against grouped tiles from the same baseline 48K snapshot.
 //!
-//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy|sorted-stage|sorted-ab] [depth]`
+//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy] [depth]`
 
 #[cfg(not(feature = "perf-ablations"))]
 fn main() {
@@ -42,7 +40,6 @@ mod probe {
             GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch, Glm5NextCapturedRows, Glm5NextExpertRoute,
             Glm5NextRowBank, Glm5NextRowBankPlan, Glm5NextSession, Glm5NextSnapshot,
             Glm5NextStageReport, Glm5NextWeights, set_expert_packet_max_rows, set_expert_route,
-            with_sorted_expert_prefill,
         },
         metal::*,
         tokenizer::Tokenizer,
@@ -1079,148 +1076,6 @@ mod probe {
         Ok(())
     }
 
-    /// Candidate and incumbent stage spans over one shared baseline prefix
-    /// snapshot. The 48K prefix is always built with sorted experts disabled.
-    fn sorted_stage(
-        ctx: &MetalContext,
-        weights: &Glm5NextWeights,
-        ids: &[u32],
-        depth: usize,
-        capacity: usize,
-    ) -> anyhow::Result<()> {
-        const WIDTH: usize = 2048;
-        let mut session =
-            with_sorted_expert_prefill(false, || new_session(ctx, weights, ids, depth, capacity))?;
-        let snapshot = session.capture_snapshot()?;
-        let tokens = &ids[depth..depth + WIDTH];
-        let mut stages: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
-        let mut walls: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
-
-        for enabled in [false, true] {
-            with_sorted_expert_prefill(enabled, || -> anyhow::Result<()> {
-                session.restore_snapshot(&snapshot)?;
-                let logits = session.prefill_packed(ctx, tokens)?;
-                anyhow::ensure!(
-                    logits.iter().all(|v| v.is_finite()),
-                    "non-finite sorted warm logits"
-                );
-                Ok(())
-            })?;
-        }
-
-        // Three interleaved stage profiles per arm. Both arms see the same
-        // 48K state and the same routed input rows.
-        for order in [[0usize, 1usize], [1, 0], [0, 1]] {
-            for arm in order {
-                let enabled = arm == 1;
-                with_sorted_expert_prefill(enabled, || -> anyhow::Result<()> {
-                    session.restore_snapshot(&snapshot)?;
-                    let start = Instant::now();
-                    let (logits, report) = session.prefill_chunk_stage_profiled(ctx, tokens)?;
-                    walls[arm].push(start.elapsed().as_secs_f64() * 1e3);
-                    anyhow::ensure!(
-                        logits.iter().all(|v| v.is_finite()),
-                        "non-finite sorted stage logits"
-                    );
-                    stages[arm].push(
-                        stage_totals(&report)
-                            .get("routed_experts")
-                            .copied()
-                            .ok_or_else(|| anyhow::anyhow!("missing routed-expert span"))?,
-                    );
-                    Ok(())
-                })?;
-            }
-        }
-        let baseline_stage_ms = median(stages[0].clone());
-        let sorted_stage_ms = median(stages[1].clone());
-        emit(json!({
-            "kind": "sorted_stage", "depth": depth, "width": WIDTH,
-            "prefix_arm": "grouped", "arms": ["grouped", "sorted_expert_major"],
-            "routed_experts_stage_ms": [baseline_stage_ms, sorted_stage_ms],
-            "routed_experts_stage_samples_ms": stages,
-            "stage_speedup": baseline_stage_ms / sorted_stage_ms,
-            "stage_profile_wall_ms": [median(walls[0].clone()), median(walls[1].clone())],
-            "stage_profile_wall_samples_ms": walls,
-            "pressure": pressure(), "loadavg": loadavg(),
-        }));
-        Ok(())
-    }
-
-    /// Three interleaved ordinary-wall pairs after the isolated stage gate.
-    /// The same-state and bitwise outputs are retained for the exactness gate.
-    fn sorted_ab(
-        ctx: &MetalContext,
-        weights: &Glm5NextWeights,
-        ids: &[u32],
-        depth: usize,
-        capacity: usize,
-    ) -> anyhow::Result<()> {
-        const WIDTH: usize = 2048;
-        let mut session =
-            with_sorted_expert_prefill(false, || new_session(ctx, weights, ids, depth, capacity))?;
-        let snapshot = session.capture_snapshot()?;
-        let tokens = &ids[depth..depth + WIDTH];
-        for enabled in [false, true] {
-            with_sorted_expert_prefill(enabled, || -> anyhow::Result<()> {
-                session.restore_snapshot(&snapshot)?;
-                let logits = session.prefill_packed(ctx, tokens)?;
-                anyhow::ensure!(
-                    logits.iter().all(|v| v.is_finite()),
-                    "non-finite sorted A/B warm logits"
-                );
-                Ok(())
-            })?;
-        }
-        let mut walls = [Vec::new(), Vec::new()];
-        let mut final_logits: [Option<Vec<f32>>; 2] = [None, None];
-        let mut final_states: [Option<Glm5NextSnapshot>; 2] = [None, None];
-        let mut final_routes: [Option<Vec<(usize, Vec<i32>)>>; 2] = [None, None];
-        for (pair, order) in [[0usize, 1usize], [1, 0], [0, 1]].into_iter().enumerate() {
-            for arm in order {
-                let enabled = arm == 1;
-                with_sorted_expert_prefill(enabled, || -> anyhow::Result<()> {
-                    session.restore_snapshot(&snapshot)?;
-                    let start = Instant::now();
-                    let logits = session.prefill_packed(ctx, tokens)?;
-                    walls[arm].push(start.elapsed().as_secs_f64() * 1e3);
-                    anyhow::ensure!(
-                        logits.iter().all(|v| v.is_finite()),
-                        "non-finite sorted A/B logits"
-                    );
-                    if pair == 2 {
-                        final_logits[arm] = Some(logits);
-                        final_states[arm] = Some(session.capture_snapshot()?);
-                        final_routes[arm] = Some(session.perf_packed_route_ids(WIDTH)?);
-                    }
-                    Ok(())
-                })?;
-            }
-        }
-        let a = final_logits[0].as_ref().expect("grouped logits");
-        let b = final_logits[1].as_ref().expect("sorted logits");
-        let logits_bitwise_equal =
-            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits());
-        let state_bitwise_equal = final_states[0]
-            .as_ref()
-            .expect("grouped state")
-            .same_state(final_states[1].as_ref().expect("sorted state"));
-        let routes_equal = final_routes[0] == final_routes[1];
-        let pair_speedups: Vec<f64> = (0..3).map(|i| walls[0][i] / walls[1][i]).collect();
-        emit(json!({
-            "kind": "sorted_ab", "depth": depth, "width": WIDTH,
-            "arms": ["grouped", "sorted_expert_major"],
-            "wall_samples_ms": walls,
-            "pair_speedups": pair_speedups,
-            "median_speedup": median(walls[0].clone()) / median(walls[1].clone()),
-            "logits_bitwise_equal": logits_bitwise_equal,
-            "persistent_state_bitwise_equal": state_bitwise_equal,
-            "route_ids_equal": routes_equal,
-            "pressure": pressure(), "loadavg": loadavg(),
-        }));
-        Ok(())
-    }
-
     /// Force each legal routed-expert route at every width, with interleaved
     /// warm repetitions. The ordinary wall is the timing number; the stage
     /// profile and kernel census attribute the routed-expert time.
@@ -1494,7 +1349,7 @@ mod probe {
         let args: Vec<String> = std::env::args().collect();
         let corpus = args.get(1).ok_or_else(|| {
             anyhow::anyhow!(
-                "usage: glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy|sorted-stage|sorted-ab] [depth]"
+                "usage: glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality] [depth]"
             )
         })?;
         let mode = args.get(2).map(String::as_str).unwrap_or("all");
@@ -1519,15 +1374,7 @@ mod probe {
         anyhow::ensure!(
             matches!(
                 mode,
-                "all"
-                    | "census"
-                    | "batch"
-                    | "threshold"
-                    | "routes"
-                    | "route-quality"
-                    | "occupancy"
-                    | "sorted-stage"
-                    | "sorted-ab"
+                "all" | "census" | "batch" | "threshold" | "routes" | "route-quality" | "occupancy"
             ),
             "unknown mode {mode}"
         );
@@ -1544,9 +1391,7 @@ mod probe {
         } else {
             CAPACITY
         };
-        let needed_width = if matches!(mode, "sorted-stage" | "sorted-ab") {
-            2048
-        } else if mode == "routes" || mode == "occupancy" {
+        let needed_width = if mode == "routes" || mode == "occupancy" {
             *route_widths().iter().max().expect("route widths")
         } else if mode == "route-quality" {
             *quality_widths.iter().max().expect("quality widths")
@@ -1611,12 +1456,6 @@ mod probe {
         }
         if mode == "occupancy" {
             occupancy(&ctx, &weights, &ids, &occupancy_depths, capacity)?;
-        }
-        if mode == "sorted-stage" {
-            sorted_stage(&ctx, &weights, &ids, depth, capacity)?;
-        }
-        if mode == "sorted-ab" {
-            sorted_ab(&ctx, &weights, &ids, depth, capacity)?;
         }
         emit(json!({
             "kind": "done", "pressure": pressure(), "loadavg": loadavg(),

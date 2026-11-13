@@ -22,6 +22,20 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Ready to land after final composed contracts at the rebased attention
   tip; cooperative experts is separate and default-off. No pushes/merges.
   [Full frozen rule, all pairs and disk bytes](bench/2026-11-13-v41-attention-final.md).
+## 2026-11-13 - Cooperative V4.1 Experts: Prototype Rebased, Default-Off
+
+- Replay archived M32/M64, eight-group prototype on the attention base,
+  separate branch `perf/v41-cooperative-prepared`; preserve MIT attribution.
+- Existing GPU differential extended to actual H5120/F2304, mean populations
+  16/32, tile boundaries, tails, empty/hot runs and same/mixed down types.
+  90 cases/mode, 73,048,064 planned strict components. No new ignored test.
+- Local iter and test-profile no-run compile pass. M5 functional execution
+  remains required; no isolation/native/serve claim or promotion.
+- Next gate: exactness, then >=1.25x combined GU+down at real 384-expert
+  populations for 2048@48K and 1K@80K, with inclusive movement reported.
+  Direct F32 gather/packed-input design attributes only expert-owned copies,
+  not all 71.4557ms of audit scatter+pack (indexer shares that total).
+  [Design, coverage and predeclared gate](bench/2026-11-13-v41-cooperative-prepared.md).
 
 ## 2026-11-13 - V4.1 Final Arm: Native Root Interpretation Corrected
 

@@ -23,6 +23,7 @@ pub(crate) struct SortedExpertGeometry {
     pub topk: usize,
     pub rows: usize,
     pub clamp: f32,
+    pub cooperative: bool,
 }
 
 const KERNEL: &str = "v41_sorted_experts";
@@ -71,6 +72,12 @@ impl<'a> SortedExperts<'a> {
         g: SortedExpertGeometry,
     ) -> Result<Self, MetalError> {
         require_serial(KERNEL, enc)?;
+        if g.cooperative && ctx.device_facts().name != "Apple M5 Ultra" {
+            return Err(bad_shape(
+                KERNEL,
+                "cooperative expert device is not qualified",
+            ));
+        }
         if !(1..=4096).contains(&g.rows)
             || !(1..=1024).contains(&g.experts)
             || !(1..=g.experts).contains(&g.topk)
@@ -175,15 +182,16 @@ impl<'a> SortedExperts<'a> {
         )?;
         check_disjoint(KERNEL, inner, &[(packed, "packed"), (output, "output")])?;
         let suffix = |w: &MetalTensor| moe_grouped_generic_layout(w.dtype).unwrap().suffix;
+        let family = if g.cooperative { "cooperative_" } else { "" };
         let pipelines = [
             ctx.tensor_pipeline("v41_sorted_plan")?,
             ctx.tensor_pipeline("v41_sorted_pack")?,
-            ctx.tensor_pipeline(&format!("v41_sorted_gu_{}", suffix(banks[0])))?,
-            ctx.tensor_pipeline(&format!("v41_sorted_down_{}", suffix(banks[2])))?,
+            ctx.tensor_pipeline(&format!("v41_sorted_gu_{family}{}", suffix(banks[0])))?,
+            ctx.tensor_pipeline(&format!("v41_sorted_down_{family}{}", suffix(banks[2])))?,
         ];
         for p in &pipelines[2..] {
             if p.threadExecutionWidth() != 32
-                || p.maxTotalThreadsPerThreadgroup() < 128
+                || p.maxTotalThreadsPerThreadgroup() < if g.cooperative { 256 } else { 128 }
                 || p.staticThreadgroupMemoryLength()
                     .checked_add(SHARED_BYTES)
                     .is_none_or(|n| n > ctx.device.maxThreadgroupMemoryLength())
@@ -306,7 +314,7 @@ impl<'a> SortedExperts<'a> {
                 depth: 1,
             },
             MTLSize {
-                width: 128,
+                width: if self.g.cooperative { 256 } else { 128 },
                 height: 1,
                 depth: 1,
             },

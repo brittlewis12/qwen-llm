@@ -27,6 +27,21 @@ fn sorted_rows_geometry(c: &Config, rows: usize) -> bool {
         && (c.hidden, c.intermediate, c.experts, c.topk) == (5120, 2304, 384, 6)
 }
 
+crate::env_flag!(
+    /// Use eight-SIMDgroup cooperative M32/M64 native-IQ experts on the qualified M5 Ultra sorted prefill tier. Retains K64 dequantization and F32/half boundaries with direct accumulator writeback; experimental, default off. 0 retains the independent M32 expert tiles.
+    default_off cooperative_experts_env,
+    "QWEN_V41_EXPERT_COOPERATIVE"
+);
+fn cooperative_experts_enabled() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    if let Some(super::PrefillExperiment::CooperativeExperts(enabled)) =
+        super::PREFILL_EXPERIMENT.with(|s| s.get())
+    {
+        return enabled;
+    }
+    cooperative_experts_env()
+}
+
 pub(super) struct Workspace {
     // 0 X, 1 incoming pre, 2 projected mixes, 3 next pre, 4 post, 5 comb,
     // 6 collapse, 7 normalized input, 8 logits, 9 scores, 10 IDs, 11 weights,
@@ -1331,6 +1346,8 @@ impl Workspace {
                         topk: c.topk,
                         rows: n,
                         clamp: c.clamp,
+                        cooperative: ctx.device_facts().name == "Apple M5 Ultra"
+                            && cooperative_experts_enabled(),
                     },
                 )?;
                 experts.encode_gate_up(e.enc());

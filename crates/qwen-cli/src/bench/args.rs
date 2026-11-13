@@ -933,7 +933,7 @@ pub(crate) struct MoeBatchSweepArgs {
     #[arg(long)]
     pub(crate) route_plan: Option<PathBuf>,
     /// New append rows to capture per agent in route-only mode.
-    #[arg(long, default_value = "512")]
+    #[arg(long, default_value = "2048")]
     pub(crate) route_rows_per_agent: usize,
     /// Token-id pattern used for captured replay tokens.
     #[arg(long, value_enum, default_value = "ramp")]

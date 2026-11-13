@@ -575,6 +575,11 @@ pub(crate) fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
         if agents.is_empty() {
             return Err(anyhow!("route plan has no agents"));
         }
+        if route_rows_per_agent < 2048 {
+            return Err(anyhow!(
+                "route-census needs at least 2,048 rows per agent for the crossover grid"
+            ));
+        }
         let tokenizer = NativeTokenizer::from_gguf(&g).context("open native GGUF tokenizer")?;
         let text = std::fs::read_to_string(&file[0])
             .with_context(|| format!("read {}", file[0].display()))?;
@@ -593,8 +598,11 @@ pub(crate) fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
         }
         let mf = MetalForward::new(&ctx, &mm);
         let mut counts_by_agent = vec![vec![vec![0u64; n_expert]; moe_blocks.len()]; agents.len()];
+        let mut counts_by_agent_by_width =
+            vec![std::collections::BTreeMap::<usize, Vec<Vec<u64>>>::new(); agents.len()];
         let mut rows_by_agent = vec![0usize; agents.len()];
         let mut calls_by_agent = vec![0usize; agents.len()];
+        let capture_widths = [32usize, 161, 512, 2048];
         for (agent_index, agent_plan) in agents.iter().enumerate() {
             let calls = agent_plan["calls"]
                 .as_array()
@@ -658,6 +666,12 @@ pub(crate) fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
                     }
                     rows_by_agent[agent_index] += 1;
                     position += 1;
+                    if capture_widths.contains(&rows_by_agent[agent_index]) {
+                        counts_by_agent_by_width[agent_index].insert(
+                            rows_by_agent[agent_index],
+                            counts_by_agent[agent_index].clone(),
+                        );
+                    }
                 }
                 calls_by_agent[agent_index] += 1;
                 if rows_by_agent[agent_index] >= route_rows_per_agent {
@@ -696,11 +710,14 @@ pub(crate) fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
                 "root_tokens": route_capture_ctx,
                 "captured_tokens_per_agent": rows_by_agent,
                 "calls_used_per_agent": calls_by_agent,
+                "route_plan_family": plan["family"],
+                "route_plan_seed": plan["seed"],
                 "expert_count": n_expert,
                 "topk": topk,
                 "moe_blocks": weights,
                 "counts_per_moe_block": total_counts,
                 "counts_per_agent_and_moe_block": counts_by_agent,
+                "counts_by_agent_and_width": counts_by_agent_by_width,
                 "route_semantics": "serve_realistic CSV population; each agent owns its own packed code-corpus root, append token slices use the same agent*977 offset and call lengths as the serve driver; appended route rows are B1 continuations"
             })
         );

@@ -232,7 +232,7 @@ int main(int argc,const char **argv){@autoreleasepool{try{
             if(line.length==0)continue;
             NSDictionary *r=[NSJSONSerialization JSONObjectWithData:[line dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
             NSString *dtype=r[@"dtype"], *role=r[@"role"];
-            bool iq2=[dtype isEqual:@"iq2_s"]; require(iq2 || [dtype isEqual:@"IQ3_S"],"real level dtype");
+            bool iq2=[dtype isEqual:@"iq2_s"]; require(iq2 || [dtype isEqual:@"iq3_s"],"real level dtype");
             int rows=[r[@"rows"] intValue], m=[r[@"m"] intValue], k=[r[@"k"] intValue];
             int native_bytes=[r[@"native_block_bytes"] intValue], level_bytes=[r[@"level_block_bytes"] intValue];
             Fixture base(p.d,native_bytes,iq2,m,k,1,rows,uint32_t(rows));

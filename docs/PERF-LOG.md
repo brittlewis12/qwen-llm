@@ -51,6 +51,14 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   no polarity conflicts). Earlier full/checkpoint contracts pass; final
   composed-tree check follows in the closing raw log. No next-lever code.
   [All cells, per-arm disk bytes and exact resume step](bench/2026-11-13-v41-attention-close.md).
+## 2026-11-13 - GLM Real Expert Level Codes: Bitwise, Stage Gate Fails
+
+- Stored re-encoding of real IQ2_S/IQ3_S experts is exact (0 Half/tile bit
+  mismatches), but the stage gate fails: median paired speedup is **0.79-0.89x**
+  at 7/28/57/161/512 rows; the candidate adds 22-29% bytes.
+- At 57 GB, corrected mixed-format speeded-work coverage is 72.9-76.3% by cell,
+  but the slower tile implies a first-order **3.6-5.2% wall regression**.
+  Closed; no runtime change. [Record](bench/2026-11-13-glm-level-code-expert-cache.md).
 
 ## 2026-11-13 - GLM KDA Parallel Preparation: Ship
 

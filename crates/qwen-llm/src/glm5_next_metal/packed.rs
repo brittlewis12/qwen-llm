@@ -34,6 +34,78 @@ use crate::metal::{
 };
 use objc2_metal::MTLComputePipelineState;
 
+#[cfg(feature = "perf-ablations")]
+thread_local! {
+    static IQ_REPACK_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+fn iq_repack_requested() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    if let Some(enabled) = IQ_REPACK_OVERRIDE.with(std::cell::Cell::get) {
+        return enabled;
+    }
+    glm_prefill_iq_repack_storage_enabled()
+}
+
+#[cfg(feature = "perf-ablations")]
+pub fn with_iq_repack_prefill<R>(enabled: bool, body: impl FnOnce() -> R) -> R {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            IQ_REPACK_OVERRIDE.with(|state| state.set(self.0));
+        }
+    }
+    let _restore = Restore(IQ_REPACK_OVERRIDE.with(|state| state.replace(Some(enabled))));
+    body()
+}
+
+fn grouped_iq_repacked<'a>(
+    ctx: &MetalContext,
+    weights: &'a Glm5NextWeights,
+    block: usize,
+    current: &'a GroupedExperts<'a>,
+    arith: Arith,
+    hidden: usize,
+    ffn: usize,
+    experts: usize,
+    top_k: usize,
+    rows: usize,
+) -> GroupedExperts<'a> {
+    let eligible = iq_repack_requested()
+        && (hidden, ffn, experts, top_k) == (4096, 2048, 288, 8)
+        && (1024..=4096).contains(&rows)
+        && arith.lineage == PackedLineage::Fast
+        && arith.precision == FastPrecision::Half
+        && crate::metal::moe_grouped_tensor_selected(ctx);
+    let repacked = eligible
+        .then(|| weights.repacked_moe.get(block).and_then(Option::as_ref))
+        .flatten();
+    let (gate_bank, up_bank, down_bank) = repacked.map_or(
+        (current.gate_bank, current.up_bank, current.down_bank),
+        |banks| {
+            (
+                banks.gate.as_ref().unwrap_or(current.gate_bank),
+                banks.up.as_ref().unwrap_or(current.up_bank),
+                banks.down.as_ref().unwrap_or(current.down_bank),
+            )
+        },
+    );
+    GroupedExperts {
+        gate_bank,
+        up_bank,
+        down_bank,
+        input: current.input,
+        ids: current.ids,
+        weights: current.weights,
+        status: current.status,
+        counts: current.counts,
+        slots: current.slots,
+        inner: current.inner,
+        slot_out: current.slot_out,
+        output: current.output,
+    }
+}
+
 /// Synchronous research hook. The session stays poisoned and its published
 /// position stays unchanged until every layer and the normal validation finish.
 #[cfg(feature = "perf-ablations")]
@@ -2385,6 +2457,18 @@ impl Glm5NextSession<'_> {
                             .view_subrange(0, vec![h as u64, (k * rows) as u64]),
                         output: &v(&p.routed),
                     };
+                    let grouped = grouped_iq_repacked(
+                        ctx,
+                        self.weights,
+                        index,
+                        &grouped,
+                        p.arith(),
+                        h,
+                        f,
+                        e,
+                        k,
+                        rows,
+                    );
                     let _expert_mode = encode_experts_with_half(
                         ctx,
                         &enc,

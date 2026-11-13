@@ -529,16 +529,32 @@ pub fn split_attention_units(c: &Glm5NextConfig, queries: u64) -> u64 {
 /// queries, reusing the score, selection and expansion scratch.
 pub const PACKED_SPARSE_QUERIES: u64 = 64;
 
+crate::env_flag!(
+    /// Candidate 128-row packed sparse-index/attention microbatches for 4,096-row GLM chunks. Session admission prices the larger scratch. Zero restores 64-row microbatches.
+    default_off sparse_query_128_requested,
+    "QWEN_GLM53_PREFILL_SPARSE_QUERY_128"
+);
+
+/// Query microbatch width for a packed session. The wider path is restricted
+/// to 4,096-row sessions so small chunks keep their measured 64-row geometry.
+pub fn packed_sparse_queries(rows: u64) -> u64 {
+    if rows >= 4096 && sparse_query_128_requested() {
+        128
+    } else {
+        PACKED_SPARSE_QUERIES
+    }
+}
+
 /// Packed-prefill sparse-selection scratch for chunks of up to `rows` tokens
 /// in a session of `capacity` positions: chunk-wide indexer queries, head
 /// weights and per-row visibility; microbatch scores, selected pools and
-/// expanded rows for [`PACKED_SPARSE_QUERIES`] queries; and one sticky
+/// expanded rows for [`packed_sparse_queries`] queries; and one sticky
 /// selector status per (MLA block, chunk row).
 pub fn packed_sparse_specs(c: &Glm5NextConfig, capacity: u64, rows: u64) -> Vec<BufferSpec> {
     let pools = capacity.div_ceil(c.indexer_pool as u64).max(1);
     let (ih, id) = (c.indexer_head_count as u64, c.indexer_head_dim as u64);
     let mla = c.block_count(MixerKind::Mla) as u64;
-    let s = rows.min(PACKED_SPARSE_QUERIES);
+    let s = rows.min(packed_sparse_queries(rows));
     let units = split_attention_units(c, s.min(PACKED_SPLIT_QUERIES));
     let z = BufferSpec::zeros;
     vec![

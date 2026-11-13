@@ -51,6 +51,7 @@ mod probe {
     /// Deep appends need room above the 48K/80K roots.
     const ROUTE_CAPACITY: usize = 98304;
     const PREFILL_ROWS: usize = 2048;
+    const MAX_PREFILL_ROWS: usize = 4096;
     const CENSUS_WIDTHS: [usize; 9] = [1, 2, 4, 8, 16, 32, 48, 64, 128];
     const THRESHOLD_WIDTHS: [usize; 8] = [8, 12, 16, 24, 32, 48, 64, 96];
     const ROUTE_WIDTHS: [usize; 17] = [
@@ -62,6 +63,20 @@ mod probe {
     fn emit(v: Value) {
         println!("{v}");
         std::io::stdout().flush().unwrap();
+    }
+
+    fn configured_prefill_rows() -> anyhow::Result<usize> {
+        // Benchmark-only session chunk size; defaults to the production-like 2,048-row census.
+        let rows = std::env::var("GLM_ROUTE_PREFILL_ROWS")
+            .ok()
+            .map(|value| value.parse::<usize>())
+            .transpose()?
+            .unwrap_or(PREFILL_ROWS);
+        anyhow::ensure!(
+            (1..=MAX_PREFILL_ROWS).contains(&rows),
+            "GLM_ROUTE_PREFILL_ROWS must be in 1..={MAX_PREFILL_ROWS}, got {rows}"
+        );
+        Ok(rows)
     }
 
     fn pressure() -> i32 {
@@ -187,8 +202,26 @@ mod probe {
         depth: usize,
         capacity: usize,
     ) -> anyhow::Result<Glm5NextSession<'a>> {
-        let mut session = Glm5NextSession::with_prefill_rows(ctx, weights, capacity, PREFILL_ROWS)?;
-        for part in ids[..depth].chunks(PREFILL_ROWS) {
+        new_session_with_rows(
+            ctx,
+            weights,
+            ids,
+            depth,
+            capacity,
+            configured_prefill_rows()?,
+        )
+    }
+
+    fn new_session_with_rows<'a>(
+        ctx: &MetalContext,
+        weights: &'a Glm5NextWeights,
+        ids: &[u32],
+        depth: usize,
+        capacity: usize,
+        prefill_rows: usize,
+    ) -> anyhow::Result<Glm5NextSession<'a>> {
+        let mut session = Glm5NextSession::with_prefill_rows(ctx, weights, capacity, prefill_rows)?;
+        for part in ids[..depth].chunks(prefill_rows) {
             gate();
             session.prefill_packed(ctx, part)?;
         }
@@ -291,6 +324,7 @@ mod probe {
         ids: &[u32],
         depth: usize,
     ) -> anyhow::Result<()> {
+        let batch_prefill_rows = configured_prefill_rows()?;
         // Member 0 carries the shared packed activation scratch; the others
         // only need decode state. All four restore the same 48K prefix.
         let mut sessions: Vec<Glm5NextSession> = (0..GLM5_NEXT_MAX_BATCH_SIZE)
@@ -299,7 +333,7 @@ mod probe {
                     ctx,
                     weights,
                     CAPACITY,
-                    if i == 0 { PREFILL_ROWS } else { 4 },
+                    if i == 0 { batch_prefill_rows } else { 4 },
                 )
             })
             .collect::<Result<_, _>>()?;
@@ -869,13 +903,14 @@ mod probe {
             max_depth + max_width + 1
         );
 
-        let mut session = Glm5NextSession::with_prefill_rows(ctx, weights, capacity, PREFILL_ROWS)?;
+        let prefill_rows = configured_prefill_rows()?;
+        let mut session = Glm5NextSession::with_prefill_rows(ctx, weights, capacity, prefill_rows)?;
         let mut snapshots = Vec::new();
         let mut depth_cursor = 0usize;
         while session.position() < max_depth {
             gate();
             let start = session.position();
-            let end = (start + PREFILL_ROWS).min(max_depth);
+            let end = (start + prefill_rows).min(max_depth);
             session.prefill_packed(ctx, &ids[start..end])?;
             while sorted_depths.get(depth_cursor).copied() == Some(session.position()) {
                 snapshots.push((session.position(), session.capture_snapshot()?));
@@ -1073,6 +1108,192 @@ mod probe {
                 }));
             }
         }
+        Ok(())
+    }
+
+    fn profile_rows(
+        ctx: &MetalContext,
+        session: &mut Glm5NextSession<'_>,
+        tokens: &[u32],
+        chunk_rows: usize,
+    ) -> anyhow::Result<(Vec<f32>, f64, f64, f64, BTreeMap<&'static str, f64>)> {
+        let mut logits = Vec::new();
+        let (mut wall_ms, mut gpu_ms, mut span_ms) = (0.0, 0.0, 0.0);
+        let mut stages = BTreeMap::<&'static str, f64>::new();
+        for chunk in tokens.chunks(chunk_rows) {
+            gate();
+            let started = Instant::now();
+            let (out, report) = session.prefill_chunk_stage_profiled(ctx, chunk)?;
+            wall_ms += started.elapsed().as_secs_f64() * 1e3;
+            anyhow::ensure!(
+                out.iter().all(|value| value.is_finite()),
+                "non-finite paired logits"
+            );
+            gpu_ms += report.command_gpu_ms;
+            span_ms += report.span_sum_ms;
+            for (stage, ms) in stage_totals(&report) {
+                *stages.entry(stage).or_default() += ms;
+            }
+            logits = out;
+        }
+        Ok((logits, wall_ms, gpu_ms, span_ms, stages))
+    }
+
+    fn logits_bitwise_equal(a: &[f32], b: &[f32]) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(left, right)| left.to_bits() == right.to_bits())
+    }
+
+    /// Paired root cell: baseline executes 4,096 tokens as two 2,048-row
+    /// chunks; candidate executes one 4,096-row chunk and uses 128-query
+    /// sparse tiles when enabled. Both sessions restore the same 48K snapshot.
+    fn paired_rows(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        ids: &[u32],
+        depth: usize,
+        capacity: usize,
+    ) -> anyhow::Result<()> {
+        const BASE_ROWS: usize = 2048;
+        const CANDIDATE_ROWS: usize = 4096;
+        const WIDTH: usize = 4096;
+        anyhow::ensure!(
+            configured_prefill_rows()? == CANDIDATE_ROWS,
+            "paired candidate requires GLM_ROUTE_PREFILL_ROWS=4096"
+        );
+        anyhow::ensure!(
+            depth + WIDTH < ids.len(),
+            "paired row cell needs {} tokens, corpus has {}",
+            depth + WIDTH + 1,
+            ids.len()
+        );
+        let tokens = &ids[depth..depth + WIDTH];
+
+        // One prefix build and one captured state feed both row geometries.
+        let seed = new_session_with_rows(ctx, weights, ids, depth, capacity, BASE_ROWS)?;
+        let start_state = seed.capture_snapshot()?;
+        drop(seed);
+
+        let mut baseline = Glm5NextSession::with_prefill_rows(ctx, weights, capacity, BASE_ROWS)?;
+        let mut candidate =
+            Glm5NextSession::with_prefill_rows(ctx, weights, capacity, CANDIDATE_ROWS)?;
+        baseline.restore_snapshot(&start_state)?;
+        candidate.restore_snapshot(&start_state)?;
+        let sessions = [&mut baseline, &mut candidate];
+        let rows = [BASE_ROWS, CANDIDATE_ROWS];
+        let labels = ["baseline_2048", "candidate_4096"];
+        for arm in 0..2 {
+            gate();
+            sessions[arm].restore_snapshot(&start_state)?;
+            let warm = sessions[arm].prefill_packed(ctx, tokens)?;
+            anyhow::ensure!(
+                warm.iter().all(|value| value.is_finite()),
+                "non-finite warm logits"
+            );
+            sessions[arm].restore_snapshot(&start_state)?;
+        }
+
+        let stage_order = [(0usize, 0usize), (0, 1), (1, 1), (1, 0), (2, 0), (2, 1)];
+        let mut stage_samples = [
+            BTreeMap::<&'static str, Vec<f64>>::new(),
+            BTreeMap::<&'static str, Vec<f64>>::new(),
+        ];
+        let mut pending_stage: [Option<(Vec<f32>, Glm5NextSnapshot)>; 3] =
+            std::array::from_fn(|_| None);
+        let mut stage_exactness = Vec::new();
+        let mut stage_events = Vec::new();
+        for (pair, arm) in stage_order {
+            sessions[arm].restore_snapshot(&start_state)?;
+            let (logits, wall_ms, gpu_ms, span_ms, stages) =
+                profile_rows(ctx, sessions[arm], tokens, rows[arm])?;
+            for (&stage, &ms) in &stages {
+                stage_samples[arm].entry(stage).or_default().push(ms);
+            }
+            let state = sessions[arm].capture_snapshot()?;
+            if let Some((pending_logits, pending_state)) = pending_stage[pair].take() {
+                stage_exactness.push(json!({
+                    "pair": pair,
+                    "logits_bitwise": logits_bitwise_equal(&pending_logits, &logits),
+                    "state_bitwise": pending_state.same_state(&state),
+                }));
+            } else {
+                pending_stage[pair] = Some((logits, state));
+            }
+            stage_events.push(json!({
+                "pair": pair, "arm": labels[arm], "rows": rows[arm],
+                "profile_wall_ms": wall_ms, "command_gpu_ms": gpu_ms,
+                "stage_span_sum_ms": span_ms, "stages_ms": stages,
+            }));
+        }
+
+        let wall_order = [(0usize, 0usize), (0, 1), (1, 1), (1, 0), (2, 0), (2, 1)];
+        let mut wall_samples: [Vec<f64>; 2] = std::array::from_fn(|_| Vec::new());
+        let mut pending_wall: [Option<(Vec<f32>, Glm5NextSnapshot)>; 3] =
+            std::array::from_fn(|_| None);
+        let mut wall_exactness = Vec::new();
+        let mut wall_events = Vec::new();
+        for (pair, arm) in wall_order {
+            gate();
+            sessions[arm].restore_snapshot(&start_state)?;
+            let started = Instant::now();
+            let logits = sessions[arm].prefill_packed(ctx, tokens)?;
+            let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+            anyhow::ensure!(
+                logits.iter().all(|value| value.is_finite()),
+                "non-finite paired logits"
+            );
+            wall_samples[arm].push(wall_ms);
+            let state = sessions[arm].capture_snapshot()?;
+            if let Some((pending_logits, pending_state)) = pending_wall[pair].take() {
+                wall_exactness.push(json!({
+                    "pair": pair,
+                    "logits_bitwise": logits_bitwise_equal(&pending_logits, &logits),
+                    "state_bitwise": pending_state.same_state(&state),
+                }));
+            } else {
+                pending_wall[pair] = Some((logits, state));
+            }
+            wall_events.push(json!({
+                "pair": pair, "arm": labels[arm], "rows": rows[arm], "wall_ms": wall_ms,
+            }));
+        }
+
+        let stage_p50 = |arm: usize, stage: &str| {
+            stage_samples[arm]
+                .get(stage)
+                .cloned()
+                .map(median)
+                .unwrap_or(0.0)
+        };
+        let base_route_ms = stage_p50(0, "routed_experts");
+        let candidate_route_ms = stage_p50(1, "routed_experts");
+        let base_wall_ms = median(wall_samples[0].clone());
+        let candidate_wall_ms = median(wall_samples[1].clone());
+        emit(json!({
+            "kind": "paired_rows_summary",
+            "depth": depth, "width": WIDTH,
+            "baseline_rows": BASE_ROWS, "candidate_rows": CANDIDATE_ROWS,
+            "baseline_sparse_query_rows": qwen_llm::glm5_next::memory::packed_sparse_queries(BASE_ROWS as u64),
+            "candidate_sparse_query_rows": qwen_llm::glm5_next::memory::packed_sparse_queries(CANDIDATE_ROWS as u64),
+            "snapshot_bytes": start_state.bytes(),
+            "session_peak_bytes": [baseline.ledger().peak_bytes(), candidate.ledger().peak_bytes()],
+            "stage_target": "routed_experts",
+            "baseline_routed_experts_ms_p50": base_route_ms,
+            "candidate_routed_experts_ms_p50": candidate_route_ms,
+            "routed_experts_stage_speedup": base_route_ms / candidate_route_ms,
+            "baseline_wall_ms_p50": base_wall_ms,
+            "candidate_wall_ms_p50": candidate_wall_ms,
+            "ordinary_wall_speedup": base_wall_ms / candidate_wall_ms,
+            "stage_exactness": stage_exactness,
+            "wall_exactness": wall_exactness,
+            "stage_events": stage_events,
+            "wall_events": wall_events,
+            "stage_samples_ms": [stage_samples[0], stage_samples[1]],
+            "wall_samples_ms": [wall_samples[0], wall_samples[1]],
+            "pressure": pressure(), "loadavg": loadavg(),
+        }));
         Ok(())
     }
 
@@ -1349,7 +1570,7 @@ mod probe {
         let args: Vec<String> = std::env::args().collect();
         let corpus = args.get(1).ok_or_else(|| {
             anyhow::anyhow!(
-                "usage: glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality] [depth]"
+                "usage: glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy|candidate|paired-rows] [depth]"
             )
         })?;
         let mode = args.get(2).map(String::as_str).unwrap_or("all");
@@ -1358,7 +1579,7 @@ mod probe {
             .map(|s| s.parse())
             .transpose()?
             .unwrap_or(48 * 1024);
-        let occupancy_depths = if mode == "occupancy" {
+        let occupancy_depths = if matches!(mode, "occupancy" | "candidate") {
             std::env::var("GLM_ROUTE_DEPTHS")
                 .ok()
                 .map(|value| {
@@ -1374,7 +1595,15 @@ mod probe {
         anyhow::ensure!(
             matches!(
                 mode,
-                "all" | "census" | "batch" | "threshold" | "routes" | "route-quality" | "occupancy"
+                "all"
+                    | "census"
+                    | "batch"
+                    | "threshold"
+                    | "routes"
+                    | "route-quality"
+                    | "occupancy"
+                    | "candidate"
+                    | "paired-rows"
             ),
             "unknown mode {mode}"
         );
@@ -1383,7 +1612,10 @@ mod probe {
         } else {
             Vec::new()
         };
-        let capacity = if matches!(mode, "routes" | "route-quality" | "occupancy") {
+        let capacity = if matches!(
+            mode,
+            "routes" | "route-quality" | "occupancy" | "candidate" | "paired-rows"
+        ) {
             std::env::var("GLM_APPEND_CAPACITY")
                 .ok()
                 .and_then(|value| value.parse().ok())
@@ -1391,14 +1623,16 @@ mod probe {
         } else {
             CAPACITY
         };
-        let needed_width = if mode == "routes" || mode == "occupancy" {
+        let needed_width = if matches!(mode, "routes" | "occupancy" | "candidate") {
             *route_widths().iter().max().expect("route widths")
+        } else if mode == "paired-rows" {
+            4096
         } else if mode == "route-quality" {
             *quality_widths.iter().max().expect("quality widths")
         } else {
             256
         };
-        let max_depth = if mode == "occupancy" {
+        let max_depth = if matches!(mode, "occupancy" | "candidate") {
             occupancy_depths.iter().copied().max().unwrap_or(depth)
         } else {
             depth
@@ -1431,9 +1665,9 @@ mod probe {
         let weights = Glm5NextWeights::load(&ctx, &gguf)?;
         emit(json!({
             "kind": "header", "mode": mode, "depth": depth,
-            "occupancy_depths": if mode == "occupancy" { Some(&occupancy_depths) } else { None },
-            "capacity": capacity, "prefill_rows": PREFILL_ROWS,
-            "route_widths": if matches!(mode, "routes" | "occupancy") { Some(route_widths()) } else { None },
+            "occupancy_depths": if matches!(mode, "occupancy" | "candidate") { Some(&occupancy_depths) } else { None },
+            "capacity": capacity, "prefill_rows": configured_prefill_rows()?,
+            "route_widths": if matches!(mode, "routes" | "occupancy" | "candidate") { Some(route_widths()) } else { None },
             "quality_widths": if mode == "route-quality" { Some(quality_widths) } else { None },
             "corpus_tokens": ids.len(), "device": ctx.device_facts(),
             "pressure": pressure(), "loadavg": loadavg(),
@@ -1456,6 +1690,13 @@ mod probe {
         }
         if mode == "occupancy" {
             occupancy(&ctx, &weights, &ids, &occupancy_depths, capacity)?;
+        }
+        if mode == "candidate" {
+            occupancy(&ctx, &weights, &ids, &occupancy_depths, capacity)?;
+            paired_rows(&ctx, &weights, &ids, depth, capacity)?;
+        }
+        if mode == "paired-rows" {
+            paired_rows(&ctx, &weights, &ids, depth, capacity)?;
         }
         emit(json!({
             "kind": "done", "pressure": pressure(), "loadavg": loadavg(),

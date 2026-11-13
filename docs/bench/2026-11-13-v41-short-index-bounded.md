@@ -76,3 +76,10 @@ All8 signatures per cell are bitwise; all are pressure0. No speedup claim for
 inactive controls. Per-pair times and raw hashes are retained in
 `2026-11-12-v41-prefill/data/bounded-short-deep-nice0-summary.json`.
 Root49152/49509 and purged serve gates remain pending. No default promotion.
+
+Root controls complete at nice0:49152 is **21495.799/21647.937ms,0.99297x**;
+49509 is **21982.811/21954.227ms,1.00130x**. Positive pairs1/3 and2/3;
+all8 signatures in each cell are bitwise. Allowed pressure2 is retained.
+No root speedup claim. `data/bounded-short-roots-nice0-summary.json` under
+the earlier bench directory keeps every pair/hash. All7 rebased native
+target/control cells pass the numerical gate. Purged serve remains pending.

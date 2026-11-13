@@ -46,6 +46,18 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   fold **678.057/735.361** vs split **788.930/799.782 ms**. One call instead
   of two; **86.8/87.6 ms** median wall saved. Witness only. Raw runs in
   `$HOME/qwen-runs/2026-11-13-fold-band-landing/`.
+## 2026-11-13 - V4.1 Short Index: Nice0 Root Controls Exact; Purged Serve Starts
+
+- Nice0 root49152 **21495.799/21647.937ms,0.99297x**; root49509
+  **21982.811/21954.227ms,1.00130x**. All8 signatures each bitwise;
+  allowed pressure2 retained. No root benefit claim.
+- All7 rebased native target/control cells exact. Three purged serve pairs
+  use fixed60s windows, greedy/cap32, nice0 verified by ps. Window amendment
+  was recorded before any serve arm began; observation minimums unchanged.
+- First purge484633 ->0 resident pages, msync success. Serve/default decision
+  pending; hard stage cutoff remains17:35 for cleanup/report before17:47.
+  [Protocol](bench/2026-11-13-v41-short-index-bounded.md).
+
 ## 2026-11-13 - V4.1 Short Index: Rebased Bounded Nice0 Gate
 
 - Rebased onto rewritten main `56a1e8fe5`; landed MID preserved. Cooperative

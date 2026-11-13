@@ -2703,7 +2703,8 @@ impl Glm5NextSession<'_> {
                 let shape = vec![width, rows as u64];
                 let raw_q = p.dense_gate.view_subrange(0, shape.clone());
                 let raw_k = p.dense_up.view_subrange(0, shape);
-                prepared.encode_prepare_parallel(ctx, enc, &raw_q, &raw_k, &p.kda_out)?;
+                let raw_v = v(&p.kda_out);
+                prepared.encode_prepare_parallel(ctx, enc, &raw_q, &raw_k, &raw_v)?;
             } else {
                 prepared.encode_prepare(enc)?;
             }

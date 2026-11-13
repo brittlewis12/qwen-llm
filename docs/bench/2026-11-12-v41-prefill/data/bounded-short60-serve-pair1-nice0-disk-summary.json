@@ -1,0 +1,44 @@
+[
+  {
+    "arm": "a",
+    "process_lifetime_bytes": 32785104896,
+    "sampled_window_bytes": 1187528704,
+    "native_window_bytes": 1287405568,
+    "native_intervals": 26,
+    "tps": 87.01666666666667,
+    "thermal_max": 0,
+    "purge": {
+      "file": "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+      "bytes": 110595290816,
+      "resident_pages_before": 484633,
+      "resident_pages_after": 0,
+      "msync_rc": 0,
+      "msync_errno": 0,
+      "seconds": 0.22615313529968262
+    },
+    "nice": {
+      "33041": 0
+    }
+  },
+  {
+    "arm": "b",
+    "process_lifetime_bytes": 32762953728,
+    "sampled_window_bytes": 1168949248,
+    "native_window_bytes": 2209792000,
+    "native_intervals": 28,
+    "tps": 86.98333333333333,
+    "thermal_max": 0,
+    "purge": {
+      "file": "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+      "bytes": 110595290816,
+      "resident_pages_before": 2001085,
+      "resident_pages_after": 0,
+      "msync_rc": 0,
+      "msync_errno": 0,
+      "seconds": 0.5334229469299316
+    },
+    "nice": {
+      "39072": 0
+    }
+  }
+]

@@ -83,3 +83,26 @@ all8 signatures in each cell are bitwise. Allowed pressure2 is retained.
 No root speedup claim. `data/bounded-short-roots-nice0-summary.json` under
 the earlier bench directory keeps every pair/hash. All7 rebased native
 target/control cells pass the numerical gate. Purged serve remains pending.
+
+
+## Current-main composition and first purged pair
+
+Main advanced during this stage to `9877b6f25`, landing the header fold for
+1..=2048-row appends (previously512..=2048). That overlaps this short band.
+The branch was rebased again onto that main; generated ENV conflicts were
+resolved by regeneration. The measured binaries remain pinned to source
+`4ba3c377b` on main`56a1e8fe5`. These measurements cannot establish the
+combined server configuration without a composition check.
+
+Purged three-agent serve pair1, orderAB, completed16:59:37 UTC. All6 eligible
+short appends have observed TTFT. Mean prefill ratio1.013515x; TTFT1.013062x;
+root prefill0.995840x. Aggregate TPS87.0167/86.9833. Both arms nice0 and
+pressure0; both purges returned0 and left0 resident Engram pages.
+
+Process lifetime physical disk reads were32,785,104,896 /32,762,953,728B;
+direct sampled steady-window deltas1,187,528,704 /1,168,949,248B. The
+per-call native attribution method gives1,287,405,568 /2,209,792,000B because
+its first-token/window boundaries differ; do not interchange those metrics.
+All counters, matched calls, roots, missing-TTFT counts and thermal evidence
+remain in the pair summary/comparison under the earlier bench data directory.
+One pair is insufficient for promotion. Pair2BA acquired after queueing.

@@ -6,29 +6,12 @@
 
 use super::Result;
 
-crate::env_flag!(
-    /// Candidate 4,096-row GLM packed-prefill sessions. The plan still retries smaller rows on typed memory pressure; zero restores the 2,048-row ceiling.
-    default_off prefill_4096_rows_requested,
-    "QWEN_GLM53_PREFILL_4096_ROWS"
-);
-
 /// Ranked widths capped to the useful prompt/endpoint (or an approved maximum).
 /// Zero is serial execution, including when packed execution is unavailable.
 pub fn candidates(max_rows: usize, packed: bool) -> Vec<usize> {
-    let ceiling = if prefill_4096_rows_requested() {
-        4096
-    } else {
-        2048
-    };
-    let mut rows: Vec<_> = [4096, 2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1, 0]
+    let mut rows: Vec<_> = [2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1, 0]
         .into_iter()
-        .map(|n| {
-            if packed {
-                n.min(max_rows).min(ceiling)
-            } else {
-                0
-            }
-        })
+        .map(|n| if packed { n.min(max_rows) } else { 0 })
         .collect();
     rows.dedup();
     rows

@@ -827,7 +827,7 @@ impl PackedSparseScratch {
             attention_partials: b.take("attention_partials")?,
             attention_partial_stats: b.take("attention_partial_stats")?,
             rows: rows as usize,
-            microbatch: rows.min(memory::packed_sparse_queries(rows as u64)) as usize,
+            microbatch: rows.min(memory::PACKED_SPARSE_QUERIES) as usize,
         };
         b.finish()?;
         Ok(s)
@@ -2910,7 +2910,7 @@ impl Glm5NextSession<'_> {
     /// Sparse attention for chunk rows `first..rows` (all at or past the
     /// frontier): chunk-wide indexer queries (F16-rounded) and head weights
     /// scaled by 1 / sqrt(heads * dim), then per microbatch of up to
-    /// [`memory::packed_sparse_queries`] rows: scores over each row's visible
+    /// [`memory::PACKED_SPARSE_QUERIES`] rows: scores over each row's visible
     /// pools, exact top-512 into the (block, row) status slots, expansion
     /// and online attention over exactly the selected latent rows. The same
     /// kernels as decode, so per-row results match serial decode under the

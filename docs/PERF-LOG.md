@@ -31,6 +31,19 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - Raw captures and generated tables:
   `metagross:~/qwen-runs/2026-11-12-waste-audit/`. Branch `perf/waste-audit`;
   not merged.
+## 2026-11-13 - V4.1 Attention Finish: Stop Pending Original Executables
+
+- No new model run or timing. Exact executable pins cannot currently be
+  restored; source/profiles/metallibs are reproduced, host executable SHA
+  differences are not localized. Archive-location question remains pending.
+- One-arm scheduling and purge-per-run controls are implemented and CPU
+  checked; contracts passcf6652fd1. Pair1/prior evidence remain unchanged.
+  No new root verdict or ready-to-land claim; both candidates remain staged.
+- Exact idle controller94399 stopped; M5 worktree/private target/2 bundles
+  removed,2 local bundles deleted. Raw logs and mismatch evidence retained.
+  No pushes/merges; final process/ENV checks follow.
+  [Blocker and reviewable work](bench/2026-11-13-v41-attention-finish.md).
+
 ## 2026-11-13 - V4.1 Attention Finish: Exact Executable Pin Blocks Measurement
 
 - Scheduling-only one-arm mode and per-run purge controller are ready.
@@ -40,7 +53,7 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   release5c538677b90c (now1fa66184f9a1 /78131445f024). Test fixture differs;
   tokenizer and every metallib match exactly. Cause not localized.
 - Prior executable copies were deleted with build output. No archive found
-  in recorded run directories and no M5 mbx cache. Archive-location question
+  in recorded run directories; no mbx/sccache executable on PATH. Archive-location question
   pending; no model loaded, no new timing, no pin substitution or promotion.
   [Conflict and prepared protocol](bench/2026-11-13-v41-attention-finish.md).
 

@@ -1,0 +1,10 @@
+{
+  "time": 1794601853.574024,
+  "task_processes": [],
+  "removed": [
+    "/Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-bundle/target",
+    "/Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-finish/source.bundle",
+    "/Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-finish/harness.bundle"
+  ],
+  "worktree_removed": true
+}

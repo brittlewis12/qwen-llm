@@ -78,8 +78,10 @@ exact executable SHA guard before any model or GPU witness loads:
 Every main/research/tensor metallib across iter/release/test is byte-identical
 to the previous pinned build. Executable differences are not localized;
 identical GPU libraries alone do not establish identical host executables.
-No mbx tool/cache is configured on the M5. Bounded checks found no executable
-archives in the recorded run directories. The original executables were
+Neither mbx nor sccache was found on the M5 PATH, and RUSTC_WRAPPER is unset.
+Stable Cargo cannot expose its wrapper configuration via cargo config get;
+other cache locations have not been ruled out. Bounded checks found no
+executable archives in the recorded run directories. The original executables were
 removed with the prior build output; no separate copies were retained.
 A text-input question requests an archive location. Do not silently replace
 the requested pins with new hashes or use elapsed waiting as authorization.
@@ -97,3 +99,24 @@ Complete expected/actual hashes, source/compiler details and rebuilt Mach-O
 section digests are in data/pinned-binary-conflict.json. Existing full-state
 bitwise/native/served evidence is unchanged. No performance or readiness
 verdict can be added without the originals or an explicit pin clarification.
+
+
+## Bounded stop pending artifact location
+
+No model was loaded and no new native/serve timing was collected. The exact
+binary requirement remains unresolved; the prepared harness does not make
+the bundle ready to land. Existing pair1 and all prior evidence stand.
+
+The idle controller94399 was verified by exact command and stopped outside
+any lease; session exits143. Build job completed with the expected pin-check
+failure and no resident child. Guarded cleanup finds no task process and
+removes the restored worktree, old private attention-bundle/target directory,
+and2 new M5 bundles;2 local transfer bundles are deleted too. Raw rebuild
+logs and conflict evidence remain. Final process/ENV/record checks follow.
+Both candidates remain staged as before; no root verdict, fallback change,
+performance promotion, push or merge. Main remains9877b6f25.
+
+Required next input is an archive location for the original executables,
+or clarification that the pin permits an exact-source/profile rebuild with
+identical metallibs despite different executable hashes. A new measurement
+will not be substituted without that clarification.

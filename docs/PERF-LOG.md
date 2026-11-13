@@ -12,6 +12,24 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   throughput geomean **1.01861 >= 0.98**; lead accepts this as the bitwise
   non-regression check below the two-percent resolution. Default-on with
   `QWEN_GLM53_KDA_PARALLEL_PREP=0` rollback. [Record](bench/2026-11-13-glm-kda-parallel-prep.md).
+## 2026-11-13 - Prefill Waste Audit: Attention and Expert Round Trips Dominate
+
+- **Measurement only; no product change.** Node-graph capture of GLM-5.3
+  Flash (UD-IQ3_XXS) and V4.1 Flash (GSQ-RCO IQ2_XS, file A), chunk 2,048 rows
+  at 48K and append 1,024 at 80K. All four captures bitwise; isolated node
+  times only. [Note and generated tables](bench/2026-11-13-waste-audit.md).
+- Recorder fix: in-place read-write bindings now emit a read and a write span.
+  Without it the first pass reported a fake 13.5 ms/token of V4.1 dead writes.
+  Dead writes and recomputation are otherwise near zero (GLM 0/0; V4.1 chunk
+  0/0, append 3 identical index-head MMAs, 7.53 ms, 0.68% wall).
+- Largest chains: GLM latent score->softmax 177.9/89.6 ms (12.0/6.0 GB, priced
+  round-trip 30.0/15.0 ms); GLM expert gate/up epilogue 180.5/118.2 ms; V4.1
+  PV->normalize 130.8/63.5 ms and score->softmax 56.5/26.4 ms. V4.1 format
+  movement: 280 `scatter_offset_f32_to_f16` calls 39.2/19.2 ms and 40
+  `v41_sorted_pack` 32.3/15.1 ms.
+- Raw captures and generated tables:
+  `metagross:~/qwen-runs/2026-11-12-waste-audit/`. Branch `perf/waste-audit`;
+  not merged.
 
 ## 2026-11-13 - V4.1 Serve: Header Fold Band Widened To 1..=2048
 

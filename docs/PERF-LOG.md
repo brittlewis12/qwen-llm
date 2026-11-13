@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+
+## 2026-11-13 - V4.1 Attention Close: Native Pass, Final Serve Arm Queued Out
+
+- Purged native 48K passes 1.064904x mean A/B (47.8270/44.9120s); all eight
+  endpoints bitwise. Individual pairs 0.931764/1.710896/0.862674x, with load
+  and disk variation retained. No isolated attention attribution.
+- Pair 1 AB stands; fresh pair 2 BA complete; pair 3 A complete (87.6 TPS).
+  Final B never began warmup/model load. Exact controller stopped at 22:39:23
+  when the queued arm no longer fit its reserved measurement budget. Five
+  arms pass independent controls; no three-pair verdict and not ready to land.
+- Source/profile pin 67b retained in archived binaries; all nine metallibs
+  identical to original, all executable hashes recorded and rechecked.
+  M5 worktree/bulk target/bundles removed; open-gate executable archives kept.
+- Rebased onto main 8b765391e; ENV header conflicts regenerated (830 knobs,
+  no polarity conflicts). Earlier full/checkpoint contracts pass; final
+  composed-tree check follows in the closing raw log. No next-lever code.
+  [All cells, per-arm disk bytes and exact resume step](bench/2026-11-13-v41-attention-close.md).
+
 ## 2026-11-13 - GLM KDA Parallel Preparation: Ship
 
 - Bitwise stage **2.522x**, root **+2.27%**, append **+1.1%/+1.6%**. Serve

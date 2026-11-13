@@ -191,3 +191,56 @@ the source-revision header changed. The other pinned native cells and their
 full-state/following-step bitwise witnesses stand as recorded in
 [the bundle packet](2026-11-13-v41-attention-bundle.md); this stage replaces
 its unpurged native root timing with the per-run-purged packet above.
+
+## Bounded-stage close: gate remains open
+
+At 22:39:23 UTC the final B arm was still queued behind Ghost stream work,
+with 576.8s remaining before the declared 22:49 measurement cutoff and a
+600s minimum arm admission budget. Exact controller PID 81921 was interrupted;
+it stopped its exact queued child 63148. Neither B warmup nor model loading
+had begun: no B process record, arm directory or measured log existed. Both
+PIDs were subsequently absent. No completed arm is discarded or repeated.
+
+The result is **incomplete, not ready to land**: native passes, pairs 1 AB
+and 2 BA are complete, and pair 3 A is complete. The frozen three-pair served
+rule cannot be evaluated yet. No candidate is promoted or withdrawn on this
+incomplete packet. Both separate default-on candidate flags and their `=0`
+rollbacks remain staged on the branch.
+
+The independent partial audit checks every completed arm's binary pin, plan,
+greedy fields, root reply cap, actual nice 0, zero-page purge, paired 4K full
+signatures and both GPU fixtures, including all 15 wide-PV exact markers. All
+five arms pass controls. The older pair 1 summary lacks newer metadata keys;
+its original plan and launch files provide the same strict 60s window, seed,
+plan hash and cap checks. No missing value is invented and no metric gate is
+relaxed. `independent-partial-result.json` reports `passed: null`.
+
+After measurement stopped, the branch was rebased onto main `8b765391e`
+(GLM KDA and waste-audit landings). The only conflicts were two generated
+ENV revision headers; regeneration resolves both. Final ENV: 830 knobs, no
+polarity conflicts. There is no production attention source conflict; the
+upstream V4.1 GPU-step changes add optional causal diagnostics. Pinned model
+measurements and archived executables remain the approved 67b program.
+
+The earlier full contracts passed `e64d364d5`; the five-arm checkpoint also
+passed contracts at `302d24186`, tree
+`55d5d279d44c4080801fe81c6e8635aa464dd511`. The final composed-tree contract
+result is preserved in `attention-close-composed-contracts.log` and its
+result JSON in the run directory. The separate probe feature fix is retained
+through the rebase (now `761a48c6d`). No new ignored tests, pushes or merges.
+
+M5 cleanup removed the private worktree, bulk target under attention-bundle,
+and both transferred bundles. `cleanup.json` records no remaining lane
+processes. The four executables under `attention-close/pins/` and manifests
+are deliberately retained for this open gate; all hashes were rechecked
+after target/worktree removal (`retained-pin-check.json`). Raw records remain
+on M5 and have local evidence copies. The sole local transfer bundle is
+deleted; the shared local MBX target is retained.
+
+Next bounded action: restore the Python harness from `cf6652fd1`, run only
+`finish-serve-pair3` B (`--order ab --only-arm b`) with the archived binaries,
+one <=15m lease, inherited FD, nice 0, symmetric warmups and zero-page purge.
+The exact argv and required environment are in `pending-serve-arm.json`. Use
+a distinct or append-only outer lease log. Native and all five completed
+served arms stand. Then apply the unchanged full three-pair rule. Cooperative
+experts and the forwarded waste candidates remain planning only.

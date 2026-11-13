@@ -308,6 +308,19 @@ fn main() -> Result<()> {
                 let tokens: Vec<_> = (0..batch).map(|i| streams[i][4300 + j]).collect();
                 step(&f, &mut states[..batch], &tokens, true)?;
             }
+            if let Some(path) = args.iter().find_map(|arg| arg.strip_prefix("purge=")) {
+                let report = qwen_llm::cache_probe::invalidate_file_cache(path)?;
+                println!(
+                    "{}",
+                    serde_json::json!({"kind":"engram_purge","file":path,
+                        "resident_pages_before":report.before.resident_pages,
+                        "resident_pages_after":report.after.resident_pages})
+                );
+                ensure!(
+                    report.after.resident_pages == 0,
+                    "Engram purge left resident pages"
+                );
+            }
             let period = w
                 .schedule
                 .compression_ratios

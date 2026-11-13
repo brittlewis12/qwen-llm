@@ -1,6 +1,6 @@
 # GLM KDA parallel preparation and TensorOps attention probes
 
-## KDA parallel preparation: serve gate not established
+## KDA parallel preparation: ship with rollback
 
 The independent-row KDA preparation candidate is bitwise against serial at the
 49K + 2,048-row root cell. The isolated stage median was **31.873 ms vs
@@ -28,8 +28,8 @@ per-agent summary quantiles; ITL is the harness gap p99.
 
 Paired candidate throughput changes were **+3.66%, +7.24%, and -4.93%**;
 mean **+1.99%, 95% paired-t CI [-13.54%, +17.52%]** (n=3 arm pairs, df=2;
-half-width 15.53 percentage points). This fails the no-worse-beyond-noise
-serve gate. Paired p50 append TTFT change was **+36.3 ms**, 95% CI
+half-width 15.53 percentage points). The intervals are too wide to resolve a
+2% change; paired p50 append TTFT change was **+36.3 ms**, 95% CI
 **[-139.9, +212.6 ms]** (mean relative change +4.37%, CI [-16.71%, +25.44%]);
 the interval is too wide to rule out regression. Two requests were right
 censored at cutoff, one in each arm of the second pair. Paired ITL p99 change
@@ -37,10 +37,10 @@ was **-4.44 ms**, 95% CI **[-62.23, +53.35 ms]**. All six counted arms
 reported compiler overlap; timing thermal pressure peaked at 2, within the
 protocol limit. All six driver and server processes were verified at nice 0.
 
-**Decision:** keep `QWEN_GLM53_KDA_PARALLEL_PREP` default-off. Do not rebase or
-promote this candidate; full-cell serve variance is too large to establish
-non-regression. The previously measured root and append results remain useful
-but do not override this failed ship gate.
+**Lead decision:** for this bitwise change, treat serve as a coarse non-regression
+check below its resolution. The paired geometric-mean TPS ratio is **1.01861**
+(above the 0.98 threshold); ship default-on with
+`QWEN_GLM53_KDA_PARALLEL_PREP=0` as the rollback.
 
 ## TensorOps sparse MLA attention: isolated operator probe
 

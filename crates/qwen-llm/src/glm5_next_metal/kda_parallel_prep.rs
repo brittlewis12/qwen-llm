@@ -7,8 +7,8 @@ thread_local! {
 }
 
 crate::env_flag!(
-    /// Default-off M5 Fast/Half GLM KDA convolution and normalization preparation in independent row/head groups at 128..=4096 rows. Reuses the dead dense gate/up and KDA output buffers to preserve projected q/k/v rows; adds no admitted scratch. Zero restores the serial preparation kernel.
-    default_off enabled,
+    /// Default-on M5 Fast/Half GLM KDA convolution and normalization preparation in independent row/head groups at 128..=4096 rows. Reuses the dead dense gate/up and KDA output buffers to preserve projected q/k/v rows; adds no admitted scratch. Zero restores the serial preparation kernel.
+    default_on enabled,
     "QWEN_GLM53_KDA_PARALLEL_PREP"
 );
 

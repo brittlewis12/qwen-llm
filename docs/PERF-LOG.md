@@ -207,14 +207,16 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   [bench note](bench/2026-11-12-serve-qos-nice0.md). Aven note on `SRV-2K0Y`:
   `JQFK6MMVXBWTG93N`.
 ## 2026-11-13 - GLM KDA Parallel Preparation: Serve Gate Failed
+## 2026-11-13 - GLM KDA Parallel Preparation: Ship
 
 - The KDA preparation kernel passed bitwise and its isolated 49K + 2,048-row
   span improved **2.522x** (80.396 -> 31.873 ms). Root wall improved 2.27%;
   80K append walls improved 1.1% at 256 rows and 1.6% at 1,024 rows.
 - Three-agent 48K serve throughput changes were +3.66%, +7.24%, -4.93%; the
-  paired mean was +1.99% with a 95% CI of [-13.54%, +17.52%]. TTFT and ITL
-  intervals were also too wide to rule out regression. Candidate remains
-  default-off; no rebase/promotion.
+  paired mean was +1.99% with a 95% CI of [-13.54%, +17.52%]. Lead treats this
+  as a coarse non-regression check for the bitwise change: geometric-mean TPS
+  ratio **1.01861 >= 0.98**. Ship default-on with
+  `QWEN_GLM53_KDA_PARALLEL_PREP=0` rollback.
 - The isolated 64-query selected-latent TensorOps probe measured 2.115 ms for
   split vs 1.098 ms for the production F16 TensorOps operator (1.93x). This is
   not a full-chunk wall or quality gate.

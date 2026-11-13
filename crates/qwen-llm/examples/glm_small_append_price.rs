@@ -35,7 +35,7 @@ mod probe {
     use objc2_metal::MTLBuffer;
     use qwen_llm::{
         gguf::GgufFile,
-        glm5_next::FfnTensors,
+        glm5_next::{FfnTensors, MixerTensors},
         glm5_next_metal::{
             GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch, Glm5NextCapturedRows, Glm5NextExpertRoute,
             Glm5NextRowBank, Glm5NextRowBankPlan, Glm5NextSession, Glm5NextSnapshot,
@@ -549,6 +549,39 @@ mod probe {
             .unwrap_or_else(|| ROUTE_WIDTHS.to_vec())
     }
 
+    fn occupancy_cells(depths: &[usize], widths: &[usize]) -> anyhow::Result<Vec<(usize, usize)>> {
+        let mut cells = if let Ok(value) = std::env::var("GLM_ROUTE_CELLS") {
+            value
+                .split(',')
+                .map(|item| {
+                    let (depth, width) = item
+                        .split_once(':')
+                        .ok_or_else(|| anyhow::anyhow!("invalid route cell {item:?}"))?;
+                    Ok((depth.parse()?, width.parse()?))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?
+        } else {
+            depths
+                .iter()
+                .flat_map(|depth| widths.iter().map(|width| (*depth, *width)))
+                .collect()
+        };
+        for (depth, width) in &cells {
+            anyhow::ensure!(
+                depths.contains(depth),
+                "route cell has uncaptured depth {depth}"
+            );
+            anyhow::ensure!(
+                widths.contains(width),
+                "route cell has unconfigured width {width}"
+            );
+        }
+        cells.sort_unstable();
+        cells.dedup();
+        anyhow::ensure!(!cells.is_empty(), "occupancy needs at least one route cell");
+        Ok(cells)
+    }
+
     /// Every route the shipped kernels admit at `width`. The per-slot packet
     /// validates 1..=128 rows; the others span the whole grid.
     fn route_arms(width: usize) -> Vec<RouteArm> {
@@ -606,6 +639,208 @@ mod probe {
         Ok((gate_up_bytes / experts, down_bytes / experts))
     }
 
+    #[derive(Clone, Copy, Default)]
+    struct StageCost {
+        flops: f64,
+        logical_bytes: u64,
+        q6_bytes: u64,
+        q8_bytes: u64,
+    }
+
+    fn add_matrix_cost(
+        costs: &mut BTreeMap<&'static str, StageCost>,
+        stage: &'static str,
+        tensor: &qwen_llm::metal::MetalTensor,
+        rows: u64,
+    ) {
+        let cost = costs.entry(stage).or_default();
+        cost.logical_bytes += tensor.n_bytes();
+        if tensor.shape.len() >= 2 {
+            cost.flops += 2.0 * tensor.n_elements() as f64 * rows as f64;
+        }
+        let dtype = format!("{:?}", tensor.dtype);
+        if dtype.contains("Q6_K") {
+            cost.q6_bytes += tensor.n_bytes();
+        } else if dtype.contains("Q8_0") {
+            cost.q8_bytes += tensor.n_bytes();
+        }
+    }
+
+    fn add_dense_cost(
+        costs: &mut BTreeMap<&'static str, StageCost>,
+        stage: &'static str,
+        dense: &qwen_llm::glm5_next::DenseFfnTensors<qwen_llm::metal::MetalTensor>,
+        rows: u64,
+    ) {
+        for tensor in [&dense.gate, &dense.up, &dense.down] {
+            add_matrix_cost(costs, stage, tensor, rows);
+        }
+    }
+
+    fn stage_cost_model(
+        weights: &Glm5NextWeights,
+        rows: usize,
+        depth: usize,
+        routed_bytes: u64,
+    ) -> BTreeMap<&'static str, StageCost> {
+        let c = &weights.config;
+        let (h, rows) = (u64::from(c.hidden_size), rows as u64);
+        let mut costs = BTreeMap::<&'static str, StageCost>::new();
+        for block in &weights.blocks {
+            for hc in [&block.attention_hc, &block.ffn_hc] {
+                let cost = costs.entry("mhc").or_default();
+                for tensor in [&hc.mix, &hc.base, &hc.scale] {
+                    cost.logical_bytes += tensor.n_bytes();
+                }
+            }
+            for norm in [&block.attention_norm, &block.ffn_norm] {
+                costs.entry("mhc").or_default().logical_bytes += norm.n_bytes();
+            }
+
+            match &block.mixer {
+                MixerTensors::Kda(kda) => {
+                    for tensor in [
+                        &kda.query,
+                        &kda.key,
+                        &kda.value,
+                        &kda.query_conv,
+                        &kda.key_conv,
+                        &kda.value_conv,
+                        &kda.decay_a,
+                        &kda.decay_b,
+                        &kda.decay_bias,
+                        &kda.neg_exp_a_log,
+                        &kda.beta,
+                        &kda.gate_a,
+                        &kda.gate_b,
+                        &kda.output_norm,
+                        &kda.output,
+                    ] {
+                        add_matrix_cost(&mut costs, "kda", tensor, rows);
+                    }
+                    let heads = h / u64::from(c.kda_head_dim.max(1));
+                    let dim = u64::from(c.kda_head_dim);
+                    // The recurrent estimate includes state decay, rank-one
+                    // update, and state-vector output for each row.
+                    costs.entry("kda").or_default().flops +=
+                        5.0 * rows as f64 * (heads * dim * dim) as f64;
+                }
+                MixerTensors::Mla(mla) => {
+                    for tensor in [&mla.query_a, &mla.query_b, &mla.latent, &mla.key_absorb] {
+                        add_matrix_cost(&mut costs, "mla_projection", tensor, rows);
+                    }
+                    for tensor in [&mla.value_expand, &mla.output] {
+                        add_matrix_cost(&mut costs, "mla_output", tensor, rows);
+                    }
+                    for tensor in [&mla.indexer.key, &mla.indexer.pool_gate] {
+                        add_matrix_cost(&mut costs, "mla_indexer", tensor, rows);
+                    }
+                    for tensor in [&mla.indexer.query, &mla.indexer.head_weights] {
+                        add_matrix_cost(&mut costs, "sparse_query", tensor, rows);
+                    }
+                }
+            }
+
+            match &block.ffn {
+                FfnTensors::Dense(dense) => {
+                    add_dense_cost(&mut costs, "dense_ffn", dense, rows);
+                }
+                FfnTensors::Moe(moe) => {
+                    add_matrix_cost(&mut costs, "router", &moe.router, rows);
+                    add_dense_cost(&mut costs, "shared_expert", &moe.shared, rows);
+                }
+            }
+        }
+
+        let moe_blocks = weights
+            .blocks
+            .iter()
+            .filter(|block| matches!(&block.ffn, FfnTensors::Moe(_)))
+            .count() as u64;
+        let route_slots = rows * u64::from(c.expert_used_count) * moe_blocks;
+        let routed = costs.entry("routed_experts").or_default();
+        routed.flops = 6.0 * h as f64 * f64::from(c.expert_ffn_size) * route_slots as f64;
+        routed.logical_bytes = routed_bytes;
+
+        let context = (depth as u64 + rows / 2).min(u64::from(c.context_length));
+        let pools = context.div_ceil(u64::from(c.indexer_pool.max(1)));
+        let score_flops = 2.0
+            * rows as f64
+            * pools as f64
+            * f64::from(c.indexer_head_count)
+            * f64::from(c.indexer_head_dim);
+        let score = costs.entry("sparse_scores").or_default();
+        score.flops = score_flops;
+        score.logical_bytes = rows * pools * u64::from(c.indexer_head_dim) * 2;
+
+        let select = costs.entry("sparse_select").or_default();
+        select.logical_bytes = rows * pools * std::mem::size_of::<f32>() as u64;
+
+        let sparse = costs.entry("sparse_attention").or_default();
+        let selected_rows = u64::from(c.indexer_top_k);
+        let heads = u64::from(c.head_count);
+        let kv = u64::from(c.kv_lora_rank);
+        let head_dim = u64::from(c.mla_key_head_dim);
+        sparse.flops =
+            2.0 * rows as f64 * selected_rows as f64 * heads as f64 * (kv + head_dim) as f64;
+        sparse.logical_bytes = rows * selected_rows * (kv + head_dim) * 2;
+
+        let mhc = costs.entry("mhc").or_default();
+        mhc.flops = weights.blocks.len() as f64
+            * rows as f64
+            * h as f64
+            * f64::from(c.hc_streams)
+            * f64::from(c.hc_streams)
+            * 4.0;
+        costs
+    }
+
+    fn stage_time_ms(stages: &BTreeMap<&'static str, f64>, stage: &str) -> f64 {
+        if stage == "mhc" {
+            return ["attention_pre", "attention_post", "ffn_pre", "ffn_post"]
+                .iter()
+                .map(|name| stages.get(name).copied().unwrap_or(0.0))
+                .sum();
+        }
+        if stage == "kda" {
+            return stages
+                .iter()
+                .filter(|(name, _)| **name == "kda" || name.starts_with("packed_kda_"))
+                .map(|(_, ms)| *ms)
+                .sum();
+        }
+        stages.get(stage).copied().unwrap_or(0.0)
+    }
+
+    fn stage_metrics(
+        costs: &BTreeMap<&'static str, StageCost>,
+        stages: &BTreeMap<&'static str, f64>,
+    ) -> Value {
+        let mut metrics = serde_json::Map::new();
+        for (name, cost) in costs {
+            let ms = stage_time_ms(stages, name);
+            let seconds = ms / 1e3;
+            let tflops = (seconds > 0.0).then_some(cost.flops / seconds / 1e12);
+            let logical_gbs = (seconds > 0.0).then_some(cost.logical_bytes as f64 / seconds / 1e9);
+            metrics.insert(
+                (*name).into(),
+                json!({
+                    "stage_ms": ms,
+                    "estimated_flops": cost.flops,
+                    "logical_weight_or_scan_bytes": cost.logical_bytes,
+                    "q6_weight_bytes": cost.q6_bytes,
+                    "q8_weight_bytes": cost.q8_bytes,
+                    "estimated_tflops": tflops,
+                    "logical_gbs": logical_gbs,
+                    "q6_logical_gbs": (seconds > 0.0).then_some(cost.q6_bytes as f64 / seconds / 1e9),
+                    "q8_logical_gbs": (seconds > 0.0).then_some(cost.q8_bytes as f64 / seconds / 1e9),
+                    "tensor_roof_util_pct_of_131_7_tflops": tflops.map(|rate| 100.0 * rate / 131.7),
+                }),
+            );
+        }
+        Value::Object(metrics)
+    }
+
     /// Capture the routed union and distribution from ordinary production
     /// selection. Route ids are read from the completed packed call; a second
     /// serialized dispatch census attributes gate/up and down bandwidth.
@@ -620,8 +855,10 @@ mod probe {
         let mut sorted_depths = depths.to_vec();
         sorted_depths.sort_unstable();
         sorted_depths.dedup();
+        let widths = route_widths();
+        let cells = occupancy_cells(&sorted_depths, &widths)?;
         let max_depth = *sorted_depths.last().expect("nonempty depths");
-        let max_width = *route_widths().iter().max().expect("route widths");
+        let max_width = *widths.iter().max().expect("route widths");
         anyhow::ensure!(
             max_depth + max_width < ids.len(),
             "corpus has {} tokens, needs {}",
@@ -649,7 +886,7 @@ mod probe {
 
         emit(json!({
             "kind": "occupancy_header", "mode": "production_route_occupancy",
-            "depths": sorted_depths, "widths": route_widths(), "capacity": capacity,
+            "depths": sorted_depths, "widths": widths, "cells": cells, "capacity": capacity,
             "hidden_size": weights.config.hidden_size,
             "expert_count": weights.config.expert_count,
             "expert_used_count": weights.config.expert_used_count,
@@ -659,16 +896,58 @@ mod probe {
         }));
 
         for (depth, snapshot) in &snapshots {
-            for width in route_widths() {
+            for width in &widths {
+                let width = *width;
+                if !cells.contains(&(*depth, width)) {
+                    continue;
+                }
                 let tokens = &ids[*depth..*depth + width];
                 gate();
                 session.restore_snapshot(snapshot)?;
-                let (logits, stage) = session.prefill_chunk_stage_profiled(ctx, tokens)?;
+                let logits = session.prefill_packed(ctx, tokens)?;
                 anyhow::ensure!(
                     logits.iter().all(|v| v.is_finite()),
-                    "non-finite occupancy logits"
+                    "non-finite occupancy warm logits"
                 );
                 let route_ids = session.perf_packed_route_ids(width)?;
+
+                let mut ordinary_wall_samples = Vec::new();
+                for _ in 0..5 {
+                    gate();
+                    session.restore_snapshot(snapshot)?;
+                    let start = Instant::now();
+                    let logits = session.prefill_packed(ctx, tokens)?;
+                    ordinary_wall_samples.push(start.elapsed().as_secs_f64() * 1e3);
+                    anyhow::ensure!(
+                        logits.iter().all(|v| v.is_finite()),
+                        "non-finite ordinary occupancy logits"
+                    );
+                }
+
+                let mut stage_profile_wall_samples = Vec::new();
+                let mut command_gpu_samples = Vec::new();
+                let mut span_sum_samples = Vec::new();
+                let mut stage_samples = BTreeMap::<&'static str, Vec<f64>>::new();
+                for _ in 0..3 {
+                    gate();
+                    session.restore_snapshot(snapshot)?;
+                    let start = Instant::now();
+                    let (logits, report) = session.prefill_chunk_stage_profiled(ctx, tokens)?;
+                    stage_profile_wall_samples.push(start.elapsed().as_secs_f64() * 1e3);
+                    anyhow::ensure!(
+                        logits.iter().all(|v| v.is_finite()),
+                        "non-finite stage-profile logits"
+                    );
+                    command_gpu_samples.push(report.command_gpu_ms);
+                    span_sum_samples.push(report.span_sum_ms);
+                    for (name, ms) in stage_totals(&report) {
+                        stage_samples.entry(name).or_default().push(ms);
+                    }
+                }
+                let stages: BTreeMap<&'static str, f64> = stage_samples
+                    .iter()
+                    .map(|(name, samples)| (*name, median(samples.clone())))
+                    .collect();
 
                 let mut all_counts = Vec::new();
                 let mut per_layer = Vec::with_capacity(route_ids.len());
@@ -710,7 +989,18 @@ mod probe {
                     profiled_logits.iter().all(|v| v.is_finite()),
                     "non-finite profiled logits"
                 );
-                let (kernels, _, dispatches) = kernel_totals(&report);
+                let (kernels, families, dispatches) = kernel_totals(&report);
+                let mut family_json = serde_json::Map::new();
+                for (name, (calls, ms)) in &families {
+                    family_json.insert(
+                        (*name).into(),
+                        json!({
+                            "calls": calls,
+                            "serialized_gpu_ms": ms,
+                            "serialized_us_per_row": ms * 1e3 / width as f64,
+                        }),
+                    );
+                }
                 let mut gate_up_ms = 0.0;
                 let mut down_ms = 0.0;
                 for row in &report.rows {
@@ -734,7 +1024,17 @@ mod probe {
                         down_ms += ms;
                     }
                 }
-                let routed_ms = stage_totals(&stage).get("routed_experts").copied();
+                let routed_ms = stages.get("routed_experts").copied();
+                let cost_model = stage_cost_model(
+                    weights,
+                    width,
+                    *depth,
+                    gate_up_union_bytes + down_union_bytes,
+                );
+                let ordinary_wall_ms = median(ordinary_wall_samples.clone());
+                let stage_profile_wall_ms = median(stage_profile_wall_samples.clone());
+                let command_gpu_ms = median(command_gpu_samples.clone());
+                let span_sum_ms = median(span_sum_samples.clone());
                 emit(json!({
                     "kind": "occupancy", "depth": depth, "width": width,
                     "union_gate_up_bytes": gate_up_union_bytes,
@@ -746,10 +1046,24 @@ mod probe {
                     "rows_per_expert_distribution": distribution(&all_counts),
                     "per_layer": per_layer,
                     "routed_experts_ms": routed_ms,
+                    "ordinary_wall_ms": ordinary_wall_ms,
+                    "ordinary_wall_samples_ms": ordinary_wall_samples,
+                    "stage_profile_wall_ms": stage_profile_wall_ms,
+                    "stage_profile_wall_samples_ms": stage_profile_wall_samples,
+                    "stage_profile_overhead_ratio": stage_profile_wall_ms / ordinary_wall_ms,
+                    "command_gpu_ms": command_gpu_ms,
+                    "command_gpu_ms_samples": command_gpu_samples,
+                    "stage_span_sum_ms": span_sum_ms,
+                    "stage_unassigned_gap_ms": command_gpu_ms - span_sum_ms,
+                    "ordinary_wall_minus_profiled_gpu_ms": ordinary_wall_ms - command_gpu_ms,
+                    "stages_ms": stages,
+                    "stage_samples_ms": stage_samples,
+                    "stage_metrics": stage_metrics(&cost_model, &stages),
+                    "stage_cost_semantics": "estimated multiply-add FLOPs from logical weight shapes; logical unique-weight and modeled cache-scan bytes, not physical bus counters",
                     "gate_up_kernel_ms": gate_up_ms,
                     "down_kernel_ms": down_ms,
                     "dispatches": dispatches, "kernels": kernels,
-                    "expert_dispatches": report.rows.iter().filter(|r| r.kernel.contains("moe_") || r.kernel.contains("glm_iq3_down")).collect::<Vec<_>>(),
+                    "serialized_dispatch_families": family_json,
                     "pressure": pressure(), "loadavg": loadavg(),
                 }));
             }

@@ -329,9 +329,9 @@ pub fn prefetch_retained_with_cancel(
 
 /// Executed weights as read-only views of retained no-copy GGUF windows.
 pub(crate) struct RepackedMoeWeights {
-    pub(crate) gate: MetalTensor,
-    pub(crate) up: MetalTensor,
-    pub(crate) down: MetalTensor,
+    pub(crate) gate: Option<MetalTensor>,
+    pub(crate) up: Option<MetalTensor>,
+    pub(crate) down: Option<MetalTensor>,
 }
 
 pub struct Glm5NextWeights {
@@ -369,11 +369,11 @@ fn repacked_iq_bank_len(desc: &TensorDesc, dtype: GgmlType, bytes_per_block: u64
         .ok_or_else(|| Glm5NextMetalError::Invalid("repacked bank byte count overflow".into()))
 }
 
-fn repacked_block_bytes(dtype: GgmlType) -> Result<u64> {
+fn repacked_block_bytes(dtype: GgmlType) -> Option<u64> {
     match dtype {
-        GgmlType::IQ2_S => Ok(84),
-        GgmlType::IQ3_S => Ok(116),
-        other => invalid(format!("unsupported GLM repacked expert dtype {other:?}")),
+        GgmlType::IQ2_S => Some(84),
+        GgmlType::IQ3_S => Some(116),
+        _ => None,
     }
 }
 
@@ -383,29 +383,19 @@ fn repacked_model_bytes(model: &Glm5NextModel) -> Result<u64> {
         let FfnTensors::Moe(moe) = &block.ffn else {
             continue;
         };
-        let gate_block_bytes = repacked_block_bytes(moe.gate_experts.dtype)?;
-        let up_block_bytes = repacked_block_bytes(moe.up_experts.dtype)?;
-        let down_block_bytes = repacked_block_bytes(moe.down_experts.dtype)?;
-        if moe.down_experts.dtype != GgmlType::IQ3_S {
-            return invalid(format!(
-                "{} down bank is {:?}; the GLM repack candidate currently requires IQ3_S",
-                moe.down_experts.name, moe.down_experts.dtype
-            ));
-        }
-        for (desc, dtype, block_bytes) in [
-            (moe.gate_experts, moe.gate_experts.dtype, gate_block_bytes),
-            (moe.up_experts, moe.up_experts.dtype, up_block_bytes),
-            (moe.down_experts, moe.down_experts.dtype, down_block_bytes),
-        ] {
+        for desc in [moe.gate_experts, moe.up_experts, moe.down_experts] {
+            let Some(block_bytes) = repacked_block_bytes(desc.dtype) else {
+                continue;
+            };
             total = total
-                .checked_add(repacked_iq_bank_len(desc, dtype, block_bytes)?)
+                .checked_add(repacked_iq_bank_len(desc, desc.dtype, block_bytes)?)
                 .ok_or_else(|| {
                     Glm5NextMetalError::Invalid("repacked total byte overflow".into())
                 })?;
         }
     }
     if total == 0 {
-        return invalid("GLM IQ repack requested, but the model has no routed experts");
+        return invalid("GLM IQ repack requested, but the model has no IQ2_S/IQ3_S expert banks");
     }
     Ok(total)
 }
@@ -610,19 +600,23 @@ impl Glm5NextWeights {
             blocks
                 .iter()
                 .map(|block| match &block.ffn {
-                    FfnTensors::Moe(moe) => Ok(Some(RepackedMoeWeights {
-                        gate: repack_expert_tensor(
-                            ctx,
-                            &moe.gate_experts,
-                            repacked_block_bytes(moe.gate_experts.dtype)? as usize,
-                        )?,
-                        up: repack_expert_tensor(
-                            ctx,
-                            &moe.up_experts,
-                            repacked_block_bytes(moe.up_experts.dtype)? as usize,
-                        )?,
-                        down: repack_expert_tensor(ctx, &moe.down_experts, 116)?,
-                    })),
+                    FfnTensors::Moe(moe) => {
+                        let repack = |tensor: &MetalTensor| -> Result<Option<MetalTensor>> {
+                            match repacked_block_bytes(tensor.dtype) {
+                                Some(block_bytes) => Ok(Some(repack_expert_tensor(
+                                    ctx,
+                                    tensor,
+                                    block_bytes as usize,
+                                )?)),
+                                None => Ok(None),
+                            }
+                        };
+                        Ok(Some(RepackedMoeWeights {
+                            gate: repack(&moe.gate_experts)?,
+                            up: repack(&moe.up_experts)?,
+                            down: repack(&moe.down_experts)?,
+                        }))
+                    }
                     FfnTensors::Dense(_) => Ok(None),
                 })
                 .collect::<Result<Vec<_>>>()?

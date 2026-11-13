@@ -206,6 +206,20 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Raw `metagross:~/qwen-runs/2026-11-12-qos-nice0/`; record
   [bench note](bench/2026-11-12-serve-qos-nice0.md). Aven note on `SRV-2K0Y`:
   `JQFK6MMVXBWTG93N`.
+## 2026-11-13 - GLM TensorOps Indexer Scores: Rejected
+
+- Same restored 49K prefix and 2,048-row full chunk, three interleaved
+  `sparse_scores` samples per arm: matrix **377.20 / 377.10 / 377.08 ms**,
+  TensorOps **377.39 / 377.38 / 377.01 ms**, **0.999x** median speedup. This
+  misses the required 1.25x isolated-stage gate.
+- Pressure stayed at 0 and the pre-load residency checks were empty. Load
+  average was 10.91/12.12/16.24 before and 11.18/11.96/15.84 after. No paired
+  ordinary-wall, quality, or serve gate was run after the stage failure.
+- Removed the TensorOps score path and probe. Next lever: lossless IQ2_S/IQ3_S
+  in-memory repack at the 2,048-row full-chunk regime.
+- **Evidence:** [TensorOps indexer rejection](bench/2026-11-13-glm-indexer-tensorops.md),
+  raw files under `bench/2026-11-13-glm-prefill/indexer-tensorops/`.
+
 ## 2026-11-13 - GLM Sorted Expert-Major Prefill: Rejected
 
 - Same restored 49K prefix and 2,048 real rows, three interleaved stage

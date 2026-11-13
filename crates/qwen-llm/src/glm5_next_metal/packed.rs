@@ -71,28 +71,12 @@ fn grouped_iq_repacked<'a>(
     top_k: usize,
     rows: usize,
 ) -> GroupedExperts<'a> {
-    let mode = expert_mode(
-        arith,
-        current.gate_bank.dtype,
-        current.up_bank.dtype,
-        current.down_bank.dtype,
-    );
-    let tensor_selected = forced_expert_route().is_none()
-        && super::tensor_gate_up::selected(
-            arith,
-            mode,
-            current.gate_bank.dtype,
-            current.up_bank.dtype,
-            (hidden, ffn, experts, top_k),
-            rows,
-        );
     let eligible = iq_repack_requested()
         && (hidden, ffn, experts, top_k) == (4096, 2048, 288, 8)
         && (1024..=4096).contains(&rows)
         && arith.lineage == PackedLineage::Fast
         && arith.precision == FastPrecision::Half
-        && crate::metal::moe_grouped_tensor_selected(ctx)
-        && tensor_selected;
+        && crate::metal::moe_grouped_tensor_selected(ctx);
     let repacked = eligible
         .then(|| weights.repacked_moe.get(block).and_then(Option::as_ref))
         .flatten();

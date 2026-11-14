@@ -41,16 +41,25 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   rather than exact token ITL. [Per-arm output counts and full tables](bench/2026-11-14-glm-layer-slice-ab.md).
 ## 2026-11-14 - Shared Serve TTFT Lifecycle Trace
 
-- Opt-in `QWEN_SERVE_TTFT_TIMING=1`, default-off. Shared request IDs,
-  monotonic stages, typed spans and bounded prefill/decode quantum history;
-  distinct control-SSE and first-visible flushes. Disabled capture has no
-  clocks/allocation; local20-span+snapshot diagnostic about29us/request.
-- Shared HTTP/transport/batching hooks plus V4.1 cache, boundary-tokenize,
-  admission, checkpoint and native-slice hooks. GLM can use the same API;
-  no scheduling/kernel/tokenization/cache fix in this stage.
--23 CPU lifecycle/transport tests pass, including unchanged loopback SSE
-  bytes. One purged greedy three-agent file-A measurement pending.
-  [Design, measurement and component accounting](bench/2026-11-14-serve-ttft-instrumentation.md).
+- Opt-in `QWEN_SERVE_TTFT_TIMING=1`: shared monotonic request/round IDs,
+  HTTP/render/tokenize/cache/admission/slice/sample/SSE timings and bounded
+  peer-round history. Default-off; disabled capture has no trace clocks or
+  allocation. CPU capture diagnostic ~29 us/request excluding log output.
+- One failed arm hit host-memory admission (400 MB required / 289 MB
+  remaining); retained separately, limits unchanged. Harness now retains
+  partial client rows/window bounds on failure. Clean purged greedy three-agent
+  file-A retry completed, nice 0, thermal <=2, disk counter **189,521,977,344 B**.
+- Short / ~1K outside-native p50 **105.692 / 85.773 ms**: tokenization
+  **52.086 / 39.495 ms**, checkpoint **21.649 / 21.585 ms**, ready waits
+  **25.679 / 18.099 ms**. Slot wait ~0.005 ms; sampling/SSE/transport small.
+  Short p95 **1622.344 ms**, including **1082.090 ms** behind a peer prefill
+  **before HTTP processing**. N=19/9 (p95=max); all 32 eligible calls join,
+  no dropped spans or TTFT censoring; per-call partitions balance.
+- Recommend exact full-tokenization/boundary reuse first; duplicated
+  generation-prefix encode alone prices **20.6 / 14.6 ms p50**. No lever
+  implemented. CPU tests/contracts pass; measured Rust source `0a54d2316`
+  unchanged at final tip. M5 task processes/build/worktree/pins cleaned up.
+  [Components, controls, failed attempt and recommendation](bench/2026-11-14-serve-ttft-instrumentation.md).
 
 ## 2026-11-14 - V4.1 Compact + Radix: Default-On by Lead Judgment
 

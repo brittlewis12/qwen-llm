@@ -1,0 +1,266 @@
+[
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/arm.log",
+    "sha256": "339ce8866fef4ecc5bea5bf034bbcd034466f892bb8437abbc7b41cb4d3ae1e1",
+    "bytes": 4417
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/arm.model-pids.json",
+    "sha256": "fabcc6981c502f70fa84bd4d7af821a1ce295f446199271c7578abd225b568c7",
+    "bytes": 103
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/arm.process-io.jsonl",
+    "sha256": "c702c17a38eec98a287e0c3b0ef74c758888274cb2440c6ff8d78466d743d0cf",
+    "bytes": 143686
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/build.log",
+    "sha256": "114c4254962dbb51b998b14e0148f176a355d267aa2384d475cbe360f73465f9",
+    "bytes": 21878
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/command.json",
+    "sha256": "f65b8943c3e32969881afc0b33a5191233846d92aeb5a09496c081ad93d8f900",
+    "bytes": 1319
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/driver.log",
+    "sha256": "fe847caf2a6a225fa81f803b043191ebaee446284609b1658fcc0f9a16aed414",
+    "bytes": 1201
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/load-before.txt",
+    "sha256": "d5ee2cb18dbca5e1f21f9625f2810decac46c83fc31bac493a66ba2b711a437f",
+    "bytes": 67
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/pin-manifest.json",
+    "sha256": "be5bf1abf5b9f3e69f5834a9c731f15a80b06f073aa042ad5935d243603509bc",
+    "bytes": 1154
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/plan.json",
+    "sha256": "f27485bfc8061dd04c3d6403182314840d7f9fac3b039b919f362caf5bc410cf",
+    "bytes": 6851
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/preload-thermal.json",
+    "sha256": "d495d058fa351e2dac05e93e4e5c16ad17521d7d26d2dce2d1bf12521eeed09d",
+    "bytes": 1644
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/processes-before.txt",
+    "sha256": "ef96c407d09268121372ebfa743820cd028bbd6ed72adc7249d5eeceb8015415",
+    "bytes": 27128
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/purge.jsonl",
+    "sha256": "496e2d3d8940d4b302ffe65e84740a8cf82f4636430c0c75a9fbfd6d4970d2d0",
+    "bytes": 254
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/serve/failed.json",
+    "sha256": "33972af19017fa5ae446166efe811a53afb388dbc9983ef3d37b6b20a9e35966",
+    "bytes": 361
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/serve/launch.json",
+    "sha256": "d320a7470ed04528cf02d37ca7da0450c3abc1afb9e9a25b51e97df80835ddad",
+    "bytes": 3326
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/serve/native-lines.json",
+    "sha256": "497c10346b7e1aa1188569b626582a769a969ba49a6edb354bd0bb8f40aca318",
+    "bytes": 1475941
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/serve/plan.json",
+    "sha256": "f27485bfc8061dd04c3d6403182314840d7f9fac3b039b919f362caf5bc410cf",
+    "bytes": 6851
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/serve/settle.json",
+    "sha256": "b43e58153e40e8640182ced36dff9c7b41ab223b34cfc76147a2df89e5e3fd34",
+    "bytes": 9252
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/serve/thermal.json",
+    "sha256": "9ff80894577c64091c6c8535df01194b53c8db7e0a328f29decb725755b55aae",
+    "bytes": 21885
+  },
+  {
+    "cohort": "failed",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/serve/warm-calls.jsonl",
+    "sha256": "8da60cf9b2a0d3c3fdbcc28ce9b2849f0f56af92c0a92001160ac4bcb847a65d",
+    "bytes": 12413
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/arm-result.json",
+    "sha256": "db80e97a2baf59c004fe74c88cd87cb0f38f0a4c21bd03f1a0583c7c6793cdb1",
+    "bytes": 5846
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/arm.log",
+    "sha256": "457daa20348a7490c27c61e94b183c79d3c3d59fb140d8d337adf0bf8f99f727",
+    "bytes": 8789
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/arm.model-pids.json",
+    "sha256": "20a285dae49f17049875ae12114a395c12ac4375b4ea79d96e335743a54c6bfa",
+    "bytes": 104
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/arm.process-io.jsonl",
+    "sha256": "3a5aa8823e3680956524be9d58cb1a3b7fc1c5633ce3feca22cc7e221a3af0aa",
+    "bytes": 177047
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/command.json",
+    "sha256": "5c687a57468b6f89d07e42a93a4d032217c263fecee9e8a2fe4b8374bce55aac",
+    "bytes": 1343
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/load-after.txt",
+    "sha256": "fea5be7e2fd276890c4cb6cb15cb4499b12c46a76164206048197a6da3cc1567",
+    "bytes": 67
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/load-before.txt",
+    "sha256": "8cef7850c65cc21cf788f7f513f4c681116df7843bd8cb7798a655d5008c7c4f",
+    "bytes": 67
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/plan.json",
+    "sha256": "f27485bfc8061dd04c3d6403182314840d7f9fac3b039b919f362caf5bc410cf",
+    "bytes": 6851
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/preload-thermal.json",
+    "sha256": "b11a51ee22fbbaac478a5f2609298cbd1df316bcf7ccb51f1c2c80583f567965",
+    "bytes": 1274
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/processes-after.txt",
+    "sha256": "237e28381fcf6602b81725771cfaf725eaf9231a9a4cc5e7a49046c7393ee349",
+    "bytes": 26785
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/processes-before.txt",
+    "sha256": "f679a55e5cc654afe5a57d00ab433b95570e5f7432b0ad0ddf1629ddcf63653f",
+    "bytes": 25181
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/purge.jsonl",
+    "sha256": "9cf1324375849927c72127a7d2e44fd90db56f4196231ef9e99e5e7fb3101e2d",
+    "bytes": 254
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/serve/calls.jsonl",
+    "sha256": "78a61fb35076963688c54babd706f96236dae7c57096af2c65badd326e668766",
+    "bytes": 731413
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/serve/launch.json",
+    "sha256": "f628d44a2a026b09ece098a35a5187a17c08194b1dfafe5517774ca2be00c9c9",
+    "bytes": 3351
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/serve/native-lines.json",
+    "sha256": "1b7954787c7d50cbb96ec7c7aafa44a3319bfa6aba3127615a3aca15fc4d0c02",
+    "bytes": 3110436
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/serve/plan.json",
+    "sha256": "f27485bfc8061dd04c3d6403182314840d7f9fac3b039b919f362caf5bc410cf",
+    "bytes": 6851
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/serve/raw-calls.jsonl",
+    "sha256": "1374043c561899e3707af498a979ec4ff39c7960c529a7031f5d57b9f4f7f6fd",
+    "bytes": 785862
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/serve/settle.json",
+    "sha256": "b2a4bea4a96a574e23ce90ad3b36f42b001ac5a6e2c3d3bb73b95366ea0b25f7",
+    "bytes": 9272
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/serve/summary.json",
+    "sha256": "90b20add53333e0c93611828c647ad1d129087f10d739e020897ab28b105a037",
+    "bytes": 4919
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/serve/thermal.json",
+    "sha256": "5f6691e25cb6e6d758f35c3217e090601a0d7d0b25c680facd2c3726c61f9ff7",
+    "bytes": 23792
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/serve/warm-calls.jsonl",
+    "sha256": "b84aadec5141fed7a873f4e52cdab514a1785017a5c99b2b8b62a447a31e0f89",
+    "bytes": 12431
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/measurement/serve/window.json",
+    "sha256": "b4f1f6f512df095e8e04ea0a9bb0f3bbd0b7b5fcfce41bafc2c39b8037f952cc",
+    "bytes": 61
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/pin-manifest.json",
+    "sha256": "be5bf1abf5b9f3e69f5834a9c731f15a80b06f073aa042ad5935d243603509bc",
+    "bytes": 1154
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/retry-driver.log",
+    "sha256": "b88077bb878b9b51d98e050606add69c7a6bb3e722826703d1722778d3fd3fd2",
+    "bytes": 5169
+  },
+  {
+    "cohort": "primary",
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/ttft-instrumentation/run_retry.py",
+    "sha256": "7904a7a988499ce91046b88324e85a76f8e5a986a906e0e151850e0bde131208",
+    "bytes": 3801
+  }
+]

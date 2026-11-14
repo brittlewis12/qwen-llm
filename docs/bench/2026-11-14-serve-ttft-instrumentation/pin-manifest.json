@@ -1,0 +1,33 @@
+{
+  "source": "0a54d231622131bc37e5c41ae6e97357e7f9a72c",
+  "tree": "3a761d17bd0c621e44f57047608c82397f26d63a",
+  "profile": "release",
+  "command": "nice -n 10 cargo build --offline --locked --release -p qwen-cli --bin qwen --bin qwen-tok",
+  "binaries": {
+    "qwen": {
+      "sha256": "bc0e4fe375a4b377204d17d10f827689efb87088675ce56db0b1aea789d3ea6e",
+      "bytes": 41601528
+    },
+    "qwen-tok": {
+      "sha256": "29f4edce59d54fe79c99b4668a3e250037270b3b86dfee706f3e2b768f9c9ac0",
+      "bytes": 1293976
+    }
+  },
+  "metallibs": [
+    {
+      "path": "release/build/qwen-llm-93395525bac8e0ef/out/kernels.metallib",
+      "sha256": "35ac100a2ceb16fdcfdbc435fb7d941910183e873570c50a2044c52cce168c7b",
+      "bytes": 9828511
+    },
+    {
+      "path": "release/build/qwen-llm-93395525bac8e0ef/out/kernels_research.metallib",
+      "sha256": "be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f",
+      "bytes": 912052
+    },
+    {
+      "path": "release/build/qwen-llm-93395525bac8e0ef/out/kernels_tensor.metallib",
+      "sha256": "43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c",
+      "bytes": 4249314
+    }
+  ]
+}

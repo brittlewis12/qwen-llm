@@ -28,14 +28,17 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   clocks already collected can be retained with little extra logging.
   [Decomposition, all arms, source audit and ranked levers](bench/2026-11-14-v41-serve-ttft.md).
 ## 2026-11-14 - GLM Serve Layer Slice: Recommend 400 ms, Roll Back to 200 ms
+## 2026-11-14 - GLM Serve Layer Slice: Default 400 ms, Roll Back to 200 ms
 
 - Three interleaved A/B pairs, same release binary, nice 0, greedy 48K roots;
-  `MIN_MS=500` fixed. Frozen geomeans: long TTFT p50 **0.966×**, about-1K
-  p50 **0.903×**, short p95 **0.757×**, aggregate TPS **1.137×**. All pass.
-- Recommend default 400 ms with `QWEN_SERVE_GLM_LAYER_SLICE_MS=200` rollback;
-  no default changed here. TPS is noisy: pair ratios **0.931/1.601/0.985×**;
-  without pair 1 the remaining two-pair geomean is **0.958×**. [Full tables,
-  counts, root limits and thermal record](bench/2026-11-14-glm-layer-slice-ab.md).
+  `MIN_MS=500` fixed. TTFT gates pass: long p50 **0.966×**, about-1K p50
+  **0.903×**, short p95 **0.757×**. The later matched-call check passes pooled
+  completion p50 **0.891×**; client-visible SSE delta-gap p99 is **1.219×**
+  geomean (pair 0/2 are **1.419/1.421×**).
+- Default is now 400 ms; `QWEN_SERVE_GLM_LAYER_SLICE_MS=200` is the rollback.
+  Completion pairs use identical labels, inputs and output token counts. TPS
+  remains noisy: **0.931/1.601/0.985×**, and the available gap is delta-event
+  rather than exact token ITL. [Per-arm output counts and full tables](bench/2026-11-14-glm-layer-slice-ab.md).
 
 ## 2026-11-14 - V4.1 Compact + Radix: Default-On by Lead Judgment
 

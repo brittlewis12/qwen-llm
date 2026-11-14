@@ -18,13 +18,12 @@ const LIVE_STATES: &str = "QWEN_SERVE_GLM_LIVE_STATES";
 const PREFILL_FAIR: &str = "QWEN_SERVE_GLM_PREFILL_FAIR";
 /// Target decode service percentage under mixed load for unsliced appends (1..=90, default 10).
 const DECODE_PERCENT: &str = "QWEN_SERVE_GLM_DECODE_PERCENT";
-/// Nominal GPU milliseconds per row-preserving layer slice under mixed load (default 200; zero restores whole-row chunks and the original decode-percentage policy).
+/// Nominal GPU milliseconds per row-preserving layer slice under mixed load (default 400; set to 200 to roll back to the previous default, or zero to disable slicing and restore the original decode-percentage policy).
 const LAYER_SLICE_MS: &str = "QWEN_SERVE_GLM_LAYER_SLICE_MS";
-// The three-agent serve A/B accepts selective slicing: smaller max gap,
-// unchanged append TTFT and neutral throughput. Global gap p99 rises by
-// construction (one long stall becomes several slice-sized gaps), so it is
-// not the gate for this change.
-const DEFAULT_LAYER_SLICE_MS: usize = 200;
+// The three-agent serve A/B supports a 400 ms slice by matched-call
+// completion-time p50 and client-visible SSE delta-gap p99. The latter is a
+// chunk-gap proxy, not token-level ITL; retain the 200 ms environment rollback.
+const DEFAULT_LAYER_SLICE_MS: usize = 400;
 /// Slice only appends whose predicted original prefill wall exceeds this many milliseconds (default 500). Zero restores the all-append slicing policy; LAYER_SLICE_MS=0 still disables slicing entirely.
 const LAYER_SLICE_MIN_MS: &str = "QWEN_SERVE_GLM_LAYER_SLICE_MIN_MS";
 const DEFAULT_LAYER_SLICE_MIN_MS: usize = 500;
@@ -663,9 +662,10 @@ pub(super) fn with_transport_relief<'w, T, V>(
 mod tests {
     use super::*;
     #[test]
-    fn layer_slice_ms_has_an_exact_zero_rollback_and_bounded_input() {
+    fn layer_slice_ms_defaults_to_400_with_exact_rollbacks_and_bounded_input() {
         assert_eq!(parse_slice_ms(None).unwrap(), DEFAULT_LAYER_SLICE_MS);
-        assert_eq!(parse_slice_ms(None).unwrap(), 200);
+        assert_eq!(parse_slice_ms(None).unwrap(), 400);
+        assert_eq!(parse_slice_ms(Some("200")).unwrap(), 200);
         assert_eq!(parse_slice_ms(Some("0")).unwrap(), 0);
         for n in ["0", "1", "100", "10000"] {
             assert!(parse_slice_ms(Some(n)).is_ok());

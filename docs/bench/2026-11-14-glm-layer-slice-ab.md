@@ -116,8 +116,95 @@ rule nevertheless passes as preregistered. Recommend changing the default
 slice from 200 ms to 400 ms with a `QWEN_SERVE_GLM_LAYER_SLICE_MS=200`
 rollback. No product default was changed in this stage. The steady p50 wins
 for long and about-1K appends support the direction; the throughput margin
-should be treated as noisy, not as a reliable 13.7% gain.
+should be treated as noisy, not as a reliable 13.7% gain. The first A/B
+stage left the product default untouched; the completion-time follow-up below
+met its additional rule and this branch now changes the default to 400 ms.
 
 The residual remains an aggregate of all time outside native server prefill;
 it is not a direct measurement of admission, peer wait, first-token work, or
 transport. Per-request lifecycle instrumentation is needed to split it.
+
+## Completion-time follow-up from the same arms
+
+Using only the retained call records, request completion time is `end - sent`
+from HTTP request start to stream completion. We include calls offered in the
+180 s window that completed with a known row count. Pairwise comparisons below
+use the **intersection of labels** present in both arms; every matched label
+has identical input rows, prompt, request spec, and generated-token count on A
+and B. This makes the timing distributions like-for-like. Percentiles use the
+same nearest-rank method as the serve harness.
+
+The first table gives the raw completed sample counts and generated output
+tokens per class in each arm. Pair 1's raw A/B totals differ because the arms
+completed different numbers of calls; matched-set output counts are shown in
+the next table and are equal on A/B.
+
+| Arm | Short n/tokens | About-1K n/tokens | Long n/tokens |
+|---|---:|---:|---:|
+| Pair 0 A200 | 72 / 2,212 | 13 / 250 | 6 / 114 |
+| Pair 0 B400 | 73 / 2,231 | 13 / 250 | 6 / 114 |
+| Pair 1 A200 | 83 / 3,047 | 14 / 379 | 9 / 237 |
+| Pair 1 B400 | 73 / 2,231 | 13 / 250 | 7 / 133 |
+| Pair 2 A200 | 84 / 3,066 | 14 / 379 | 9 / 237 |
+| Pair 2 B400 | 88 / 3,155 | 16 / 417 | 9 / 237 |
+
+Matched completion percentiles are milliseconds. The output column is the
+same A and B output-token total for the matched calls.
+
+| Pair | Class | Matched n / output tokens | A200 p50/p95 | B400 p50/p95 | B/A p50/p95 |
+|---|---|---:|---:|---:|---:|
+| 0 | Short | 72 / 2,212 | 1,173/2,660 | 1,187/2,756 | 1.012/1.036 |
+| 0 | About 1K | 13 / 250 | 2,596/3,723 | 2,571/3,052 | 0.990/0.820 |
+| 0 | Long | 6 / 114 | 6,575/9,559 | 6,495/9,080 | 0.988/0.950 |
+| 0 | Pooled | 91 / 2,576 | 1,276/9,236 | 1,262/8,784 | 0.989/0.951 |
+| 1 | Short | 52 / 1,832 | 1,493/6,982 | 1,159/5,140 | 0.776/0.736 |
+| 1 | About 1K | 9 / 174 | 3,086/8,088 | 2,508/2,918 | 0.813/0.361 |
+| 1 | Long | 6 / 114 | 7,758/11,161 | 6,337/8,913 | 0.817/0.799 |
+| 1 | Pooled | 67 / 2,120 | 1,790/9,678 | 1,220/8,817 | 0.681/0.911 |
+| 2 | Short | 84 / 3,066 | 1,974/7,425 | 1,912/7,279 | 0.968/0.980 |
+| 2 | About 1K | 14 / 379 | 3,235/7,912 | 3,399/7,355 | 1.051/0.930 |
+| 2 | Long | 9 / 237 | 9,476/14,727 | 9,106/12,732 | 0.961/0.865 |
+| 2 | Pooled | 107 / 3,682 | 2,344/10,245 | 2,459/9,232 | 1.049/0.901 |
+
+| Completion time | Pair 0 B/A | Pair 1 B/A | Pair 2 B/A | Geomean |
+|---|---:|---:|---:|---:|
+| Short p50 | 1.012 | 0.776 | 0.968 | 0.913 |
+| Short p95 | 1.036 | 0.736 | 0.980 | 0.908 |
+| About-1K p50 | 0.990 | 0.813 | 1.051 | 0.946 |
+| About-1K p95 | 0.820 | 0.361 | 0.930 | 0.650 |
+| Long p50 | 0.988 | 0.817 | 0.961 | 0.919 |
+| Long p95 | 0.950 | 0.799 | 0.865 | 0.869 |
+| Pooled p50 | 0.989 | 0.681 | 1.049 | **0.891** |
+| Pooled p95 | 0.951 | 0.911 | 0.901 | 0.921 |
+
+The harness's saved `gap_*` values are gaps between consecutive timestamped
+SSE delta events in each response, which are the available client-visible
+stall measure. They are not exact token timestamps: the six arms captured
+0.40–0.52 delta events per generated token, so a delta can contain multiple
+tokens. Values below are p50/p99/max event-gap milliseconds per arm.
+
+| Arm | Event gap p50/p99/max (ms) |
+|---|---:|
+| Pair 0 A200 | 25.4/297.8/463.3 |
+| Pair 0 B400 | 26.1/422.4/751.6 |
+| Pair 1 A200 | 25.4/461.5/2,768.8 |
+| Pair 1 B400 | 25.2/415.2/774.4 |
+| Pair 2 A200 | 25.4/456.6/3,089.1 |
+| Pair 2 B400 | 23.6/648.6/4,485.8 |
+
+| Event gap | Pair 0 B/A | Pair 1 B/A | Pair 2 B/A | Geomean |
+|---|---:|---:|---:|---:|
+| p50 | 1.028 | 0.993 | 0.928 | 0.982 |
+| p99 | 1.419 | 0.900 | 1.421 | **1.219** |
+| Maximum | 1.622 | 0.280 | 1.452 | 0.870 |
+
+Pooled matched completion p50 passes the ≤1.00 rule at 0.891×. The p99
+client-visible delta-gap geomean is 1.219×, within the suggested 1.25× bound,
+though pairs 0 and 2 individually rise to 1.419× and 1.421× and the maximum
+gap reaches 4.49 s in pair 2. Applying the three-pair geomean rule, recommend
+400 ms default with the exact rollback `QWEN_SERVE_GLM_LAYER_SLICE_MS=200`.
+True token-level ITL needs per-token or token-batched timestamps; this commit
+uses the measured client-visible delta-gap proxy and records that limit.
+
+The default change and regenerated ENV reference are recorded in the latest
+commit; this is a same-binary A/B interpretation, not a new GPU run.

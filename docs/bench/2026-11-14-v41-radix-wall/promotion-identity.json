@@ -1,0 +1,9 @@
+{
+  "measured_source": "eb29cfe51",
+  "kernels_tree": "4b28874cff3d75a539c3aca7f5557438f6d68c38",
+  "kernels_source_identical": true,
+  "host_dispatch_identical_excluding_knob_declarations": true,
+  "main_base": "411228dc0",
+  "no_new_gpu_work": true,
+  "host_source_identical_except_doc_comments": true
+}

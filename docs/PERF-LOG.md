@@ -6,6 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-14 - V4.1 Compact + Radix: Default-On by Lead Judgment
+
+- The stage gate missed at256 rows: **1.183782/1.223085x** at80K/128K,
+  below1.25x. The frozen served rule **FAILED on 1K client TTFT**:
+  **0.975476686x** geomean, pairs **0.906402317/1.014436452/1.009496527x**.
+  Both components promoted **by lead judgment**; neither failure is relabeled.
+- Lead rationale: pair1 1K server prefill improved **1.036939x**, while
+  client TTFT was0.906402x and short TTFT1.345920x, attributed by the lead
+  to queueing variance. Pairs2/3 1K TTFT are positive. Bitwise; all retained
+  native 1K append pairs positive, **1.025358x** at80K and **1.044608x** at128K.
+  Root/TPS/short/1K-prefill pass, with two independent `=0` rollbacks.
+- Default-on again; ENV regenerated. Kernels source-identical to measured
+  `eb29cfe51`; the existing native packet is the M5 witness. No new GPU work.
+  Local-main promotion only, Britt reviews before any push. This lane commits
+  without merge or push. [Failure history and recorded judgment](bench/2026-11-14-v41-radix-wall.md#subsequent-lead-judgment-promote-both-default-on).
+
 ## 2026-11-14 - V4.1 Compact + Radix: Native Wins, Served Gate Fails
 
 - Lead judgment advanced the composition despite the 256-row stage misses.

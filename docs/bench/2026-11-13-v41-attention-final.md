@@ -80,3 +80,37 @@ Raw: `metagross:~/qwen-runs/2026-11-12-v41-prefill/attention-close/`
 (all six arms and independent result); final-arm controller under sibling
 `attention-final/`. Gate is closed; archives may be deleted after records and
 checks finish. No push or merge.
+
+## M5 native paired-cell witness
+
+A self-contained bundle of `309249854` was checked out in a separate detached
+M5 worktree. A clean `iter` build used a new
+`CARGO_TARGET_DIR=~/qwen-runs/2026-11-13-attention-landing/target-iter-clean`
+and succeeded in 52.50 s:
+`cargo build --locked --profile iter --features perf-ablations -p qwen-llm --example v41_prefill_census`.
+The same binary (SHA256
+`78ce6eb2ab95f302b71accd5b2dd0bf067d0e645bdaaeb6a1964916f90d05425`) ran
+both native cells at depth 81,920 with `scripts/bench/v41_prefill_packet.py`
+and `scripts/bench/v41_prefill_cells.py`. Each cell had one warmup pair,
+then three retained interleaved pairs. The baseline's
+`AttentionBundle(false)` disables both new routes, matching runtime rollback
+values `QWEN_V41_MASKED_REINDEX_SHORT=0` and `QWEN_V41_ATTN_PV_WIDE=0`;
+`AttentionBundle(true)` selects both default-on routes. `ps -o nice=` verified
+niceness 0 for PIDs 47079 and 56934.
+
+| Cell | Pair 1 baseline / candidate (ratio) | Pair 2 baseline / candidate (ratio) | Pair 3 baseline / candidate (ratio) | Retained mean baseline / candidate (ratio) | Bitwise signatures |
+|---|---:|---:|---:|---:|---|
+| 150 rows @ 80K | 380.195 / 353.983 ms (1.07405x) | 379.893 / 354.814 ms (1.07068x) | 381.556 / 354.303 ms (1.07692x) | 380.548 / 354.366 ms (1.07388x) | all 4 pairs exact |
+| 1,024 rows @ 80K | 1,054.627 / 1,032.768 ms (1.02116x) | 1,050.684 / 1,037.873 ms (1.01234x) | 1,051.513 / 1,028.274 ms (1.02260x) | 1,052.274 / 1,032.972 ms (1.01869x) | all 4 pairs exact |
+
+The signatures cover logits, causal state, and following-token logits; every
+warmup and measured pair was bitwise exact. Thermal pressure stayed at 0.
+At packet start the M5 uptime record showed load averages 9.30/11.87/12.63.
+An earlier read-only preflight also saw shadPS4 PID 82927 at 155.6% CPU and
+1,821,424 KiB RSS, with `ps4-dump` compiler workers active.
+The retained process snapshot at 19:24 records load averages
+21.38/21.19/16.42 and thermal 0, with the Ghost remote lane active and its
+`ps4-dump` worker at 206.8% CPU, 1,866,288 KiB RSS, and niceness 20. These
+background jobs were left running. Full host snapshots, per-cell JSONL,
+niceness checks, and reducer output remain under
+`metagross:~/qwen-runs/2026-11-13-attention-landing/witness/`.

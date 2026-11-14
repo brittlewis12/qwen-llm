@@ -1092,6 +1092,24 @@ fn handle_responses(
         tokens,
     });
     let request = prepared.request();
+    let timing = super::lifecycle_timing::current();
+    if timing.id() != 0 {
+        use sha2::{Digest, Sha256};
+        let mut token_hash = Sha256::new();
+        if let Some(ids) = &prepared.tokens {
+            for id in ids {
+                token_hash.update(id.to_le_bytes());
+            }
+        }
+        tracing::info!(target:"qwen_diag", "serve input witness: {}", json!({
+            "request_id":timing.id(),"response_id":response_id,
+            "prompt_sha256":format!("{:x}",Sha256::digest(prepared.prompt.as_bytes())),
+            "token_sha256":prepared.tokens.as_ref().map(|_|format!("{:x}",token_hash.finalize())),
+            "token_count":prepared.tokens.as_ref().map(Vec::len),
+            "shared_prefix_byte":prepared.boundaries.and_then(|b|b.shared_prefix_end),
+            "generation_header_byte":prepared.boundaries.and_then(|b|b.generation_header_start)
+        }));
+    }
     if !request.stream {
         let mut sink = CollectSink::new(stream, backend.output_headroom());
         match backend.generate_prepared(Arc::clone(&prepared), &mut sink) {

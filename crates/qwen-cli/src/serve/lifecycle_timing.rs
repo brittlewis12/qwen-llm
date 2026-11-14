@@ -319,16 +319,22 @@ impl Drop for Round {
     fn drop(&mut self) {
         if self.id != 0 {
             let end = now();
-            if let Some(r) = history()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter_mut()
-                .rev()
-                .find(|r| r.id == self.id)
-            {
-                r.end = Some(end);
-            }
+            let completed = {
+                let mut history = history().lock().unwrap_or_else(|e| e.into_inner());
+                history.iter_mut().rev().find(|r| r.id == self.id).map(|r| {
+                    r.end = Some(end);
+                    r.clone()
+                })
+            };
             ROUND.set(self.previous);
+            // Full generation history supplements the existing first-visible
+            // snapshots. Never hold the history mutex while writing a line.
+            if let Some(r) = completed {
+                tracing::info!(target:"qwen_diag", "serve round timing: {}", json!({
+                    "version":1,"round_id":r.id,"kind":r.kind,"request_ids":r.requests,
+                    "position":r.position,"rows":r.rows,"start_ns":r.start,"end_ns":end
+                }));
+            }
         }
     }
 }

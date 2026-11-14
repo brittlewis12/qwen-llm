@@ -798,8 +798,8 @@ fn drain_completions(
 }
 
 qwen_llm::env_flag!(
-    /// Start bounded batched HTTP rendering/tokenization on the accept side while inference runs. Default-off qualification switch; 0 restores inference-loop dispatch.
-    default_off async_prepare_enabled,
+    /// Start bounded batched HTTP rendering/tokenization on the accept side while inference runs. Default-on; 0 restores inference-loop dispatch.
+    default_on async_prepare_enabled,
     "QWEN_SERVE_ASYNC_PREPARE"
 );
 
@@ -807,10 +807,13 @@ qwen_llm::env_flag!(
 std::thread_local! { static ASYNC_PREPARE_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 fn use_async_prepare() -> bool {
     #[cfg(test)]
-    if ASYNC_PREPARE_OVERRIDE.get() {
-        return true;
+    {
+        ASYNC_PREPARE_OVERRIDE.get()
     }
-    async_prepare_enabled()
+    #[cfg(not(test))]
+    {
+        async_prepare_enabled()
+    }
 }
 
 fn spawn_acceptor(

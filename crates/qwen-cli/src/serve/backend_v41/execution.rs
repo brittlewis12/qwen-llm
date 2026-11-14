@@ -249,6 +249,13 @@ impl Settings {
         drop(boundary_span);
         checkpoint_cuts.sort_unstable();
         checkpoint_cuts.dedup();
+        let request_id = super::super::lifecycle_timing::current().id();
+        if request_id != 0 {
+            tracing::info!(target:"qwen_diag", "serve cut witness: {}", serde_json::json!({
+                "request_id":request_id,"prompt_tokens":ids.len(),"shared_cut":shared_cut,
+                "generation_cut":generation_cut,"checkpoint_cuts":checkpoint_cuts
+            }));
+        }
         // An aliased generation boundary still owns the shared-prefix cut.
         let fuse_header = self.fuse_header && generation_cut != shared_cut;
         let vocab = self.tokenizer.n_vocab() as usize;
@@ -610,6 +617,17 @@ impl Settings {
             reuse.checkpoint(&run.state, &run.ids, &run.logits, run.reserve);
         }
         run.prefill_work.finished = true;
+        let request_id = super::super::lifecycle_timing::current().id();
+        if request_id != 0 {
+            use sha2::{Digest, Sha256};
+            let mut hash = Sha256::new();
+            for value in &run.logits {
+                hash.update(value.to_bits().to_le_bytes());
+            }
+            tracing::info!(target:"qwen_diag", "serve logits witness: {}", serde_json::json!({
+                "request_id":request_id,"position":run.position,"logits_sha256":format!("{:x}",hash.finalize())
+            }));
+        }
         super::super::lifecycle_timing::mark(
             super::super::lifecycle_timing::Stage::PrefillComplete,
         );

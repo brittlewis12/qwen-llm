@@ -6,6 +6,15 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-14 - Intake + Tokenization Qualification Started
+
+- Rebased onto `e70da3f8a`; candidate defaults on, independent 0 rollbacks.
+  Same release binary for A/A controls and AB/BA/AB. A1 is preregistered
+  as both the second control baseline and pair1's A arm; no speed selection.
+- Full round-cohort records plus prompt/ID/cut/logit digests supplement
+  the stable shared trace API. Frozen six-metric rule unchanged.
+  [Protocol, controls and outcome](bench/2026-11-14-v41-intake-qualification.md).
+
 ## 2026-11-14 - V4.1 Three-Agent TTFT: Peer-Prefill Tails Priced
 
 - Records only:18 paired arms plus1 diagnostic,164 input hashes verified;

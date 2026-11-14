@@ -6,8 +6,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 qwen_llm::env_flag!(
-    /// Reuse V4.1 full prompt tokenization at proven special-token cuts, with exact text-prefix verification and full-encode fallback. Four conversations / 8 MiB retained; default-off qualification switch, 0 restores full and boundary encodes.
-    default_off enabled,
+    /// Reuse V4.1 full prompt tokenization at proven special-token cuts, with exact text-prefix verification and full-encode fallback. Four conversations / 8 MiB retained; default-on; 0 restores full and boundary encodes.
+    default_on enabled,
     "QWEN_SERVE_TOKEN_PREFIX_CACHE"
 );
 pub(super) fn is_enabled() -> bool {

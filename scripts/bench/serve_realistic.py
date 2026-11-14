@@ -550,6 +550,10 @@ class Arm:
             # Server phase lines are part of the evidence: they carry per-round
             # transition and host time for every completed request.
             dump(self.out/'native-lines.json',self.lines)
+            # Keep completed and partial client timelines even if another
+            # agent stops the arm before the summary can be built.
+            with (self.out/'raw-calls.jsonl').open('w') as f:
+                for row in self.rows:f.write(json.dumps(row)+'\n')
             with (self.out/'warm-calls.jsonl').open('w') as f:
                 for row in self.rows:
                     if row['warm']:f.write(json.dumps(row)+'\n')

@@ -37,6 +37,14 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   stays removed. All arm disk counters/load retained. Gate closed; M5 worktree,
   target, bundle and pins removed, no task workers left. [All cells, pairs,
   launch controls and cleanup](bench/2026-11-14-v41-radix-wall.md).
+## 2026-11-14 - V4.1 Packed-Reference Index Scorer Closed
+
+- E2M1/UE8M0 pack and F32 dequant matched the scalar contract bitwise; the
+  32-head SIMDgroup score matched its real packed-score oracle exactly. The
+  isolated score stage was 0.35× at 256/1,024 rows and 0.39–0.53× for 1–3
+  rows versus F32 MMA. On the 80K real-model screen, aggregate top-512 overlap
+  ranged 6.6–90.0% (worst layer 24). No integration; three-session 128K key
+  payload saving priced at 416.25 MiB. [Bench record](bench/2026-11-14-v41-fp4-indexer.md).
 
 ## 2026-11-14 - GLM Gate/Up Epilogue Edge Closed at Route-Partition Check
 

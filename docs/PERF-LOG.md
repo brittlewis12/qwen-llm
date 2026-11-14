@@ -40,24 +40,38 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   remains noisy: **0.931/1.601/0.985×**, and the available gap is delta-event
   rather than exact token ITL. [Per-arm output counts and full tables](bench/2026-11-14-glm-layer-slice-ab.md).
 ## 2026-11-14 - V4.1 Exact Token-Prefix Cache: Qualification Prototype
+## 2026-11-14 - V4.1 Exact Token-Prefix Cache: Large CPU Saving, Default-Off
 
-- Default-off `QWEN_SERVE_TOKEN_PREFIX_CACHE=1`, independent 0 rollback.
-  Four conversations / 8 MiB retained payload; exact unchanged bytes and
-  special-fragment cuts with a maximum-special-length guard. Full encode
-  fallback; immutable tokenizer identity. Reuses full-encode boundary IDs.
-- CPU plan/renderer/adversarial token-ID and cut properties pass. One composed
-  M5 diagnostic arm pending; no standalone wall attribution or promotion.
-  [Design, proof, controls and results](bench/2026-11-14-v41-serve-prepare.md).
+- `QWEN_SERVE_TOKEN_PREFIX_CACHE=1`; four conversations / 8 MiB retained
+  payload, exact byte prefixes and guarded special-fragment cuts. Native
+  full-encode fallback, tokenizer identity, independent 0 rollback.
+- Released file-A CPU witness: **57 cases / 54 incremental hits / 699 prefix
+  checks**, identical IDs. In the composed served arm, tokenization p50
+  short/~1K **52.086→2.681 / 39.495→3.163 ms**. Reused 98.78/95.97% at
+  p50. No checkpoint or shader changes; all three metallibs identical.
+- Cross-run output equality **did not hold**: 37 completed common responses
+  match exactly, but cancelled `a2-t2` differs at byte104 before truncation.
+  Input/cut digests are absent in baseline; batch-rounding attribution is
+  plausible, unproven. No full output-bitwise or promotion claim.
+  [Proof, all components, divergence and controls](bench/2026-11-14-v41-serve-prepare.md).
 
-## 2026-11-14 - Concurrent HTTP Preparation: Qualification Prototype
+## 2026-11-14 - Concurrent HTTP Preparation: Handler Serialization Removed
 
-- The 1,082 ms pre-handler wait is synchronous inference-loop dispatch:
-  baseline `serve/mod.rs:1173` pumps before `:1206` starts the worker.
-  Default-off `QWEN_SERVE_ASYNC_PREPARE=1` starts bounded CPU workers on
-  acceptance, retaining the original inference thread and FIFO channel.
-- CPU blocked-pump concurrency, cap and shutdown checks; combined served
-  diagnostic pending. Mutable KV state and checkpoint capture unchanged.
-  [Serialization, bounds and measurement](bench/2026-11-14-v41-serve-prepare.md).
+- Baseline `serve/mod.rs:1173` pumps synchronously before `:1206` starts
+  the handler. Default-off `QWEN_SERVE_ASYNC_PREPARE=1` starts bounded
+  immutable CPU preparation from the accept thread; inference stays put.
+  Blocked-pump concurrency/cap/shutdown tests pass; 0 rollback retained.
+- Composed purged three-agent arm: short handler-start p50/p95
+  **15.191/1082.155→0.081/0.160 ms**. The tail now waits in the prepared
+  mailbox: 764 ms behind a peer plus about 141 ms peer decode credit.
+- Short/~1K outside-native p50 **105.692→51.365 / 85.773→42.190 ms**;
+  common-label TTFT **1.1309/1.0217x**. TPS 89.917 vs90.325; roots
+  29.837 vs25.017 s p50 with matching native drift and higher host load.
+  One unpaired diagnostic, not a root non-regression or paired gate.
+- Nice0, thermal<=2, process disk reads **190,324,699,136 B**; 29 focused
+  CPU tests and standard contracts pass. Both switches remain default-off
+  pending full qualification and output-difference attribution; pins retained.
+  [Serialization, tables, limits and next gate](bench/2026-11-14-v41-serve-prepare.md).
 
 ## 2026-11-14 - Shared Serve TTFT Lifecycle Trace
 

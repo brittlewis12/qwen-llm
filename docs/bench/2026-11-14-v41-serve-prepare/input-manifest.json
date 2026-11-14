@@ -1,0 +1,142 @@
+[
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/build.log",
+    "bytes": 22551,
+    "sha256": "02ac1f83c153aee6f0f2b84916bc60a9fb5f8f655ced787b5d10089449d3b01e"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/driver.log",
+    "bytes": 4962,
+    "sha256": "80bc78c415a6ec0bbfe4507b222417dcfac13c77fc82d4439f92a72cfcb7762f"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/arm-result.json",
+    "bytes": 5842,
+    "sha256": "1abd5d7733fbc348ccb008af554001f626ae13bcba036680517ed536a0309ae1"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/arm.log",
+    "bytes": 8781,
+    "sha256": "427977b2086ce0cbaf00db8d0a5a03a9b4f898ffbd5224ee22b5e503c79f674b"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/arm.model-pids.json",
+    "bytes": 104,
+    "sha256": "9b220b642962e199c1d4e90171ead982cde44f531083a507d63debc0db78a319"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/arm.process-io.jsonl",
+    "bytes": 214262,
+    "sha256": "dd09d4c3e6e1e21d27dc06eb18a08172d345872ea858ab52efacfb89816cb6c3"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/command.json",
+    "bytes": 1406,
+    "sha256": "25d5cce4ff81f0ec0095bfa42ba282b7a51457f404f6ed443223e3f18383d54e"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/load-after.txt",
+    "bytes": 67,
+    "sha256": "576a6157355613da85d07440a072024ac2d40a0da97ec21ecd0890385d5cc6fa"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/load-before.txt",
+    "bytes": 67,
+    "sha256": "304d8c0cc081a109032aa4e5807919236b52517ca231b847432809b4b09e3687"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/plan.json",
+    "bytes": 6851,
+    "sha256": "f27485bfc8061dd04c3d6403182314840d7f9fac3b039b919f362caf5bc410cf"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/preload-thermal.json",
+    "bytes": 1276,
+    "sha256": "7956e01de18a52663e1bb91a2fbfb247b9cd891e31d0dcd30c5ffb39707925fc"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/processes-after.txt",
+    "bytes": 27050,
+    "sha256": "42ac449ec7fb703e4f7179f604353fc3136e21395303b8772346e64d49036bb5"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/processes-before.txt",
+    "bytes": 28355,
+    "sha256": "242177b4b657d281c8788d8d6303f659cfc0afbe69790381fc766ed1dc6fe023"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/purge.jsonl",
+    "bytes": 254,
+    "sha256": "df663fe53fd6933725304cfc2fa10a28e35b27b652c387f496659b1ecdde7902"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/serve/calls.jsonl",
+    "bytes": 723596,
+    "sha256": "ac560514343146c2ee2ca95eb9399fe2b2354e228670494bf190a5ec554964db"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/serve/launch.json",
+    "bytes": 3565,
+    "sha256": "225ceebd2cefe8cbcb25f42b8f7326b799e74ae48aed1eb502fa297dd008cc2d"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/serve/native-lines.json",
+    "bytes": 3092080,
+    "sha256": "7d9025da49bf4f93b7efc2a84e3db8a9ec5bbe7bc1ff2742ac1bc31c5623df4a"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/serve/plan.json",
+    "bytes": 6851,
+    "sha256": "f27485bfc8061dd04c3d6403182314840d7f9fac3b039b919f362caf5bc410cf"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/serve/raw-calls.jsonl",
+    "bytes": 777862,
+    "sha256": "7218de7eb596f5dc42ee5441a4f0716a1f0a71728a17e8b6da1e6949e1c746ea"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/serve/settle.json",
+    "bytes": 12781,
+    "sha256": "cb3075b010f494c400a088adee3174a5e4c153e6bb642f8202111fe164fec489"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/serve/summary.json",
+    "bytes": 4916,
+    "sha256": "cf4dd726eaf819bd4808ae16f4d95bd9298d2d925a1bdd4403eef72321a77468"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/serve/thermal.json",
+    "bytes": 1417389,
+    "sha256": "a7b4a6f5e35ce54649661b5d2d5517ffe1c95689c0042bc699afd4de8f97b635"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/serve/warm-calls.jsonl",
+    "bytes": 12458,
+    "sha256": "d55a5ef4431bfc7c1e0aeaed436b63b9454c238a59177acb8f5fe0e310229ce7"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/serve/window.json",
+    "bytes": 61,
+    "sha256": "2e91be08969966901cd62f6488cc1dcdc79ca185f69ddd9d7d80b0406e8d0570"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/token-prefix-exact-pid.json",
+    "bytes": 40,
+    "sha256": "d47d294b553bdaf332b6d77c2f8f30f49762a206140e089716f2aee733e5ba48"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/token-prefix-exact.log",
+    "bytes": 93,
+    "sha256": "e9be938d55324d87113ea3211d77cd4e92c9a6cfc28956e230f02702021ecb53"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/pin-manifest.json",
+    "bytes": 1336,
+    "sha256": "2d72cd64b10f83f5f78b3c06410229185e151097b687f73b5f992fdc71705808"
+  },
+  {
+    "path": "metagross:~/qwen-runs/2026-11-12-v41-prefill/serve-prepare/run_prepare_arm.py",
+    "bytes": 5041,
+    "sha256": "d79bfe78f614b91efa155dbf24584ef928846881cf67bd7b68a37f7d3139f23e"
+  }
+]

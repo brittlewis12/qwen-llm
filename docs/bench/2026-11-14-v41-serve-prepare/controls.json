@@ -1,0 +1,336 @@
+{
+  "result": {
+    "start": 1794656188.502448,
+    "end": 1794656703.192867,
+    "model_pids": [
+      58281
+    ],
+    "model_niceness": {
+      "58281": 0
+    },
+    "binary_sha256": "3899ddaeaeefb408583b6e62da9834d5a1f111f082ed87c3669444272d2c4826",
+    "engram_purge": {
+      "file": "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+      "bytes": 110595290816,
+      "resident_pages_before": 0,
+      "resident_pages_after": 0,
+      "msync_rc": 0,
+      "msync_errno": 0,
+      "seconds": 1.1920928955078125e-05
+    },
+    "process_disk_read_bytes": 190324699136,
+    "summary": {
+      "window_begin": 1794656579.866784,
+      "window_end": 1794656699.866784,
+      "window_seconds": 120.0,
+      "window_tokens": 10790,
+      "aggregate_tps": 89.91666666666667,
+      "gap_p50_s": 0.027313232421875,
+      "gap_p95_s": 0.02865910530090332,
+      "gap_p99_s": 0.031865835189819336,
+      "gap_max_s": 1.7115960121154785,
+      "round_budget": {
+        "rounds_est": 2530.446985653112,
+        "avg_width": 2.945934388438189,
+        "coverage": 0.7007414272474514,
+        "transition_s": 68.7241072988295,
+        "prefill_s": 18.754269404571048,
+        "partial_prefill_s": 1.9181370675710485,
+        "partial_prefill_calls": 3,
+        "capture_s": 0.001921709,
+        "host_s": 0.3905793515469435,
+        "transition_ms_per_round": 27.158880501537837,
+        "host_ms_per_round": 0.15435192033716305,
+        "host_metric": "median content gap minus native round wall"
+      },
+      "agents": [
+        {
+          "agent": 0,
+          "window_tokens": 3469,
+          "turns_offered": 18,
+          "ttft_p50_s": 0.6111140251159668,
+          "ttft_p95_s": 1.668712854385376,
+          "carry_in_requests": 1,
+          "pending_at_cutoff": 0,
+          "queue_exposure_s": 11.796226263046265,
+          "censored_ttft": 0
+        },
+        {
+          "agent": 1,
+          "window_tokens": 3608,
+          "turns_offered": 9,
+          "ttft_p50_s": 0.7154991626739502,
+          "ttft_p95_s": 1.5796887874603271,
+          "carry_in_requests": 1,
+          "pending_at_cutoff": 1,
+          "queue_exposure_s": 7.237423658370972,
+          "censored_ttft": 1
+        },
+        {
+          "agent": 2,
+          "window_tokens": 3713,
+          "turns_offered": 2,
+          "ttft_p50_s": 1.0727088451385498,
+          "ttft_p95_s": 1.5262179374694824,
+          "carry_in_requests": 1,
+          "pending_at_cutoff": 0,
+          "queue_exposure_s": 2.5989267826080322,
+          "censored_ttft": 0
+        }
+      ],
+      "agent_count": 3,
+      "trace_20s": [
+        {
+          "start_s": 0,
+          "duration_s": 20.0,
+          "gap_p50_s": 0.027460098266601562,
+          "gap_p95_s": 0.02866816520690918,
+          "gap_max_s": 0.6388671398162842,
+          "decode_stream_width_1_s": 0.0,
+          "decode_stream_width_2_s": 1.7941021919250488,
+          "decode_stream_width_3_s": 18.20589780807495,
+          "predecode_only_s": 0.0,
+          "idle_s": 0.0
+        },
+        {
+          "start_s": 20,
+          "duration_s": 20.0,
+          "gap_p50_s": 0.027512073516845703,
+          "gap_p95_s": 0.02888798713684082,
+          "gap_max_s": 1.5624749660491943,
+          "decode_stream_width_1_s": 0.0,
+          "decode_stream_width_2_s": 5.563458681106567,
+          "decode_stream_width_3_s": 14.436541318893433,
+          "predecode_only_s": 0.0,
+          "idle_s": 0.0
+        },
+        {
+          "start_s": 40,
+          "duration_s": 20.0,
+          "gap_p50_s": 0.0272979736328125,
+          "gap_p95_s": 0.028528690338134766,
+          "gap_max_s": 1.1118268966674805,
+          "decode_stream_width_1_s": 0.8345611095428467,
+          "decode_stream_width_2_s": 6.670461177825928,
+          "decode_stream_width_3_s": 12.494977712631226,
+          "predecode_only_s": 0.0,
+          "idle_s": 0.0
+        },
+        {
+          "start_s": 60,
+          "duration_s": 20.0,
+          "gap_p50_s": 0.027153968811035156,
+          "gap_p95_s": 0.028470993041992188,
+          "gap_max_s": 0.8515000343322754,
+          "decode_stream_width_1_s": 0.0,
+          "decode_stream_width_2_s": 4.67730450630188,
+          "decode_stream_width_3_s": 15.32269549369812,
+          "predecode_only_s": 0.0,
+          "idle_s": 0.0
+        },
+        {
+          "start_s": 80,
+          "duration_s": 20.0,
+          "gap_p50_s": 0.02722620964050293,
+          "gap_p95_s": 0.028448104858398438,
+          "gap_max_s": 1.7115960121154785,
+          "decode_stream_width_1_s": 1.368407964706421,
+          "decode_stream_width_2_s": 2.076616048812866,
+          "decode_stream_width_3_s": 16.554975986480713,
+          "predecode_only_s": 0.0,
+          "idle_s": 0.0
+        },
+        {
+          "start_s": 100,
+          "duration_s": 20.0,
+          "gap_p50_s": 0.027159929275512695,
+          "gap_p95_s": 0.028831958770751953,
+          "gap_max_s": 0.71683669090271,
+          "decode_stream_width_1_s": 0.6357481479644775,
+          "decode_stream_width_2_s": 3.6155943870544434,
+          "decode_stream_width_3_s": 15.748657464981079,
+          "predecode_only_s": 0.0,
+          "idle_s": 0.0
+        }
+      ],
+      "startup_s": 18.129650831222534,
+      "warmup_s": 88.82564401626587,
+      "warm_settle_s": 109.74256262509152,
+      "arm": "default",
+      "family": "v41",
+      "seed": 20261112,
+      "thermal_max": 2,
+      "sampling": {
+        "mode": "greedy",
+        "fields": {
+          "temperature": 0,
+          "top_p": 1
+        }
+      },
+      "metric": "delivered text+reasoning tokens retokenized; excludes EOS/format control",
+      "thermal_flagged": true,
+      "timing_thermal_max": 1,
+      "timing_thermal_seconds": {
+        "0": 56.61638808250427,
+        "1": 63.38361191749573,
+        "2": 0.0,
+        "unknown": 0.0
+      },
+      "compile_observed": true,
+      "compile_overlapped": true,
+      "max_thermal_pressure": 2,
+      "load_after": [
+        21.90576171875,
+        29.529296875,
+        23.38134765625
+      ],
+      "arm_thermal_seconds": {
+        "0": 152.95626831054688,
+        "1": 133.01493072509766,
+        "2": 66.13149881362915,
+        "unknown": 0.0
+      }
+    }
+  },
+  "launch": {
+    "commit": "724b5782a1a163a0ad560047f9869dc3014fa13f",
+    "command": [
+      "/Users/tito/qwen-runs/2026-11-12-v41-prefill/serve-prepare/pins/qwen",
+      "serve",
+      "-m",
+      "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00001-of-00004.gguf",
+      "--addr",
+      "127.0.0.1:19983",
+      "--max-context-tokens",
+      "196608",
+      "--max-tokens",
+      "9062"
+    ],
+    "harness_command": [
+      "scripts/bench/serve_realistic.py",
+      "run",
+      "--binary",
+      "/Users/tito/qwen-runs/2026-11-12-v41-prefill/serve-prepare/pins/qwen",
+      "--tokenizer",
+      "/Users/tito/qwen-runs/2026-11-12-v41-prefill/serve-prepare/pins/qwen-tok",
+      "--model",
+      "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00001-of-00004.gguf",
+      "--corpus",
+      "/Users/tito/qwen-runs/2026-11-07-serve-agents/code.txt",
+      "--plan",
+      "/Users/tito/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/plan.json",
+      "--out",
+      "/Users/tito/qwen-runs/2026-11-12-v41-prefill/serve-prepare/measurement/serve",
+      "--agents",
+      "3",
+      "--arm",
+      "default",
+      "--warm-tokens",
+      "49152",
+      "--context",
+      "196608",
+      "--warm-reply-tokens",
+      "32",
+      "--sampling",
+      "greedy",
+      "--cool",
+      "0",
+      "--ramp",
+      "15",
+      "--timeout",
+      "650",
+      "--port",
+      "19983",
+      "--max-thermal-pressure",
+      "2",
+      "--warmup-max-thermal-pressure",
+      "2",
+      "--settle-thermal-seconds",
+      "60",
+      "--settle-max-thermal-pressure",
+      "1",
+      "--harness-commit",
+      "724b5782a",
+      "--env",
+      "QWEN_SERVE_ASYNC_PREPARE=1",
+      "--env",
+      "QWEN_SERVE_TOKEN_PREFIX_CACHE=1",
+      "--env",
+      "QWEN_SERVE_TTFT_TIMING=1",
+      "--env",
+      "QWEN_SERVE_V41_PREFILL_TIMING=1",
+      "--env",
+      "QWEN_SERVE_V41_MAX_ACTIVE=4",
+      "--env",
+      "QWEN_SERVE_V41_SAMPLE_WORKERS=3",
+      "--env",
+      "QWEN_SERVE_V41_PREFILL_FAIR=1"
+    ],
+    "arm": "default",
+    "harness_commit": "724b5782a",
+    "sampling": {
+      "mode": "greedy",
+      "fields": {
+        "temperature": 0,
+        "top_p": 1
+      }
+    },
+    "env_overrides": [
+      "QWEN_SERVE_ASYNC_PREPARE=1",
+      "QWEN_SERVE_TOKEN_PREFIX_CACHE=1",
+      "QWEN_SERVE_TTFT_TIMING=1",
+      "QWEN_SERVE_V41_PREFILL_TIMING=1",
+      "QWEN_SERVE_V41_MAX_ACTIVE=4",
+      "QWEN_SERVE_V41_SAMPLE_WORKERS=3",
+      "QWEN_SERVE_V41_PREFILL_FAIR=1"
+    ],
+    "cool_seconds": 0.0,
+    "warm_cool_seconds": 0,
+    "warm_reply_tokens": 32,
+    "ramp_seconds": 15.0,
+    "context": 196608,
+    "agents": 3,
+    "load_before": [
+      41.6103515625,
+      23.69189453125,
+      17.54052734375
+    ],
+    "preflight_thermal": [
+      {
+        "time": 1794656339.025826,
+        "thermal": 0
+      },
+      {
+        "time": 1794656342.036747,
+        "thermal": 0
+      },
+      {
+        "time": 1794656345.055053,
+        "thermal": 0
+      }
+    ],
+    "max_thermal_pressure": 2,
+    "warmup_max_thermal_pressure": 2,
+    "settle_thermal_seconds": 60.0,
+    "settle_max_thermal_pressure": 1,
+    "thermal_policy": "explicit settling ceiling before load and after warming; independent ramp/window ceiling",
+    "runtime_env": {
+      "QWEN_METAL_LEASE_WAIT": "1",
+      "QWEN_METAL_LEASE_FD": "3",
+      "QWEN_SERVE_ASYNC_PREPARE": "1",
+      "QWEN_SERVE_TOKEN_PREFIX_CACHE": "1",
+      "QWEN_SERVE_TTFT_TIMING": "1",
+      "QWEN_SERVE_V41_PREFILL_TIMING": "1",
+      "QWEN_SERVE_V41_MAX_ACTIVE": "4",
+      "QWEN_SERVE_V41_SAMPLE_WORKERS": "3",
+      "QWEN_SERVE_V41_PREFILL_FAIR": "1"
+    },
+    "corpus_sha256": "cf2059d77a3b3e70d8116b3e445c94e00aa515e5d792e94e6966def38e142969",
+    "protocol": "steady-own-history-v2"
+  },
+  "tokenizer_witness": {
+    "pid": 49721,
+    "niceness": 0,
+    "code": 0
+  }
+}

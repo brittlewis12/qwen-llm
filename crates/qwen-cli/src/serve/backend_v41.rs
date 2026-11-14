@@ -61,8 +61,8 @@ const LAYER_SLICE_MS_ENV: &str = "QWEN_SERVE_V41_LAYER_SLICE_MS";
 /// Minimum predicted work before polling existing drains: 700 ms with PREFILL_YIELD, otherwise legacy 500 ms. Short calls below 512 rows always remain unsliced in conditional mode.
 const LAYER_SLICE_MIN_MS_ENV: &str = "QWEN_SERVE_V41_LAYER_SLICE_MIN_MS";
 qwen_llm::env_flag!(
-    /// Poll incumbent command drains and service one actual waiting short append, without new GPU cuts or empty decode rounds. Default-off; 0 restores the incumbent pump. Short calls remain unsliced; positive LAYER_SLICE_MS enables polls and zero disables them. Original rows/order and normal decode credit remain intact.
-    default_off prefill_yield_enabled,
+    /// Poll incumbent command drains and service one actual waiting short append, without new GPU cuts or empty decode rounds. Default on; 0 restores the incumbent pump. Short calls remain unsliced; positive LAYER_SLICE_MS enables polls and zero disables them. Original rows/order and normal decode credit remain intact.
+    default_on prefill_yield_enabled,
     "QWEN_SERVE_V41_PREFILL_YIELD"
 );
 /// Default off. Log per-call native V4.1 serve prefill wall time and unsplit

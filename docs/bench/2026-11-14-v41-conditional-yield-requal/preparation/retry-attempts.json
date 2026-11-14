@@ -1,0 +1,80 @@
+[
+  {
+    "tag": "B2r",
+    "attempt": 2,
+    "pid": 8667,
+    "start": 1794685545.1804118,
+    "command": [
+      "scripts/bench/with-metal-lease",
+      "--task",
+      "v41-conditional-retry-B2r-2",
+      "--for",
+      "15m",
+      "--",
+      "timeout",
+      "870",
+      "python3",
+      "/Users/tito/qwen-runs/2026-11-12-v41-prefill/conditional-yield/retry_arm.py",
+      "B2r",
+      "--mode",
+      "candidate"
+    ],
+    "end": 1794686449.3242712,
+    "exit_code": 0
+  },
+  {
+    "tag": "A2r",
+    "attempt": 1,
+    "pid": 71377,
+    "start": 1794686449.328417,
+    "command": [
+      "scripts/bench/with-metal-lease",
+      "--task",
+      "v41-conditional-retry-A2r-1",
+      "--for",
+      "15m",
+      "--",
+      "timeout",
+      "870",
+      "python3",
+      "/Users/tito/qwen-runs/2026-11-12-v41-prefill/conditional-yield/retry_arm.py",
+      "A2r",
+      "--mode",
+      "baseline"
+    ],
+    "end": 1794686986.483692,
+    "exit_code": 75
+  },
+  {
+    "tag": "A2r",
+    "attempt": 2,
+    "pid": 27627,
+    "start": 1794686986.4891698,
+    "end": 1794687218.3391092,
+    "exit_code": null,
+    "disposition": "interrupted_before_model_to_correct_CPU_guard"
+  },
+  {
+    "tag": "A2r",
+    "attempt": 3,
+    "pid": 48800,
+    "start": 1794687438.4867048,
+    "command": [
+      "scripts/bench/with-metal-lease",
+      "--task",
+      "v41-conditional-retry-A2r-3",
+      "--for",
+      "15m",
+      "--",
+      "timeout",
+      "870",
+      "python3",
+      "/Users/tito/qwen-runs/2026-11-12-v41-prefill/conditional-yield/retry_arm.py",
+      "A2r",
+      "--mode",
+      "baseline"
+    ],
+    "end": 1794687973.036042,
+    "exit_code": 0
+  }
+]

@@ -1,0 +1,5 @@
+{"event":"loaded","root_rows":49152,"append_rows":1024,"append_depth":81920}
+{"event":"root_empty","bitwise":true,"polls":12,"same_commands":true}
+{"event":"root","bitwise":true,"callbacks":12,"state_digest":"52be3dee2667f4630875f7585effd8f7508fbf79035b3cc4c9eb2f1106ba30e3"}
+{"event":"append_empty","bitwise":true,"polls":2,"same_commands":true}
+{"event":"append","bitwise":true,"callbacks":2,"state_digest":"93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a"}

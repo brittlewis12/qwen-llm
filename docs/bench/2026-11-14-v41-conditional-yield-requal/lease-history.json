@@ -1,0 +1,52 @@
+[
+  {
+    "requested": "2026-11-14T19:40:06+00:00",
+    "acquired": "2026-11-14T19:40:16+00:00",
+    "waited_s": 10.0,
+    "task": "v41-conditional-retry-B2r-1",
+    "expected": "15m",
+    "session": "",
+    "cwd": "qwen-llm-v41-conditional",
+    "waited_behind": "pid=67919 executable=sh opencode_session=none started=2026-11-14T19:36:56Z task=standing-2026-11-14 expected=14m; held 3m09s"
+  },
+  {
+    "requested": "2026-11-14T19:45:45+00:00",
+    "acquired": "2026-11-14T19:49:47+00:00",
+    "waited_s": 242.8,
+    "task": "v41-conditional-retry-B2r-2",
+    "expected": "15m",
+    "session": "",
+    "cwd": "qwen-llm-v41-conditional",
+    "waited_behind": "pid=96370 executable=python3.12 opencode_session=ghost started=2026-11-14T19:45:16Z task=ghost-services-hud-l63 expected=5m; held 29s"
+  },
+  {
+    "requested": "2026-11-14T20:00:49+00:00",
+    "acquired": "2026-11-14T20:04:45+00:00",
+    "waited_s": 236.1,
+    "task": "v41-conditional-retry-A2r-1",
+    "expected": "15m",
+    "session": "",
+    "cwd": "qwen-llm-v41-conditional",
+    "waited_behind": "pid=18883 executable=timeout opencode_session=none started=2026-11-14T20:00:48Z task=standing-2026-11-14 expected=14m; held 0s"
+  },
+  {
+    "requested": "2026-11-14T20:09:46+00:00",
+    "acquired": "2026-11-14T20:09:46+00:00",
+    "waited_s": 0.0,
+    "task": "v41-conditional-retry-A2r-2",
+    "expected": "15m",
+    "session": "",
+    "cwd": "qwen-llm-v41-conditional",
+    "waited_behind": ""
+  },
+  {
+    "requested": "2026-11-14T20:17:18+00:00",
+    "acquired": "2026-11-14T20:17:18+00:00",
+    "waited_s": 0.0,
+    "task": "v41-conditional-retry-A2r-3",
+    "expected": "15m",
+    "session": "",
+    "cwd": "qwen-llm-v41-conditional",
+    "waited_behind": ""
+  }
+]

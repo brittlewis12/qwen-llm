@@ -1,0 +1,23 @@
+{
+  "default_on_serve_suite": {
+    "passed": 719,
+    "failed": 0,
+    "preexisting_ignored": 42,
+    "explicit_yield_override": false
+  },
+  "full_cli_with_yield_1": {
+    "passed": 1748,
+    "failed": 0,
+    "preexisting_ignored": 73,
+    "targets": 12
+  },
+  "fmt": "pass",
+  "env": {
+    "knobs": 837,
+    "default_on": 230,
+    "default_off": 30,
+    "polarity_conflicts": 0
+  },
+  "numerical_and_kernel_sources_unchanged": true,
+  "contracts": "required on the final clean rebased commit before ready-to-land declaration"
+}

@@ -4,7 +4,7 @@ TOP=Path('/Users/tito/qwen-runs/2026-11-12-v41-prefill/conditional-yield')
 REPO=Path('/Users/tito/code/qwen-llm-v41-conditional')
 os.chdir(REPO)
 (TOP/'dispatch/retry-controller.pid').write_text(str(os.getpid())+'\n')
-records=[]
+records=json.loads((TOP/'retry-attempts.json').read_text()) if (TOP/'retry-attempts.json').exists() else []
 
 def emit(**r):
     r['time']=time.time();print(json.dumps(r),flush=True)
@@ -54,6 +54,7 @@ for tag,mode,latest in [('B2r','candidate',1794687900),('A2r','baseline',1794689
             child=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,env=env,pass_fds=())
             (TOP/'dispatch'/(name+'.pid')).write_text(str(child.pid)+'\n')
             record=dict(tag=tag,attempt=attempt,pid=child.pid,start=time.time(),command=command);records.append(record)
+            (TOP/'retry-attempts.json').write_text(json.dumps(records,indent=2)+'\n')
             emit(event='queued',tag=tag,attempt=attempt,pid=child.pid)
             last=0
             try:
@@ -68,8 +69,8 @@ for tag,mode,latest in [('B2r','candidate',1794687900),('A2r','baseline',1794689
                     time.sleep(1)
             finally:
                 if child.poll() is None:stop_exact(child)
-            record.update(end=time.time(),exit_code=child.returncode)
-            (TOP/'retry-attempts.json').write_text(json.dumps(records,indent=2)+'\n')
+                record.update(end=time.time(),exit_code=child.returncode)
+                (TOP/'retry-attempts.json').write_text(json.dumps(records,indent=2)+'\n')
         if child.returncode==0 and (TOP/tag/'result.json').exists():
             emit(event='arm_complete',tag=tag,attempt=attempt);break
         if child.returncode==75:

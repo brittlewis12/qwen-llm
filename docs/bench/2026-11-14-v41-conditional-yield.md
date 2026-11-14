@@ -1,5 +1,10 @@
 # V4.1 conditional prefill yielding
 
+Follow-up: the [replacement BA qualification](2026-11-14-v41-conditional-yield-requal.md)
+closes this packet with a full frozen-rule PASS and default-on rollout.
+The incomplete checkpoint below is preserved as measured.
+
+
 Bounded stage:2026-11-14 16:52:42–19:22:42 UTC. Branch
 `perf/v41-prefill-yield-conditional`, based on `cabbb8a24` / main `1522261bc`.
 The previous unconditional experiment stays recorded separately.

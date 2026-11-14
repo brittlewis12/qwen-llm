@@ -1,0 +1,15 @@
+{"event": "arm_already_complete", "tag": "B2r", "time": 1794687438.4825652}
+{"event": "queued", "tag": "A2r", "attempt": 3, "pid": 48800, "time": 1794687438.486968}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 3, "time": 1794687438.487039}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 3, "time": 1794687488.859582}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 3, "time": 1794687539.300483}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 3, "time": 1794687589.663711}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 3, "time": 1794687639.961594}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 3, "time": 1794687690.3071208}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 3, "time": 1794687740.699894}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 3, "time": 1794687791.0171862}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 3, "time": 1794687841.3256772}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 3, "time": 1794687891.590324}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 3, "time": 1794687941.885188}
+{"event": "arm_complete", "tag": "A2r", "attempt": 3, "time": 1794687973.036466}
+{"event": "pair_complete", "time": 1794687973.0364952}

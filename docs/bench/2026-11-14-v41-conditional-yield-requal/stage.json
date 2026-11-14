@@ -9,13 +9,8 @@
     "A2r"
   ],
   "frozen_rule_unchanged": true,
-  "preload_required_available_bytes": 210453397504,
+  "preload_required_available_bytes": 42949672960,
   "transport_required_bytes": 2046812160,
-  "preload_basis": {
-    "observed_device_and_shadow_bytes": 171370217472,
-    "peak_observed_process_footprint": 32601915016,
-    "margin_bytes": 4294967296
-  },
   "corrected_stage_start_utc": "2026-11-14 19:38:30 UTC",
   "latest_first_arm_start_utc": "2026-11-14 20:25:00 UTC",
   "memory_check_order": "after lease acquisition only",
@@ -23,5 +18,17 @@
   "original_waiter_killed_by_lead": [
     15561,
     15563
-  ]
+  ],
+  "previous_preload_required_available_bytes": 210453397504,
+  "rejected_total_model_basis": {
+    "observed_device_and_shadow_bytes": 171370217472,
+    "peak_observed_process_footprint": 32601915016,
+    "margin_bytes": 4294967296
+  },
+  "cpu_preload_basis": {
+    "observed_peak_process_footprint": 32601915016,
+    "transport_reserve": 2046812160,
+    "margin_bytes": 4294967296,
+    "native_metal_admission": "unchanged; physical capacity and working-set, separate from CPU availability"
+  }
 }

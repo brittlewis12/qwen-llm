@@ -6,6 +6,28 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-14 - V4.1 Conditional Yield: Frozen Served Gate PASS, Default On
+
+- Replacement BA pair B2r/A2r, retained release pins `e41e037e2`; standing pairs
+  1/3 unchanged. Same greedy purged protocol, one nice0 arm per <=15m lease.
+  Full frozen gate **PASS**, without threshold changes or lead override.
+- Short client TTFT p95 B/A pairs **0.498751/0.529547/0.510646**, geomean
+  **0.512825**. Pooled matched completion p50 **0.963792** (75 per arm), TPS
+  **1.049171**, SSE gap p99 **1.003542**. Root native/client A/B
+  **1.284430/1.283898**, short/~1K native **1.033009/1.060058** clear >=0.98.
+  Root/native speed ratios are controls; host/I/O drift prevents kernel claims.
+- Each candidate arm fired **two** actual in-window yields, each one native
+  short call. Standing bitwise root/append and empty-command-topology witnesses
+  remain valid; numerical and Metal sources unchanged. Default-on with
+  `QWEN_SERVE_V41_PREFILL_YIELD=0` rollback.
+- RAM checks now occur after joining/acquiring the FIFO. This lane also fixed
+  its preload guard's CPU/Metal overcount: shared Metal is bounded by physical
+  capacity/working set, not charged against cache-blind CPU availability.
+  Preparations were deferred/stopped before model load; no valid arm discarded.
+  Ghost processes untouched. Actual-default serve719 and enabled full CLI1748
+  pass; ENV/fmt pass. Final clean-tree contracts are required before reporting.
+  [All pairs, components, memory/I/O, corrections and pins](bench/2026-11-14-v41-conditional-yield-requal.md).
+
 ## 2026-11-14 - V4.1 Conditional Yield: Incomplete Control, Pins Retained
 
 - Default-off refinement polls incumbent drains only, services actual waiting

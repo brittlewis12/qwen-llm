@@ -8,7 +8,7 @@ def snapshot():
     free=values['Pages free'];inactive=values['Pages inactive'];internal=values['Anonymous pages']
     return dict(time=time.time(),page_bytes=page,free_bytes=free*page,conservative_available_bytes=(free+max(0,inactive-internal))*page,inactive_bytes=inactive*page,anonymous_bytes=internal*page,file_backed_bytes=values['File-backed pages']*page,compressor_bytes=values['Pages occupied by compressor']*page,load=list(os.getloadavg()))
 
-def wait_until_ready(out,deadline,minimum=196*(1<<30),stable=15):
+def wait_until_ready(out,deadline,minimum=40*(1<<30),stable=15):
     ready=None;last_print=0
     with Path(out).open('a') as f:
         while time.time()<deadline:

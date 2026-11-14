@@ -1,0 +1,39 @@
+{
+  "source": "e41e037e2412622e64924f791921de3f3d856914",
+  "profile": "release",
+  "witness_features": [
+    "perf-ablations"
+  ],
+  "cpu_tests_profile": "test",
+  "start": 1794677989.123327,
+  "end": 1794678422.234091,
+  "binaries": {
+    "qwen": {
+      "sha256": "db4f80b804429ae84cd29f3d0dfaac0d55dbac074268814a71b7b52a58a4ceb5",
+      "bytes": 41699208
+    },
+    "qwen-tok": {
+      "sha256": "a6415f0b0fc0afd47db4672d76a4b2ce099e14fc256c15a8f9656626a46e04b4",
+      "bytes": 1293976
+    },
+    "qwen-cpu-tests": {
+      "sha256": "73f5323efb67b0b5ab4a5568b5e97d9f43d02cc5a5c3b40edebf191884f0949b",
+      "bytes": 61144968
+    },
+    "v41_prefill_yield_witness": {
+      "sha256": "97a727c8eb6d314715bce36f2faad6137e8c069ff641fc1c99c61ab87385136e",
+      "bytes": 18238120
+    }
+  },
+  "serve_metallibs": {
+    "kernels_tensor.metallib": "43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c",
+    "kernels.metallib": "35ac100a2ceb16fdcfdbc435fb7d941910183e873570c50a2044c52cce168c7b",
+    "kernels_research.metallib": "be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f"
+  },
+  "witness_metallibs": {
+    "kernels_tensor.metallib": "43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c",
+    "kernels.metallib": "35ac100a2ceb16fdcfdbc435fb7d941910183e873570c50a2044c52cce168c7b",
+    "kernels_research.metallib": "be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f"
+  },
+  "metallibs_identical": true
+}

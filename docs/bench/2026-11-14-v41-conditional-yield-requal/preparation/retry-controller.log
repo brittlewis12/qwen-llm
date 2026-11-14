@@ -1,0 +1,47 @@
+{"event": "queued", "tag": "B2r", "attempt": 2, "pid": 8667, "time": 1794685545.180418}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794685545.180555}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794685595.574788}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794685645.910455}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794685696.261683}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794685746.584297}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794685796.900904}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794685847.1873658}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794685897.405177}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794685947.650175}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794685998.0110662}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794686048.439863}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794686098.831219}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794686149.193964}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794686199.53725}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794686249.879484}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794686300.21453}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794686350.553248}
+{"event": "waiting_or_running", "tag": "B2r", "attempt": 2, "time": 1794686400.920568}
+{"event": "arm_complete", "tag": "B2r", "attempt": 2, "time": 1794686449.325081}
+{"event": "queued", "tag": "A2r", "attempt": 1, "pid": 71377, "time": 1794686449.328423}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 1, "time": 1794686449.328485}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 1, "time": 1794686499.705238}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 1, "time": 1794686550.014136}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 1, "time": 1794686600.271483}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 1, "time": 1794686650.712865}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 1, "time": 1794686701.1825469}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 1, "time": 1794686751.596661}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 1, "time": 1794686802.053847}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 1, "time": 1794686852.471423}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 1, "time": 1794686902.907959}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 1, "time": 1794686953.237061}
+{"event": "released_and_requeuing", "tag": "A2r", "attempt": 1, "time": 1794686986.484606}
+{"event": "queued", "tag": "A2r", "attempt": 2, "pid": 27627, "time": 1794686986.4891698}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 2, "time": 1794686986.489234}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 2, "time": 1794687036.883878}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 2, "time": 1794687087.332244}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 2, "time": 1794687137.707036}
+{"event": "waiting_or_running", "tag": "A2r", "attempt": 2, "time": 1794687188.044835}
+Traceback (most recent call last):
+  File "/Users/tito/qwen-runs/2026-11-12-v41-prefill/conditional-yield/retry_controller.py", line 68, in <module>
+    time.sleep(1)
+    ~~~~~~~~~~^^^
+  File "/Users/tito/qwen-runs/2026-11-12-v41-prefill/conditional-yield/retry_controller.py", line 39, in interrupted
+    def interrupted(signum,frame):raise KeyboardInterrupt(signum)
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt: 2

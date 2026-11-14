@@ -70,6 +70,7 @@ SCOPES = {
     "qwen": [
         "serve::lifecycle_timing::tests::",
         "serve::token_prefix_cache::tests::",
+        "serve::transport::tests::preparation_cap_preserves_queued_socket_and_releases_on_shutdown",
         "serve::batch_lifecycle_tests::accepted_request_renders_and_tokenizes_while_peer_pump_is_blocked",
         "serve::http::tests::ttft_trace_marks_visible_flush_without_changing_sse_bytes",
         "serve::decode_cursor::gpu_burst_tests::",

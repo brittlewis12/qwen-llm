@@ -6,6 +6,23 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-14 - Intake + Exact Tokenization: Promoted by Lead Decision
+
+- The frozen rule **FAILED** on short/~1K native prefill 0.998399/0.999226x
+  against 1.00. The lead ruled this threshold a spec error for a non-kernel
+  intake/tokenization change and promoted on native non-regression (>=0.98)
+  plus short/~1K client TTFT 1.096472/1.050986x, outside-native p50 roughly
+  100→45 ms, TPS 1.006389x and root native 1.020042x. The frozen FAIL remains
+  in the record; no measurements or original thresholds were rewritten.
+- Candidate divergence 1/39, 2/39, 2/39 matches A/A 2/39; no same-prompt
+  ID/cut mismatch. The lead accepted pre-existing batch-composition variance;
+  no cross-run served output-bitwise claim. All sequential roots match logits
+  and response bytes.
+- Both switches are default-on with independent `=0` rollbacks. Opt-in shared
+  lifecycle tracing remains included. Rust/shader source is byte-identical to
+  measured `3482f60cb`, including defaults. No GPU work or pushes this stage.
+  [Decision and unchanged frozen evidence](bench/2026-11-14-v41-intake-qualification.md).
+
 ## 2026-11-14 - Intake + Exact Tokenization: Served Gate FAILED, Default-Off
 
 - Same-binary A/A control diverges 2/39 observed responses; candidate/reference

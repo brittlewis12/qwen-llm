@@ -798,8 +798,8 @@ fn drain_completions(
 }
 
 qwen_llm::env_flag!(
-    /// Start bounded batched HTTP rendering/tokenization on the accept side while inference runs. Default-off qualification switch; 0 restores inference-loop dispatch.
-    default_off async_prepare_enabled,
+    /// Start bounded batched HTTP rendering/tokenization on the accept side while inference runs. Default-on; 0 restores inference-loop dispatch.
+    default_on async_prepare_enabled,
     "QWEN_SERVE_ASYNC_PREPARE"
 );
 

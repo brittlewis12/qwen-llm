@@ -20,7 +20,11 @@ The existing timing knob now additionally emits full generation round records on
 
 ## Results
 
-The divergence control is consistent, but the paired performance gate **FAILED**. Short and ~1K native prefill geomeans are 0.998399/0.999226 against 1.00; both flags return to default-off. Short/~1K client TTFT passes at 1.096472/1.050986. No promotion or threshold override. All three pairs completed before the cutoff.
+**Promoted by explicit lead decision after the frozen rule failed.** The original short/~1K native-prefill threshold was 1.00; measured geomeans 0.998399/0.999226 failed it. The lead ruled that threshold a spec error for an intake/tokenization change that does not change prefill compute. Native prefill is a non-regression check at >=0.98 for this change; both cells pass. Promotion rests on that non-regression plus short/~1K client TTFT 1.096472/1.050986, outside-native p50 roughly 100→45 ms, TPS 1.006389 and root native prefill 1.020042. This is a recorded lead decision, not a retroactive pass under the frozen rule. All original measurements, thresholds and the FAIL JSON remain unchanged.
+
+Both `QWEN_SERVE_ASYNC_PREPARE` and `QWEN_SERVE_TOKEN_PREFIX_CACHE` are default-on again, each with its own `=0` rollback. Lifecycle tracing remains opt-in through `QWEN_SERVE_TTFT_TIMING=1` and is included in this branch.
+
+The candidate divergence rate (1/39, 2/39, 2/39) matches the A/A control range (2/39), with no identical-prompt token-ID or cut mismatch. The lead accepted this as batch-composition variance that predates the change. The traces establish baseline variation and differing batch histories; they do not identify a particular numerical kernel. No cross-run served output-bitwise claim is made.
 
 ### Baseline divergence control
 
@@ -35,9 +39,9 @@ The first A/A divergence is completed **`a2-t1`, byte22**, with identical prompt
 
 Among38 jointly visible calls with matched input/cut witnesses, one differs. This directly demonstrates baseline numeric variation without either feature. Different batch histories are consistent with the existing quantized-column rounding caveats; these records do not isolate a particular kernel. [Complete per-call hashes, cohort examples and rates](2026-11-14-v41-intake-qualification/control/baseline-comparison.json). The control meets the preregistered condition to proceed; it does not excuse a future candidate token/cut mismatch at identical prompt text.
 
-### Frozen gate result
+### Frozen gate result (historical, unchanged)
 
-**FAIL** under the frozen six-metric rule. No promotion. Both switches return to default-off; the measured candidate pins retain the default-on program.
+**FAIL** under the frozen six-metric rule. At the initial cutoff both switches were returned to default-off without promotion. The subsequent lead decision above restores default-on; it does not change this frozen result.
 
 Ratios above 1 favor the candidate; each latency ratio is baseline/candidate. TPS is candidate/baseline. No arms or cells were dropped.
 
@@ -118,7 +122,7 @@ The A/A control already diverges, and candidate comparisons show no prompt-ident
 
 ### Provenance and checks
 
-Measured runtime source `3482f60cb`, release profile; the only post-measurement runtime changes restore the two flags to default-off after the failed gate. The preparation, tokenization and instrumentation implementations remain source-identical to the measured program. [Pin manifest](2026-11-14-v41-intake-qualification/pin-manifest.json) records source/tree and all executable hashes. All three metallibs match the preceding intake experiment byte-for-byte. Every arm passed six symmetric CPU warmup tests and the released-tokenizer witness (57 cases, 54 incremental hits, 699 boundary checks, full/prefix IDs identical). No GPU/numerical/checkpoint edits were made.
+Measured runtime source `3482f60cb`, release profile; the flags were temporarily returned to default-off after the failed gate, then restored by lead decision. All Rust and shader source, including the defaults, is byte-identical to measured source `3482f60cb`; preparation, tokenization, tracing and numerical implementations are unchanged. [Pin manifest](2026-11-14-v41-intake-qualification/pin-manifest.json) records source/tree and all executable hashes. All three metallibs match the preceding intake experiment byte-for-byte. Every arm passed six symmetric CPU warmup tests and the released-tokenizer witness (57 cases, 54 incremental hits, 699 boundary checks, full/prefix IDs identical). No GPU/numerical/checkpoint edits were made.
 
 Raw data: `metagross:~/qwen-runs/2026-11-12-v41-prefill/intake-qualify/`. The [frozen reduction](2026-11-14-v41-intake-qualification/results/summary.json), per-call component ledgers, pair exclusions, arm commands and response comparison digests are retained here without transcript text.
 
@@ -128,4 +132,4 @@ The [recorded arm driver](2026-11-14-v41-intake-qualification/run_qualify_arm.py
 
 Cleanup after the closed FAIL gate: the [exact-PID audit](2026-11-14-v41-intake-qualification/results/cleanup-m5.json) found none of 35 registered arm/warmup/harness/dispatch PIDs alive and no live process referencing task paths. No kills were needed. The M5 worktree, Git bundles, build output, temporary build directory and closed-gate pins (including the preceding candidate pins) were removed; raw evidence remains.
 
-CPU contracts passed on measured source `3482f60cb`; the final restored-defaults tree is checked again before reporting.
+CPU contracts passed on measured source `3482f60cb` and the initial default-off record `9eb9bbc1e`. The promoted default-on tree is checked again before reporting.

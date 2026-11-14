@@ -12,6 +12,17 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
 
 
+## 2026-11-14 - V4.1 Attention Prepare / Finish-Post Attribution
+
+- At 80K, 256/1K rows: prepare 31.61/74.76 ms and finish/post
+  53.55/116.96 ms; stage-profile append walls 458.01/967.72 ms. Three stage
+  samples and three dispatch profiles, one warmup, bitwise outputs.
+- Q5 output-A/B matmuls price 47.9/86.9 ms; query RoPE 4.4/20.9 ms of the
+  combined RoPE price. Per-dispatch sums overlap/replay and do not add to span;
+  bytes are compulsory-footprint estimates, not DRAM counters.
+- No exact, cheap candidate is projected to clear a 1.25x stage gate at both
+  widths; measurement only. [Kernel census and limits](bench/2026-11-14-v41-attention-post-attribution.md).
+
 ## 2026-11-14 - Cooperative Experts: Isolation Fails, Candidates Removed
 
 - Real populations across 40 routed layers / 384 experts: means 32/4/16,

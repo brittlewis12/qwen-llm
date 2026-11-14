@@ -1,0 +1,18 @@
+{
+  "valid_pairs": [
+    1,
+    3
+  ],
+  "geomeans": {
+    "short_ttft_p95_ba": 0.5046636070297442,
+    "tps_ba": 1.0361074704752158,
+    "root_native_ab": 1.3906945890567388,
+    "root_client_ab": 1.3899100238921618,
+    "short_native_ab": 1.0169391401964358,
+    "1k_native_ab": 1.0378195828602483,
+    "gap_p99_ba": 1.0126994211304574
+  },
+  "pooled_completion_p50_ba": 0.9557581373148492,
+  "pooled_matched_n": 50,
+  "formal_gate": "incomplete; no pass or fail"
+}

@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-14 - V4.1 Conditional Yield: Incomplete Control, Pins Retained
+
+- Default-off refinement polls incumbent drains only, services actual waiting
+  short work once, and preserves normal decode credit. M5 bitwise root/append
+  and empty-poll command-topology witnesses pass; serve/witness metallibs match.
+  Runtime source `e41e037e2`; 719 serve tests, contracts and fmt pass.
+- Five full nice0 purged arms completed. Baseline A2 aborted on transport
+  memory admission: required 2,046,812,160 bytes, host headroom 2,022,670,336.
+  Failed logs/calls remain recorded. **No three-pair verdict or promotion**;
+  `QWEN_SERVE_V41_PREFILL_YIELD` stays default-off and pins are retained.
+- Valid pairs 1/3: short TTFT p95 B/A **0.498751/0.510646**; SSE gap p99
+  **1.108685/0.925024**. Partial pooled completion p50 **0.955758** (50 matched
+  samples per arm). Actual in-window yields B1/B2/B3: **2/0/2**, each one
+  native short call. B2's valid baseline control is missing.
+- Worth completing the BA pair with these pins before another design change.
+  Root improvements are not attributed to yielding: no warm-root peer service,
+  substantial startup/I/O/load drift. All roots, component distributions,
+  exclusions, process reads and the invalid control are retained.
+  [Rule, complete evidence and limitations](bench/2026-11-14-v41-conditional-yield.md).
+
 ## 2026-11-14 - V4.1 Conditional Yield: Qualification Started
 
 - Default-off refinement uses incumbent command drains only: no empty GPU

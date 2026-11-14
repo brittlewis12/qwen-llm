@@ -1,0 +1,65 @@
+{"event": "thermal_settle_begin", "phase": "before_load", "seconds": 60.0, "maximum": 1}
+{"event": "thermal_settle_done", "phase": "before_load", "waited_s": 60.87724399997387, "thermal": 0}
+{"event": "turn", "label": "a0-warm", "completed": true, "generated": 32, "ttft_s": 29.864320993423462}
+{"event": "turn", "label": "a1-warm", "completed": true, "generated": 32, "ttft_s": 29.02992010116577}
+{"event": "turn", "label": "a2-warm", "completed": true, "generated": 32, "ttft_s": 27.354318141937256}
+{"event": "warmed", "startup_s": 1.9478929042816162, "warmup_s": 87.64646601676941}
+{"event": "thermal_settle_begin", "phase": "after_warm", "seconds": 60.0, "maximum": 1}
+{"event": "thermal_settle_done", "phase": "after_warm", "waited_s": 60.72560016694479, "thermal": 0}
+{"event": "turn", "label": "a0-t0", "completed": true, "generated": 71, "ttft_s": 2.1834559440612793}
+{"event": "turn", "label": "a1-t0", "completed": true, "generated": 98, "ttft_s": 1.4458861351013184}
+{"event": "turn", "label": "a0-t1", "completed": true, "generated": 98, "ttft_s": 0.49077892303466797}
+{"event": "turn", "label": "a1-t1", "completed": true, "generated": 189, "ttft_s": 0.7938697338104248}
+{"event": "turn", "label": "a0-t2", "completed": true, "generated": 105, "ttft_s": 1.2584340572357178}
+{"event": "turn", "label": "a0-t3", "completed": true, "generated": 476, "ttft_s": 1.1348748207092285}
+{"event": "turn", "label": "a0-t4", "completed": true, "generated": 122, "ttft_s": 0.34904980659484863}
+{"event": "turn", "label": "a0-t5", "completed": true, "generated": 66, "ttft_s": 0.6359460353851318}
+{"event": "turn", "label": "a2-t0", "completed": true, "generated": 1064, "ttft_s": 0.6464719772338867}
+{"event": "turn", "label": "a0-t6", "completed": true, "generated": 66, "ttft_s": 0.6376900672912598}
+{"event": "turn", "label": "a2-t1", "completed": true, "generated": 96, "ttft_s": 1.108159065246582}
+{"event": "turn", "label": "a0-t7", "completed": true, "generated": 471, "ttft_s": 0.38580918312072754}
+{"event": "turn", "label": "a1-t2", "completed": true, "generated": 1309, "ttft_s": 0.6764180660247803}
+{"event": "turn", "label": "a0-t8", "completed": true, "generated": 76, "ttft_s": 0.7319381237030029}
+{"event": "turn", "label": "a1-t3", "completed": true, "generated": 205, "ttft_s": 0.49080586433410645}
+{"event": "turn", "label": "a0-t9", "completed": true, "generated": 218, "ttft_s": 0.4041290283203125}
+{"event": "turn", "label": "a1-t4", "completed": true, "generated": 98, "ttft_s": 0.8389592170715332}
+{"event": "turn", "label": "a0-t10", "completed": true, "generated": 96, "ttft_s": 1.1060669422149658}
+{"event": "turn", "label": "a1-t5", "completed": true, "generated": 76, "ttft_s": 0.7176270484924316}
+{"event": "turn", "label": "a1-t6", "completed": true, "generated": 81, "ttft_s": 1.2585577964782715}
+{"event": "turn", "label": "a0-t11", "completed": true, "generated": 189, "ttft_s": 0.7726588249206543}
+{"event": "turn", "label": "a0-t12", "completed": true, "generated": 132, "ttft_s": 0.8374779224395752}
+{"event": "turn", "label": "a0-t13", "completed": true, "generated": 71, "ttft_s": 0.6021528244018555}
+{"event": "turn", "label": "a0-t14", "completed": true, "generated": 122, "ttft_s": 0.34263086318969727}
+{"event": "turn", "label": "a0-t15", "completed": true, "generated": 122, "ttft_s": 0.33499884605407715}
+{"event": "turn", "label": "a0-t16", "completed": true, "generated": 471, "ttft_s": 0.4486048221588135}
+{"event": "turn", "label": "a0-t17", "completed": true, "generated": 161, "ttft_s": 1.8524408340454102}
+{"event": "turn", "label": "a1-t7", "completed": true, "generated": 1269, "ttft_s": 1.5902841091156006}
+{"event": "turn", "label": "a0-t18", "completed": true, "generated": 83, "ttft_s": 1.286003828048706}
+{"event": "turn", "label": "a0-t19", "completed": true, "generated": 78, "ttft_s": 0.7707130908966064}
+{"event": "turn", "label": "a0-t20", "completed": true, "generated": 85, "ttft_s": 0.37690210342407227}
+{"event": "turn", "label": "a1-t8", "completed": true, "generated": 268, "ttft_s": 1.5680150985717773}
+{"event": "turn", "label": "a1-t9", "completed": true, "generated": 122, "ttft_s": 0.41797494888305664}
+{"event": "turn", "label": "a0-t21", "completed": false, "generated": null, "ttft_s": 0.4360978603363037}
+{"event": "server_stopped", "code": 130}
+Traceback (most recent call last):
+  File "/Users/tito/code/qwen-llm-v41-conditional/scripts/bench/serve_realistic.py", line 895, in <module>
+    if __name__=='__main__':main()
+                            ^^^^^^
+  File "/Users/tito/code/qwen-llm-v41-conditional/scripts/bench/serve_realistic.py", line 890, in main
+    arm.run()
+  File "/Users/tito/code/qwen-llm-v41-conditional/scripts/bench/serve_realistic.py", line 527, in run
+    f.result()
+  File "/Users/tito/.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/Users/tito/.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/Users/tito/.local/share/uv/python/cpython-3.12.15-macos-aarch64-none/lib/python3.12/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/tito/code/qwen-llm-v41-conditional/scripts/bench/serve_realistic.py", line 515, in agent_loop
+    final=self.request(self.body(history,spec['reply_tokens']),f'a{agent}-t{turn}',spec)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/tito/code/qwen-llm-v41-conditional/scripts/bench/serve_realistic.py", line 410, in request
+    raise RuntimeError(str(final['error']))
+RuntimeError: {'type': 'server_busy', 'code': 'memory_admission_denied', 'param': '', 'message': 'transport CPU memory admission denied (host_availability_insufficient): required=2046812160 headroom=Some(HostMemoryHeadroom { ceiling_remaining_bytes: 103507689472, host_remaining_bytes: 2022670336, raw_process_remaining_bytes: 0 })'}

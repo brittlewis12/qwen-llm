@@ -1,0 +1,203 @@
+{
+  "tag": "A1",
+  "mode": "baseline",
+  "start": 1794679513.575516,
+  "end": 1794679972.4403882,
+  "model_pids": [
+    96327
+  ],
+  "model_niceness": {
+    "96327": 0
+  },
+  "binary_sha256": "db4f80b804429ae84cd29f3d0dfaac0d55dbac074268814a71b7b52a58a4ceb5",
+  "purge": {
+    "file": "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+    "bytes": 110595290816,
+    "resident_pages_before": 0,
+    "resident_pages_after": 0,
+    "msync_rc": 0,
+    "msync_errno": 0,
+    "seconds": 1.2159347534179688e-05
+  },
+  "process_disk_read_bytes": 191623065600,
+  "symmetric_warmup": [
+    {
+      "pid": 94367,
+      "nice": 0,
+      "code": 0,
+      "log": "cpu-warmup.log"
+    }
+  ],
+  "summary": {
+    "window_begin": 1794679849.4493198,
+    "window_end": 1794679969.4493198,
+    "window_seconds": 120.0,
+    "window_tokens": 10665,
+    "aggregate_tps": 88.875,
+    "gap_p50_s": 0.027456998825073242,
+    "gap_p95_s": 0.028728723526000977,
+    "gap_p99_s": 0.031016111373901367,
+    "gap_max_s": 2.1093969345092773,
+    "round_budget": {
+      "rounds_est": 2427.650742286103,
+      "avg_width": 2.9429088591257453,
+      "coverage": 0.6787623066104079,
+      "transition_s": 66.35992723236524,
+      "prefill_s": 18.942052208,
+      "partial_prefill_s": 2.233413,
+      "partial_prefill_calls": 3,
+      "capture_s": 0.0013884210000000004,
+      "host_s": 0.29607634627248514,
+      "transition_ms_per_round": 27.3350387996399,
+      "host_ms_per_round": 0.12196002543334217,
+      "host_metric": "median content gap minus native round wall"
+    },
+    "agents": [
+      {
+        "agent": 0,
+        "window_tokens": 3427,
+        "turns_offered": 18,
+        "ttft_p50_s": 0.6209619045257568,
+        "ttft_p95_s": 1.817885160446167,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 12.092764139175415,
+        "censored_ttft": 0
+      },
+      {
+        "agent": 1,
+        "window_tokens": 3566,
+        "turns_offered": 8,
+        "ttft_p50_s": 0.7119331359863281,
+        "ttft_p95_s": 1.575361967086792,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 7.303770065307617,
+        "censored_ttft": 0
+      },
+      {
+        "agent": 2,
+        "window_tokens": 3672,
+        "turns_offered": 2,
+        "ttft_p50_s": 1.123549222946167,
+        "ttft_p95_s": 1.548949956893921,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 2.672499179840088,
+        "censored_ttft": 0
+      }
+    ],
+    "agent_count": 3,
+    "trace_20s": [
+      {
+        "start_s": 0,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.02753901481628418,
+        "gap_p95_s": 0.028735876083374023,
+        "gap_max_s": 0.6412570476531982,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 2.648428201675415,
+        "decode_stream_width_3_s": 17.351571798324585,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 20,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.02758312225341797,
+        "gap_p95_s": 0.02895808219909668,
+        "gap_max_s": 1.5691542625427246,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 4.870396375656128,
+        "decode_stream_width_3_s": 15.129603624343872,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 40,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027498960494995117,
+        "gap_p95_s": 0.028912067413330078,
+        "gap_max_s": 1.6064372062683105,
+        "decode_stream_width_1_s": 0.8406147956848145,
+        "decode_stream_width_2_s": 6.805002689361572,
+        "decode_stream_width_3_s": 12.354382514953613,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 60,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.02734994888305664,
+        "gap_p95_s": 0.028609037399291992,
+        "gap_max_s": 0.8684051036834717,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 4.542947053909302,
+        "decode_stream_width_3_s": 15.457052946090698,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 80,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027392864227294922,
+        "gap_p95_s": 0.028543949127197266,
+        "gap_max_s": 2.1093969345092773,
+        "decode_stream_width_1_s": 1.4131710529327393,
+        "decode_stream_width_2_s": 2.153409719467163,
+        "decode_stream_width_3_s": 16.433419227600098,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 100,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027404069900512695,
+        "gap_p95_s": 0.028597116470336914,
+        "gap_max_s": 0.7233648300170898,
+        "decode_stream_width_1_s": 0.6936450004577637,
+        "decode_stream_width_2_s": 3.6785740852355957,
+        "decode_stream_width_3_s": 15.62778091430664,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      }
+    ],
+    "startup_s": 18.12025499343872,
+    "warmup_s": 99.95764923095703,
+    "warm_settle_s": 60.788819000008516,
+    "arm": "default",
+    "family": "v41",
+    "seed": 20261112,
+    "thermal_max": 2,
+    "sampling": {
+      "mode": "greedy",
+      "fields": {
+        "temperature": 0,
+        "top_p": 1
+      }
+    },
+    "metric": "delivered text+reasoning tokens retokenized; excludes EOS/format control",
+    "thermal_flagged": true,
+    "timing_thermal_max": 2,
+    "timing_thermal_seconds": {
+      "0": 65.16904306411743,
+      "1": 15.662935018539429,
+      "2": 39.16802191734314,
+      "unknown": 0.0
+    },
+    "compile_observed": true,
+    "compile_overlapped": true,
+    "max_thermal_pressure": 2,
+    "load_after": [
+      23.80810546875,
+      21.19775390625,
+      19.77197265625
+    ],
+    "arm_thermal_seconds": {
+      "0": 259.03896403312683,
+      "1": 15.662935018539429,
+      "2": 38.633116245269775,
+      "unknown": 0.0
+    }
+  }
+}

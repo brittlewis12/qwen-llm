@@ -1,0 +1,10 @@
+metal: waiting for process lease /tmp/qwen-llm-501/metal.lock (pid=29720 executable=timeout opencode_session=none started=2026-11-14T18:27:05Z task=v41-conditional-B2 expected=15m; held 11s)
+{"file": "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf", "bytes": 110595290816, "resident_pages_before": 507100, "resident_pages_after": 0, "msync_rc": 0, "msync_errno": 0, "seconds": 0.49106693267822266}
+Traceback (most recent call last):
+  File "/Users/tito/qwen-runs/2026-11-12-v41-prefill/conditional-yield/yield_arm.py", line 65, in <module>
+    try:pids,nice=pair.run_harness(command,out/'arm.log',binary,deadline,fd)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/tito/code/qwen-llm-v41-conditional/scripts/bench/v41_prefill_serve_pair.py", line 63, in run_harness
+    if child.returncode:raise RuntimeError(f"serve phase failed: {log_path.name} ({child.returncode})")
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: serve phase failed: arm.log (1)

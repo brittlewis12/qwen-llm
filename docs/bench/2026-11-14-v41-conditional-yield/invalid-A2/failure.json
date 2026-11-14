@@ -1,0 +1,36 @@
+{
+  "status": "invalid_baseline_transport_failure",
+  "error": "RuntimeError: {'type': 'server_busy', 'code': 'memory_admission_denied', 'param': '', 'message': 'transport CPU memory admission denied (host_availability_insufficient): required=2046812160 headroom=Some(HostMemoryHeadroom { ceiling_remaining_bytes: 103507689472, host_remaining_bytes: 2022670336, raw_process_remaining_bytes: 0 })'}",
+  "required_bytes": 2046812160,
+  "host_remaining_bytes": 2022670336,
+  "roots": [
+    {
+      "label": "a0-warm",
+      "native_ms": 29782.114629000003,
+      "client_ms": 29864.320993423462,
+      "load_min": 32.42724609375,
+      "load_p50": 34.509765625,
+      "load_max": 37.6044921875
+    },
+    {
+      "label": "a1-warm",
+      "native_ms": 28958.922832,
+      "client_ms": 29029.92010116577,
+      "load_min": 30.22119140625,
+      "load_p50": 31.07568359375,
+      "load_max": 32.42724609375
+    },
+    {
+      "label": "a2-warm",
+      "native_ms": 27274.107206000004,
+      "client_ms": 27354.318141937256,
+      "load_min": 29.2421875,
+      "load_p50": 29.39697265625,
+      "load_max": 30.22119140625
+    }
+  ],
+  "window": {
+    "begin": 1794681640.74276,
+    "end": 1794681760.74276
+  }
+}

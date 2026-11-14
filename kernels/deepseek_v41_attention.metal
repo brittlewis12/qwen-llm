@@ -299,11 +299,12 @@ kernel void kernel_deepseek_v41_attention_index_heads_rows_mma(
     }
 }
 
-// Exact M2 experiment, derived from this file's one-query F32 index MMA
-// (project MIT/Apache-2.0). Reuse each loaded key matrix across two independent
-// query accumulators. Each query retains its 16 K updates and head-sum order.
-// The last partial eight-key block can have different shifted windows in the
-// two queries; load it separately in that case. No input precision change.
+// Exact M2 experiment derived from this file's one-query F32 index MMA
+// (project MIT/Apache-2.0). Sixteen simdgroups process two queries, retaining
+// one incumbent query matrix set per simdgroup. A padded threadgroup key
+// panel is loaded once for both queries and all four head groups. Partial-tail
+// windows that differ from the shared window use the incumbent device load.
+// Every key retains the same 16 K updates, weight MMA and head-sum order.
 kernel void kernel_deepseek_v41_attention_index_heads_rows_mma_m2(
     constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
     constant uint4 &c [[buffer(2)]], device const float *q [[buffer(3)]],
@@ -313,101 +314,80 @@ kernel void kernel_deepseek_v41_attention_index_heads_rows_mma_m2(
     uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     threadgroup float ws[512];
     threadgroup float partial[2u * V41_IDX_MMA_KEYS * 4u];
-    threadgroup float scratch[8u * 64u];
+    threadgroup float scratch[16u * 64u];
+    threadgroup float key_panel[16u * 132u];
     const uint local = group.y * 2u;
     if (local >= c.y) return;
-    const uint row = row0 + local;
     const bool valid1 = local + 1u < c.y;
-    const uint row1 = row + (valid1 ? 1u : 0u);
-    const uint length0 = (a.x + row + 1u) / a.y;
-    const uint length1 = (a.x + row1 + 1u) / a.y;
+    const uint row = row0 + local;
+    const uint max_length = (a.x + row + 1u + (valid1 ? 1u : 0u)) / a.y;
     const uint first = group.x * V41_IDX_MMA_KEYS;
-    if (max(length0,length1) <= a.z || first >= max(length0,length1)) return;
-    device const float *q0 = q + (ulong)row * b.z;
-    device const float *q1 = q + (ulong)row1 * b.z;
-    device const float *w0 = weights + (ulong)row * b.w;
-    device const float *w1 = weights + (ulong)row1 * b.w;
+    if (max_length <= a.z || first >= max_length) return;
+    const uint qi = sg / 8u, hg = sg % 4u, kg = (sg % 8u) / 4u;
+    const bool valid = qi == 0u || valid1;
+    const uint qrow_id = row + (qi == 1u && valid1 ? 1u : 0u);
+    const uint length = (a.x + qrow_id + 1u) / a.y;
+    device const float *qrow = q + (ulong)qrow_id * b.z;
+    device const float *wrow = weights + (ulong)qrow_id * b.w;
     const float scale = rsqrt(float(b.x)) * rsqrt(float(b.y));
-    const uint wi = (tid / 64u) * 8u + (tid % 64u) / 8u;
-    ws[tid] = w0[wi] * scale;
-    ws[256u + tid] = w1[wi] * scale;
+    const uint wt = tid % 256u;
+    ws[tid] = wrow[(wt / 64u) * 8u + (wt % 64u) / 8u] * scale;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    const uint hg = sg % 4u, kg = sg / 4u;
-    simdgroup_float8x8 qt0[16],qt1[16];
+    simdgroup_float8x8 qt[16];
     #pragma clang loop unroll(full)
-    for (uint i=0;i<16u;++i) {
-        simdgroup_load(qt0[i],q0 + hg * 8u * 128u + i * 8u,128,ulong2(0,0),true);
-        simdgroup_load(qt1[i],q1 + hg * 8u * 128u + i * 8u,128,ulong2(0,0),true);
-    }
-    simdgroup_float8x8 wc0,wc1;
-    simdgroup_load(wc0,ws + hg * 64u,8);
-    simdgroup_load(wc1,ws + 256u + hg * 64u,8);
+    for (uint i=0;i<16u;++i)
+        simdgroup_load(qt[i],qrow + hg * 8u * 128u + i * 8u,128,ulong2(0,0),true);
+    simdgroup_float8x8 wc;
+    simdgroup_load(wc,ws + qi * 256u + hg * 64u,8);
     threadgroup float *o = scratch + sg * 64u;
     for (uint round=0;round<V41_IDX_MMA_ROUNDS;++round) {
-        const uint key0 = first + (round * 2u + kg) * 8u;
-        const bool active0 = length0 > a.z && key0 < length0;
-        const bool active1 = valid1 && length1 > a.z && key0 < length1;
-        if (!active0 && !active1) break;
-        const uint base0 = active0 ? min(key0,length0 - 8u) : 0u;
-        const uint base1 = active1 ? min(key0,length1 - 8u) : 0u;
-        simdgroup_float8x8 acc0=simdgroup_float8x8(0.0f),acc1=simdgroup_float8x8(0.0f);
-        if (active0 && active1 && base0 == base1) {
-            #pragma clang loop unroll(full)
-            for (uint i=0;i<16u;++i) {
-                simdgroup_float8x8 km;
-                simdgroup_load(km,keys + (ulong)base0 * 128u + i * 8u,128);
-                simdgroup_multiply_accumulate(acc0,km,qt0[i],acc0);
-                simdgroup_multiply_accumulate(acc1,km,qt1[i],acc1);
-            }
-        } else {
-            if (active0) {
+        const uint panel = first + round * 16u;
+        if (panel >= max_length) break;
+        for (uint e=tid;e<16u*128u;e+=512u) {
+            const uint block = e / (8u*128u), kr = (e / 128u) % 8u, d = e % 128u;
+            const uint base = min(panel + block * 8u,max_length - 8u);
+            key_panel[(block * 8u + kr) * 132u + d] = keys[(ulong)(base + kr) * 128u + d];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const uint key0 = panel + kg * 8u;
+        if (valid && length > a.z && key0 < length) {
+            const uint base = min(key0,length - 8u);
+            const uint shared_base = min(key0,max_length - 8u);
+            simdgroup_float8x8 acc=simdgroup_float8x8(0.0f);
+            if (base == shared_base) {
                 #pragma clang loop unroll(full)
                 for (uint i=0;i<16u;++i) {
                     simdgroup_float8x8 km;
-                    simdgroup_load(km,keys + (ulong)base0 * 128u + i * 8u,128);
-                    simdgroup_multiply_accumulate(acc0,km,qt0[i],acc0);
+                    simdgroup_load(km,key_panel + kg * 8u * 132u + i * 8u,132);
+                    simdgroup_multiply_accumulate(acc,km,qt[i],acc);
                 }
-            }
-            if (active1) {
+            } else {
                 #pragma clang loop unroll(full)
                 for (uint i=0;i<16u;++i) {
                     simdgroup_float8x8 km;
-                    simdgroup_load(km,keys + (ulong)base1 * 128u + i * 8u,128);
-                    simdgroup_multiply_accumulate(acc1,km,qt1[i],acc1);
+                    simdgroup_load(km,keys + (ulong)base * 128u + i * 8u,128);
+                    simdgroup_multiply_accumulate(acc,km,qt[i],acc);
                 }
             }
-        }
-        if (active0) {
-            acc0.thread_elements()[0]=max(acc0.thread_elements()[0],0.0f);
-            acc0.thread_elements()[1]=max(acc0.thread_elements()[1],0.0f);
+            acc.thread_elements()[0]=max(acc.thread_elements()[0],0.0f);
+            acc.thread_elements()[1]=max(acc.thread_elements()[1],0.0f);
             simdgroup_float8x8 r;
-            simdgroup_multiply(r,acc0,wc0);
+            simdgroup_multiply(r,acc,wc);
             simdgroup_store(r,o,8);
             simdgroup_barrier(mem_flags::mem_threadgroup);
-            const uint key=base0+lane;
-            if (lane<8u && key>=key0 && key<length0) partial[(key-first)*4u+hg]=o[lane*8u];
+            const uint key=base+lane;
+            if (lane<8u && key>=key0 && key<length)
+                partial[(qi * V41_IDX_MMA_KEYS + key-first)*4u+hg]=o[lane*8u];
             simdgroup_barrier(mem_flags::mem_threadgroup);
         }
-        if (active1) {
-            acc1.thread_elements()[0]=max(acc1.thread_elements()[0],0.0f);
-            acc1.thread_elements()[1]=max(acc1.thread_elements()[1],0.0f);
-            simdgroup_float8x8 r;
-            simdgroup_multiply(r,acc1,wc1);
-            simdgroup_store(r,o,8);
-            simdgroup_barrier(mem_flags::mem_threadgroup);
-            const uint key=base1+lane;
-            if (lane<8u && key>=key0 && key<length1) partial[(V41_IDX_MMA_KEYS+key-first)*4u+hg]=o[lane*8u];
-            simdgroup_barrier(mem_flags::mem_threadgroup);
-        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint j=tid;j<V41_IDX_MMA_KEYS;j+=256u) {
-        const uint key=first+j;
-        if (length0>a.z && key<length0)
-            scores[(ulong)local*c.x+key]=partial[j*4u]+partial[j*4u+1u]+partial[j*4u+2u]+partial[j*4u+3u];
-        const uint k=V41_IDX_MMA_KEYS+j;
-        if (valid1 && length1>a.z && key<length1)
-            scores[(ulong)(local+1u)*c.x+key]=partial[k*4u]+partial[k*4u+1u]+partial[k*4u+2u]+partial[k*4u+3u];
+    for (uint j=tid;j<2u*V41_IDX_MMA_KEYS;j+=512u) {
+        const uint which=j/V41_IDX_MMA_KEYS, key=first+j%V41_IDX_MMA_KEYS;
+        const bool live=which==0u || valid1;
+        const uint len=(a.x+row+1u+which)/a.y;
+        if (live && len>a.z && key<len)
+            scores[(ulong)(local+which)*c.x+key]=partial[j*4u]+partial[j*4u+1u]+partial[j*4u+2u]+partial[j*4u+3u];
     }
 }
 

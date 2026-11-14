@@ -83,7 +83,7 @@ pub(super) fn index_scores_m2(
             depth: 1,
         },
         MTLSize {
-            width: 256,
+            width: 512,
             height: 1,
             depth: 1,
         },

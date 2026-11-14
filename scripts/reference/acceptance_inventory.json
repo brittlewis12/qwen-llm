@@ -6543,5 +6543,19 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Scripted runtime records the thread QoS class across plain prefill and batch decode"
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::compact_masked_mma_preserves_scores_and_selected_ids_bitwise",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal differential checks compact block IDs, score bits, chronological selection and status at deep index shapes."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::attention_gpu::tests::radix_select::coalesced_radix_matches_incumbent_bits_and_status",
+    "class": "gpu",
+    "ignored": false,
+    "reason": "Metal differential and CPU sort reference check coalesced radix IDs, masks, NaN status, ties and guarded offsets."
   }
 ]

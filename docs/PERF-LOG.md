@@ -39,6 +39,17 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   and metallib pins, every root/load, outside-native p50/p95, per-arm process
   and sampled-window disk reads, matched-call exclusions and output controls
   are in the [qualification record](bench/2026-11-14-v41-intake-qualification.md).
+## 2026-11-14 - GLM Served TTFT: Single-Arm Lifecycle Attribution
+
+- One opt-in, 180 s greedy three-agent arm on current-main `e70da3f8a` plus
+  lifecycle hooks; 400 ms slice default confirmed. TTFT traces joined 119/119
+  calls with no missing/censored records or dropped spans. Outside-native p50:
+  short **773 ms**, about-1K **945 ms**, long **2,355 ms**, root **88 ms**.
+- Largest isolated short-residual component is raw-piece to first-visible
+  flush (**426 ms p50**); peer-round-overlapped wait is **380 ms p50**. Render,
+  tokenization and prefix match are each under **6 ms**; no append snapshot
+  restores. Recommend measuring the shared first-piece handoff next. [Full
+  component distributions, round counts and limitations](bench/2026-11-14-glm-serve-ttft-hooks.md).
 
 ## 2026-11-14 - V4.1 Three-Agent TTFT: Peer-Prefill Tails Priced
 

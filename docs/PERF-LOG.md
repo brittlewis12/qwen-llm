@@ -6,14 +6,25 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
-## 2026-11-14 - V4.1 Row-Preserving Prefill Yield: Qualification Started
+## 2026-11-14 - V4.1 Row-Preserving Prefill Yield: Served Gate FAILED
 
-- Default-off `QWEN_SERVE_V41_PREFILL_YIELD=1`: existing drained layer
-  boundaries collect prepared HTTP jobs and service one waiting short append.
-  Same rows/layers/kernels; suspended parent slot/reserve retained; no recursive
-  peer slicing. CPU lifecycle/loopback tests and production native witness.
-- Fresh `1522261bc` base. AB/BA/AB, one purged arm per lease, scheduling gate
-  frozen before any arm. [Design, rule and results](bench/2026-11-14-v41-prefill-yield.md).
+- Bitwise native PASS: 48K CED root (53 callbacks), 1K@80K (2 callbacks),
+  parent logits/causal payload/next logits and nested150-row peer logits/state.
+  Same original rows/layers/kernels; no GPU/shader changes. CPU51 and contracts
+  pass. Source `f33834a2c`, one pinned release serve binary, identical serve /
+  witness metallibs. Prepared HTTP intake and suspended slot/reserve are bounded.
+- Three purged AB/BA/AB pairs, one nice0 arm per lease, symmetric warmup.
+  Frozen gate **FAILED**: pooled matched completion p50 **1.055895x** (>1),
+  SSE delta-gap p99 **8.476746x** (>1.25). Short client TTFT p95 **0.621462x**
+  passes; TPS **0.996364x**, root native **1.114560x**, short/~1K native
+  **1.002653/0.998506x** pass their >=0.98 non-regression checks. No promotion;
+  `QWEN_SERVE_V41_PREFILL_YIELD` remains default-off with0 rollback.
+- Slicing turns rare long stalls into more frequent shorter ones: pair1
+  >100ms gaps58/10,906→112/10,804; max1.679→1.196s, p9929.845→277.795ms.
+  Most new decode boundaries service no arriving prefill. Follow up with
+  selective yielding / keeping short calls unsliced, preserving decode credit;
+  no variant or threshold change was made in this packet.
+  [All cells, components, exclusions, I/O/load and pins](bench/2026-11-14-v41-prefill-yield.md).
 
 ## 2026-11-14 - Intake + Exact Tokenization: Promoted by Lead Decision
 

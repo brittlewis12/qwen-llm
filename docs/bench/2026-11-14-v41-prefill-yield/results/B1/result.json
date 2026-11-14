@@ -1,0 +1,203 @@
+{
+  "tag": "B1",
+  "mode": "candidate",
+  "start": 1794670551.316711,
+  "end": 1794671035.080582,
+  "model_pids": [
+    40037
+  ],
+  "model_niceness": {
+    "40037": 0
+  },
+  "binary_sha256": "493817a1522dff23032eb00b4ce1a793c89c3b71b9b644c6b8cdb5ad18b3c3b6",
+  "purge": {
+    "file": "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+    "bytes": 110595290816,
+    "resident_pages_before": 0,
+    "resident_pages_after": 0,
+    "msync_rc": 0,
+    "msync_errno": 0,
+    "seconds": 1.1920928955078125e-05
+  },
+  "process_disk_read_bytes": 189385408512,
+  "symmetric_warmup": [
+    {
+      "pid": 37457,
+      "nice": 0,
+      "code": 0,
+      "log": "cpu-warmup.log"
+    }
+  ],
+  "summary": {
+    "window_begin": 1794670912.591122,
+    "window_end": 1794671032.591122,
+    "window_seconds": 120.0,
+    "window_tokens": 10872,
+    "aggregate_tps": 90.6,
+    "gap_p50_s": 0.026987075805664062,
+    "gap_p95_s": 0.0282289981842041,
+    "gap_p99_s": 0.27779507637023926,
+    "gap_max_s": 1.1961960792541504,
+    "round_budget": {
+      "rounds_est": 3539.9054431532163,
+      "avg_width": 2.9186797206046924,
+      "coverage": 0.9598050036791759,
+      "transition_s": 94.19779168875984,
+      "prefill_s": 19.061374582,
+      "partial_prefill_s": 1.111355,
+      "partial_prefill_calls": 2,
+      "capture_s": 0.0013579110000000003,
+      "host_s": 1.3339048504988498,
+      "transition_ms_per_round": 26.610256460650525,
+      "host_ms_per_round": 0.3768193450135371,
+      "host_metric": "median content gap minus native round wall"
+    },
+    "agents": [
+      {
+        "agent": 0,
+        "window_tokens": 3493,
+        "turns_offered": 18,
+        "ttft_p50_s": 0.6426212787628174,
+        "ttft_p95_s": 1.7651610374450684,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 13.247456789016724,
+        "censored_ttft": 0
+      },
+      {
+        "agent": 1,
+        "window_tokens": 3631,
+        "turns_offered": 9,
+        "ttft_p50_s": 0.7902779579162598,
+        "ttft_p95_s": 1.628309965133667,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 7.26980447769165,
+        "censored_ttft": 0
+      },
+      {
+        "agent": 2,
+        "window_tokens": 3748,
+        "turns_offered": 2,
+        "ttft_p50_s": 1.1340899467468262,
+        "ttft_p95_s": 1.610384225845337,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 2.744474172592163,
+        "censored_ttft": 0
+      }
+    ],
+    "agent_count": 3,
+    "trace_20s": [
+      {
+        "start_s": 0,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027028322219848633,
+        "gap_p95_s": 0.0280148983001709,
+        "gap_max_s": 0.3317279815673828,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 2.458183765411377,
+        "decode_stream_width_3_s": 17.541816234588623,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 20,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027035951614379883,
+        "gap_p95_s": 0.028185129165649414,
+        "gap_max_s": 0.38832807540893555,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 5.52101731300354,
+        "decode_stream_width_3_s": 14.47898268699646,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 40,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.026999950408935547,
+        "gap_p95_s": 0.0282289981842041,
+        "gap_max_s": 1.0455079078674316,
+        "decode_stream_width_1_s": 1.1772260665893555,
+        "decode_stream_width_2_s": 6.1124396324157715,
+        "decode_stream_width_3_s": 12.710334300994873,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 60,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.026817798614501953,
+        "gap_p95_s": 0.02840709686279297,
+        "gap_max_s": 0.4004659652709961,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 4.616668224334717,
+        "decode_stream_width_3_s": 15.383331775665283,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 80,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.026982784271240234,
+        "gap_p95_s": 0.02816319465637207,
+        "gap_max_s": 1.1961960792541504,
+        "decode_stream_width_1_s": 1.3236589431762695,
+        "decode_stream_width_2_s": 2.643441915512085,
+        "decode_stream_width_3_s": 16.032899141311646,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 100,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.0270230770111084,
+        "gap_p95_s": 0.028380155563354492,
+        "gap_max_s": 0.41858792304992676,
+        "decode_stream_width_1_s": 0.6924629211425781,
+        "decode_stream_width_2_s": 4.524889230728149,
+        "decode_stream_width_3_s": 14.782647848129272,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      }
+    ],
+    "startup_s": 17.215383768081665,
+    "warmup_s": 77.29454326629639,
+    "warm_settle_s": 110.48735504189972,
+    "arm": "default",
+    "family": "v41",
+    "seed": 20261112,
+    "thermal_max": 2,
+    "sampling": {
+      "mode": "greedy",
+      "fields": {
+        "temperature": 0,
+        "top_p": 1
+      }
+    },
+    "metric": "delivered text+reasoning tokens retokenized; excludes EOS/format control",
+    "thermal_flagged": true,
+    "timing_thermal_max": 2,
+    "timing_thermal_seconds": {
+      "0": 33.873218059539795,
+      "1": 56.26692986488342,
+      "2": 29.859852075576782,
+      "unknown": 0.0
+    },
+    "compile_observed": true,
+    "compile_overlapped": true,
+    "max_thermal_pressure": 2,
+    "load_after": [
+      19.033203125,
+      20.25537109375,
+      22.1796875
+    ],
+    "arm_thermal_seconds": {
+      "0": 185.53325772285461,
+      "1": 115.29298686981201,
+      "2": 39.49371123313904,
+      "unknown": 0.0
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "measured_source": "f33834a2c84492f97d1098c514db9adfd0b3811b",
+  "measured_tree": "3fa1540ae5db5f96a8aab24f0b76e481a004e2d8",
+  "contracts": "PASS",
+  "selected_scheduler_loopback_cpu": {
+    "passed": 26,
+    "failed": 0
+  },
+  "shared_serve_cpu": {
+    "passed": 51,
+    "failed": 0
+  },
+  "m5_native_bitwise": "PASS",
+  "serve_gate": "FAIL",
+  "default_on": false,
+  "local_pin_archive": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/row-yield-local-pins",
+  "all_archived_binary_sha256_verified": true
+}

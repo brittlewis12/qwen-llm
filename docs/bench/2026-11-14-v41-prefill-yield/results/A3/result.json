@@ -1,0 +1,203 @@
+{
+  "tag": "A3",
+  "mode": "baseline",
+  "start": 1794672559.9099698,
+  "end": 1794673000.362995,
+  "model_pids": [
+    64682
+  ],
+  "model_niceness": {
+    "64682": 0
+  },
+  "binary_sha256": "493817a1522dff23032eb00b4ce1a793c89c3b71b9b644c6b8cdb5ad18b3c3b6",
+  "purge": {
+    "file": "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+    "bytes": 110595290816,
+    "resident_pages_before": 0,
+    "resident_pages_after": 0,
+    "msync_rc": 0,
+    "msync_errno": 0,
+    "seconds": 1.4781951904296875e-05
+  },
+  "process_disk_read_bytes": 189416144896,
+  "symmetric_warmup": [
+    {
+      "pid": 58527,
+      "nice": 0,
+      "code": 0,
+      "log": "cpu-warmup.log"
+    }
+  ],
+  "summary": {
+    "window_begin": 1794672877.688051,
+    "window_end": 1794672997.688051,
+    "window_seconds": 120.0,
+    "window_tokens": 11050,
+    "aggregate_tps": 92.08333333333333,
+    "gap_p50_s": 0.026346921920776367,
+    "gap_p95_s": 0.027097225189208984,
+    "gap_p99_s": 0.029445171356201172,
+    "gap_max_s": 1.6619689464569092,
+    "round_budget": {
+      "rounds_est": 3717.3838426240295,
+      "avg_width": 2.925362009812412,
+      "coverage": 0.993393665158371,
+      "transition_s": 96.6133568014812,
+      "prefill_s": 20.204669626,
+      "partial_prefill_s": 1.2730080000000001,
+      "partial_prefill_calls": 3,
+      "capture_s": 0.0012939159999999996,
+      "host_s": 1.32826504968973,
+      "transition_ms_per_round": 25.989610137564835,
+      "host_ms_per_round": 0.35731178321153223,
+      "host_metric": "median content gap minus native round wall"
+    },
+    "agents": [
+      {
+        "agent": 0,
+        "window_tokens": 3567,
+        "turns_offered": 19,
+        "ttft_p50_s": 0.5873658657073975,
+        "ttft_p95_s": 1.635714054107666,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 11.699715375900269,
+        "censored_ttft": 0
+      },
+      {
+        "agent": 1,
+        "window_tokens": 3692,
+        "turns_offered": 10,
+        "ttft_p50_s": 0.6997890472412109,
+        "ttft_p95_s": 1.4965848922729492,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 8.039801359176636,
+        "censored_ttft": 0
+      },
+      {
+        "agent": 2,
+        "window_tokens": 3791,
+        "turns_offered": 3,
+        "ttft_p50_s": 1.0439698696136475,
+        "ttft_p95_s": 1.482706069946289,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 3.1326661109924316,
+        "censored_ttft": 0
+      }
+    ],
+    "agent_count": 3,
+    "trace_20s": [
+      {
+        "start_s": 0,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.026751041412353516,
+        "gap_p95_s": 0.0272979736328125,
+        "gap_max_s": 0.6220600605010986,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 2.76273512840271,
+        "decode_stream_width_3_s": 17.23726487159729,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 20,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.026339054107666016,
+        "gap_p95_s": 0.026968002319335938,
+        "gap_max_s": 1.5058338642120361,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 4.854260444641113,
+        "decode_stream_width_3_s": 15.145739555358887,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 40,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.026272058486938477,
+        "gap_p95_s": 0.026897907257080078,
+        "gap_max_s": 1.52229905128479,
+        "decode_stream_width_1_s": 0.8265206813812256,
+        "decode_stream_width_2_s": 6.503820180892944,
+        "decode_stream_width_3_s": 12.66965913772583,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 60,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.026285886764526367,
+        "gap_p95_s": 0.02682209014892578,
+        "gap_max_s": 0.6011240482330322,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 4.063192844390869,
+        "decode_stream_width_3_s": 15.93680715560913,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 80,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.026281118392944336,
+        "gap_p95_s": 0.026849985122680664,
+        "gap_max_s": 1.6619689464569092,
+        "decode_stream_width_1_s": 1.3751411437988281,
+        "decode_stream_width_2_s": 3.4149162769317627,
+        "decode_stream_width_3_s": 15.20994257926941,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 100,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.026221036911010742,
+        "gap_p95_s": 0.02688002586364746,
+        "gap_max_s": 0.7482233047485352,
+        "decode_stream_width_1_s": 0.6638312339782715,
+        "decode_stream_width_2_s": 4.922652721405029,
+        "decode_stream_width_3_s": 14.4135160446167,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      }
+    ],
+    "startup_s": 17.541475772857666,
+    "warmup_s": 81.69472789764404,
+    "warm_settle_s": 60.954905541962944,
+    "arm": "default",
+    "family": "v41",
+    "seed": 20261112,
+    "thermal_max": 0,
+    "sampling": {
+      "mode": "greedy",
+      "fields": {
+        "temperature": 0,
+        "top_p": 1
+      }
+    },
+    "metric": "delivered text+reasoning tokens retokenized; excludes EOS/format control",
+    "thermal_flagged": false,
+    "timing_thermal_max": 0,
+    "timing_thermal_seconds": {
+      "0": 120.0,
+      "1": 0.0,
+      "2": 0.0,
+      "unknown": 0.0
+    },
+    "compile_observed": true,
+    "compile_overlapped": true,
+    "max_thermal_pressure": 2,
+    "load_after": [
+      7.57421875,
+      15.26513671875,
+      22.06640625
+    ],
+    "arm_thermal_seconds": {
+      "0": 295.0714888572693,
+      "1": 0.0,
+      "2": 0.0,
+      "unknown": 0.0
+    }
+  }
+}

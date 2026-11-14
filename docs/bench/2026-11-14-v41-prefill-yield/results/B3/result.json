@@ -1,0 +1,203 @@
+{
+  "tag": "B3",
+  "mode": "candidate",
+  "start": 1794673399.6912131,
+  "end": 1794673902.515924,
+  "model_pids": [
+    88917
+  ],
+  "model_niceness": {
+    "88917": 0
+  },
+  "binary_sha256": "493817a1522dff23032eb00b4ce1a793c89c3b71b9b644c6b8cdb5ad18b3c3b6",
+  "purge": {
+    "file": "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+    "bytes": 110595290816,
+    "resident_pages_before": 0,
+    "resident_pages_after": 0,
+    "msync_rc": 0,
+    "msync_errno": 0,
+    "seconds": 1.2159347534179688e-05
+  },
+  "process_disk_read_bytes": 189371465728,
+  "symmetric_warmup": [
+    {
+      "pid": 77292,
+      "nice": 0,
+      "code": 0,
+      "log": "cpu-warmup.log"
+    }
+  ],
+  "summary": {
+    "window_begin": 1794673779.980601,
+    "window_end": 1794673899.980601,
+    "window_seconds": 120.0,
+    "window_tokens": 10801,
+    "aggregate_tps": 90.00833333333334,
+    "gap_p50_s": 0.02712082862854004,
+    "gap_p95_s": 0.029341936111450195,
+    "gap_p99_s": 0.2762422561645508,
+    "gap_max_s": 1.1741859912872314,
+    "round_budget": {
+      "rounds_est": 2465.9171462132754,
+      "avg_width": 2.9383794802594374,
+      "coverage": 0.680399962966392,
+      "transition_s": 67.01046924824256,
+      "prefill_s": 18.6472568942485,
+      "partial_prefill_s": 2.2239790000000004,
+      "partial_prefill_calls": 3,
+      "capture_s": 0.0011837314006050287,
+      "host_s": 0.0,
+      "transition_ms_per_round": 27.174663735618825,
+      "host_ms_per_round": 0.0,
+      "host_metric": "median content gap minus native round wall"
+    },
+    "agents": [
+      {
+        "agent": 0,
+        "window_tokens": 3463,
+        "turns_offered": 18,
+        "ttft_p50_s": 0.6487300395965576,
+        "ttft_p95_s": 1.770017147064209,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 13.500494003295898,
+        "censored_ttft": 0
+      },
+      {
+        "agent": 1,
+        "window_tokens": 3603,
+        "turns_offered": 8,
+        "ttft_p50_s": 0.7329580783843994,
+        "ttft_p95_s": 1.6314549446105957,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 6.371702194213867,
+        "censored_ttft": 0
+      },
+      {
+        "agent": 2,
+        "window_tokens": 3735,
+        "turns_offered": 2,
+        "ttft_p50_s": 1.177211046218872,
+        "ttft_p95_s": 1.6813938617706299,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 2.858604907989502,
+        "censored_ttft": 0
+      }
+    ],
+    "agent_count": 3,
+    "trace_20s": [
+      {
+        "start_s": 0,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027943134307861328,
+        "gap_p95_s": 0.029590129852294922,
+        "gap_max_s": 0.3401660919189453,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 1.9219088554382324,
+        "decode_stream_width_3_s": 18.078091144561768,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 20,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027994871139526367,
+        "gap_p95_s": 0.029652118682861328,
+        "gap_max_s": 0.394209623336792,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 5.218883991241455,
+        "decode_stream_width_3_s": 14.781116008758545,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 40,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.02749800682067871,
+        "gap_p95_s": 0.02933812141418457,
+        "gap_max_s": 1.05244779586792,
+        "decode_stream_width_1_s": 1.140965223312378,
+        "decode_stream_width_2_s": 6.294138669967651,
+        "decode_stream_width_3_s": 12.56489610671997,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 60,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.026757240295410156,
+        "gap_p95_s": 0.028995037078857422,
+        "gap_max_s": 0.3337700366973877,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 5.6080756187438965,
+        "decode_stream_width_3_s": 14.391924381256104,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 80,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.026894092559814453,
+        "gap_p95_s": 0.027643918991088867,
+        "gap_max_s": 1.1741859912872314,
+        "decode_stream_width_1_s": 1.095541000366211,
+        "decode_stream_width_2_s": 1.907608985900879,
+        "decode_stream_width_3_s": 16.99685001373291,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 100,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.026732206344604492,
+        "gap_p95_s": 0.027477025985717773,
+        "gap_max_s": 0.4034230709075928,
+        "decode_stream_width_1_s": 0.9263730049133301,
+        "decode_stream_width_2_s": 3.985344648361206,
+        "decode_stream_width_3_s": 15.088282346725464,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      }
+    ],
+    "startup_s": 17.552844047546387,
+    "warmup_s": 74.63641595840454,
+    "warm_settle_s": 130.93788095808122,
+    "arm": "default",
+    "family": "v41",
+    "seed": 20261112,
+    "thermal_max": 2,
+    "sampling": {
+      "mode": "greedy",
+      "fields": {
+        "temperature": 0,
+        "top_p": 1
+      }
+    },
+    "metric": "delivered text+reasoning tokens retokenized; excludes EOS/format control",
+    "thermal_flagged": true,
+    "timing_thermal_max": 1,
+    "timing_thermal_seconds": {
+      "0": 0.0,
+      "1": 120.0,
+      "2": 0.0,
+      "unknown": 0.0
+    },
+    "compile_observed": true,
+    "compile_overlapped": true,
+    "max_thermal_pressure": 2,
+    "load_after": [
+      24.4921875,
+      29.5556640625,
+      25.23046875
+    ],
+    "arm_thermal_seconds": {
+      "0": 127.9809501171112,
+      "1": 197.21708011627197,
+      "2": 32.43741488456726,
+      "unknown": 0.0
+    }
+  }
+}

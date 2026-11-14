@@ -1,0 +1,9 @@
+
+running 5 tests
+test serve::backend_v41::scheduler_tests::yielded_intake_cancellation_discards_parent_and_preserves_serviced_peer ... ok
+test serve::backend_v41::scheduler_tests::yielded_intake_counts_suspended_parent_against_active_limit ... ok
+test serve::backend_v41::scheduler_tests::yielded_intake_services_short_before_parent_finishes_without_changing_outputs ... ok
+test serve::batch_lifecycle_tests::accepted_request_renders_and_tokenizes_while_peer_pump_is_blocked ... ok
+test serve::batch_lifecycle_tests::prepared_peer_is_submitted_inside_boundary_before_parent_pump_returns ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1157 filtered out; finished in 0.32s

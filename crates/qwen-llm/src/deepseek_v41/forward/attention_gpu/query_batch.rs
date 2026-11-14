@@ -24,141 +24,6 @@ pub(super) const TILE: usize = 512;
 /// Default on; 0/false/no restores full-domain scoring. Read per call for A/B.
 const MASKED_REINDEX_ENV: &str = "QWEN_V41_MASKED_REINDEX";
 
-crate::env_flag!(
-    /// Experimental exact compact-block launch for masked F32 index MMA; reuses long-selection pair scratch. Default off pending whole-serial-span qualification.
-    default_off masked_index_compact_env,
-    "QWEN_V41_MASKED_INDEX_COMPACT"
-);
-fn masked_index_compact_enabled() -> bool {
-    #[cfg(feature = "perf-ablations")]
-    if let Some(
-        super::super::PrefillExperiment::MaskedIndexCompact(enabled)
-        | super::super::PrefillExperiment::IndexCompose(enabled),
-    ) = super::super::PREFILL_EXPERIMENT.with(|s| s.get())
-    {
-        return enabled;
-    }
-    masked_index_compact_env()
-}
-
-crate::env_flag!(
-    /// Experimental exact two-query F32 dense-index MMA tile. Default off pending composed serial-span and native gates; 0 restores the one-query tile independently of compact masked scoring.
-    default_off index_mma_m2_env,
-    "QWEN_V41_INDEX_MMA_M2"
-);
-fn index_mma_m2_enabled() -> bool {
-    #[cfg(feature = "perf-ablations")]
-    if let Some(
-        super::super::PrefillExperiment::IndexMmaM2(enabled)
-        | super::super::PrefillExperiment::IndexCompose(enabled),
-    ) = super::super::PREFILL_EXPERIMENT.with(|s| s.get())
-    {
-        return enabled;
-    }
-    index_mma_m2_env()
-}
-
-pub(super) fn index_scores_m2(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    g: [usize; 6],
-    q: &MetalTensor,
-    weights: &MetalTensor,
-    keys: &MetalTensor,
-    scores: &MetalTensor,
-) -> Result<()> {
-    let [start, ratio, last, first, n, stride] = g;
-    pipeline(ctx, enc, "index_heads_rows_mma_m2")?;
-    enc.set_bytes(0, &[start as u32, ratio as u32, 512, last as u32]);
-    enc.set_bytes(1, &[128u32, 32, 4096, 32]);
-    enc.set_bytes(2, &[stride as u32, n as u32, 0, 0]);
-    enc.set_bytes(7, &(first as u32));
-    for (slot, tensor) in [(3, q), (4, weights), (5, keys), (6, scores)] {
-        enc.set_tensor(slot, tensor);
-    }
-    enc.dispatch(
-        MTLSize {
-            width: last.div_ceil(128),
-            height: n.div_ceil(2),
-            depth: 1,
-        },
-        MTLSize {
-            width: 256,
-            height: 1,
-            depth: 1,
-        },
-    );
-    Ok(())
-}
-
-pub(super) fn compact_mask_ids(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    start: usize,
-    first: usize,
-    n: usize,
-    mask: &MetalTensor,
-    mask_stride: usize,
-    ids: &MetalTensor,
-    status: &MetalTensor,
-) -> Result<()> {
-    pipeline(ctx, enc, "compact_mask_ids")?;
-    enc.set_bytes(
-        0,
-        &[start as u32, first as u32, n as u32, mask_stride as u32],
-    );
-    enc.set_tensor(1, mask);
-    enc.set_tensor(2, ids);
-    enc.set_tensor(3, status);
-    enc.dispatch(
-        MTLSize {
-            width: 1,
-            height: n,
-            depth: 1,
-        },
-        MTLSize {
-            width: 1024,
-            height: 1,
-            depth: 1,
-        },
-    );
-    Ok(())
-}
-
-pub(super) fn compact_index_scores(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    g: [usize; 6],
-    q: &MetalTensor,
-    weights: &MetalTensor,
-    keys: &MetalTensor,
-    scores: &MetalTensor,
-    ids: &MetalTensor,
-) -> Result<()> {
-    let [start, ratio, last, first, n, stride] = g;
-    pipeline(ctx, enc, "index_heads_rows_mma_compact")?;
-    enc.set_bytes(0, &[start as u32, ratio as u32, 512u32, last as u32]);
-    enc.set_bytes(1, &[128u32, 32, 4096, 32]);
-    enc.set_bytes(2, &[stride as u32, n as u32, 8, 2048]);
-    for (slot, tensor) in [(3, q), (4, weights), (5, keys), (6, scores), (8, ids)] {
-        enc.set_tensor(slot, tensor);
-    }
-    enc.set_bytes(7, &(first as u32));
-    enc.dispatch(
-        MTLSize {
-            width: 128,
-            height: n,
-            depth: 1,
-        },
-        MTLSize {
-            width: 256,
-            height: 1,
-            depth: 1,
-        },
-    );
-    Ok(())
-}
-
 fn masked_reindex_enabled() -> bool {
     crate::env_flag::read_default_on(MASKED_REINDEX_ENV)
 }
@@ -1477,37 +1342,6 @@ impl Workspace {
                 .view_subrange((tile * width) as u64, vec![(tile * block_width) as u64])
         });
         let candidates_stride = self.capacity.div_ceil(c.candidate_block);
-        let compact = mask
-            && ratio == 1
-            && c.candidate_block == 8
-            && c.candidate_topk == 2048
-            && c.index_topk == 512
-            && masked_index_compact_enabled()
-            && masked_reindex_enabled()
-            && super::select_grid_enabled()
-            && super::index_ilp_supported(c)
-            && (start >= 131_072 || start >= 49_152 && masked_reindex_mid_enabled())
-            && ((512..=2048).contains(&rows.rows)
-                || (128..512).contains(&rows.rows) && masked_reindex_short_enabled())
-            && self.global_mode(id, start, rows.rows)? == GlobalKvMode::Ordinary
-            && ctx.device_facts().name == "Apple M5 Ultra";
-        let compact_ids = rows
-            .select_pairs
-            .as_ref()
-            .filter(|ids| compact && ids.n_elements() as usize >= rows.rows * 2048);
-        if let Some(ids) = compact_ids {
-            compact_mask_ids(
-                ctx,
-                enc,
-                start,
-                0,
-                rows.rows,
-                &rows.candidates,
-                candidates_stride,
-                ids,
-                &self.status,
-            )?;
-        }
         for first in (0..rows.rows).step_by(tile) {
             let n = (rows.rows - first).min(tile);
             let last_length = (start + first + n) / ratio;
@@ -1577,48 +1411,18 @@ impl Workspace {
             } else {
                 super::IndexRowsKernel::Ilp
             };
-            if let Some(ids) = compact_ids {
-                compact_index_scores(
-                    ctx,
-                    enc,
-                    [start, ratio, last_length, first, n, width],
-                    &rows.index_query,
-                    &rows.index_weights,
-                    &self.owners[owner].keys,
-                    &rows.select_scores,
-                    ids,
-                )?;
-            } else if !masked_index
-                && c.index_topk == 512
-                && index_mma_m2_enabled()
-                && super::index_ilp_supported(c)
-                && super::select_grid_enabled()
-                && self.global_mode(id, start, rows.rows)? == GlobalKvMode::Ordinary
-                && ctx.device_facts().name == "Apple M5 Ultra"
-            {
-                index_scores_m2(
-                    ctx,
-                    enc,
-                    [start, ratio, last_length, first, n, width],
-                    &rows.index_query,
-                    &rows.index_weights,
-                    &self.owners[owner].keys,
-                    &rows.select_scores,
-                )?;
-            } else {
-                super::encode_index_scores_rows_kernel(
-                    ctx,
-                    enc,
-                    c,
-                    kernel,
-                    [start, ratio, last_length, first, n, width],
-                    &rows.index_query,
-                    &rows.index_weights,
-                    &self.owners[owner].keys,
-                    &rows.select_scores,
-                    masked_index.then_some((&rows.candidates, candidates_stride)),
-                )?;
-            }
+            super::encode_index_scores_rows_kernel(
+                ctx,
+                enc,
+                c,
+                kernel,
+                [start, ratio, last_length, first, n, width],
+                &rows.index_query,
+                &rows.index_weights,
+                &self.owners[owner].keys,
+                &rows.select_scores,
+                masked_index.then_some((&rows.candidates, candidates_stride)),
+            )?;
             if let Some(block_scores) = &block_scores {
                 pipeline(ctx, enc, "select_block_scores_rows")?;
                 enc.set_bytes(

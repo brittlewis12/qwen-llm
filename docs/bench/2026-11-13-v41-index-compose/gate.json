@@ -1,0 +1,930 @@
+{
+  "source": "32cbcb219",
+  "threshold": 1.25,
+  "aggregate_pass": false,
+  "active_layers": [
+    2,
+    8,
+    14,
+    20,
+    24,
+    28,
+    32,
+    36
+  ],
+  "empty_serial_layers": 32,
+  "cells": [
+    {
+      "file": "stages-131072-1024.jsonl",
+      "depth": 131072,
+      "rows": 1024,
+      "pairs": [
+        {
+          "order": "BA",
+          "baseline_serial_ms": 194.88962599999996,
+          "candidate_serial_ms": 158.046793,
+          "ratio": 1.2331134488758653,
+          "baseline_wall_ms": 1035.7334170000001,
+          "candidate_wall_ms": 992.8072500000001
+        },
+        {
+          "order": "AB",
+          "baseline_serial_ms": 195.02208199999998,
+          "candidate_serial_ms": 158.09558399999997,
+          "ratio": 1.233570711247697,
+          "baseline_wall_ms": 1040.59875,
+          "candidate_wall_ms": 994.50825
+        },
+        {
+          "order": "BA",
+          "baseline_serial_ms": 194.249001,
+          "candidate_serial_ms": 158.6295,
+          "ratio": 1.2245452516713473,
+          "baseline_wall_ms": 1029.0809590000001,
+          "candidate_wall_ms": 993.209167
+        }
+      ],
+      "serial_speedup_geomean": 1.2304027905819332,
+      "pass_gate": false,
+      "bitwise_endpoints": 8,
+      "arms": [
+        {
+          "rep": 0,
+          "policy": "baseline",
+          "serial_ms": 192.26629300000002,
+          "serial_layers_ms": {
+            "2": 21.157959,
+            "8": 21.075625,
+            "14": 21.063875,
+            "20": 44.906042,
+            "24": 21.160042,
+            "28": 20.841125,
+            "32": 20.794958,
+            "36": 21.266667
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 1186.530458,
+          "disk_read_bytes": 172556288,
+          "thermal": 0,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ]
+        },
+        {
+          "rep": 1,
+          "policy": "index-compose",
+          "serial_ms": 158.554374,
+          "serial_layers_ms": {
+            "2": 22.27375,
+            "8": 22.242375,
+            "14": 22.076458,
+            "20": 47.580875,
+            "24": 11.139208,
+            "28": 11.006208,
+            "32": 11.082625,
+            "36": 11.152875
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 995.8680840000001,
+          "disk_read_bytes": 147456,
+          "thermal": 0,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ]
+        },
+        {
+          "rep": 2,
+          "policy": "index-compose",
+          "serial_ms": 158.046793,
+          "serial_layers_ms": {
+            "2": 22.241,
+            "8": 22.313458,
+            "14": 22.05775,
+            "20": 47.417834,
+            "24": 11.128334,
+            "28": 11.004958,
+            "32": 10.830417,
+            "36": 11.053042
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 992.8072500000001,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ]
+        },
+        {
+          "rep": 3,
+          "policy": "baseline",
+          "serial_ms": 194.88962599999996,
+          "serial_layers_ms": {
+            "2": 21.615417,
+            "8": 21.657583,
+            "14": 21.093792,
+            "20": 45.668917,
+            "24": 21.094791,
+            "28": 21.162917,
+            "32": 21.143375,
+            "36": 21.452834
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 1035.7334170000001,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ]
+        },
+        {
+          "rep": 4,
+          "policy": "baseline",
+          "serial_ms": 195.02208199999998,
+          "serial_layers_ms": {
+            "2": 21.508708,
+            "8": 21.48025,
+            "14": 21.270417,
+            "20": 45.8575,
+            "24": 21.335791,
+            "28": 21.175541,
+            "32": 21.129125,
+            "36": 21.26475
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 1040.59875,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ]
+        },
+        {
+          "rep": 5,
+          "policy": "index-compose",
+          "serial_ms": 158.09558399999997,
+          "serial_layers_ms": {
+            "2": 22.32425,
+            "8": 22.583833,
+            "14": 22.053875,
+            "20": 47.179167,
+            "24": 10.958375,
+            "28": 10.990292,
+            "32": 10.978167,
+            "36": 11.027625
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 994.50825,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ]
+        },
+        {
+          "rep": 6,
+          "policy": "index-compose",
+          "serial_ms": 158.6295,
+          "serial_layers_ms": {
+            "2": 22.342917,
+            "8": 22.418375,
+            "14": 21.983375,
+            "20": 47.7815,
+            "24": 11.031375,
+            "28": 11.03225,
+            "32": 11.020833,
+            "36": 11.018875
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 993.209167,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ]
+        },
+        {
+          "rep": 7,
+          "policy": "baseline",
+          "serial_ms": 194.249001,
+          "serial_layers_ms": {
+            "2": 21.429833,
+            "8": 21.464917,
+            "14": 21.067417,
+            "20": 45.413709,
+            "24": 21.196417,
+            "28": 21.153958,
+            "32": 21.166583,
+            "36": 21.356167
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 1029.0809590000001,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "stages-131072-256.jsonl",
+      "depth": 131072,
+      "rows": 256,
+      "pairs": [
+        {
+          "order": "BA",
+          "baseline_serial_ms": 61.253082,
+          "candidate_serial_ms": 52.84275,
+          "ratio": 1.1591577274082063,
+          "baseline_wall_ms": 465.661542,
+          "candidate_wall_ms": 459.54729199999997
+        },
+        {
+          "order": "AB",
+          "baseline_serial_ms": 61.261790999999995,
+          "candidate_serial_ms": 53.041500000000006,
+          "ratio": 1.1549784791154094,
+          "baseline_wall_ms": 466.280458,
+          "candidate_wall_ms": 463.993417
+        },
+        {
+          "order": "BA",
+          "baseline_serial_ms": 61.377207999999996,
+          "candidate_serial_ms": 53.044709,
+          "ratio": 1.1570844511560994,
+          "baseline_wall_ms": 466.69412500000004,
+          "candidate_wall_ms": 460.33545799999996
+        }
+      ],
+      "serial_speedup_geomean": 1.1570722945978034,
+      "pass_gate": false,
+      "bitwise_endpoints": 8,
+      "arms": [
+        {
+          "rep": 0,
+          "policy": "baseline",
+          "serial_ms": 61.290583000000005,
+          "serial_layers_ms": {
+            "2": 7.430417,
+            "8": 7.368125,
+            "14": 7.351417,
+            "20": 14.828334,
+            "24": 6.119458,
+            "28": 6.068333,
+            "32": 6.064333,
+            "36": 6.060166
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 1189.152792,
+          "disk_read_bytes": 50020352,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ]
+        },
+        {
+          "rep": 1,
+          "policy": "index-compose",
+          "serial_ms": 53.010583,
+          "serial_layers_ms": {
+            "2": 7.725834,
+            "8": 7.645875,
+            "14": 7.654833,
+            "20": 15.502458,
+            "24": 3.601666,
+            "28": 3.730417,
+            "32": 3.577875,
+            "36": 3.571625
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 458.537375,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ]
+        },
+        {
+          "rep": 2,
+          "policy": "index-compose",
+          "serial_ms": 52.84275,
+          "serial_layers_ms": {
+            "2": 7.736958,
+            "8": 7.663833,
+            "14": 7.647709,
+            "20": 15.479291,
+            "24": 3.594875,
+            "28": 3.576,
+            "32": 3.5715,
+            "36": 3.572584
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 459.54729199999997,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ]
+        },
+        {
+          "rep": 3,
+          "policy": "baseline",
+          "serial_ms": 61.253082,
+          "serial_layers_ms": {
+            "2": 7.43125,
+            "8": 7.370333,
+            "14": 7.360583,
+            "20": 14.837333,
+            "24": 6.084,
+            "28": 6.055083,
+            "32": 6.057167,
+            "36": 6.057333
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 465.661542,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ]
+        },
+        {
+          "rep": 4,
+          "policy": "baseline",
+          "serial_ms": 61.261790999999995,
+          "serial_layers_ms": {
+            "2": 7.439542,
+            "8": 7.365333,
+            "14": 7.351083,
+            "20": 14.847583,
+            "24": 6.083292,
+            "28": 6.060083,
+            "32": 6.062042,
+            "36": 6.052833
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 466.280458,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ]
+        },
+        {
+          "rep": 5,
+          "policy": "index-compose",
+          "serial_ms": 53.041500000000006,
+          "serial_layers_ms": {
+            "2": 7.746167,
+            "8": 7.720584,
+            "14": 7.666458,
+            "20": 15.56,
+            "24": 3.598666,
+            "28": 3.575458,
+            "32": 3.580542,
+            "36": 3.593625
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 463.993417,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ]
+        },
+        {
+          "rep": 6,
+          "policy": "index-compose",
+          "serial_ms": 53.044709,
+          "serial_layers_ms": {
+            "2": 7.734667,
+            "8": 7.668958,
+            "14": 7.670125,
+            "20": 15.58425,
+            "24": 3.630125,
+            "28": 3.577875,
+            "32": 3.578542,
+            "36": 3.600167
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 460.33545799999996,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ]
+        },
+        {
+          "rep": 7,
+          "policy": "baseline",
+          "serial_ms": 61.377207999999996,
+          "serial_layers_ms": {
+            "2": 7.447375,
+            "8": 7.44025,
+            "14": 7.37575,
+            "20": 14.855625,
+            "24": 6.077625,
+            "28": 6.058,
+            "32": 6.061625,
+            "36": 6.060958
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 466.69412500000004,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "stages-81920-1024.jsonl",
+      "depth": 81920,
+      "rows": 1024,
+      "pairs": [
+        {
+          "order": "BA",
+          "baseline_serial_ms": 122.62254200000001,
+          "candidate_serial_ms": 102.014207,
+          "ratio": 1.2020143625681472,
+          "baseline_wall_ms": 962.434,
+          "candidate_wall_ms": 949.763209
+        },
+        {
+          "order": "AB",
+          "baseline_serial_ms": 122.671292,
+          "candidate_serial_ms": 102.03120900000002,
+          "ratio": 1.202291859542701,
+          "baseline_wall_ms": 964.043666,
+          "candidate_wall_ms": 950.039666
+        },
+        {
+          "order": "BA",
+          "baseline_serial_ms": 122.69437400000001,
+          "candidate_serial_ms": 102.01833300000001,
+          "ratio": 1.2026698573872991,
+          "baseline_wall_ms": 962.183583,
+          "candidate_wall_ms": 949.0733329999999
+        }
+      ],
+      "serial_speedup_geomean": 1.2023253298194632,
+      "pass_gate": false,
+      "bitwise_endpoints": 8,
+      "arms": [
+        {
+          "rep": 0,
+          "policy": "baseline",
+          "serial_ms": 122.632124,
+          "serial_layers_ms": {
+            "2": 13.182666,
+            "8": 13.120209,
+            "14": 13.1135,
+            "20": 27.373541,
+            "24": 13.976333,
+            "28": 13.97875,
+            "32": 13.955084,
+            "36": 13.932041
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 1028.449125,
+          "disk_read_bytes": 188170240,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ]
+        },
+        {
+          "rep": 1,
+          "policy": "index-compose",
+          "serial_ms": 101.97454200000001,
+          "serial_layers_ms": {
+            "2": 13.705583,
+            "8": 13.638875,
+            "14": 13.631792,
+            "20": 28.616291,
+            "24": 8.109125,
+            "28": 8.098625,
+            "32": 8.090084,
+            "36": 8.084167
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 953.8075419999999,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ]
+        },
+        {
+          "rep": 2,
+          "policy": "index-compose",
+          "serial_ms": 102.014207,
+          "serial_layers_ms": {
+            "2": 13.705208,
+            "8": 13.636958,
+            "14": 13.633458,
+            "20": 28.637792,
+            "24": 8.109916,
+            "28": 8.11525,
+            "32": 8.086208,
+            "36": 8.089417
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 949.763209,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ]
+        },
+        {
+          "rep": 3,
+          "policy": "baseline",
+          "serial_ms": 122.62254200000001,
+          "serial_layers_ms": {
+            "2": 13.205208,
+            "8": 13.119708,
+            "14": 13.112,
+            "20": 27.3705,
+            "24": 13.959083,
+            "28": 13.965334,
+            "32": 13.94725,
+            "36": 13.943459
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 962.434,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ]
+        },
+        {
+          "rep": 4,
+          "policy": "baseline",
+          "serial_ms": 122.671292,
+          "serial_layers_ms": {
+            "2": 13.193125,
+            "8": 13.119875,
+            "14": 13.116292,
+            "20": 27.381334,
+            "24": 13.987167,
+            "28": 13.962666,
+            "32": 13.954625,
+            "36": 13.956208
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 964.043666,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ]
+        },
+        {
+          "rep": 5,
+          "policy": "index-compose",
+          "serial_ms": 102.03120900000002,
+          "serial_layers_ms": {
+            "2": 13.7035,
+            "8": 13.638917,
+            "14": 13.634584,
+            "20": 28.651583,
+            "24": 8.119583,
+            "28": 8.104167,
+            "32": 8.090833,
+            "36": 8.088042
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 950.039666,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ]
+        },
+        {
+          "rep": 6,
+          "policy": "index-compose",
+          "serial_ms": 102.01833300000001,
+          "serial_layers_ms": {
+            "2": 13.722,
+            "8": 13.641833,
+            "14": 13.633125,
+            "20": 28.633667,
+            "24": 8.10725,
+            "28": 8.111916,
+            "32": 8.08175,
+            "36": 8.086792
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 949.0733329999999,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ]
+        },
+        {
+          "rep": 7,
+          "policy": "baseline",
+          "serial_ms": 122.69437400000001,
+          "serial_layers_ms": {
+            "2": 13.206041,
+            "8": 13.121458,
+            "14": 13.114167,
+            "20": 27.373708,
+            "24": 13.979708,
+            "28": 13.990292,
+            "32": 13.956,
+            "36": 13.953
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 962.183583,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ]
+        }
+      ]
+    },
+    {
+      "file": "stages-81920-256.jsonl",
+      "depth": 81920,
+      "rows": 256,
+      "pairs": [
+        {
+          "order": "BA",
+          "baseline_serial_ms": 40.098917,
+          "candidate_serial_ms": 35.121331,
+          "ratio": 1.1417254374556591,
+          "baseline_wall_ms": 448.405,
+          "candidate_wall_ms": 443.24087499999996
+        },
+        {
+          "order": "AB",
+          "baseline_serial_ms": 40.047000999999995,
+          "candidate_serial_ms": 35.2185,
+          "ratio": 1.1371012677995938,
+          "baseline_wall_ms": 449.98654100000005,
+          "candidate_wall_ms": 453.857166
+        },
+        {
+          "order": "BA",
+          "baseline_serial_ms": 40.074082000000004,
+          "candidate_serial_ms": 35.133708000000006,
+          "ratio": 1.1406163562354419,
+          "baseline_wall_ms": 454.606583,
+          "candidate_wall_ms": 454.268833
+        }
+      ],
+      "serial_speedup_geomean": 1.1398126483480762,
+      "pass_gate": false,
+      "bitwise_endpoints": 8,
+      "arms": [
+        {
+          "rep": 0,
+          "policy": "baseline",
+          "serial_ms": 40.107457000000004,
+          "serial_layers_ms": {
+            "2": 5.274,
+            "8": 5.244542,
+            "14": 5.237416,
+            "20": 9.437459,
+            "24": 3.734542,
+            "28": 3.730916,
+            "32": 3.720166,
+            "36": 3.728416
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 864.668291,
+          "disk_read_bytes": 76578816,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ]
+        },
+        {
+          "rep": 1,
+          "policy": "index-compose",
+          "serial_ms": 35.111124,
+          "serial_layers_ms": {
+            "2": 5.4275,
+            "8": 5.397291,
+            "14": 5.391917,
+            "20": 9.839125,
+            "24": 2.278625,
+            "28": 2.254666,
+            "32": 2.264583,
+            "36": 2.257417
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 450.635292,
+          "disk_read_bytes": 147456,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ]
+        },
+        {
+          "rep": 2,
+          "policy": "index-compose",
+          "serial_ms": 35.121331,
+          "serial_layers_ms": {
+            "2": 5.427958,
+            "8": 5.396708,
+            "14": 5.399375,
+            "20": 9.846458,
+            "24": 2.269166,
+            "28": 2.257708,
+            "32": 2.260458,
+            "36": 2.2635
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 443.24087499999996,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ]
+        },
+        {
+          "rep": 3,
+          "policy": "baseline",
+          "serial_ms": 40.098917,
+          "serial_layers_ms": {
+            "2": 5.276792,
+            "8": 5.240292,
+            "14": 5.245917,
+            "20": 9.43725,
+            "24": 3.730625,
+            "28": 3.725875,
+            "32": 3.71975,
+            "36": 3.722416
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 448.405,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ]
+        },
+        {
+          "rep": 4,
+          "policy": "baseline",
+          "serial_ms": 40.047000999999995,
+          "serial_layers_ms": {
+            "2": 5.281167,
+            "8": 5.240625,
+            "14": 5.235167,
+            "20": 9.404209,
+            "24": 3.734708,
+            "28": 3.715125,
+            "32": 3.715208,
+            "36": 3.720792
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 449.98654100000005,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ]
+        },
+        {
+          "rep": 5,
+          "policy": "index-compose",
+          "serial_ms": 35.2185,
+          "serial_layers_ms": {
+            "2": 5.431291,
+            "8": 5.506792,
+            "14": 5.399292,
+            "20": 9.849083,
+            "24": 2.269375,
+            "28": 2.256167,
+            "32": 2.252458,
+            "36": 2.254042
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 453.857166,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ]
+        },
+        {
+          "rep": 6,
+          "policy": "index-compose",
+          "serial_ms": 35.133708000000006,
+          "serial_layers_ms": {
+            "2": 5.4365,
+            "8": 5.394708,
+            "14": 5.394417,
+            "20": 9.861041,
+            "24": 2.273375,
+            "28": 2.260417,
+            "32": 2.253916,
+            "36": 2.259334
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 454.268833,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ]
+        },
+        {
+          "rep": 7,
+          "policy": "baseline",
+          "serial_ms": 40.074082000000004,
+          "serial_layers_ms": {
+            "2": 5.281625,
+            "8": 5.236708,
+            "14": 5.236041,
+            "20": 9.427125,
+            "24": 3.729125,
+            "28": 3.720083,
+            "32": 3.7205,
+            "36": 3.722875
+          },
+          "empty_serial_layers": 32,
+          "wall_ms": 454.606583,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ]
+        }
+      ]
+    }
+  ]
+}

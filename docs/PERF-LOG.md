@@ -21,6 +21,21 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   64×2,051 F32 scores (512.75 KiB vs 32 KiB current scratch). Exact recompute
   adds about 178/90 ms of score production for 30/15 ms priced traffic savings.
   No NI path or gate/up follow-on. [Design record](bench/2026-11-14-glm-latent-score-softmax.md).
+## 2026-11-14 - V4.1 Compact + Exact M2: Composed Gate Fails
+
+- Compact was restored for composition under the unchanged >=1.25x-every-cell
+  serial-span rule. Chosen exact register M2 is 0.973x the one-query kernel in
+  diagnostics; explicit unrolling fixes an initial 30x slowdown, while shared
+  key staging and a resource cap add no speed. All variants pass strict bits.
+- One pinned iter binary, AB warmup then BA/AB/BA: composed geomeans
+  **1.139813/1.202325x** at 80K and **1.157072/1.230403x** at 128K (256/1K).
+  Every cell fails. All 32 causal signatures bitwise; nice 0, thermal 0,
+  measured append-window process disk reads 0; warmup reads retained.
+- Both components and knobs removed; active Rust/shader files match the
+  pre-stage tip. No native or serve packet after failure. Next suggested
+  exact lever: aggregate masked `-Inf` radix histogram counts. [All sources,
+  diagnostic points, layer times and paired results](bench/2026-11-13-v41-index-compose.md).
+
 ## 2026-11-14 - V4.1 Serial Attention: Audit Corrected, Compact Gate Fails
 
 - The alleged three duplicate index MMAs (7.534 ms) process different query

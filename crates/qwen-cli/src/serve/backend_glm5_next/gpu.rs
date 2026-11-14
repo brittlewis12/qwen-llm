@@ -4,6 +4,7 @@ use crate::serve::decode_cursor::{Advance, DecodeCursor};
 pub(super) fn advance(
     ctx: &qwen_llm::metal::MetalContext,
     tokenizer: &qwen_llm::tokenizer::NativeTokenizer,
+    lifecycle: &super::super::lifecycle_timing::Trace,
     session: &mut Glm5NextSession<'_>,
     sampler: &mut qwen_llm::sampling::Sampler,
     cursor: &mut DecodeCursor,
@@ -22,6 +23,9 @@ pub(super) fn advance(
     let mut tokens = Vec::with_capacity(count);
     let mut callback_error = None;
     let result = session.generate_gpu_tokens(ctx, logits, sampler, count, &CHAT_STOPS, |token| {
+        if tokens.is_empty() {
+            lifecycle.mark(super::super::lifecycle_timing::Stage::FirstSampled);
+        }
         tokens.push(token);
         let result = (|| -> Result<bool, BackendFailure> {
             crate::shutdown::checkpoint().map_err(|e| ServeError::server_error(e.to_string()))?;

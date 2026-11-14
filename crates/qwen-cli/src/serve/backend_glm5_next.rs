@@ -845,6 +845,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         let session = self.session.as_mut().expect("prepared session");
         let generation = (|| {
             use super::decode_cursor::{Advance, DecodeCursor};
+            let lifecycle = run.lifecycle.clone();
             let mut cursor = DecodeCursor::new(decode_loop::DecodeRequest {
                 family: FAMILY,
                 logits: std::mem::take(&mut run.logits),
@@ -856,6 +857,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 let advance = gpu::advance(
                     self.ctx,
                     self.prepared.artifact.tokenizer(),
+                    &lifecycle,
                     session,
                     &mut run.sampler,
                     &mut cursor,
@@ -906,6 +908,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         sink: &mut dyn GenerationSink,
     ) -> Result<execution::Begun<'w>, BackendFailure> {
         self.idle_residency.before_request();
+        let lifecycle = super::lifecycle_timing::current();
         // Everything a client can get wrong is refused before the live
         // session is touched, so a 400 keeps the cached conversation.
         let conversation = super::checkpoint_ladder::conversation(&request);
@@ -917,6 +920,15 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         let vocab_size = self.prepared.artifact.config().vocab_size;
         let tokenizer = self.prepared.artifact.tokenizer();
         // The renderer writes [gMASK]<sop>; the glm4 tokenizer adds nothing.
+        let tokenize_span = super::lifecycle_timing::Span::current(
+            if tokens.is_some() {
+                "copy_prepared_tokens"
+            } else {
+                "tokenize_full_backend"
+            },
+            0,
+            0,
+        );
         let tokens = match tokens {
             Some(tokens) => tokens.to_vec(),
             None => decode_loop::encode_checked(
@@ -928,6 +940,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                     .display,
             )?,
         };
+        drop(tokenize_span);
         let required = decode_loop::required_forwards(
             crate::family_profile::profile(qwen_llm::model_family::ModelFamily::Glm5Next).display,
             tokens.len(),
@@ -953,6 +966,8 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
 
         // Taken before the session is used and republished only for a state
         // the session is known to hold, so a failure leaves no stale history.
+        let live_prefix_span =
+            super::lifecycle_timing::Span::current("prefix_match", 0, tokens.len());
         self.take_idle(&tokens, request_lineage(request, self.lineage));
         let saved_chunk_origin = self.chunk_origin.take();
         #[cfg(test)]
@@ -973,9 +988,12 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
             live_lineage,
             lineage,
         );
+        drop(live_prefix_span);
         let mut schedule = snapshot_schedule(self.cache.max_bytes(), self.fast_snapshots, lineage);
         let boundary_t0 = Instant::now();
         let tokenizer = self.prepared.artifact.tokenizer();
+        let boundary_span =
+            super::lifecycle_timing::Span::current("tokenize_boundaries", 0, tokens.len());
         let cuts = schedule.map_or_else(Vec::new, |schedule| {
             cut_positions(
                 |text| decode_loop::encode_checked(tokenizer, text, false, vocab_size, FAMILY),
@@ -985,6 +1003,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 schedule,
             )
         });
+        drop(boundary_span);
         // CPU cost of verifying boundaries (one prefix encode per cut).
         let boundary_ms = boundary_t0.elapsed().as_secs_f64() * 1e3;
         // Fast snapshots exist only at a verified shared-prefix cut: without
@@ -1038,6 +1057,8 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         // Incumbent lookup: Exact accepts any compatible prefix; Fast shared
         // snapshots must end exactly at this request's cut. Compare compatible
         // full-chunk checkpoints below; live wins ties across both origins.
+        let cache_match_span =
+            super::lifecycle_timing::Span::current("prefix_match", 0, tokens.len());
         let hit = namespace
             .filter(|_| self.prefix_reuse)
             .and_then(|namespace| match namespace.schedule {
@@ -1085,6 +1106,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         let trajectory =
             trajectory_namespace.and_then(|ns| self.cache.peek_best_prefix_in(&ns, &tokens));
         let (hit, trajectory_hit) = chunk_checkpoint::choose(live, hit, trajectory);
+        drop(cache_match_span);
         let deep_hit = deep_hit && !trajectory_hit;
         let restore_t0 = Instant::now();
         let mut restored: Option<EntryId> = None;
@@ -1098,6 +1120,8 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         }
         let matched = match hit {
             Some(hit) => {
+                let _restore_span =
+                    super::lifecycle_timing::Span::current("prefix_restore", 0, hit.prefix_len);
                 if live_lineage != Some(lineage) {
                     self.session = None;
                     let shared = if chunk_enabled {
@@ -1253,6 +1277,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                 0
             }
         };
+        lifecycle.extent(FAMILY, tokens.len(), matched);
         if let Some(plan) = plan {
             tracing::info!(target: "qwen_diag",
                 "serve: glm5_next prefill plan rows={} session_bytes={} prefix_budget={} prefix_preference_held={}",
@@ -1370,6 +1395,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         let prompt_len = tokens.len();
         Ok(execution::Begun::Run(Box::new(execution::Run {
             session: None,
+            lifecycle,
             tokens,
             history,
             sampler,
@@ -1546,6 +1572,11 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
                     .saturating_add(maximum_rows.max(1).min(run.selected_rows.max(1))),
             )
         });
+        let _layer_slice = super::lifecycle_timing::Span::current(
+            "glm_layer_slice",
+            run.position,
+            end.saturating_sub(run.position),
+        );
         let outcome = (|| {
             if !pending {
                 let session = self.session.as_mut().expect("session");
@@ -1660,6 +1691,8 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
         if run.ready {
             return Ok(());
         }
+        let _finish_span =
+            super::lifecycle_timing::Span::current("finish_prefill", run.position, 0);
         #[cfg(test)]
         {
             self.last_prefill_logits = run.logits.iter().map(|v| v.to_bits()).collect();

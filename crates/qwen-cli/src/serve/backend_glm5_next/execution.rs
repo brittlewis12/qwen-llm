@@ -9,6 +9,7 @@ pub(super) enum Begun<'w> {
 
 pub(super) struct Run<'w> {
     pub session: Option<Glm5NextSession<'w>>,
+    pub lifecycle: super::super::lifecycle_timing::Trace,
     pub tokens: Vec<u32>,
     pub history: Vec<u32>,
     pub sampler: Sampler,

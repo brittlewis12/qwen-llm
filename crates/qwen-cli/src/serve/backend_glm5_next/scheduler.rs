@@ -292,6 +292,9 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
     fn rows(&self, run: &Self::Run) -> usize {
         run.selected_rows
     }
+    fn position(&self, run: &Self::Run) -> usize {
+        run.position
+    }
     fn prefill(
         &mut self,
         run: &mut Self::Run,
@@ -417,9 +420,11 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
         reserve: u64,
     ) -> Option<Result<Advance, BackendFailure>> {
         run.reserve = reserve;
+        let lifecycle = run.lifecycle.clone();
         gpu::advance(
             self.0.ctx,
             self.0.prepared.artifact.tokenizer(),
+            &lifecycle,
             run.session.as_mut().expect("request owns session"),
             &mut run.sampler,
             cursor,
@@ -465,6 +470,7 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
         // the driver guard.
         let _qos = qwen_llm::metal::GpuThreadQos::enter();
         let offset: Vec<f64> = cursors.iter().map(|c| c.elapsed_ms()).collect();
+        let lifecycles: Vec<_> = runs.iter().map(|run| run.lifecycle.clone()).collect();
         let counts: Vec<usize> = cursors
             .iter()
             .map(|c| c.remaining_tokens().min(8))
@@ -488,6 +494,10 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
                 &counts,
                 &eos,
                 |member, token| {
+                    if burst[member].is_empty() {
+                        lifecycles[member]
+                            .mark(super::super::lifecycle_timing::Stage::FirstSampled);
+                    }
                     burst[member].push(token as i32);
                     let result = (|| -> Result<bool, BackendFailure> {
                         crate::shutdown::checkpoint()

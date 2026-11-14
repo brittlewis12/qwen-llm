@@ -35,6 +35,10 @@ pub(crate) trait Runtime {
         sink: &mut dyn GenerationSink,
     ) -> Result<Begun<Self::Run>, BackendFailure>;
     fn rows(&self, run: &Self::Run) -> usize;
+    /// Current prompt-token position for request-scoped lifecycle spans.
+    fn position(&self, _run: &Self::Run) -> usize {
+        0
+    }
     fn now(&mut self) -> Instant {
         Instant::now()
     }
@@ -774,12 +778,6 @@ impl<R> Driver<R> {
             let a = &mut self.active[i];
             let timing = a.sink.lifecycle();
             let _lifecycle = timing.enter();
-            let _round = crate::serve::lifecycle_timing::Round::new(
-                "prefill",
-                std::iter::once(timing),
-                0,
-                0,
-            );
             let run = a.run.as_mut().expect("prefill run");
             let loaded = !members.is_empty();
             let rows = if loaded && !self.prefill_fair {
@@ -787,8 +785,15 @@ impl<R> Driver<R> {
             } else {
                 runtime.rows(run).max(1)
             };
+            let position = runtime.position(run);
+            let _round = crate::serve::lifecycle_timing::Round::new(
+                "prefill",
+                std::iter::once(timing),
+                position,
+                rows,
+            );
             let slice_span =
-                crate::serve::lifecycle_timing::Span::current("prefill_slice", 0, rows);
+                crate::serve::lifecycle_timing::Span::current("prefill_slice", position, rows);
             let quantum = runtime.prefill_sliced(
                 run,
                 rows,

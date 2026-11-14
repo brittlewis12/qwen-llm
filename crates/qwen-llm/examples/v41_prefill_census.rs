@@ -140,6 +140,7 @@ fn main() -> Result<()> {
     let rows: usize = a[4].parse()?;
     let mode = a.get(5).map_or("native", String::as_str);
     let reps: usize = a.get(6).map_or(Ok(1), |v| v.parse())?;
+    let context = (depth + rows + 1).next_multiple_of(4096).max(98_304);
     let experiment = a.get(7).map_or("baseline", String::as_str);
     let paired = experiment.starts_with("paired-");
     let candidate = experiment.strip_prefix("paired-").unwrap_or(experiment);
@@ -155,7 +156,7 @@ fn main() -> Result<()> {
         "profile mode"
     );
     ensure!(
-        rows > 0 && depth + rows < 98_304 && reps <= 8,
+        rows > 0 && depth + rows <= 196_608 && reps <= 8,
         "bounded shape"
     );
     thermal()?;
@@ -185,7 +186,7 @@ fn main() -> Result<()> {
         "index_layers":w.schedule.index_source_layers,"kv_layers":w.schedule.kv_source_layers,
         "prefill_rows":f.prefill_chunk_rows()}),
     );
-    let mut prefix = f.new_state(98_304)?;
+    let mut prefix = f.new_state(context)?;
     if depth > 0 {
         let t = Instant::now();
         cold(&f, &mut prefix, &ids[..depth])?;
@@ -208,7 +209,7 @@ fn main() -> Result<()> {
         } else {
             candidate
         };
-        let mut s = f.new_state(98_304)?;
+        let mut s = f.new_state(context)?;
         f.restore_snapshot(&mut s, &snap)?;
         let scope = if mode == "stages" {
             profile::Scope::begin_stages().map_err(anyhow::Error::msg)?

@@ -792,6 +792,7 @@ impl Workspace {
         rows: &Rows,
         dense_weight: Option<&MetalTensor>,
     ) -> Result<()> {
+        metal::dispatch_profile_label("attention_prepare", Some(id));
         op::require(!enc.is_concurrent(), "query batch requires serial encoder")?;
         op::require(
             self.active_batch().is_some_and(|b| {
@@ -908,6 +909,7 @@ impl Workspace {
         input: &MetalTensor,
         rows: &Rows,
     ) -> Result<()> {
+        metal::dispatch_profile_label("attention_serial", Some(id));
         let range_host = range_host_enabled();
         let mode = if range_host {
             self.validate_serial_range(enc, id, start, w, input, rows)?
@@ -1535,6 +1537,7 @@ impl Workspace {
         start: usize,
         rows: &Rows,
     ) -> Result<()> {
+        metal::dispatch_profile_label("attention_tiles", Some(id));
         let tile = tile_rows();
         let mut first = 0;
         while first < rows.rows {

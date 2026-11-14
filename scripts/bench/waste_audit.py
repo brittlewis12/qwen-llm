@@ -12,7 +12,7 @@ plan per causal scope with exact read/write buffer spans and one isolated GPU
 timestamp pair per dispatch.  This tool attributes that GPU time to
 
   * dead writes (written, then overwritten or dropped without a read),
-  * recomputation (same kernel, grid and input spans within a round),
+  * recomputation (same kernel, arguments, grid and input spans within a round),
   * pure data movement (copies, fills and F32<->half conversions),
   * memory round-trip fusion candidates,
   * possible unneeded rows/head work, and
@@ -270,6 +270,9 @@ def recomputation(cap: Capture):
                     tuple(node["grid"]),
                     tuple(node["threads"]),
                     reads,
+                    tuple((slot, tuple(data)) for slot, data in node.get("constants", [])),
+                    tuple(tuple(x) for x in node.get("threadgroup_memory", [])),
+                    node.get("pipeline"),
                 )
                 if key in seen and reads:
                     first = seen[key]
@@ -283,7 +286,7 @@ def recomputation(cap: Capture):
                         continue
                     items.append(
                         {
-                            "category": "recomputation",
+                            "category": "recomputation" if "constants" in node and "constants" in cap.plans[first[0]]["nodes"][first[1]] else "unverified_recomputation",
                             "family_file": cap.path.name,
                             "phase": cap.phase,
                             "kernel": node["kernel"],
@@ -298,7 +301,7 @@ def recomputation(cap: Capture):
                                 for s in node["spans"]
                                 if not s["write"]
                             ),
-                            "evidence": "identical kernel/grid/threads and input spans",
+                            "evidence": "identical kernel/arguments/grid/threads/input spans" if "constants" in node else "legacy capture omits inline constants; reuse is not proven",
                         }
                     )
                 else:
@@ -629,6 +632,11 @@ def self_test():
         ],
         "waves": [[0, 2, 3, 4], [1], [5]],
     }
+    for node in plan["nodes"]:
+        node["constants"] = []
+    # Same spans and launch, different row0: not a duplicate.
+    altered = dict(plan["nodes"][3], id=len(plan["nodes"]), constants=[(7,[1,0,0,0])])
+    plan["nodes"].append(altered)
     nodes = []
     for scope_id, p in [(1, plan)]:
         for n in p["nodes"]:
@@ -658,6 +666,7 @@ def self_test():
         name = f.name
     result = analyze(Path(name))
     Path(name).unlink()
+    assert not any(i["category"] == "recomputation" and i.get("node") == altered["id"] for i in result["items"]), "different inline row0 is not recomputation"
     cats = {i["category"] for i in result["items"]}
     assert "dead_write" in cats, cats
     assert "recomputation" in cats, cats
@@ -675,7 +684,8 @@ def self_test():
 
 FIX = {
     "dead_write": "drop the write, or stop overwriting before a reader",
-    "recomputation": "delete the duplicate dispatch and reuse the first result",
+    "recomputation": "verify output lifetime, then reuse the first result",
+    "unverified_recomputation": "capture and compare inline constants before considering reuse",
     "data_movement": "have the producer write the consumer format / bind the source",
     "fusable_chain": "fuse the producer into its single consumer",
     "per_member_duplication": "share one weight stream across members",

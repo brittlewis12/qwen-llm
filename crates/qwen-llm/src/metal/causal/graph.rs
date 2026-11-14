@@ -156,7 +156,10 @@ pub(crate) fn record_plan(nodes: &[Node], spans: &[Vec<Access>], waves: &[Vec<us
                 if s.write { out.push(serde_json::json!({"buffer":s.buffer,"lo":s.lo,"hi":s.hi,"write":true})); }
                 out
             }).collect();
-            serde_json::json!({"id":i,"kernel":n.name(),"label":n.label,"grid":[n.grid.width,n.grid.height,n.grid.depth],"threads":[n.threads.width,n.threads.height,n.threads.depth],"predecessors":predecessors,"spans":encoded})
+            let constants: Vec<_> = n.state.slots.iter().filter_map(|(slot,b)| match b {
+                Binding::Bytes(bytes) => Some((*slot, bytes.to_vec())), _ => None,
+            }).collect();
+            serde_json::json!({"id":i,"kernel":n.name(),"label":n.label,"grid":[n.grid.width,n.grid.height,n.grid.depth],"threads":[n.threads.width,n.threads.height,n.threads.depth],"predecessors":predecessors,"spans":encoded,"constants":constants,"threadgroup_memory":n.state.threadgroup,"pipeline":Retained::as_ptr(&n.state.pipeline.as_ref().unwrap().raw) as usize})
         }).collect();
         a.plans.push(serde_json::json!({"scope":a.scope,"nodes":rows,"waves":waves}));
     });

@@ -174,6 +174,7 @@ fn mma_index_scores_match_index_heads_rows() {
             (131_066, 1, 2, 3),
         ],
     );
+    mma_subtile_offsets_are_observable();
 }
 
 /// Later reindexing must preserve allowed scores and selection, including
@@ -1061,4 +1062,67 @@ fn select_kernels_timing() {
         );
     });
     println!("empty dispatch us={floor:.2}");
+}
+
+// Equal buffers and grids do not imply duplicate work: row0 selects different
+// query/weight rows. Full and tiled evaluation of the same rows must be exact.
+fn mma_subtile_offsets_are_observable() {
+    let ctx = MetalContext::new().unwrap();
+    let c = Config::default();
+    let start = 81920usize;
+    let rows = 4usize;
+    let last = start + rows;
+    let stride = last + 3;
+    let q: Vec<f32> = (0..rows * 32 * 128)
+        .map(|i| ((i % 4096 % 17) as f32 - 8.) * ((i / 4096 + 1) as f32) * 0.03125)
+        .collect();
+    let w: Vec<f32> = (0..rows * 32)
+        .map(|i| ((i % 7 + 1) as f32) * 0.125)
+        .collect();
+    let k: Vec<f32> = (0..last * 128)
+        .map(|i| ((i * 13 % 101) as f32 - 50.) * 0.015625)
+        .collect();
+    let q = upload(&ctx, &q, vec![(rows * 32 * 128) as u64]).unwrap();
+    let w = upload(&ctx, &w, vec![(rows * 32) as u64]).unwrap();
+    let k = upload(&ctx, &k, vec![(last * 128) as u64]).unwrap();
+    let full = upload(
+        &ctx,
+        &vec![-12345.; rows * stride],
+        vec![(rows * stride) as u64],
+    )
+    .unwrap();
+    let tile = upload(&ctx, &vec![-12345.; 2 * stride], vec![(2 * stride) as u64]).unwrap();
+    execute(&ctx, |enc| {
+        encode_index_scores_rows_mma(
+            &ctx, enc, &c, start, 1, last, 0, rows, stride, &q, &w, &k, &full,
+        )
+        .unwrap()
+    });
+    let expected = f32_slice(&full).unwrap().to_vec();
+    let mut first_tile: Option<Vec<f32>> = None;
+    for first in [0usize, 2] {
+        execute(&ctx, |enc| {
+            encode_index_scores_rows_mma(
+                &ctx, enc, &c, start, 1, last, first, 2, stride, &q, &w, &k, &tile,
+            )
+            .unwrap()
+        });
+        let got = f32_slice(&tile).unwrap();
+        for (a, b) in got
+            .iter()
+            .zip(&expected[first * stride..(first + 2) * stride])
+        {
+            assert_eq!(a.to_bits(), b.to_bits(), "MMA sub-tile row0={first}");
+        }
+        if let Some(old) = &first_tile {
+            assert_ne!(
+                &got[..start],
+                old.as_slice(),
+                "different row0 must not reuse the first tile"
+            );
+        } else {
+            first_tile = Some(got[..start].to_vec());
+        }
+    }
+    eprintln!("MMA_SUBTILE_REUSE_PROOF full_vs_tile_bits_exact=true row0_0_vs_2_differ=true");
 }

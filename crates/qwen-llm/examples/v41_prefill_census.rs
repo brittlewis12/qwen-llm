@@ -111,10 +111,16 @@ fn execute(
             "baseline" => match control_for {
                 "masked-reindex-mid" => E::MaskedReindexMid(false),
                 "attention-bundle" => E::AttentionBundle(false),
+                "masked-index-compact" => E::MaskedIndexCompact(false),
+                "radix-coalesce" => E::RadixCoalesce(false),
+                "index-radix" => E::IndexRadixCompose(false),
                 _ => E::Production,
             },
             "masked-reindex-mid" => E::MaskedReindexMid(true),
             "attention-bundle" => E::AttentionBundle(true),
+            "masked-index-compact" => E::MaskedIndexCompact(true),
+            "radix-coalesce" => E::RadixCoalesce(true),
+            "index-radix" => E::IndexRadixCompose(true),
             _ => anyhow::bail!("experiment"),
         };
         with_prefill_experiment(e, run)
@@ -144,12 +150,21 @@ fn main() -> Result<()> {
         .checked_add(rows)
         .ok_or_else(|| anyhow::anyhow!("shape overflow"))?;
     let experiment = a.get(7).map_or("baseline", String::as_str);
-    let paired = experiment.starts_with("paired-");
-    let candidate = experiment.strip_prefix("paired-").unwrap_or(experiment);
+    let triad = experiment.starts_with("triad-");
+    let paired = experiment.starts_with("paired-") || triad;
+    let candidate = experiment
+        .strip_prefix("paired-")
+        .or_else(|| experiment.strip_prefix("triad-"))
+        .unwrap_or(experiment);
     ensure!(
         matches!(
             candidate,
-            "baseline" | "masked-reindex-mid" | "attention-bundle"
+            "baseline"
+                | "masked-reindex-mid"
+                | "attention-bundle"
+                | "masked-index-compact"
+                | "radix-coalesce"
+                | "index-radix"
         ),
         "experiment"
     );
@@ -198,13 +213,37 @@ fn main() -> Result<()> {
     drop(prefix);
     #[cfg(feature = "perf-ablations")]
     let mut expected = None;
-    for rep in 0..reps * if paired { 2 } else { 1 } {
+    ensure!(!triad || candidate == "index-radix", "triad experiment");
+    for rep in 0..reps
+        * if triad {
+            3
+        } else if paired {
+            2
+        } else {
+            1
+        }
+    {
         let arm = if paired && rep / 2 % 2 == 1 {
             1 - rep % 2
         } else {
             rep % 2
         };
-        let policy = if paired && arm == 0 {
+        let policy = if triad {
+            // Warm all three pipelines, then keep primary A/B pairs adjacent:
+            // warm A/B/C, measured B/A/C, C/A/B, B/A/C.
+            let order = if rep / 3 == 0 {
+                [0, 2, 1]
+            } else if rep / 3 % 2 == 1 {
+                [2, 0, 1]
+            } else {
+                [1, 0, 2]
+            };
+            match order[rep % 3] {
+                0 => "baseline",
+                1 => "masked-index-compact",
+                _ => candidate,
+            }
+        } else if paired && arm == 0 {
             "baseline"
         } else {
             candidate

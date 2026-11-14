@@ -760,6 +760,200 @@ kernel void kernel_deepseek_v41_attention_select_radix_rows(
     }
 }
 
+// Exact histogram-coalescing variant, derived from this file's incumbent
+// select_radix_rows (project MIT/Apache-2.0). Only integer histogram updates
+// change; score mapping, threshold search, NaN status, tie order and output
+// placement retain the incumbent operations. No new buffers or precision.
+[[max_total_threads_per_threadgroup(1024)]]
+kernel void kernel_deepseek_v41_attention_select_radix_rows_coalesced(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    constant uint4 &c [[buffer(2)]], device const float *scores [[buffer(3)]],
+    device uint *candidates [[buffer(4)]], device uint *selected [[buffer(5)]],
+    device atomic_uint *status [[buffer(6)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup atomic_uint hist[2048];
+    threadgroup uint partials[33];
+    threadgroup uint found[2];
+    const uint local = group.y;
+    if (local >= b.z) return;
+    const uint row = c.y + local;
+    const uint visible = (a.x + row + 1) / a.y;
+    const uint visible_blocks = (visible + a.w - 1u) / a.w;
+    const bool publish = c.w != 0;
+    const uint length = publish ? visible_blocks : visible;
+    const uint k = publish ? c.z : a.z;
+    if (length <= k) return;
+    device const float *srow = scores + (ulong)local * b.x;
+    device uint *crow = candidates + (ulong)row * b.y;
+    const bool masked = !publish && b.w != 0 && visible_blocks > c.z;
+
+    uint prefix = 0, prefix_mask = 0, remaining = k;
+    const uint shifts[3] = {21u, 10u, 0u};
+    const uint widths[3] = {11u, 11u, 10u};
+    for (uint pass = 0; pass < 3; ++pass) {
+        const uint shift = shifts[pass], bins = 1u << widths[pass], digit = bins - 1u;
+        for (uint j = tid; j < bins; j += V41_RADIX_THREADS)
+            atomic_store_explicit(hist + j, 0u, memory_order_relaxed);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Integer counts are associative and bounded by the row length.
+        // Preserve every key mapping and first-pass NaN status update, but
+        // combine the hot masked -Inf bucket into one atomic per simdgroup.
+        const uint neg_inf = radix_key(-INFINITY);
+        uint neg_inf_count = 0;
+        for (uint t = tid; t < length; t += V41_RADIX_THREADS) {
+            const uint key = radix_row_key(srow, crow, t, masked, a.w, pass == 0, status);
+            if ((key & prefix_mask) == prefix) {
+                if (masked && key == neg_inf) ++neg_inf_count;
+                else atomic_fetch_add_explicit(hist + ((key >> shift) & digit), 1u, memory_order_relaxed);
+            }
+        }
+        const uint neg_inf_total = simd_sum(neg_inf_count);
+        if (lane == 0 && neg_inf_total != 0)
+            atomic_fetch_add_explicit(hist + ((neg_inf >> shift) & digit),neg_inf_total,memory_order_relaxed);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Thread i owns bins (descending) [bins-1 - i*per, ..., bins - (i+1)*per].
+        const uint per = bins / V41_RADIX_THREADS;
+        uint mine = 0;
+        for (uint j = 0; j < per; ++j)
+            mine += atomic_load_explicit(hist + (bins - 1u - (tid * per + j)), memory_order_relaxed);
+        uint total;
+        uint above = radix_exclusive_sum(mine, partials, sg, lane, total);
+        if (above < remaining && remaining <= above + mine) {
+            for (uint j = 0; j < per; ++j) {
+                const uint bin = bins - 1u - (tid * per + j);
+                const uint n = atomic_load_explicit(hist + bin, memory_order_relaxed);
+                if (above + n >= remaining) {
+                    found[0] = bin;
+                    found[1] = above;
+                    break;
+                }
+                above += n;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        prefix |= found[0] << shift;
+        prefix_mask |= digit << shift;
+        remaining -= found[1];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    // prefix is now the k-th largest key T; `remaining` keys equal to T are needed.
+    const uint threshold = prefix, need_equal = remaining;
+    const uint chunk = (length + V41_RADIX_THREADS - 1u) / V41_RADIX_THREADS;
+    const uint lo = min(length, tid * chunk), hi = min(length, lo + chunk);
+    uint greater = 0, equal = 0;
+    for (uint t = lo; t < hi; ++t) {
+        const uint key = radix_row_key(srow, crow, t, masked, a.w, false, status);
+        greater += key > threshold;
+        equal += key == threshold;
+    }
+    uint total;
+    const uint equal_before = radix_exclusive_sum(equal, partials, sg, lane, total);
+    const uint equal_taken = equal_before >= need_equal ? 0u : min(equal, need_equal - equal_before);
+    uint out = radix_exclusive_sum(greater + equal_taken, partials, sg, lane, total);
+    device uint *dst = selected + (ulong)row * c.x;
+    uint equal_seen = equal_before;
+    for (uint t = lo; t < hi; ++t) {
+        const uint key = radix_row_key(srow, crow, t, masked, a.w, false, status);
+        bool take = key > threshold;
+        if (key == threshold) {
+            take = equal_seen < need_equal;
+            ++equal_seen;
+        }
+        if (publish) crow[t] = take ? 1u : 0u;
+        else if (take) dst[out++] = t;
+    }
+}
+
+// Exact compact launch experiment, derived from this file's incumbent masked
+// MMA and radix_exclusive_sum (project MIT/Apache-2.0). Integer compaction
+// preserves block order; each allowed eight-key panel keeps its F32 MMA,
+// partial-tail handling and four-head-group sum unchanged.
+[[max_total_threads_per_threadgroup(1024)]]
+kernel void kernel_deepseek_v41_attention_compact_mask_ids(
+    constant uint4 &a [[buffer(0)]], device const uint *mask [[buffer(1)]],
+    device uint *ids [[buffer(2)]], device atomic_uint *status [[buffer(3)]],
+    uint3 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup uint partials[33];
+    const uint row = a.y + group.y;
+    const uint blocks = (a.x + row + 1u + 7u) / 8u;
+    const uint chunk = (blocks + 1023u) / 1024u;
+    const uint lo = min(blocks,tid * chunk), hi = min(blocks,lo + chunk);
+    device const uint *m = mask + (ulong)row * a.w;
+    uint count = 0;
+    for (uint i=lo;i<hi;++i) count += m[i] != 0;
+    uint total;
+    uint offset = radix_exclusive_sum(count,partials,sg,lane,total);
+    if (total != 2048u) {
+        if (tid == 0) atomic_fetch_or_explicit(status,16u,memory_order_relaxed);
+        return;
+    }
+    device uint *out = ids + (ulong)row * 2048u;
+    for (uint i=lo;i<hi;++i) if (m[i]) out[offset++] = i;
+}
+
+kernel void kernel_deepseek_v41_attention_index_heads_rows_mma_compact(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    constant uint4 &c [[buffer(2)]], device const float *q [[buffer(3)]],
+    device const float *weights [[buffer(4)]], device const float *keys [[buffer(5)]],
+    device float *scores [[buffer(6)]], constant uint &row0 [[buffer(7)]],
+    device const uint *ids [[buffer(8)]],
+    uint3 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float ws[256];
+    threadgroup float partial[V41_IDX_MMA_KEYS * 4u];
+    threadgroup float scratch[8u * 64u];
+    const uint local = group.y;
+    if (local >= c.y) return;
+    const uint row = row0 + local;
+    const uint length = (a.x + row + 1u) / a.y;
+    device const uint *blocks = ids + (ulong)row * c.w + group.x * 16u;
+    device const float *qrow = q + (ulong)row * b.z;
+    device const float *wrow = weights + (ulong)row * b.w;
+    const float scale = rsqrt(float(b.x)) * rsqrt(float(b.y));
+    ws[tid] = wrow[(tid / 64u) * 8u + (tid % 64u) / 8u] * scale;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint hg = sg % 4u, kg = sg / 4u;
+    simdgroup_float8x8 qt[16];
+    for (uint i=0;i<16u;++i)
+        simdgroup_load(qt[i],qrow + hg * 8u * 128u + i * 8u,128,ulong2(0,0),true);
+    simdgroup_float8x8 wc;
+    simdgroup_load(wc,ws + hg * 64u,8);
+    threadgroup float *o = scratch + sg * 64u;
+    for (uint round=0;round<V41_IDX_MMA_ROUNDS;++round) {
+        const uint ordinal = round * 2u + kg;
+        const uint key0 = blocks[ordinal] * 8u;
+        const uint base = min(key0,length - 8u);
+        device const float *kp = keys + (ulong)base * 128u;
+        simdgroup_float8x8 acc = simdgroup_float8x8(0.0f);
+        for (uint i=0;i<16u;++i) {
+            simdgroup_float8x8 km;
+            simdgroup_load(km,kp + i * 8u,128);
+            simdgroup_multiply_accumulate(acc,km,qt[i],acc);
+        }
+        acc.thread_elements()[0] = max(acc.thread_elements()[0],0.0f);
+        acc.thread_elements()[1] = max(acc.thread_elements()[1],0.0f);
+        simdgroup_float8x8 r;
+        simdgroup_multiply(r,acc,wc);
+        simdgroup_store(r,o,8);
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        const uint key = base + lane;
+        if (lane < 8u && key >= key0 && key < length)
+            partial[(ordinal * 8u + key - key0) * 4u + hg] = o[lane * 8u];
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    device float *srow = scores + (ulong)local * c.x;
+    for (uint j=tid;j<V41_IDX_MMA_KEYS;j+=256u) {
+        const uint key = blocks[j / 8u] * 8u + j % 8u;
+        if (key < length)
+            srow[key] = partial[j * 4u] + partial[j * 4u + 1u] + partial[j * 4u + 2u] + partial[j * 4u + 3u];
+    }
+}
+
 // select_radix_rows split across threadgroups for long rows (decode has one
 // row, which one threadgroup leaves the GPU mostly idle on). Same arguments
 // a/b/c, order, masks, NaN status, modes and outputs. d: digit pass, keys per

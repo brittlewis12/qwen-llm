@@ -182,6 +182,15 @@ impl Settings {
         let maximum = self.limits.max_tokens(request);
         // Check the output-only lower bound before tokenization or state allocation.
         super::super::decode_loop::required_forwards("V4.1", 1, maximum, self.context)?;
+        let tokenize_span = super::super::lifecycle_timing::Span::current(
+            if tokens.is_some() {
+                "copy_prepared_tokens"
+            } else {
+                "tokenize_full_backend"
+            },
+            0,
+            0,
+        );
         let ids = match tokens {
             Some(tokens) => tokens.to_vec(),
             None => super::super::decode_loop::encode_checked(
@@ -192,6 +201,9 @@ impl Settings {
                 "V4.1",
             )?,
         };
+        drop(tokenize_span);
+        let boundary_span =
+            super::super::lifecycle_timing::Span::current("tokenize_boundaries", 0, ids.len());
         let mut checkpoint_cuts = Vec::new();
         let mut generation_cut = None;
         let mut shared_cut = None;
@@ -201,6 +213,15 @@ impl Settings {
                 ("generation_header", boundaries.generation_header_start),
             ] {
                 let Some(offset) = offset else { continue };
+                let _boundary = super::super::lifecycle_timing::Span::current(
+                    if name == "shared_prefix" {
+                        "tokenize_shared_prefix"
+                    } else {
+                        "tokenize_generation_prefix"
+                    },
+                    0,
+                    ids.len(),
+                );
                 let prefix = prompt.get(..offset).and_then(|prefix| {
                     self.tokenizer
                         .encode(prefix, false)
@@ -224,6 +245,7 @@ impl Settings {
                 }
             }
         }
+        drop(boundary_span);
         checkpoint_cuts.sort_unstable();
         checkpoint_cuts.dedup();
         // An aliased generation boundary still owns the shared-prefix cut.
@@ -243,10 +265,19 @@ impl Settings {
         let flag = sink.cancellation_flag();
         let cancel = cancel_of(&flag);
         check(sink, cancel)?;
+        let prepare_span =
+            super::super::lifecycle_timing::Span::current("prefix_prepare", 0, ids.len());
         reuse.prepare(&ids);
+        drop(prepare_span);
+        let output_admission =
+            super::super::lifecycle_timing::Span::current("output_admission", 0, ids.len());
         admit_output(reuse, reserve, self.headroom)?;
+        drop(output_admission);
         let restore_start = engine.now();
+        let restore_span =
+            super::super::lifecycle_timing::Span::current("prefix_take", 0, ids.len());
         let restored = reuse.take(&ids, required, reserve)?;
+        drop(restore_span);
         let restore_ms = (engine.now() - restore_start).as_secs_f64() * 1e3;
         let (state, logits, matched, reuse_source) = if let Some(restored) = restored {
             (
@@ -256,6 +287,8 @@ impl Settings {
                 restored.source,
             )
         } else {
+            let _allocate =
+                super::super::lifecycle_timing::Span::current("state_admit_allocate", 0, ids.len());
             super::super::memory_relief::retry(
                 "deepseek_v41",
                 engine.admit(required, ids.len(), reserve),
@@ -367,6 +400,11 @@ impl Settings {
         reuse: &mut R,
         mut between: Option<&mut dyn FnMut(&mut E, &mut R)>,
     ) -> std::result::Result<(), BackendFailure> {
+        let _slice = super::super::lifecycle_timing::Span::current(
+            "prefill_slice",
+            run.position,
+            run.next_endpoint(max_rows).saturating_sub(run.position),
+        );
         let flag = run.flag.clone();
         let cancel = cancel_of(&flag);
         let ids = &run.ids;
@@ -540,6 +578,8 @@ impl Settings {
         }
         if run.checkpoint_cuts.contains(&endpoint) || fused_header {
             let logits = if fused_header { &run.logits[..] } else { &[] };
+            let _checkpoint =
+                super::super::lifecycle_timing::Span::current("prefix_checkpoint", endpoint, 0);
             reuse.checkpoint(&run.state, &ids[..endpoint], logits, run.reserve);
         }
         Ok(())
@@ -553,15 +593,25 @@ impl Settings {
         engine: &mut impl Engine<S>,
         reuse: &mut impl reuse::Reuse<S>,
     ) -> std::result::Result<(), BackendFailure> {
+        let _finish =
+            super::super::lifecycle_timing::Span::current("finish_prefill", run.position, 0);
         check(sink, cancel_of(&run.flag))?;
         run.prefill_ms = run.prefill_work.elapsed_ms;
         if run.logits.len() != run.vocab || !run.logits.iter().all(|v| v.is_finite()) {
             return Err(ServeError::server_error("V4.1 returned malformed logits").into());
         }
         if run.checkpoint_cuts.is_empty() {
+            let _checkpoint = super::super::lifecycle_timing::Span::current(
+                "prefix_checkpoint",
+                run.ids.len(),
+                0,
+            );
             reuse.checkpoint(&run.state, &run.ids, &run.logits, run.reserve);
         }
         run.prefill_work.finished = true;
+        super::super::lifecycle_timing::mark(
+            super::super::lifecycle_timing::Stage::PrefillComplete,
+        );
         tracing::info!(target:"qwen_diag", "serve prefill: family=deepseek_v41 complete=true prefill_ms={:.3} reused_tokens={} prefill_tokens={} reused_source={} layer_rounds={}",
             run.prefill_ms, run.matched, run.ids.len()-run.matched, run.reuse_source, run.prefill_work.peer_rounds);
         run.consumed = run.ids.clone();

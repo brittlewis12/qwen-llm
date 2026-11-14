@@ -122,7 +122,7 @@ impl Drop for ExecutionPermit {
 }
 
 pub(super) enum Event {
-    Incoming(TcpStream),
+    Incoming(TcpStream, super::lifecycle_timing::Trace),
     Prepared(transport::Connection),
     Native(native::Queued),
 }
@@ -204,6 +204,8 @@ fn error_reply(mut stream: &TcpStream, status: u16, message: &str) -> io::Result
 }
 
 pub(super) fn handle(stream: TcpStream, profile: &Profile) -> io::Result<()> {
+    super::lifecycle_timing::mark(super::lifecycle_timing::Stage::HttpReceive);
+    let receive_span = super::lifecycle_timing::Span::current("http_receive", 0, 0);
     let mut activity = None;
     let mut execution = None;
     let request =
@@ -281,6 +283,8 @@ pub(super) fn handle(stream: TcpStream, profile: &Profile) -> io::Result<()> {
             return error_reply(&stream, status, &cause.to_string());
         }
     };
+    drop(receive_span);
+    super::lifecycle_timing::mark(super::lifecycle_timing::Stage::BodyReceived);
     if LensApi::matches(&request.path) {
         profile.lens.handle(&request, &stream)?;
         return Ok(());
@@ -347,6 +351,7 @@ pub(super) fn spawn(
                     }
                     match listener.accept() {
                         Ok((stream, _)) => {
+                            let timing = super::lifecycle_timing::Trace::new();
                             if let Err(cause) = http::configure_stream(&stream) {
                                 tracing::info!("HTTP control socket configuration failed: {cause}");
                                 continue;
@@ -367,7 +372,10 @@ pub(super) fn spawn(
                             let thread = std::thread::Builder::new()
                                 .name("qwen-http-control-request".into())
                                 .stack_size(STACK_BYTES)
-                                .spawn(move || handle(stream, &profile));
+                                .spawn(move || {
+                                    let _scope = timing.enter();
+                                    handle(stream, &profile)
+                                });
                             let thread = match thread {
                                 Ok(thread) => thread,
                                 Err(cause) => {

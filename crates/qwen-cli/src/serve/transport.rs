@@ -37,6 +37,7 @@ const BATCH_BUFFER_RESERVE_BYTES: u64 =
     (WORKER_STACK_BYTES + (BATCH_PIECE_CAPACITY + 3) * CHUNK_BYTES * 2) as u64;
 
 struct Control {
+    timing: super::lifecycle_timing::Trace,
     execution: ExecutionControl,
     owner: Thread,
     server: Option<super::control::ExecutionGate>,
@@ -174,6 +175,9 @@ struct OwnerBatchSink {
 }
 
 impl super::batching::BatchSink for OwnerBatchSink {
+    fn lifecycle(&self) -> super::lifecycle_timing::Trace {
+        self.control.timing.clone()
+    }
     fn cancellation_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
         self.control.execution.cancellation_flag()
     }
@@ -184,6 +188,9 @@ impl super::batching::BatchSink for OwnerBatchSink {
         self.control.checkpoint()
     }
     fn queue(&mut self, bytes: &[u8]) {
+        self.control
+            .timing
+            .mark(super::lifecycle_timing::Stage::FirstRawPiece);
         let chunks = bytes.chunks(CHUNK_BYTES);
         let count = chunks.len();
         for (index, chunk) in chunks.enumerate() {
@@ -274,15 +281,20 @@ impl GenerationBackend for HttpProxy {
         ),
         ServeError,
     > {
+        let render_span = super::lifecycle_timing::Span::current("render", 0, 0);
         let (prompt, boundaries) = self.render_prepared(request)?;
+        drop(render_span);
         let tokens = match &self.prompt_tokens {
-            Some(p) if http::worker_tokenize_enabled() => Some(super::decode_loop::encode_checked(
-                p.tokenizer.as_ref(),
-                &prompt,
-                p.add_special,
-                p.vocab_size,
-                p.family,
-            )?),
+            Some(p) if http::worker_tokenize_enabled() => {
+                let _span = super::lifecycle_timing::Span::current("tokenize_full", 0, 0);
+                Some(super::decode_loop::encode_checked(
+                    p.tokenizer.as_ref(),
+                    &prompt,
+                    p.add_special,
+                    p.vocab_size,
+                    p.family,
+                )?)
+            }
             _ => None,
         };
         Ok((prompt, boundaries, tokens))
@@ -316,6 +328,9 @@ impl GenerationBackend for HttpProxy {
         });
         let (terminal, outcome) = sync_channel(1);
         let (acknowledge, processed) = sync_channel(1);
+        self.control
+            .timing
+            .mark(super::lifecycle_timing::Stage::Enqueued);
         self.work
             .try_send(Work {
                 prepared,
@@ -546,6 +561,7 @@ impl Connection {
         );
         let socket = stream.try_clone().context("clone HTTP shutdown handle")?;
         let control = Arc::new(Control {
+            timing: super::lifecycle_timing::current(),
             execution: ExecutionControl::default(),
             server: execution
                 .as_ref()
@@ -555,6 +571,7 @@ impl Connection {
                 .map_or_else(std::thread::current, super::control::ExecutionPermit::owner),
         });
         let (sender, incoming) = sync_channel(1);
+        let extra_cpu_reserve = extra_cpu_reserve.saturating_add(control.timing.reserve_bytes());
         let mut proxy = HttpProxy {
             model_id,
             profile,
@@ -581,15 +598,19 @@ impl Connection {
             .stack_size(WORKER_STACK_BYTES)
             .spawn(move || {
                 let _cancel = cancel;
+                let timing = proxy.control.timing.clone();
+                let _lifecycle = timing.enter();
                 #[cfg(test)]
                 assert!(
                     fault != Some(StartFault::WorkerPanic),
                     "injected HTTP worker panic"
                 );
-                match request {
+                let result = match request {
                     Some(request) => http::handle_request(&stream, &mut proxy, trace, request),
                     None => http::handle_connection(&stream, &mut proxy, trace),
-                }
+                };
+                timing.finish();
+                result
             })
             .context("spawn HTTP request worker")?;
         Ok(Self {
@@ -640,6 +661,9 @@ impl Connection {
             .try_recv()
         {
             Ok(work) => {
+                work.control
+                    .timing
+                    .mark(super::lifecycle_timing::Stage::Dequeued);
                 backend.submit(super::batching::Job {
                     prepared: work.prepared,
                     sink: Box::new(OwnerBatchSink {

@@ -32,6 +32,7 @@ pub(crate) mod http;
 mod idle_residency;
 mod jobs;
 pub(crate) mod lens_http;
+pub(crate) mod lifecycle_timing;
 mod memory_relief;
 mod native;
 pub(crate) mod outcome;
@@ -810,12 +811,13 @@ fn spawn_acceptor(
             while !stopping.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        let timing = lifecycle_timing::Trace::new();
                         if let Err(error) = http::configure_stream(&stream) {
                             tracing::warn!("serve: configure accepted socket failed: {error}");
                             continue;
                         }
                         if slots.try_reserve() {
-                            if sender.send(control::Event::Incoming(stream)).is_err() {
+                            if sender.send(control::Event::Incoming(stream, timing)).is_err() {
                                 break;
                             }
                         } else if let Err(error) = http::write_busy_response(&stream) {
@@ -1057,7 +1059,8 @@ fn accept_loop_inner(
                 gate.checkpoint()?;
             }
             match event {
-                control::Event::Incoming(stream) => {
+                control::Event::Incoming(stream, timing) => {
+                    let _lifecycle = timing.enter();
                     let guard = admission
                         .try_admit()
                         .context("HTTP owner admission is closed")?;
@@ -1097,7 +1100,7 @@ fn accept_loop_inner(
     // Connections still waiting their turn get the busy response, not a
     // silently closed socket.
     while let Ok(event) = receiver.try_recv() {
-        if let control::Event::Incoming(stream) = event
+        if let control::Event::Incoming(stream, _) = event
             && let Err(error) = http::write_busy_response(&stream)
         {
             tracing::info!(target: "qwen_diag", "serve: busy response aborted: {error}");
@@ -1194,7 +1197,8 @@ fn batched_loop(
                 checkpoint(OwnerCheckpoint::BeforeHandling)?;
                 progressed = true;
                 match event {
-                    control::Event::Incoming(stream) => {
+                    control::Event::Incoming(stream, timing) => {
+                        let _lifecycle = timing.enter();
                         let guard = admission
                             .try_admit()
                             .context("HTTP owner admission is closed")?;
@@ -1829,7 +1833,7 @@ mod tests {
         let peers: Vec<_> = (0..3)
             .map(
                 |_| match receiver.recv_timeout(THREAD_EXIT_TIMEOUT).unwrap() {
-                    control::Event::Incoming(stream) => stream.peer_addr().unwrap(),
+                    control::Event::Incoming(stream, _) => stream.peer_addr().unwrap(),
                     _ => panic!("plain acceptor forwards incoming streams only"),
                 },
             )
@@ -1841,7 +1845,7 @@ mod tests {
         let next = std::net::TcpStream::connect(address).unwrap();
         assert!(matches!(
             receiver.recv_timeout(THREAD_EXIT_TIMEOUT),
-            Ok(control::Event::Incoming(_))
+            Ok(control::Event::Incoming(_, _))
         ));
         stopping.store(true, Ordering::Release);
         drop(receiver);

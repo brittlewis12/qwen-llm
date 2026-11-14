@@ -177,11 +177,18 @@ impl Reuse<State> for Session<'_, '_> {
         self.store.cache.sweep();
         self.protect.clear();
         let forward = self.forward;
+        let match_span =
+            super::super::lifecycle_timing::Span::current("prefix_match", 0, ids.len());
         let live = self.store.live.take(ids, describe);
+        drop(match_span);
         let suffix = ids.len() - live.as_ref().map_or(0, |live| live.tokens.len());
         operations::live_then_snapshot(
             live,
-            |state| forward.ensure_capacity_for_request(state, required, suffix, reserve),
+            |state| {
+                let _restore =
+                    super::super::lifecycle_timing::Span::current("prefix_restore", 0, ids.len());
+                forward.ensure_capacity_for_request(state, required, suffix, reserve)
+            },
             || self.take_snapshot(ids, required, reserve),
         )
     }
@@ -249,11 +256,14 @@ impl Session<'_, '_> {
         required: usize,
         reserve: u64,
     ) -> Result<Option<Restored<State>>, ServeError> {
+        let match_span =
+            super::super::lifecycle_timing::Span::current("prefix_snapshot_match", 0, ids.len());
         let hit = operations::snapshot_candidate(&mut self.store.cache, ids, |checkpoint| {
             !checkpoint.logits.is_empty()
                 && reuse_eligible(true, checkpoint.snapshot.prefill_origin())
         })
         .filter(|hit| reuse_eligible(true, hit.value.snapshot.prefill_origin()));
+        drop(match_span);
         let Some(hit) = hit else { return Ok(None) };
         let suffix = ids.len() - hit.prefix_len;
         let Some((state, hit)) = operations::restore_candidate(
@@ -263,7 +273,11 @@ impl Session<'_, '_> {
                 let plan = self.forward.plan_request(required, suffix, reserve)?;
                 self.forward.new_state_from_plan(&plan)
             },
-            |state, checkpoint| self.forward.restore_snapshot(state, &checkpoint.snapshot),
+            |state, checkpoint| {
+                let _restore =
+                    super::super::lifecycle_timing::Span::current("prefix_restore", 0, ids.len());
+                self.forward.restore_snapshot(state, &checkpoint.snapshot)
+            },
         )?
         else {
             return Ok(None);

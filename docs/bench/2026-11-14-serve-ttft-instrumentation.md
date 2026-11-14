@@ -1,0 +1,15 @@
+# Shared serve TTFT lifecycle instrumentation
+
+Bounded stage started 2026-11-14 09:17 UTC, two-hour limit. Instrumentation only; no scheduling, tokenization, cache or kernel optimization. Fresh `perf/serve-ttft-instrumentation` from main `50d5397ac`.
+
+`QWEN_SERVE_TTFT_TIMING=1` enables a shared per-request trace. Default-off: disabled requests allocate no trace and read no trace clocks. Enabled capture uses monotonic clock reads, atomic first-event fields and typed span records; JSON is built when emitting diagnostics. A local CPU diagnostic of20 spans and a snapshot measured28.916 microseconds/request over100 iterations, not an M5 overhead claim. Global history is bounded to8,192 quanta; per-request spans to8,192 with an explicit drop counter. Diagnostic metadata is reserved in the transport CPU budget (16MiB/request); typical capture is much smaller. No prompt/token contents are recorded.
+
+HTTP accept/receive/body, parse/validate, render, full tokenization, enqueue/dequeue, submission/admission, first sample/raw piece, first SSE flush and first **visible** flush have distinct markers. V4.1 adds full/backend boundary tokenization, prefix match/restore, output admission, state allocation, checkpoint and each prefill slice. Request IDs join the standard response ID retained by the client. Prefill/decode quantum IDs and bounded history account for work before a request reaches the scheduler.
+
+A heartbeat or response-created event is not client TTFT. The socket flush-return stamp follows the actual SSE write/flush; first nonempty text/reasoning/function-argument delta is recorded separately. Each first-visible event emits `serve ttft timing:` immediately, including cancelled-at-window-end requests; final emission retains the same first-visible cutoff and completed metadata. The common harness now retains headers, response IDs and warm-call timestamps.
+
+Shared APIs: `BatchSink::lifecycle()`, `Trace::enter/mark/extent`, `Span::current(name, position, rows)`, and `Round::new`. The common batching driver sets admission/prefill/initial-sample scopes, so GLM can add precise slice positions and cache subspans with these same calls. Its existing policy is unchanged. V4.1 kernels and row partitions remain identical to main. No changes to luna's GLM worktree or A/B.
+
+CPU tests cover disabled capture, cross-thread publication/scope restoration, quantum linkage/clipping, bounded metadata/capture cost, and unchanged real loopback SSE bytes with control versus visible flush separation. Existing transport lifecycle tests also pass:23 tests total, zero failures/ignored. New CPU tests are in the acceptance inventory; no ignored tests added.
+
+One purged, greedy, nice0, three-agent file-A V4.1 arm is pending. Artifact remains production GSQ-RCO IQ2_XS plus the streamed IQ4_NL Engram, with the existing code corpus and steady v2 plan. The arm will use one <=15-minute Metal lease, inherited FD through Python, thermal <=1 continuously60s before load, permit2/abort3, no other resident model, and per-process disk counters. No baseline comparison or speed claim in this stage.

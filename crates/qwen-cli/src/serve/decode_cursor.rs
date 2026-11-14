@@ -216,6 +216,9 @@ impl DecodeCursor {
             Ok(sampled) => sampled.token,
             Err(error) => return Err(self.server(error.into())),
         };
+        if self.tokens.is_empty() {
+            super::lifecycle_timing::mark(super::lifecycle_timing::Stage::FirstSampled);
+        }
         self.first_token_selection_ms
             .get_or_insert_with(|| selection_t0.elapsed().as_secs_f64() * 1e3);
         let wall_t0 = self.wall_t0;

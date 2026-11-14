@@ -14,6 +14,9 @@ use std::sync::atomic::AtomicBool;
 
 /// Owner-side output and lifecycle of one submitted request.
 pub(crate) trait BatchSink {
+    fn lifecycle(&self) -> super::lifecycle_timing::Trace {
+        super::lifecycle_timing::Trace::default()
+    }
     /// The request's own cancellation (HTTP worker exit or disconnect).
     fn cancellation_flag(&self) -> Arc<AtomicBool>;
     /// Additional future CPU buffer allowance, beyond resident request storage.

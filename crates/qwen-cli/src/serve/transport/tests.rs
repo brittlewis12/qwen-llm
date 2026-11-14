@@ -9,6 +9,7 @@ const WAIT: Duration = Duration::from_secs(2);
 
 fn control() -> Arc<Control> {
     Arc::new(Control {
+        timing: super::super::lifecycle_timing::Trace::default(),
         execution: ExecutionControl::default(),
         server: None,
         owner: std::thread::current(),

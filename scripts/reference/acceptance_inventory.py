@@ -68,6 +68,8 @@ SCOPES = {
         "paired_startup_tests::",
     ],
     "qwen": [
+        "serve::lifecycle_timing::tests::",
+        "serve::http::tests::ttft_trace_marks_visible_flush_without_changing_sse_bytes",
         "serve::decode_cursor::gpu_burst_tests::",
         "family_options::tests::qwen4exp_decode_flags_follow_the_documented_contract",
         "deepseek_v41::tests::",

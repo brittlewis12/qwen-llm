@@ -190,7 +190,9 @@ pub(crate) trait GenerationBackend {
         &self,
         request: &ServeRequest,
     ) -> Result<(String, Option<PromptBoundaries>, Option<Vec<u32>>), ServeError> {
+        let render_span = super::lifecycle_timing::Span::current("render", 0, 0);
         let (prompt, boundaries) = self.render_prepared(request)?;
+        drop(render_span);
         Ok((prompt, boundaries, None))
     }
     /// Render is already done; `prompt` is the exact model input. The
@@ -255,6 +257,7 @@ pub(crate) trait GenerationBackend {
 struct TraceSseWriter<'a, 'b> {
     inner: SseWriter<&'a TcpStream>,
     trace: Option<&'b TraceSubscriber>,
+    timing: super::lifecycle_timing::Trace,
 }
 
 impl<'a, 'b> TraceSseWriter<'a, 'b> {
@@ -262,11 +265,14 @@ impl<'a, 'b> TraceSseWriter<'a, 'b> {
         Self {
             inner: SseWriter(stream),
             trace,
+            timing: super::lifecycle_timing::current(),
         }
     }
 
     fn heartbeat(&mut self) -> io::Result<()> {
         self.inner.heartbeat()?;
+        self.timing
+            .mark(super::lifecycle_timing::Stage::FirstSseFlushed);
         if let Some(trace) = self.trace {
             trace.line(|| json!({"kind": "heartbeat"}));
         }
@@ -284,11 +290,31 @@ impl<'a, 'b> TraceSseWriter<'a, 'b> {
 
 impl EventWrite for TraceSseWriter<'_, '_> {
     fn event(&mut self, event_type: &str, payload: Value) -> io::Result<()> {
+        let visible = matches!(
+            event_type,
+            "response.output_text.delta"
+                | "response.reasoning_text.delta"
+                | "response.function_call_arguments.delta"
+        ) && payload
+            .get("delta")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
         let trace_enabled = self.trace.is_some_and(TraceSubscriber::is_enabled);
         if trace_enabled {
             self.inner.event(event_type, payload.clone())?;
         } else {
-            return self.inner.event(event_type, payload);
+            self.inner.event(event_type, payload)?;
+            self.timing
+                .mark(super::lifecycle_timing::Stage::FirstSseFlushed);
+            if visible {
+                self.timing.visible();
+            }
+            return Ok(());
+        }
+        self.timing
+            .mark(super::lifecycle_timing::Stage::FirstSseFlushed);
+        if visible {
+            self.timing.visible();
         }
         if let Some(trace) = self.trace {
             trace.line(|| {
@@ -918,6 +944,8 @@ pub(crate) fn handle_connection(
     trace: Option<TraceSubscriber>,
 ) -> io::Result<()> {
     configure_stream(stream)?;
+    super::lifecycle_timing::mark(super::lifecycle_timing::Stage::HttpReceive);
+    let receive_span = super::lifecycle_timing::Span::current("http_receive", 0, 0);
     let mut writer = stream;
     let request = match read_http_request_with_deadline(stream, REQUEST_READ_DEADLINE) {
         Ok(Some(request)) => request,
@@ -933,6 +961,8 @@ pub(crate) fn handle_connection(
         }
     };
 
+    drop(receive_span);
+    super::lifecycle_timing::mark(super::lifecycle_timing::Stage::BodyReceived);
     handle_request(stream, backend, trace, request)
 }
 
@@ -985,6 +1015,7 @@ fn handle_responses(
     trace: Option<&TraceSubscriber>,
 ) -> io::Result<()> {
     let mut writer = stream;
+    let parse_span = super::lifecycle_timing::Span::current("parse_validate", 0, 0);
     let parsed = match backend.decode_request_json(body) {
         Ok(parsed) => {
             if let Some(trace) = trace
@@ -1035,12 +1066,15 @@ fn handle_responses(
         Ok(validated) => validated,
         Err(error) => return write_serve_error(&mut writer, &error),
     };
+    drop(parse_span);
+    super::lifecycle_timing::mark(super::lifecycle_timing::Stage::Parsed);
     let request = validated.request();
     let (prompt, boundaries, tokens) = match backend.render_and_tokenize_prepared(request) {
         Ok(rendered) => rendered,
         Err(error) => return write_serve_error(&mut writer, &error),
     };
     let response_id = next_response_id();
+    super::lifecycle_timing::current().response_id(&response_id);
     let created_at = now_unix();
 
     // Resolved before the mutable generate borrow.
@@ -1117,6 +1151,7 @@ fn handle_responses(
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-store\r\nconnection: close\r\n\r\n"
         )?;
         writer.flush()?;
+        super::lifecycle_timing::mark(super::lifecycle_timing::Stage::HeadersFlushed);
         let mut sse = TraceSseWriter::new(stream, trace);
         // Heartbeat immediately after admission (SERVE.md gate 3), then on
         // ticks between prefill chunks.
@@ -1137,6 +1172,19 @@ fn handle_responses(
         let StreamingSink { partition, .. } = sink;
         match outcome {
             Ok(outcome) => {
+                if let Some(family) = outcome
+                    .stats
+                    .as_ref()
+                    .and_then(|s| s.phases.as_ref())
+                    .and_then(|p| p.get("family"))
+                    .and_then(Value::as_str)
+                {
+                    super::lifecycle_timing::current().extent(
+                        family,
+                        outcome.usage.input_tokens,
+                        outcome.usage.cached_tokens,
+                    );
+                }
                 let mut events = Vec::new();
                 if let Err(error) = partition.finish(outcome.end, &mut events) {
                     note_server_failure(backend, &error);
@@ -2446,5 +2494,45 @@ mod tests {
         client.shutdown(Shutdown::Write).unwrap();
         std::thread::sleep(Duration::from_millis(5));
         probe_peer(&server).expect("request-side FIN is not proof the reader disconnected");
+    }
+    #[test]
+    fn ttft_trace_marks_visible_flush_without_changing_sse_bytes() {
+        use std::io::Read;
+        use std::net::{Shutdown, TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let timing = super::super::lifecycle_timing::Trace::fixture();
+        timing.response_id("wire-fixture");
+        let _scope = timing.enter();
+        let mut writer = TraceSseWriter::new(&server, None);
+        writer.heartbeat().unwrap();
+        writer
+            .event("response.created", json!({"type":"response.created"}))
+            .unwrap();
+        let before = timing.snapshot("fixture").unwrap();
+        assert!(before["stages_ns"]["first_visible_flushed"].is_null());
+        assert!(before["stages_ns"]["first_sse_flushed"].is_number());
+        timing.mark(super::super::lifecycle_timing::Stage::FirstSampled);
+        writer
+            .event("response.output_text.delta", json!({"delta":"x"}))
+            .unwrap();
+        let after = timing.snapshot("fixture").unwrap();
+        assert!(
+            after["stages_ns"]["first_visible_flushed"]
+                .as_u64()
+                .unwrap()
+                >= after["stages_ns"]["first_sampled"].as_u64().unwrap()
+        );
+        server.shutdown(Shutdown::Write).unwrap();
+        let mut text = String::new();
+        client.read_to_string(&mut text).unwrap();
+        assert_eq!(
+            text,
+            ": ping\n\nevent: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.output_text.delta\ndata: {\"delta\":\"x\"}\n\n"
+        );
     }
 }

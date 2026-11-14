@@ -218,6 +218,9 @@ impl<R> Driver<R> {
         self.max_active
     }
     pub(crate) fn submit(&mut self, job: Job) {
+        job.sink
+            .lifecycle()
+            .mark(crate::serve::lifecycle_timing::Stage::Submitted);
         self.pending.push_back(Pending {
             job,
             submitted: Instant::now(),
@@ -294,6 +297,7 @@ impl<R> Driver<R> {
         };
         let lone = self.active.len() == 1 && self.pending.is_empty();
         let a = &mut self.active[index];
+        let _lifecycle = a.sink.lifecycle().enter();
         let run = a.run.as_mut().expect("decoding run");
         let cursor = a.cursor.as_mut().expect("cursor");
         let before = cursor.completed_transitions();
@@ -414,6 +418,12 @@ impl<R> Driver<R> {
         (index, result, start.elapsed().as_secs_f64() * 1e3, 1)
     }
     fn decode<E: Runtime<Run = R>>(&mut self, members: Vec<usize>, runtime: &mut E) {
+        let _round = crate::serve::lifecycle_timing::Round::new(
+            "decode",
+            members.iter().map(|&i| self.active[i].sink.lifecycle()),
+            0,
+            1,
+        );
         // The same GPU-feeding thread also runs the batch forward/sampling and
         // the whole-batch device-feedback burst.
         let _qos = qwen_llm::metal::GpuThreadQos::enter();
@@ -681,6 +691,10 @@ impl<R> Driver<R> {
         if !self.pending.is_empty() && self.active.len() < self.max_active {
             let p = self.pending.pop_front().expect("pending");
             let mut sink = p.job.sink;
+            let timing = sink.lifecycle();
+            let _lifecycle = timing.enter();
+            timing.mark(crate::serve::lifecycle_timing::Stage::AdmissionStart);
+            let admission_span = crate::serve::lifecycle_timing::Span::current("admission", 0, 0);
             let queue_ms = p.submitted.elapsed().as_secs_f64() * 1e3;
             let own = sink.transport_reserve_bytes();
             let reserve = self.total_reserve(runtime).and_then(|n| n.checked_add(own));
@@ -702,6 +716,8 @@ impl<R> Driver<R> {
                             Begun::Run(r) => (Some(r), None),
                             Begun::Complete(o) => (None, Some(o)),
                         };
+                        drop(admission_span);
+                        timing.mark(crate::serve::lifecycle_timing::Stage::Admitted);
                         self.active.push(Active {
                             sink,
                             run,
@@ -756,6 +772,14 @@ impl<R> Driver<R> {
                 return true;
             };
             let a = &mut self.active[i];
+            let timing = a.sink.lifecycle();
+            let _lifecycle = timing.enter();
+            let _round = crate::serve::lifecycle_timing::Round::new(
+                "prefill",
+                std::iter::once(timing),
+                0,
+                0,
+            );
             let run = a.run.as_mut().expect("prefill run");
             let loaded = !members.is_empty();
             let rows = if loaded && !self.prefill_fair {
@@ -763,6 +787,8 @@ impl<R> Driver<R> {
             } else {
                 runtime.rows(run).max(1)
             };
+            let slice_span =
+                crate::serve::lifecycle_timing::Span::current("prefill_slice", 0, rows);
             let quantum = runtime.prefill_sliced(
                 run,
                 rows,
@@ -785,6 +811,7 @@ impl<R> Driver<R> {
                     reserve,
                 )
             });
+            drop(slice_span);
             let unfinished_slice = sliced && matches!(&outcome, Ok(None));
             match outcome {
                 Err(e) => self.fail(i, e),
@@ -793,6 +820,9 @@ impl<R> Driver<R> {
                         a.loaded_prefills += 1;
                     }
                     if let Some(cursor) = cursor {
+                        crate::serve::lifecycle_timing::mark(
+                            crate::serve::lifecycle_timing::Stage::PrefillComplete,
+                        );
                         a.cursor = Some(cursor);
                         self.advance(i, None, runtime);
                     }

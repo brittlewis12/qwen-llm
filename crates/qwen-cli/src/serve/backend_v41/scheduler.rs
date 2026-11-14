@@ -307,6 +307,9 @@ impl<S> Scheduler<S> {
     }
 
     pub(super) fn submit(&mut self, job: Job) {
+        job.sink
+            .lifecycle()
+            .mark(super::super::lifecycle_timing::Stage::Submitted);
         self.pending.push_back(Pending {
             job,
             submitted: Instant::now(),
@@ -528,6 +531,10 @@ impl<S> Scheduler<S> {
         reuse: &mut impl reuse::Reuse<S>,
     ) {
         let Pending { mut job, submitted } = pending;
+        let timing = job.sink.lifecycle();
+        let _lifecycle = timing.enter();
+        timing.mark(super::super::lifecycle_timing::Stage::AdmissionStart);
+        let admission_span = super::super::lifecycle_timing::Span::current("admission", 0, 0);
         let queue_ms = submitted.elapsed().as_secs_f64() * 1e3;
         let super::super::output_partition::OutputProtocol::DeepSeekV41 { max_bytes, .. } =
             job.prepared.validated.output()
@@ -562,6 +569,9 @@ impl<S> Scheduler<S> {
                 return;
             }
         };
+        drop(admission_span);
+        timing.mark(super::super::lifecycle_timing::Stage::Admitted);
+        timing.extent("deepseek_v41", run.ids.len(), run.position);
         self.active.push(Active {
             own_reserve: run.reserve.saturating_sub(others),
             sink: job.sink,
@@ -594,6 +604,15 @@ impl<S> Scheduler<S> {
         engine: &mut impl BatchEngine<S>,
         reuse: &mut impl reuse::Reuse<S>,
     ) -> bool {
+        let timing = self.active[index].sink.lifecycle();
+        let _lifecycle = timing.enter();
+        let run = self.active[index].run.as_ref().expect("prefill run");
+        let _round = super::super::lifecycle_timing::Round::new(
+            "prefill",
+            std::iter::once(timing),
+            run.position,
+            run.ids.len().saturating_sub(run.position),
+        );
         let loaded = self
             .active
             .iter()
@@ -707,6 +726,7 @@ impl<S> Scheduler<S> {
         reuse: &mut impl reuse::Reuse<S>,
     ) {
         let active = &mut self.active[index];
+        let _lifecycle = active.sink.lifecycle().enter();
         let run = active.run.as_mut().expect("prefilled request has a run");
         if let Err(failure) =
             settings.finish_prefill(run, &mut Publish(active.sink.as_mut()), engine, reuse)
@@ -828,6 +848,12 @@ impl<S> Scheduler<S> {
         engine: &mut impl BatchEngine<S>,
         reuse: &mut impl reuse::Reuse<S>,
     ) {
+        let _round = super::super::lifecycle_timing::Round::new(
+            "decode",
+            members.iter().map(|&i| self.active[i].sink.lifecycle()),
+            0,
+            1,
+        );
         let mut results: Vec<Stepped> = Vec::with_capacity(members.len());
         if members.len() == 1 {
             // Serial step with the request's own cancellation, as `step` alone.

@@ -6557,5 +6557,40 @@
     "class": "gpu",
     "ignored": false,
     "reason": "Metal differential and CPU sort reference check coalesced radix IDs, masks, NaN status, ties and guarded offsets."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::http::tests::ttft_trace_marks_visible_flush_without_changing_sse_bytes",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Shared monotonic lifecycle metadata, cross-thread publication, bounded capture and fake loopback SSE; no model or Metal context."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::lifecycle_timing::tests::cross_thread_stages_and_first_visible_survive_scope_restore",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Shared monotonic lifecycle metadata, cross-thread publication, bounded capture and fake loopback SSE; no model or Metal context."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::lifecycle_timing::tests::disabled_trace_has_no_state_or_spans",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Shared monotonic lifecycle metadata, cross-thread publication, bounded capture and fake loopback SSE; no model or Metal context."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::lifecycle_timing::tests::enabled_capture_cost_and_snapshot_are_bounded",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Shared monotonic lifecycle metadata, cross-thread publication, bounded capture and fake loopback SSE; no model or Metal context."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::lifecycle_timing::tests::round_ids_join_prefill_and_clip_at_first_visible",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Shared monotonic lifecycle metadata, cross-thread publication, bounded capture and fake loopback SSE; no model or Metal context."
   }
 ]

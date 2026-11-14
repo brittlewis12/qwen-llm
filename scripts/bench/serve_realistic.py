@@ -373,6 +373,7 @@ class Arm:
         sent = time.time()
         headers = first = final = None
         events = []
+        response_id = None
         conn = http.client.HTTPConnection('127.0.0.1', self.args.port, timeout=self.args.timeout)
         try:
             conn.request('POST', '/v1/responses', body=payload, headers={'Content-Type':'application/json'})
@@ -392,6 +393,7 @@ class Arm:
                 event = json.loads(raw)
                 now = time.time()
                 kind = event.get('type')
+                if isinstance(event.get('response'),dict):response_id=event['response'].get('id',response_id)
                 if kind in DELTA_TYPES and event.get('delta'):
                     events.append((now, kind, event['delta']))
                     if first is None:
@@ -408,7 +410,7 @@ class Arm:
             raise RuntimeError(str(final['error']))
         usage = final.get('usage', {}) if final else {}
         valid = bool(usage and not final.get('error')) if final else False
-        row = dict(label=label, agent=int(label[1]), warm=warm, sent=sent, headers=headers,
+        row = dict(label=label, agent=int(label[1]), warm=warm, sent=sent, headers=headers,response_id=response_id,
                    first=first, end=ended, completed=valid,
                    generated=usage.get('output_tokens') if valid else None,
                    prompt=usage.get('input_tokens') if valid else None,
@@ -548,6 +550,9 @@ class Arm:
             # Server phase lines are part of the evidence: they carry per-round
             # transition and host time for every completed request.
             dump(self.out/'native-lines.json',self.lines)
+            with (self.out/'warm-calls.jsonl').open('w') as f:
+                for row in self.rows:
+                    if row['warm']:f.write(json.dumps(row)+'\n')
             if error or self.abort.is_set():
                 dump(self.out/'failed.json',dict(error=error,thermal_abort=self.abort.is_set()))
             self.emit(event='server_stopped',code=self.server.returncode)
@@ -768,7 +773,7 @@ def summarize(rows, begin, end, count, native_lines=(), agents=3):
         first=r['first']
         pending=r['end']>=end and (first is None or first>=end)
         wait_end=first if first is not None else min(r['end'],end)
-        cleaned.append(dict(label=r['label'],agent=r['agent'],sent=r['sent'],first=first,end=r['end'],
+        cleaned.append(dict(label=r['label'],agent=r['agent'],sent=r['sent'],headers=r.get('headers'),response_id=r.get('response_id'),first=first,end=r['end'],
              offered_in_window=begin<=r['sent']<end,completed=r['completed'],
              ttft_s=first-r['sent'] if first is not None and first<end and r['sent']>=begin else None,
              ttft_censored_s=end-r['sent'] if pending and r['sent']>=begin else None,

@@ -39,6 +39,18 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Completion pairs use identical labels, inputs and output token counts. TPS
   remains noisy: **0.931/1.601/0.985×**, and the available gap is delta-event
   rather than exact token ITL. [Per-arm output counts and full tables](bench/2026-11-14-glm-layer-slice-ab.md).
+## 2026-11-14 - Shared Serve TTFT Lifecycle Trace
+
+- Opt-in `QWEN_SERVE_TTFT_TIMING=1`, default-off. Shared request IDs,
+  monotonic stages, typed spans and bounded prefill/decode quantum history;
+  distinct control-SSE and first-visible flushes. Disabled capture has no
+  clocks/allocation; local20-span+snapshot diagnostic about29us/request.
+- Shared HTTP/transport/batching hooks plus V4.1 cache, boundary-tokenize,
+  admission, checkpoint and native-slice hooks. GLM can use the same API;
+  no scheduling/kernel/tokenization/cache fix in this stage.
+-23 CPU lifecycle/transport tests pass, including unchanged loopback SSE
+  bytes. One purged greedy three-agent file-A measurement pending.
+  [Design, measurement and component accounting](bench/2026-11-14-serve-ttft-instrumentation.md).
 
 ## 2026-11-14 - V4.1 Compact + Radix: Default-On by Lead Judgment
 

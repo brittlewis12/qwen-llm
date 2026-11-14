@@ -2,6 +2,7 @@
 //! Timing: MODEL DEPTH BATCH STEPS [dump=TEMP_LOGITS]. Run under the canonical
 //! Metal lease; builds follow the host's campaign policy. Corpus regenerates
 //! from committed Git blobs. `nodes` exports isolated node times and span edges.
+//! `stage-grid` captures two V4.1 append widths at 32K/80K/128K with one progressive fill.
 use anyhow::{Result, ensure};
 use qwen_llm::{
     deepseek_v41::{
@@ -100,6 +101,122 @@ fn step(
             .collect()
     }
 }
+fn fill_stage_grid_depth(
+    f: &Forward<'_>,
+    state: &mut State,
+    common: &[u32],
+    target: usize,
+) -> Result<()> {
+    let start = state.position();
+    ensure!(
+        target >= start && target <= common.len(),
+        "stage-grid fill bounds"
+    );
+    if target == start {
+        return Ok(());
+    }
+    let wall = Instant::now();
+    if start == 0 {
+        let logits = f.prefill_with_execution(
+            state,
+            &common[..target],
+            Some(&CANCEL),
+            PrefillExecution::ShrinkingCed,
+        )?;
+        std::hint::black_box(logits);
+    } else {
+        ensure!(
+            f.begin_cold_prefill_episode(state, target - start)?,
+            "stage-grid CED fill eligible"
+        );
+        loop {
+            if f.cold_prefill_episode_slice(state, &common[start..target], Some(&CANCEL), 4096)?
+                .complete
+            {
+                break;
+            }
+        }
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "kind":"stage_grid_fill", "from":start, "to":target,
+            "tokens":target-start, "wall_ms":wall.elapsed().as_secs_f64()*1e3,
+            "execution":"shrinking_ced"
+        })
+    );
+    Ok(())
+}
+
+fn capture_append_stage_cell(
+    f: &Forward<'_>,
+    state: &mut State,
+    common: &[u32],
+    depth: usize,
+    rows: usize,
+) -> Result<()> {
+    ensure!(
+        state.position() == depth,
+        "stage-grid append prefix position"
+    );
+    ensure!(depth + rows <= common.len(), "stage-grid input extent");
+    let snapshot = f.capture_snapshot(state)?;
+    let chunk = &common[depth..depth + rows];
+    let warm_start = Instant::now();
+    let expected = f.prefill(state, chunk, Some(&CANCEL))?;
+    std::hint::black_box(&expected);
+    let warmup_wall_ms = warm_start.elapsed().as_secs_f64() * 1e3;
+    f.restore_snapshot(state, &snapshot)?;
+    let expected_hash = blake3::hash(bytemuck::cast_slice(&expected))
+        .to_hex()
+        .to_string();
+    for rep in 0..2 {
+        let scope = qwen_llm::deepseek_v41::forward::profile::Scope::begin_stages()
+            .map_err(anyhow::Error::msg)?;
+        let start = Instant::now();
+        let actual = f.prefill(state, chunk, Some(&CANCEL))?;
+        let wall_ms = start.elapsed().as_secs_f64() * 1e3;
+        let report = scope.finish();
+        ensure!(
+            expected.len() == actual.len()
+                && expected
+                    .iter()
+                    .zip(&actual)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "stage-grid append logits changed"
+        );
+        let actual_hash = blake3::hash(bytemuck::cast_slice(&actual))
+            .to_hex()
+            .to_string();
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind":"v41_append_stage_cell", "depth":depth, "rows":rows,
+                "rep":rep, "warmup_wall_ms":warmup_wall_ms, "wall_ms":wall_ms,
+                "stage_profile_wall_ms":report.token_wall_ms,
+                "bitwise":true, "expected_hash":expected_hash, "actual_hash":actual_hash,
+                "operations":report.operations
+            })
+        );
+        f.restore_snapshot(state, &snapshot)?;
+    }
+    Ok(())
+}
+
+fn run_append_stage_grid(f: &Forward<'_>, common: &[u32], state: &mut State) -> Result<()> {
+    ensure!(
+        common.len() >= 131_072 + 1024,
+        "stage-grid code corpus too short"
+    );
+    for depth in [32_768usize, 81_920, 131_072] {
+        fill_stage_grid_depth(f, state, common, depth)?;
+        for rows in [256usize, 1024] {
+            capture_append_stage_cell(f, state, common, depth, rows)?;
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGINT, cancel as *const () as libc::sighandler_t);
@@ -109,10 +226,12 @@ fn main() -> Result<()> {
     if args.get(1).is_some_and(|v| v == "compare") {
         return compare(&args[2], &args[3]);
     }
+    let is_stage_grid = args.get(5).is_some_and(|s| s == "stage-grid");
     // A host-load probe deliberately runs hot; the paired on/off arms share
-    // whatever pressure is present.
+    // whatever pressure is present. The stage-grid wrapper applies the current
+    // thermal policy externally (settle <=1, allow 2, abort 3).
     let probe_load: usize = args.get(8).and_then(|v| v.parse().ok()).unwrap_or(0);
-    if probe_load == 0 {
+    if probe_load == 0 && !is_stage_grid {
         thermal()?;
     }
     let g = Arc::new(GgufFile::open(&args[1])?);
@@ -139,12 +258,19 @@ fn main() -> Result<()> {
     let text = corpus(prose)?;
     let long_suffix = matches!(
         args.get(5).map(String::as_str),
-        Some("append-nodes" | "cells")
+        Some("append-nodes" | "cells" | "stage-grid")
     );
     let mut repeats = 1;
     let common = loop {
         let x = tok.encode(&text.repeat(repeats), false)?;
-        if x.len() > if long_suffix { 84_000 } else { 70_000 } {
+        let minimum = if is_stage_grid {
+            132_096
+        } else if long_suffix {
+            84_000
+        } else {
+            70_000
+        };
+        if x.len() > minimum {
             break x.into_iter().map(|v| v as u32).collect::<Vec<_>>();
         }
         repeats *= 2;
@@ -156,8 +282,12 @@ fn main() -> Result<()> {
         streams.iter().all(|s| s.len() > 4500),
         "distinct natural suffix extent"
     );
-    let mut base = f.new_state(98304)?;
+    let mut base = f.new_state(if is_stage_grid { 140_000 } else { 98304 })?;
     let depth: usize = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(32768);
+    if is_stage_grid {
+        run_append_stage_grid(&f, &common, &mut base)?;
+        return Ok(());
+    }
     ensure!([32768, 49152, 65536].contains(&depth), "depth 32K/48K/64K");
     let is_prefill_nodes = args.get(5).is_some_and(|s| s == "prefill-nodes");
     let is_append_nodes = args.get(5).is_some_and(|s| s == "append-nodes");

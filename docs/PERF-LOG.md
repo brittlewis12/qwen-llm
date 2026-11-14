@@ -6,6 +6,14 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-14 - GLM Gate/Up Epilogue Edge Closed at Route-Partition Check
+
+- No candidate or timing gate: the audit's `wide_probe→up_clamped` and reverse
+  edges alias the full `inner` buffer across disjoint `counts<=32` / `counts>32`
+  dispatches. M5 root baseline sampled 324.90 ms over 123 named calls; the
+  prototype guard did not select an arm, so the candidate span is absent.
+  Candidate code was reverted. [Edge, arithmetic and run record](bench/2026-11-14-glm-gate-up-epilogue.md).
+
 ## 2026-11-14 - GLM Latent Score→Softmax Fusion Closed at Exact-Design Gate
 
 - No code, build, or GPU timing: preserving the current MMA and softmax order

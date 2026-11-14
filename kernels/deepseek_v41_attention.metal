@@ -360,6 +360,66 @@ kernel void kernel_deepseek_v41_attention_index_heads_rows_mma_f16_probe(
     }
 }
 
+// BF16 companion for the reference-precision operand bound. The score path
+// and FP32 weights/accumulator match the F32 and F16 probe kernels.
+kernel void kernel_deepseek_v41_attention_index_heads_rows_mma_bf16_probe(
+    constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
+    constant uint4 &c [[buffer(2)]], device const bfloat *q [[buffer(3)]],
+    device const float *weights [[buffer(4)]], device const bfloat *keys [[buffer(5)]],
+    device float *scores [[buffer(6)]], constant uint &row0 [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float ws[256];
+    threadgroup float partial[V41_IDX_MMA_KEYS * 4u];
+    threadgroup float scratch[8u * 64u];
+    const uint local = group.y;
+    if (local >= c.y) return;
+    const uint row = row0 + local;
+    const uint length = (a.x + row + 1) / a.y;
+    const uint first = group.x * V41_IDX_MMA_KEYS;
+    if (length <= a.z || length < 8u || first >= length) return;
+    device const bfloat *qrow = q + (ulong)row * b.z;
+    device const float *wrow = weights + (ulong)row * b.w;
+    const float scale = rsqrt(float(b.x)) * rsqrt(float(b.y));
+    ws[tid] = wrow[(tid / 64u) * 8u + (tid % 64u) / 8u] * scale;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint hg = sg % 4u, kg = sg / 4u;
+    simdgroup_bfloat8x8 qt[16];
+    for (uint i = 0; i < 16u; ++i)
+        simdgroup_load(qt[i], qrow + hg * 8u * 128u + i * 8u, 128, ulong2(0, 0), true);
+    simdgroup_float8x8 wc;
+    simdgroup_load(wc, ws + hg * 64u, 8);
+    threadgroup float *o = scratch + sg * 64u;
+    for (uint round = 0; round < V41_IDX_MMA_ROUNDS; ++round) {
+        const uint key0 = first + (round * 2u + kg) * 8u;
+        if (key0 >= length) break;
+        const uint base = min(key0, length - 8u);
+        device const bfloat *kp = keys + (ulong)base * 128u;
+        simdgroup_float8x8 acc = simdgroup_float8x8(0.0f);
+        for (uint i = 0; i < 16u; ++i) {
+            simdgroup_bfloat8x8 km;
+            simdgroup_load(km, kp + i * 8u, 128);
+            simdgroup_multiply_accumulate(acc, km, qt[i], acc);
+        }
+        acc.thread_elements()[0] = max(acc.thread_elements()[0], 0.0f);
+        acc.thread_elements()[1] = max(acc.thread_elements()[1], 0.0f);
+        simdgroup_float8x8 r;
+        simdgroup_multiply(r, acc, wc);
+        simdgroup_store(r, o, 8);
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        const uint key = base + lane;
+        if (lane < 8u && key >= key0 && key < length) partial[(key - first) * 4u + hg] = o[lane * 8u];
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    device float *srow = scores + (ulong)local * c.x;
+    for (uint j = tid; j < V41_IDX_MMA_KEYS; j += 256u) {
+        const uint key = first + j;
+        if (key < length)
+            srow[key] = partial[j * 4u] + partial[j * 4u + 1u] + partial[j * 4u + 2u] + partial[j * 4u + 3u];
+    }
+}
+
 // c.z: candidate block width (8); c.w: full query-row mask stride.
 kernel void kernel_deepseek_v41_attention_index_heads_rows_mma_masked(
     constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],

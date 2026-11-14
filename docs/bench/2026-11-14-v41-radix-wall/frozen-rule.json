@@ -1,0 +1,26 @@
+{
+  "frozen_at_utc": "2026-11-14T05:37:00Z",
+  "source": "eb29cfe51",
+  "profile_native": "iter",
+  "profile_serve": "release",
+  "same_binary_each_arm": true,
+  "orders": [
+    "ab",
+    "ba",
+    "ab"
+  ],
+  "warmup": "paired 4K model + both compact and radix GPU fixtures identically before every arm, then Engram msync purge to zero pages",
+  "sampling": "greedy",
+  "niceness": 0,
+  "thermal": "settle <=1 continuously 60s, permit2, abort3",
+  "gates": {
+    "root_prefill_ratio": 0.98,
+    "tps_ratio": 0.98,
+    "short_prefill_ratio": 1.0,
+    "short_ttft_ratio": 1.0,
+    "1k_prefill_ratio": 1.0,
+    "1k_ttft_ratio": 1.0
+  },
+  "reduction": "geomean of the three pair ratios; all roots, every matched offered/completed label with identical new rows; null client TTFT retained and excluded only from observed-TTFT denominator; no load, order or disk filters",
+  "judgment": "The 256-row cells missed the stage gate, and compact plus radix coalescing was promoted to wall qualification by lead judgment."
+}

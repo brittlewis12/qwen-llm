@@ -6,6 +6,17 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-14 - V4.1 Compact + Radix: Native Append Wall Qualification
+
+- Lead judgment advances the bitwise composition despite the 256-row stage
+  misses; both components default-on with separate `=0` rollbacks. Rebased on
+  main `411228dc0`; ENV and CPU contracts pass.
+- Same pinned iter binary, nice0, warmup +3 interleaved pairs: **1.025358x**
+  at 1K@80K, **1.014970x** at 256@80K, **1.044608x** at 1K@128K. All 24
+  endpoints bitwise, every measured append disk counter 0, thermal0.
+- Root control and frozen three-pair served gate pending behind the shared
+  lease queue. No landing verdict. [Protocol, pairs and binary pins](bench/2026-11-14-v41-radix-wall.md).
+
 ## 2026-11-14 - GLM Gate/Up Epilogue Edge Closed at Route-Partition Check
 
 - No candidate or timing gate: the audit's `wide_probe→up_clamped` and reverse

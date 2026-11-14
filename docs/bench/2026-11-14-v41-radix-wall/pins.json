@@ -1,0 +1,13 @@
+{
+  "commit": "eb29cfe51",
+  "libs_identical_to_prior_test": true,
+  "sha256": {
+    "pins/iter": "17032c2f43a434ae9fc9167e8fa62b9a28ac055552d6e4158813dc62d071043b",
+    "pins/test": "e95618fcf666735415d131639ab0391cdf486c4e3bf27935a94e2a437d54660e",
+    "pins/release-qwen": "8027a2250d6689701c7d7c088c4f9a89a43d8c442281dce0d4996a335799e6f1",
+    "pins/qwen-tok": "4dc748c1d3c38fcf42b53124bc1a36131512344eb2550cd8febc027abb9200d1",
+    "pins/metallibs/kernels_tensor.metallib": "43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c",
+    "pins/metallibs/kernels.metallib": "35ac100a2ceb16fdcfdbc435fb7d941910183e873570c50a2044c52cce168c7b",
+    "pins/metallibs/kernels_research.metallib": "be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f"
+  }
+}

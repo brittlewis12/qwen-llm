@@ -16,30 +16,6 @@ crate::env_flag!(
     "QWEN_GLM53_PREFILL_PANELS"
 );
 
-crate::env_flag!(
-    /// Default-off experimental F16-boundary-preserving fused GLM IQ2_S clamped gate/up. Zero retains the tensor `wide_probe`/`up_clamped` path.
-    default_off gate_up_fusion_env_requested,
-    "QWEN_GLM53_GATE_UP_FUSION"
-);
-
-#[cfg(feature = "perf-ablations")]
-thread_local! {
-    static GATE_UP_FUSION_BENCH_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-fn gate_up_fusion_requested() -> bool {
-    #[cfg(feature = "perf-ablations")]
-    if let Some(value) = GATE_UP_FUSION_BENCH_OVERRIDE.with(std::cell::Cell::get) {
-        return value;
-    }
-    gate_up_fusion_env_requested()
-}
-
-#[cfg(feature = "perf-ablations")]
-pub(crate) fn set_gate_up_fusion_bench_override(value: Option<bool>) -> Option<bool> {
-    GATE_UP_FUSION_BENCH_OVERRIDE.with(|slot| slot.replace(value))
-}
-
 #[cfg(test)]
 #[derive(Clone, Copy)]
 pub(crate) enum Fault {
@@ -187,19 +163,8 @@ impl Prepared<'_> {
             adaptive,
             down,
         } = self;
-        // The prototype reads the original F32 input and performs the same
-        // F16 narrowing at the fused kernel boundary. All other routes keep
-        // the resident half copy consumed by the incumbent tensor tiles.
-        let fused_clamped = gate_up_fusion_requested()
-            && !adaptive
-            && e == 288
-            && top == 8
-            && b.gate_bank.dtype == GgmlType::IQ2_S
-            && b.up_bank.dtype == GgmlType::IQ2_S;
-        if !fused_clamped {
-            // normed is rewritten by FFN normalization after KDA. Always recopy.
-            encode_scatter_offset_f32_to_f16(ctx, enc, &flat(b.input), &flat(&half), 0, h * rows)?;
-        }
+        // normed is rewritten by FFN normalization after KDA. Always recopy.
+        encode_scatter_offset_f32_to_f16(ctx, enc, &flat(b.input), &flat(&half), 0, h * rows)?;
         encode_moe_route_bucket_slots_f32_status(
             ctx,
             enc,
@@ -211,24 +176,7 @@ impl Prepared<'_> {
             rows,
             top,
         )?;
-        if fused_clamped {
-            encode_moe_swiglu_clamped_f32_grouped_slots_generic(
-                ctx,
-                enc,
-                b.gate_bank,
-                b.up_bank,
-                &flat(b.input),
-                b.counts,
-                b.slots,
-                &flat(b.inner),
-                h,
-                f,
-                e,
-                top,
-                rows,
-                clamp,
-            )?;
-        } else if adaptive {
+        if adaptive {
             encode_moe_swiglu_adaptive_tensor(
                 ctx,
                 enc,

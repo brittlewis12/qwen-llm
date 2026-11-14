@@ -1,0 +1,8 @@
+{
+  "A1": "target/conditional-raw/A1",
+  "B1": "target/conditional-raw/B1",
+  "A2": "target/conditional-retry/raw/A2r",
+  "B2": "target/conditional-retry/raw/B2r",
+  "A3": "target/conditional-raw/A3",
+  "B3": "target/conditional-raw/B3"
+}

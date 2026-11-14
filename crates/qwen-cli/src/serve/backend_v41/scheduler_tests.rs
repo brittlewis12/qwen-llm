@@ -536,6 +536,9 @@ fn settings() -> Settings {
     settings.headroom = || finite_headroom(1 << 30);
     // Keep the original small-quantum lifecycle witnesses as rollback checks.
     settings.prefill_fair = false;
+    settings.prefill_yield = false;
+    settings.layer_slice_ms = 0;
+    settings.layer_slice_min_ms = 500;
     settings
 }
 

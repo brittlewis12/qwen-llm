@@ -1,0 +1,11 @@
+{
+  "command": "QWEN_SERVE_V41_PREFILL_YIELD=1 nice -n 10 cargo test -p qwen-cli",
+  "profile": "test",
+  "production_default": "off during prequalification",
+  "rollback_fixtures": "explicit false / slice0 / minimum500",
+  "targets": 12,
+  "passed": 1748,
+  "failed": 0,
+  "preexisting_ignored": 73,
+  "no_new_ignored_tests": true
+}

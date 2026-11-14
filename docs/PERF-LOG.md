@@ -12,9 +12,10 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   misses; both components default-on with separate `=0` rollbacks. Rebased on
   main `411228dc0`; ENV and CPU contracts pass.
 - Same pinned iter binary, nice0, warmup +3 interleaved pairs: **1.025358x**
-  at 1K@80K, **1.014970x** at 256@80K, **1.044608x** at 1K@128K. All 24
-  endpoints bitwise, every measured append disk counter 0, thermal0.
-- Root control and frozen three-pair served gate pending behind the shared
+  at 1K@80K, **1.014970x** at 256@80K, **1.044608x** at 1K@128K. Root
+  control **1.004386x**. All 32 endpoints bitwise; measured append disk
+  counters 0/thermal0, root thermal<=2 with tiny reads retained.
+- Frozen three-pair served gate pending behind the shared
   lease queue. No landing verdict. [Protocol, pairs and binary pins](bench/2026-11-14-v41-radix-wall.md).
 
 ## 2026-11-14 - GLM Gate/Up Epilogue Edge Closed at Route-Partition Check

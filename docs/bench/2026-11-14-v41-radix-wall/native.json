@@ -407,6 +407,142 @@
         }
       ],
       "wall_speedup_geomean": 1.0446079670690664
+    },
+    {
+      "file": "native-0-49152.jsonl",
+      "sha256": "0e7281f617463d1cb5bc5d83d359762ecef9edb8de35f0dbf72e631cda9b5c2d",
+      "depth": 0,
+      "rows": 49152,
+      "native": true,
+      "bitwise_endpoints": 8,
+      "pairs": [
+        {
+          "order": [
+            "index-radix",
+            "baseline"
+          ],
+          "baseline_wall_ms": 19159.617709,
+          "composed_wall_ms": 19023.172958,
+          "wall_ratio": 1.0071725548256985
+        },
+        {
+          "order": [
+            "baseline",
+            "index-radix"
+          ],
+          "baseline_wall_ms": 19515.69025,
+          "composed_wall_ms": 19224.565917,
+          "wall_ratio": 1.0151433501415272
+        },
+        {
+          "order": [
+            "index-radix",
+            "baseline"
+          ],
+          "baseline_wall_ms": 19066.906417,
+          "composed_wall_ms": 19240.169667,
+          "wall_ratio": 0.9909947129885671
+        }
+      ],
+      "arms": [
+        {
+          "rep": 0,
+          "policy": "baseline",
+          "wall_ms": 19982.489583,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "a4c13784ef52ffb732b3620e94e4d215b33926c29dd84be2a6204b17aea746ab",
+            "52be3dee2667f4630875f7585effd8f7508fbf79035b3cc4c9eb2f1106ba30e3",
+            "3d4c47091f0a1fc2c7485f6f291bec4c1cd0c36940570fe0376a125abcc94ff0"
+          ]
+        },
+        {
+          "rep": 1,
+          "policy": "index-radix",
+          "wall_ms": 19049.718458,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "a4c13784ef52ffb732b3620e94e4d215b33926c29dd84be2a6204b17aea746ab",
+            "52be3dee2667f4630875f7585effd8f7508fbf79035b3cc4c9eb2f1106ba30e3",
+            "3d4c47091f0a1fc2c7485f6f291bec4c1cd0c36940570fe0376a125abcc94ff0"
+          ]
+        },
+        {
+          "rep": 2,
+          "policy": "index-radix",
+          "wall_ms": 19023.172958,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "a4c13784ef52ffb732b3620e94e4d215b33926c29dd84be2a6204b17aea746ab",
+            "52be3dee2667f4630875f7585effd8f7508fbf79035b3cc4c9eb2f1106ba30e3",
+            "3d4c47091f0a1fc2c7485f6f291bec4c1cd0c36940570fe0376a125abcc94ff0"
+          ]
+        },
+        {
+          "rep": 3,
+          "policy": "baseline",
+          "wall_ms": 19159.617709,
+          "disk_read_bytes": 32768,
+          "thermal": 0,
+          "signature": [
+            "a4c13784ef52ffb732b3620e94e4d215b33926c29dd84be2a6204b17aea746ab",
+            "52be3dee2667f4630875f7585effd8f7508fbf79035b3cc4c9eb2f1106ba30e3",
+            "3d4c47091f0a1fc2c7485f6f291bec4c1cd0c36940570fe0376a125abcc94ff0"
+          ]
+        },
+        {
+          "rep": 4,
+          "policy": "baseline",
+          "wall_ms": 19515.69025,
+          "disk_read_bytes": 12288,
+          "thermal": 0,
+          "signature": [
+            "a4c13784ef52ffb732b3620e94e4d215b33926c29dd84be2a6204b17aea746ab",
+            "52be3dee2667f4630875f7585effd8f7508fbf79035b3cc4c9eb2f1106ba30e3",
+            "3d4c47091f0a1fc2c7485f6f291bec4c1cd0c36940570fe0376a125abcc94ff0"
+          ]
+        },
+        {
+          "rep": 5,
+          "policy": "index-radix",
+          "wall_ms": 19224.565917,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "a4c13784ef52ffb732b3620e94e4d215b33926c29dd84be2a6204b17aea746ab",
+            "52be3dee2667f4630875f7585effd8f7508fbf79035b3cc4c9eb2f1106ba30e3",
+            "3d4c47091f0a1fc2c7485f6f291bec4c1cd0c36940570fe0376a125abcc94ff0"
+          ]
+        },
+        {
+          "rep": 6,
+          "policy": "index-radix",
+          "wall_ms": 19240.169667,
+          "disk_read_bytes": 0,
+          "thermal": 2,
+          "signature": [
+            "a4c13784ef52ffb732b3620e94e4d215b33926c29dd84be2a6204b17aea746ab",
+            "52be3dee2667f4630875f7585effd8f7508fbf79035b3cc4c9eb2f1106ba30e3",
+            "3d4c47091f0a1fc2c7485f6f291bec4c1cd0c36940570fe0376a125abcc94ff0"
+          ]
+        },
+        {
+          "rep": 7,
+          "policy": "baseline",
+          "wall_ms": 19066.906417,
+          "disk_read_bytes": 0,
+          "thermal": 2,
+          "signature": [
+            "a4c13784ef52ffb732b3620e94e4d215b33926c29dd84be2a6204b17aea746ab",
+            "52be3dee2667f4630875f7585effd8f7508fbf79035b3cc4c9eb2f1106ba30e3",
+            "3d4c47091f0a1fc2c7485f6f291bec4c1cd0c36940570fe0376a125abcc94ff0"
+          ]
+        }
+      ],
+      "wall_speedup_geomean": 1.0043864955933661
     }
   ]
 }

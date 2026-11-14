@@ -38,9 +38,10 @@ same-range producer/consumer pairs are narrow Down→UpClamped and wide
 `moe_wide_probe` with `epi=0`→wide `moe_wide_probe` with `epi=2`.
 
 The audit's 5.5 GB / 2.8 GB intermediate and 27.5 / 13.8 ms round-trip prices
-are based on the aliased whole-buffer spans. They do not price a true transfer
-between the named wide and narrow count partitions, so they cannot justify a
-1.25× fusion gate for that pair.
+are based on the aliased whole-buffer spans. **These prices are upper bounds,
+not proven savings.** They do not price a true transfer between the named wide
+and narrow count partitions, so they cannot justify a 1.25× fusion gate for
+that pair.
 
 ## M5 attempt and disposition
 

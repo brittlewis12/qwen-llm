@@ -1,0 +1,10 @@
+
+running 6 tests
+test serve::batch_lifecycle_tests::accepted_request_renders_and_tokenizes_while_peer_pump_is_blocked ... ok
+test serve::token_prefix_cache::tests::adversarial_extensions_forks_and_tokenizer_identity_fall_back_exactly ... ok
+test serve::token_prefix_cache::tests::conversation_cache_is_bounded_and_exact_prefix_lookup_never_guesses ... ok
+test serve::token_prefix_cache::tests::plan_transcript_properties_keep_ids_and_boundary_prefixes_exact ... ok
+test serve::token_prefix_cache::tests::rendered_agent_plan_cache_matches_full_encoding_and_every_cut ... ok
+test serve::transport::tests::preparation_cap_preserves_queued_socket_and_releases_on_shutdown ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1152 filtered out; finished in 0.84s

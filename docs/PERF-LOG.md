@@ -6,14 +6,22 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
-## 2026-11-14 - Intake + Tokenization Qualification Started
+## 2026-11-14 - Intake + Exact Tokenization: Served Gate FAILED, Default-Off
 
-- Rebased onto `e70da3f8a`; candidate defaults on, independent 0 rollbacks.
-  Same release binary for A/A controls and AB/BA/AB. A1 is preregistered
-  as both the second control baseline and pair1's A arm; no speed selection.
-- Full round-cohort records plus prompt/ID/cut/logit digests supplement
-  the stable shared trace API. Frozen six-metric rule unchanged.
-  [Protocol, controls and outcome](bench/2026-11-14-v41-intake-qualification.md).
+- Same-binary A/A control diverges 2/39 observed responses; candidate/reference
+  pairs 1/39, 2/39, 2/39. No identical-prompt token-ID/cut mismatch. All roots
+  match initial logits and output bytes; different prior decode cohorts precede
+  differing append logits. Baseline batch-numerics variation is demonstrated;
+  no cross-run served output-bitwise claim.
+- Three purged AB/BA/AB pairs, greedy, nice0, symmetric warmup, one lease/arm.
+  Frozen gate **FAILED**: short/~1K native prefill **0.998399/0.999226x**
+  (<1.00). Client TTFT **1.096472/1.050986x**, TPS **1.006389x**, root
+  native **1.020042x** pass. No rounding, exclusion or override. Both switches
+  return default-off with independent 0 rollbacks; measured implementations kept.
+- Rebased onto `e70da3f8a`; shared tracing API remains stable. All executable
+  and metallib pins, every root/load, outside-native p50/p95, per-arm process
+  and sampled-window disk reads, matched-call exclusions and output controls
+  are in the [qualification record](bench/2026-11-14-v41-intake-qualification.md).
 
 ## 2026-11-14 - V4.1 Three-Agent TTFT: Peer-Prefill Tails Priced
 

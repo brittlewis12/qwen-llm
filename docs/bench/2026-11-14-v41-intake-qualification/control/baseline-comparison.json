@@ -1,0 +1,1975 @@
+{
+  "left": "target/intake-raw/A0",
+  "right": "target/intake-raw/A1",
+  "records": {
+    "left": {
+      "trace_records": 40,
+      "round_records": 4278,
+      "input_records": 40,
+      "cut_records": 40,
+      "logits_records": 40
+    },
+    "right": {
+      "trace_records": 40,
+      "round_records": 4258,
+      "input_records": 40,
+      "cut_records": 40,
+      "logits_records": 39
+    }
+  },
+  "common_calls": 40,
+  "observed_common": 39,
+  "mismatches": 2,
+  "divergence_rate": 0.05128205128205128,
+  "completed_common": 37,
+  "completed_mismatches": 1,
+  "status_counts": {
+    "complete_exact": 36,
+    "partial_prefix_equal": 1,
+    "unobserved": 1,
+    "complete_different": 1,
+    "partial_prefix_different": 1
+  },
+  "first_divergence_per_agent": {
+    "a2": "a2-t1"
+  },
+  "same_prompt_token_mismatch_labels": [],
+  "same_prompt_cut_mismatch_labels": [],
+  "same_input_and_cut_mismatches": 1,
+  "rows": [
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t0",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 0,
+      "left_width_counts": {
+        "3": 70
+      },
+      "right_width_counts": {
+        "2": 3,
+        "3": 67
+      },
+      "left_decode_rounds": 70,
+      "right_decode_rounds": 70,
+      "left_generated": 71,
+      "right_generated": 71,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 144,
+          "kind": "decode",
+          "request_ids": [
+            22,
+            21,
+            23
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 180502983292,
+          "end_ns": 180530105584
+        },
+        "right": {
+          "version": 1,
+          "round_id": 139,
+          "kind": "decode",
+          "request_ids": [
+            24,
+            23
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 146627583792,
+          "end_ns": 146652785667
+        },
+        "left_labels": [
+          "a2-t0",
+          "a1-t0",
+          "a0-t0"
+        ],
+        "right_labels": [
+          "a1-t0",
+          "a0-t0"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t1",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 0,
+      "left_width_counts": {
+        "3": 93,
+        "2": 4
+      },
+      "right_width_counts": {
+        "3": 95,
+        "2": 2
+      },
+      "left_decode_rounds": 97,
+      "right_decode_rounds": 97,
+      "left_generated": 98,
+      "right_generated": 98,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 233,
+          "kind": "decode",
+          "request_ids": [
+            22,
+            21,
+            24
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 183255868875,
+          "end_ns": 183282668417
+        },
+        "right": {
+          "version": 1,
+          "round_id": 229,
+          "kind": "decode",
+          "request_ids": [
+            24,
+            25,
+            26
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 149914920625,
+          "end_ns": 149942143125
+        },
+        "left_labels": [
+          "a2-t0",
+          "a1-t0",
+          "a0-t1"
+        ],
+        "right_labels": [
+          "a1-t0",
+          "a2-t0",
+          "a0-t1"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t10",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 21,
+      "left_width_counts": {
+        "3": 91,
+        "2": 4
+      },
+      "right_width_counts": {
+        "3": 91,
+        "2": 4
+      },
+      "left_decode_rounds": 95,
+      "right_decode_rounds": 95,
+      "left_generated": 96,
+      "right_generated": 96,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 2081,
+          "kind": "decode",
+          "request_ids": [
+            34,
+            39
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 242770939459,
+          "end_ns": 242792945084
+        },
+        "right": {
+          "version": 1,
+          "round_id": 2077,
+          "kind": "decode",
+          "request_ids": [
+            36,
+            40,
+            41
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 210672763500,
+          "end_ns": 210700419000
+        },
+        "left_labels": [
+          "a2-t2",
+          "a0-t10"
+        ],
+        "right_labels": [
+          "a2-t2",
+          "a1-t4",
+          "a0-t10"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t11",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "2": 19,
+        "3": 169
+      },
+      "right_width_counts": {
+        "2": 19,
+        "3": 169
+      },
+      "left_decode_rounds": 188,
+      "right_decode_rounds": 188,
+      "left_generated": 189,
+      "right_generated": 189
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t12",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "3": 131
+      },
+      "right_width_counts": {
+        "3": 131
+      },
+      "left_decode_rounds": 131,
+      "right_decode_rounds": 131,
+      "left_generated": 132,
+      "right_generated": 132
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t13",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "3": 70
+      },
+      "right_width_counts": {
+        "3": 70
+      },
+      "left_decode_rounds": 70,
+      "right_decode_rounds": 70,
+      "left_generated": 71,
+      "right_generated": 71
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t14",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "3": 121
+      },
+      "right_width_counts": {
+        "3": 121
+      },
+      "left_decode_rounds": 121,
+      "right_decode_rounds": 121,
+      "left_generated": 122,
+      "right_generated": 122
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t15",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "3": 121
+      },
+      "right_width_counts": {
+        "3": 121
+      },
+      "left_decode_rounds": 121,
+      "right_decode_rounds": 121,
+      "left_generated": 122,
+      "right_generated": 122
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t16",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "3": 470
+      },
+      "right_width_counts": {
+        "3": 470
+      },
+      "left_decode_rounds": 470,
+      "right_decode_rounds": 470,
+      "left_generated": 471,
+      "right_generated": 471
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t17",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "3": 160
+      },
+      "right_width_counts": {
+        "3": 160
+      },
+      "left_decode_rounds": 160,
+      "right_decode_rounds": 160,
+      "left_generated": 161,
+      "right_generated": 161
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t18",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "2": 2,
+        "3": 80
+      },
+      "right_width_counts": {
+        "2": 2,
+        "3": 80
+      },
+      "left_decode_rounds": 82,
+      "right_decode_rounds": 82,
+      "left_generated": 83,
+      "right_generated": 83
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t19",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "3": 77
+      },
+      "right_width_counts": {
+        "3": 77
+      },
+      "left_decode_rounds": 77,
+      "right_decode_rounds": 77,
+      "left_generated": 78,
+      "right_generated": 78
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t2",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 97,
+      "left_width_counts": {
+        "3": 97,
+        "2": 7
+      },
+      "right_width_counts": {
+        "3": 99,
+        "2": 5
+      },
+      "left_decode_rounds": 104,
+      "right_decode_rounds": 104,
+      "left_generated": 105,
+      "right_generated": 105,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 432,
+          "kind": "decode",
+          "request_ids": [
+            22,
+            26
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 190438398834,
+          "end_ns": 190460422167
+        },
+        "right": {
+          "version": 1,
+          "round_id": 428,
+          "kind": "decode",
+          "request_ids": [
+            25,
+            27,
+            28
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 157293152250,
+          "end_ns": 157320936667
+        },
+        "left_labels": [
+          "a2-t0",
+          "a0-t2"
+        ],
+        "right_labels": [
+          "a2-t0",
+          "a1-t1",
+          "a0-t2"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t20",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 77,
+      "left_width_counts": {
+        "3": 77,
+        "2": 7
+      },
+      "right_width_counts": {
+        "3": 79,
+        "2": 5
+      },
+      "left_decode_rounds": 84,
+      "right_decode_rounds": 84,
+      "left_generated": 85,
+      "right_generated": 85,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 3864,
+          "kind": "decode",
+          "request_ids": [
+            34,
+            53
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 299896449750,
+          "end_ns": 299919522792
+        },
+        "right": {
+          "version": 1,
+          "round_id": 3854,
+          "kind": "decode",
+          "request_ids": [
+            36,
+            53,
+            55
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 267861940292,
+          "end_ns": 267889772917
+        },
+        "left_labels": [
+          "a2-t2",
+          "a0-t20"
+        ],
+        "right_labels": [
+          "a2-t2",
+          "a1-t8",
+          "a0-t20"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t21",
+      "status": "partial_prefix_equal",
+      "observed": true,
+      "complete_pair": false,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 370,
+      "left_width_counts": {
+        "2": 39,
+        "3": 340
+      },
+      "right_width_counts": {
+        "2": 32,
+        "3": 338
+      },
+      "left_decode_rounds": 379,
+      "right_decode_rounds": 370,
+      "left_generated": null,
+      "right_generated": null,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 4270,
+          "kind": "decode",
+          "request_ids": [
+            34,
+            54,
+            57
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 312163941750,
+          "end_ns": 312193500375
+        },
+        "right": null,
+        "left_labels": [
+          "a2-t2",
+          "a0-t21",
+          "a1-t11"
+        ],
+        "right_labels": null
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t3",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "3": 475
+      },
+      "right_width_counts": {
+        "3": 475
+      },
+      "left_decode_rounds": 475,
+      "right_decode_rounds": 475,
+      "left_generated": 476,
+      "right_generated": 476
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t4",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "3": 121
+      },
+      "right_width_counts": {
+        "3": 121
+      },
+      "left_decode_rounds": 121,
+      "right_decode_rounds": 121,
+      "left_generated": 122,
+      "right_generated": 122
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t5",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "3": 65
+      },
+      "right_width_counts": {
+        "3": 65
+      },
+      "left_decode_rounds": 65,
+      "right_decode_rounds": 65,
+      "left_generated": 66,
+      "right_generated": 66
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t6",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 29,
+      "left_width_counts": {
+        "3": 59,
+        "2": 6
+      },
+      "right_width_counts": {
+        "3": 59,
+        "2": 6
+      },
+      "left_decode_rounds": 65,
+      "right_decode_rounds": 65,
+      "left_generated": 66,
+      "right_generated": 66,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 1211,
+          "kind": "decode",
+          "request_ids": [
+            27,
+            31
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 213544124167,
+          "end_ns": 213566285834
+        },
+        "right": {
+          "version": 1,
+          "round_id": 1208,
+          "kind": "decode",
+          "request_ids": [
+            25,
+            29,
+            33
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 181082047709,
+          "end_ns": 181108829709
+        },
+        "left_labels": [
+          "a1-t2",
+          "a0-t6"
+        ],
+        "right_labels": [
+          "a2-t0",
+          "a1-t2",
+          "a0-t6"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t7",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 44,
+      "left_width_counts": {
+        "3": 452,
+        "2": 18
+      },
+      "right_width_counts": {
+        "3": 454,
+        "2": 16
+      },
+      "left_decode_rounds": 470,
+      "right_decode_rounds": 470,
+      "left_generated": 471,
+      "right_generated": 471,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 1314,
+          "kind": "decode",
+          "request_ids": [
+            27,
+            33
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 217575112792,
+          "end_ns": 217597106084
+        },
+        "right": {
+          "version": 1,
+          "round_id": 1310,
+          "kind": "decode",
+          "request_ids": [
+            29,
+            34,
+            35
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 185135937167,
+          "end_ns": 185164381292
+        },
+        "left_labels": [
+          "a1-t2",
+          "a0-t7"
+        ],
+        "right_labels": [
+          "a1-t2",
+          "a2-t1",
+          "a0-t7"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t8",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 22,
+      "left_width_counts": {
+        "3": 72,
+        "2": 3
+      },
+      "right_width_counts": {
+        "3": 72,
+        "2": 3
+      },
+      "left_decode_rounds": 75,
+      "right_decode_rounds": 75,
+      "left_generated": 76,
+      "right_generated": 76,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 1767,
+          "kind": "decode",
+          "request_ids": [
+            34,
+            35
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 231794980542,
+          "end_ns": 231817298167
+        },
+        "right": {
+          "version": 1,
+          "round_id": 1763,
+          "kind": "decode",
+          "request_ids": [
+            29,
+            36,
+            37
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 199628421417,
+          "end_ns": 199654931084
+        },
+        "left_labels": [
+          "a2-t2",
+          "a0-t8"
+        ],
+        "right_labels": [
+          "a1-t2",
+          "a2-t2",
+          "a0-t8"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-t9",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 138,
+      "left_width_counts": {
+        "3": 211,
+        "2": 6
+      },
+      "right_width_counts": {
+        "3": 211,
+        "2": 6
+      },
+      "left_decode_rounds": 217,
+      "right_decode_rounds": 217,
+      "left_generated": 218,
+      "right_generated": 218,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 1976,
+          "kind": "decode",
+          "request_ids": [
+            34,
+            37
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 238139538667,
+          "end_ns": 238161467417
+        },
+        "right": {
+          "version": 1,
+          "round_id": 1972,
+          "kind": "decode",
+          "request_ids": [
+            36,
+            38,
+            39
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 205990424792,
+          "end_ns": 206017342584
+        },
+        "left_labels": [
+          "a2-t2",
+          "a0-t9"
+        ],
+        "right_labels": [
+          "a2-t2",
+          "a1-t3",
+          "a0-t9"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a0-warm",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "1": 31
+      },
+      "right_width_counts": {
+        "1": 31
+      },
+      "left_decode_rounds": 31,
+      "right_decode_rounds": 31,
+      "left_generated": 32,
+      "right_generated": 32
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a1-t0",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 0,
+      "left_width_counts": {
+        "2": 22,
+        "3": 75
+      },
+      "right_width_counts": {
+        "2": 21,
+        "3": 76
+      },
+      "left_decode_rounds": 97,
+      "right_decode_rounds": 97,
+      "left_generated": 98,
+      "right_generated": 98,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 139,
+          "kind": "decode",
+          "request_ids": [
+            22,
+            21
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 179835877917,
+          "end_ns": 179864111084
+        },
+        "right": {
+          "version": 1,
+          "round_id": 139,
+          "kind": "decode",
+          "request_ids": [
+            24,
+            23
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 146627583792,
+          "end_ns": 146652785667
+        },
+        "left_labels": [
+          "a2-t0",
+          "a1-t0"
+        ],
+        "right_labels": [
+          "a1-t0",
+          "a0-t0"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a1-t1",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 86,
+      "left_width_counts": {
+        "3": 185,
+        "2": 3
+      },
+      "right_width_counts": {
+        "3": 185,
+        "2": 3
+      },
+      "left_decode_rounds": 188,
+      "right_decode_rounds": 188,
+      "left_generated": 189,
+      "right_generated": 189,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 329,
+          "kind": "decode",
+          "request_ids": [
+            22,
+            24,
+            25
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 186520672375,
+          "end_ns": 186547308959
+        },
+        "right": {
+          "version": 1,
+          "round_id": 327,
+          "kind": "decode",
+          "request_ids": [
+            25,
+            27
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 153331039000,
+          "end_ns": 153354388042
+        },
+        "left_labels": [
+          "a2-t0",
+          "a0-t1",
+          "a1-t1"
+        ],
+        "right_labels": [
+          "a2-t0",
+          "a1-t1"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a1-t10",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "3": 217
+      },
+      "right_width_counts": {
+        "3": 217
+      },
+      "left_decode_rounds": 217,
+      "right_decode_rounds": 217,
+      "left_generated": 218,
+      "right_generated": 218
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a1-t11",
+      "status": "unobserved",
+      "observed": false,
+      "complete_pair": false,
+      "output_exact": null,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": null,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 0,
+      "left_width_counts": {
+        "3": 2,
+        "2": 7
+      },
+      "right_width_counts": {},
+      "left_decode_rounds": 9,
+      "right_decode_rounds": 0,
+      "left_generated": null,
+      "right_generated": null,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 4270,
+          "kind": "decode",
+          "request_ids": [
+            34,
+            54,
+            57
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 312163941750,
+          "end_ns": 312193500375
+        },
+        "right": null,
+        "left_labels": [
+          "a2-t2",
+          "a0-t21",
+          "a1-t11"
+        ],
+        "right_labels": null
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a1-t2",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 640,
+      "left_width_counts": {
+        "2": 114,
+        "3": 1194
+      },
+      "right_width_counts": {
+        "2": 109,
+        "3": 1199
+      },
+      "left_decode_rounds": 1308,
+      "right_decode_rounds": 1308,
+      "left_generated": 1309,
+      "right_generated": 1309,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 1093,
+          "kind": "decode",
+          "request_ids": [
+            22,
+            27
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 209333824167,
+          "end_ns": 209355281959
+        },
+        "right": {
+          "version": 1,
+          "round_id": 1093,
+          "kind": "decode",
+          "request_ids": [
+            25,
+            29,
+            32
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 177440405834,
+          "end_ns": 177467756792
+        },
+        "left_labels": [
+          "a2-t0",
+          "a1-t2"
+        ],
+        "right_labels": [
+          "a2-t0",
+          "a1-t2",
+          "a0-t5"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a1-t3",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 47,
+      "left_width_counts": {
+        "3": 188,
+        "2": 16
+      },
+      "right_width_counts": {
+        "3": 188,
+        "2": 16
+      },
+      "left_decode_rounds": 204,
+      "right_decode_rounds": 204,
+      "left_generated": 205,
+      "right_generated": 205,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 1818,
+          "kind": "decode",
+          "request_ids": [
+            34,
+            35,
+            36
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 233579674125,
+          "end_ns": 233607511834
+        },
+        "right": {
+          "version": 1,
+          "round_id": 1817,
+          "kind": "decode",
+          "request_ids": [
+            36,
+            38
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 201488648917,
+          "end_ns": 201511919625
+        },
+        "left_labels": [
+          "a2-t2",
+          "a0-t8",
+          "a1-t3"
+        ],
+        "right_labels": [
+          "a2-t2",
+          "a1-t3"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a1-t4",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 70,
+      "left_width_counts": {
+        "3": 94,
+        "2": 3
+      },
+      "right_width_counts": {
+        "3": 94,
+        "2": 3
+      },
+      "left_decode_rounds": 97,
+      "right_decode_rounds": 97,
+      "left_generated": 98,
+      "right_generated": 98,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 2053,
+          "kind": "decode",
+          "request_ids": [
+            34,
+            37,
+            38
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 240973537750,
+          "end_ns": 241000452084
+        },
+        "right": {
+          "version": 1,
+          "round_id": 2052,
+          "kind": "decode",
+          "request_ids": [
+            36,
+            40
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 208946870375,
+          "end_ns": 208969412625
+        },
+        "left_labels": [
+          "a2-t2",
+          "a0-t9",
+          "a1-t4"
+        ],
+        "right_labels": [
+          "a2-t2",
+          "a1-t4"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a1-t5",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 67,
+      "left_width_counts": {
+        "3": 70,
+        "2": 5
+      },
+      "right_width_counts": {
+        "3": 67,
+        "2": 8
+      },
+      "left_decode_rounds": 75,
+      "right_decode_rounds": 75,
+      "left_generated": 76,
+      "right_generated": 76,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 2153,
+          "kind": "decode",
+          "request_ids": [
+            34,
+            39,
+            40
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 245355052292,
+          "end_ns": 245382405500
+        },
+        "right": {
+          "version": 1,
+          "round_id": 2152,
+          "kind": "decode",
+          "request_ids": [
+            36,
+            42
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 213377672042,
+          "end_ns": 213400204917
+        },
+        "left_labels": [
+          "a2-t2",
+          "a0-t10",
+          "a1-t5"
+        ],
+        "right_labels": [
+          "a2-t2",
+          "a1-t5"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a1-t6",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "3": 80
+      },
+      "right_width_counts": {
+        "3": 80
+      },
+      "left_decode_rounds": 80,
+      "right_decode_rounds": 80,
+      "left_generated": 81,
+      "right_generated": 81
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a1-t7",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 337,
+      "left_width_counts": {
+        "3": 1162,
+        "2": 106
+      },
+      "right_width_counts": {
+        "3": 1162,
+        "2": 106
+      },
+      "left_decode_rounds": 1268,
+      "right_decode_rounds": 1268,
+      "left_generated": 1269,
+      "right_generated": 1269,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 2621,
+          "kind": "decode",
+          "request_ids": [
+            34,
+            43
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 261726151250,
+          "end_ns": 261748404834
+        },
+        "right": {
+          "version": 1,
+          "round_id": 2616,
+          "kind": "decode",
+          "request_ids": [
+            36,
+            45,
+            48
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 230066655417,
+          "end_ns": 230093859292
+        },
+        "left_labels": [
+          "a2-t2",
+          "a1-t7"
+        ],
+        "right_labels": [
+          "a2-t2",
+          "a1-t7",
+          "a0-t14"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a1-t8",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 188,
+      "left_width_counts": {
+        "3": 234,
+        "2": 33
+      },
+      "right_width_counts": {
+        "3": 236,
+        "2": 31
+      },
+      "left_decode_rounds": 267,
+      "right_decode_rounds": 267,
+      "left_generated": 268,
+      "right_generated": 268,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 3784,
+          "kind": "decode",
+          "request_ids": [
+            34,
+            51
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 297394444084,
+          "end_ns": 297416981875
+        },
+        "right": {
+          "version": 1,
+          "round_id": 3777,
+          "kind": "decode",
+          "request_ids": [
+            36,
+            53,
+            55
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 265766263667,
+          "end_ns": 265794319792
+        },
+        "left_labels": [
+          "a2-t2",
+          "a1-t8"
+        ],
+        "right_labels": [
+          "a2-t2",
+          "a1-t8",
+          "a0-t20"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a1-t9",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "3": 121
+      },
+      "right_width_counts": {
+        "3": 121
+      },
+      "left_decode_rounds": 121,
+      "right_decode_rounds": 121,
+      "left_generated": 122,
+      "right_generated": 122
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a1-warm",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "1": 31
+      },
+      "right_width_counts": {
+        "1": 31
+      },
+      "left_decode_rounds": 31,
+      "right_decode_rounds": 31,
+      "left_generated": 32,
+      "right_generated": 32
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a2-t0",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 0,
+      "left_width_counts": {
+        "2": 102,
+        "3": 950,
+        "1": 11
+      },
+      "right_width_counts": {
+        "3": 957,
+        "2": 92,
+        "1": 14
+      },
+      "left_decode_rounds": 1063,
+      "right_decode_rounds": 1063,
+      "left_generated": 1064,
+      "right_generated": 1064,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 139,
+          "kind": "decode",
+          "request_ids": [
+            22,
+            21
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 179835877917,
+          "end_ns": 179864111084
+        },
+        "right": {
+          "version": 1,
+          "round_id": 143,
+          "kind": "decode",
+          "request_ids": [
+            24,
+            23,
+            25
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 147175360500,
+          "end_ns": 147203254792
+        },
+        "left_labels": [
+          "a2-t0",
+          "a1-t0"
+        ],
+        "right_labels": [
+          "a1-t0",
+          "a0-t0",
+          "a2-t0"
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a2-t1",
+      "status": "complete_different",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": false,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": false,
+      "first_difference_byte": {
+        "response.output_text.delta": 22
+      },
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 24,
+      "left_width_counts": {
+        "3": 74,
+        "2": 21
+      },
+      "right_width_counts": {
+        "3": 75,
+        "2": 20
+      },
+      "left_decode_rounds": 95,
+      "right_decode_rounds": 95,
+      "left_generated": 96,
+      "right_generated": 96,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 1242,
+          "kind": "decode",
+          "request_ids": [
+            27,
+            31,
+            32
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 215389318834,
+          "end_ns": 215416051334
+        },
+        "right": {
+          "version": 1,
+          "round_id": 1245,
+          "kind": "decode",
+          "request_ids": [
+            29,
+            34
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 183100206084,
+          "end_ns": 183122692292
+        },
+        "left_labels": [
+          "a1-t2",
+          "a0-t6",
+          "a2-t1"
+        ],
+        "right_labels": [
+          "a1-t2",
+          "a2-t1"
+        ]
+      },
+      "left_input": {
+        "request_id": 32,
+        "response_id": "resp_6af85d5e000f",
+        "prompt_sha256": "e2ee0cc37f3d6bc326aaf1b31f8f227d64c9bef07767f8bc390c48a48dd8328d",
+        "token_sha256": "54674572c72cbbcf4c823db0187f78424b78435d77c9a65a6d646245b0b883a3",
+        "token_count": 51944,
+        "shared_prefix_byte": 1676,
+        "generation_header_byte": 213930
+      },
+      "right_input": {
+        "request_id": 34,
+        "response_id": "resp_6af85f3e000f",
+        "prompt_sha256": "e2ee0cc37f3d6bc326aaf1b31f8f227d64c9bef07767f8bc390c48a48dd8328d",
+        "token_sha256": "54674572c72cbbcf4c823db0187f78424b78435d77c9a65a6d646245b0b883a3",
+        "token_count": 51944,
+        "shared_prefix_byte": 1676,
+        "generation_header_byte": 213930
+      },
+      "left_cut": {
+        "request_id": 32,
+        "prompt_tokens": 51944,
+        "shared_cut": 346,
+        "generation_cut": 51942,
+        "checkpoint_cuts": [
+          346,
+          51942
+        ]
+      },
+      "right_cut": {
+        "request_id": 34,
+        "prompt_tokens": 51944,
+        "shared_cut": 346,
+        "generation_cut": 51942,
+        "checkpoint_cuts": [
+          346,
+          51942
+        ]
+      }
+    },
+    {
+      "prompt_equal": false,
+      "tokens_equal": false,
+      "label": "a2-t2",
+      "status": "partial_prefix_different",
+      "observed": true,
+      "complete_pair": false,
+      "output_exact": false,
+      "input_equal": false,
+      "cut_equal": true,
+      "initial_logits_equal": false,
+      "first_difference_byte": {
+        "response.output_text.delta": 17
+      },
+      "decode_cohorts_equal": false,
+      "first_decode_cohort_difference": 403,
+      "left_width_counts": {
+        "3": 2598,
+        "2": 239,
+        "1": 79
+      },
+      "right_width_counts": {
+        "3": 2593,
+        "2": 238,
+        "1": 71
+      },
+      "left_decode_rounds": 2916,
+      "right_decode_rounds": 2902,
+      "left_generated": 2917,
+      "right_generated": null,
+      "cohort_difference_example": {
+        "left": {
+          "version": 1,
+          "round_id": 1736,
+          "kind": "decode",
+          "request_ids": [
+            27,
+            33,
+            34
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 230276299292,
+          "end_ns": 230303780375
+        },
+        "right": {
+          "version": 1,
+          "round_id": 1737,
+          "kind": "decode",
+          "request_ids": [
+            29,
+            36
+          ],
+          "position": 0,
+          "rows": 1,
+          "start_ns": 198263622417,
+          "end_ns": 198285958459
+        },
+        "left_labels": [
+          "a1-t2",
+          "a0-t7",
+          "a2-t2"
+        ],
+        "right_labels": [
+          "a1-t2",
+          "a2-t2"
+        ]
+      },
+      "left_input": {
+        "request_id": 34,
+        "response_id": "resp_6af85d620011",
+        "prompt_sha256": "70052aef0fdcfeab60e880433b5ad3c039c1b03db3c757b670657f46112f7c32",
+        "token_sha256": "e03fc616d39b8d995467f7ce637901a116732184cda595ab36d38959caa59525",
+        "token_count": 53837,
+        "shared_prefix_byte": 1676,
+        "generation_header_byte": 220307
+      },
+      "right_input": {
+        "request_id": 36,
+        "response_id": "resp_6af85f420011",
+        "prompt_sha256": "20560d8d9815b41258b993cdc61989e735b9ba51f6089b1a07ae34946bf3f576",
+        "token_sha256": "864e50fdfbb985977be1a3064c4be3710475b7ea9fa47ec5453b0e857a503671",
+        "token_count": 53837,
+        "shared_prefix_byte": 1676,
+        "generation_header_byte": 220273
+      },
+      "left_cut": {
+        "request_id": 34,
+        "prompt_tokens": 53837,
+        "shared_cut": 346,
+        "generation_cut": 53835,
+        "checkpoint_cuts": [
+          346,
+          53835
+        ]
+      },
+      "right_cut": {
+        "request_id": 36,
+        "prompt_tokens": 53837,
+        "shared_cut": 346,
+        "generation_cut": 53835,
+        "checkpoint_cuts": [
+          346,
+          53835
+        ]
+      }
+    },
+    {
+      "prompt_equal": true,
+      "tokens_equal": true,
+      "label": "a2-warm",
+      "status": "complete_exact",
+      "observed": true,
+      "complete_pair": true,
+      "output_exact": true,
+      "input_equal": true,
+      "cut_equal": true,
+      "initial_logits_equal": true,
+      "first_difference_byte": {},
+      "decode_cohorts_equal": true,
+      "first_decode_cohort_difference": null,
+      "left_width_counts": {
+        "1": 31
+      },
+      "right_width_counts": {
+        "1": 31
+      },
+      "left_decode_rounds": 31,
+      "right_decode_rounds": 31,
+      "left_generated": 32,
+      "right_generated": 32
+    }
+  ]
+}

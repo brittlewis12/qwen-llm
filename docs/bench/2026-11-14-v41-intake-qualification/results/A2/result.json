@@ -1,0 +1,209 @@
+{
+  "tag": "A2",
+  "mode": "baseline",
+  "start": 1794663450.747797,
+  "end": 1794663961.807759,
+  "model_pids": [
+    74716
+  ],
+  "model_niceness": {
+    "74716": 0
+  },
+  "binary_sha256": "66b15ced6d8832b8b782b085a79ec09e9747a51a1374ae35038d53198538ea2b",
+  "purge": {
+    "file": "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+    "bytes": 110595290816,
+    "resident_pages_before": 2084131,
+    "resident_pages_after": 0,
+    "msync_rc": 0,
+    "msync_errno": 0,
+    "seconds": 0.6042149066925049
+  },
+  "process_disk_read_bytes": 189743656960,
+  "symmetric_warmup": [
+    {
+      "pid": 66185,
+      "nice": 0,
+      "code": 0,
+      "log": "cpu-warmup.log"
+    },
+    {
+      "pid": 66209,
+      "nice": 0,
+      "code": 0,
+      "log": "released-tokenizer.log"
+    }
+  ],
+  "summary": {
+    "window_begin": 1794663839.0377522,
+    "window_end": 1794663959.0377522,
+    "window_seconds": 120.0,
+    "window_tokens": 10682,
+    "aggregate_tps": 89.01666666666667,
+    "gap_p50_s": 0.02722620964050293,
+    "gap_p95_s": 0.0287628173828125,
+    "gap_p99_s": 0.03146815299987793,
+    "gap_max_s": 2.1204590797424316,
+    "round_budget": {
+      "rounds_est": 2464.3347902038226,
+      "avg_width": 2.9409448633165294,
+      "coverage": 0.6879797790675903,
+      "transition_s": 66.87240610068254,
+      "prefill_s": 18.742525809857508,
+      "partial_prefill_s": 2.197721,
+      "partial_prefill_calls": 3,
+      "capture_s": 0.012225120021022894,
+      "host_s": 0.2220895217915405,
+      "transition_ms_per_round": 27.13608815105499,
+      "host_ms_per_round": 0.09012148944793807,
+      "host_metric": "median content gap minus native round wall"
+    },
+    "agents": [
+      {
+        "agent": 0,
+        "window_tokens": 3420,
+        "turns_offered": 18,
+        "ttft_p50_s": 0.660222053527832,
+        "ttft_p95_s": 1.7703990936279297,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 13.017385959625244,
+        "censored_ttft": 0
+      },
+      {
+        "agent": 1,
+        "window_tokens": 3558,
+        "turns_offered": 8,
+        "ttft_p50_s": 0.7670857906341553,
+        "ttft_p95_s": 1.663114070892334,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 7.934728622436523,
+        "censored_ttft": 0
+      },
+      {
+        "agent": 2,
+        "window_tokens": 3704,
+        "turns_offered": 2,
+        "ttft_p50_s": 1.0934038162231445,
+        "ttft_p95_s": 1.5586178302764893,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 2.652021646499634,
+        "censored_ttft": 0
+      }
+    ],
+    "agent_count": 3,
+    "trace_20s": [
+      {
+        "start_s": 0,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027360916137695312,
+        "gap_p95_s": 0.028762102127075195,
+        "gap_max_s": 0.6697249412536621,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 2.0811798572540283,
+        "decode_stream_width_3_s": 17.91882014274597,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 20,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027109861373901367,
+        "gap_p95_s": 0.02811574935913086,
+        "gap_max_s": 1.5443048477172852,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 5.7450807094573975,
+        "decode_stream_width_3_s": 14.254919290542603,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 40,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027040958404541016,
+        "gap_p95_s": 0.028146982192993164,
+        "gap_max_s": 1.123624324798584,
+        "decode_stream_width_1_s": 0.9870772361755371,
+        "decode_stream_width_2_s": 6.607773780822754,
+        "decode_stream_width_3_s": 12.405148983001709,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 60,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.02702808380126953,
+        "gap_p95_s": 0.02810215950012207,
+        "gap_max_s": 0.8487496376037598,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 5.120889186859131,
+        "decode_stream_width_3_s": 14.87911081314087,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 80,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027319908142089844,
+        "gap_p95_s": 0.028750181198120117,
+        "gap_max_s": 2.1204590797424316,
+        "decode_stream_width_1_s": 0.9368221759796143,
+        "decode_stream_width_2_s": 1.776064395904541,
+        "decode_stream_width_3_s": 17.287113428115845,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 100,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.02765488624572754,
+        "gap_p95_s": 0.0297548770904541,
+        "gap_max_s": 0.7412188053131104,
+        "decode_stream_width_1_s": 1.5001599788665771,
+        "decode_stream_width_2_s": 3.928011655807495,
+        "decode_stream_width_3_s": 14.571828365325928,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      }
+    ],
+    "startup_s": 18.401126861572266,
+    "warmup_s": 87.6638011932373,
+    "warm_settle_s": 104.34569599991664,
+    "arm": "default",
+    "family": "v41",
+    "seed": 20261112,
+    "thermal_max": 2,
+    "sampling": {
+      "mode": "greedy",
+      "fields": {
+        "temperature": 0,
+        "top_p": 1
+      }
+    },
+    "metric": "delivered text+reasoning tokens retokenized; excludes EOS/format control",
+    "thermal_flagged": true,
+    "timing_thermal_max": 1,
+    "timing_thermal_seconds": {
+      "0": 0.0,
+      "1": 120.0,
+      "2": 0.0,
+      "unknown": 0.0
+    },
+    "compile_observed": true,
+    "compile_overlapped": true,
+    "max_thermal_pressure": 2,
+    "load_after": [
+      19.64453125,
+      23.6806640625,
+      22.1025390625
+    ],
+    "arm_thermal_seconds": {
+      "0": 103.38815402984619,
+      "1": 195.92024970054626,
+      "2": 45.71772217750549,
+      "unknown": 0.0
+    }
+  }
+}

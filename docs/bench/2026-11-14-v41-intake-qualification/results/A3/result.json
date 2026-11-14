@@ -1,0 +1,209 @@
+{
+  "tag": "A3",
+  "mode": "baseline",
+  "start": 1794664328.283812,
+  "end": 1794664788.3299441,
+  "model_pids": [
+    80880
+  ],
+  "model_niceness": {
+    "80880": 0
+  },
+  "binary_sha256": "66b15ced6d8832b8b782b085a79ec09e9747a51a1374ae35038d53198538ea2b",
+  "purge": {
+    "file": "/Users/tito/models/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+    "bytes": 110595290816,
+    "resident_pages_before": 0,
+    "resident_pages_after": 0,
+    "msync_rc": 0,
+    "msync_errno": 0,
+    "seconds": 1.3113021850585938e-05
+  },
+  "process_disk_read_bytes": 190175219712,
+  "symmetric_warmup": [
+    {
+      "pid": 71424,
+      "nice": 0,
+      "code": 0,
+      "log": "cpu-warmup.log"
+    },
+    {
+      "pid": 71448,
+      "nice": 0,
+      "code": 0,
+      "log": "released-tokenizer.log"
+    }
+  ],
+  "summary": {
+    "window_begin": 1794664665.398473,
+    "window_end": 1794664785.398473,
+    "window_seconds": 120.0,
+    "window_tokens": 10722,
+    "aggregate_tps": 89.35,
+    "gap_p50_s": 0.027241945266723633,
+    "gap_p95_s": 0.028029918670654297,
+    "gap_p99_s": 0.030476093292236328,
+    "gap_max_s": 2.118211030960083,
+    "round_budget": {
+      "rounds_est": 2426.100888721357,
+      "avg_width": 2.9408733635148896,
+      "coverage": 0.674594292109681,
+      "transition_s": 65.52990120322025,
+      "prefill_s": 18.875712082,
+      "partial_prefill_s": 2.2137469999999997,
+      "partial_prefill_calls": 3,
+      "capture_s": 0.0068944570000000005,
+      "host_s": 0.5618064188765232,
+      "transition_ms_per_round": 27.010377642521238,
+      "host_ms_per_round": 0.23156762420239474,
+      "host_metric": "median content gap minus native round wall"
+    },
+    "agents": [
+      {
+        "agent": 0,
+        "window_tokens": 3432,
+        "turns_offered": 18,
+        "ttft_p50_s": 0.6686172485351562,
+        "ttft_p95_s": 1.8984849452972412,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 13.031118631362915,
+        "censored_ttft": 0
+      },
+      {
+        "agent": 1,
+        "window_tokens": 3571,
+        "turns_offered": 8,
+        "ttft_p50_s": 0.7771117687225342,
+        "ttft_p95_s": 1.783233880996704,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 8.10035753250122,
+        "censored_ttft": 0
+      },
+      {
+        "agent": 2,
+        "window_tokens": 3719,
+        "turns_offered": 2,
+        "ttft_p50_s": 1.102673053741455,
+        "ttft_p95_s": 1.5316147804260254,
+        "carry_in_requests": 1,
+        "pending_at_cutoff": 0,
+        "queue_exposure_s": 2.6342878341674805,
+        "censored_ttft": 0
+      }
+    ],
+    "agent_count": 3,
+    "trace_20s": [
+      {
+        "start_s": 0,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027235984802246094,
+        "gap_p95_s": 0.028085947036743164,
+        "gap_max_s": 0.6474859714508057,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 2.9714081287384033,
+        "decode_stream_width_3_s": 17.028591871261597,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 20,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027154922485351562,
+        "gap_p95_s": 0.027830123901367188,
+        "gap_max_s": 1.5459370613098145,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 5.162018060684204,
+        "decode_stream_width_3_s": 14.837981939315796,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 40,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027149200439453125,
+        "gap_p95_s": 0.027917146682739258,
+        "gap_max_s": 1.5958237648010254,
+        "decode_stream_width_1_s": 0.979834794998169,
+        "decode_stream_width_2_s": 6.479644298553467,
+        "decode_stream_width_3_s": 12.540520906448364,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 60,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.02715015411376953,
+        "gap_p95_s": 0.02790975570678711,
+        "gap_max_s": 0.8834691047668457,
+        "decode_stream_width_1_s": 0.0,
+        "decode_stream_width_2_s": 4.833179235458374,
+        "decode_stream_width_3_s": 15.166820764541626,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 80,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.02735590934753418,
+        "gap_p95_s": 0.028113126754760742,
+        "gap_max_s": 2.118211030960083,
+        "decode_stream_width_1_s": 1.729964017868042,
+        "decode_stream_width_2_s": 2.3766238689422607,
+        "decode_stream_width_3_s": 15.893412113189697,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      },
+      {
+        "start_s": 100,
+        "duration_s": 20.0,
+        "gap_p50_s": 0.027378082275390625,
+        "gap_p95_s": 0.02833104133605957,
+        "gap_max_s": 0.7570490837097168,
+        "decode_stream_width_1_s": 0.7745420932769775,
+        "decode_stream_width_2_s": 3.4923746585845947,
+        "decode_stream_width_3_s": 15.733083248138428,
+        "predecode_only_s": 0.0,
+        "idle_s": 0.0
+      }
+    ],
+    "startup_s": 18.36198616027832,
+    "warmup_s": 81.57337212562561,
+    "warm_settle_s": 60.78934187500272,
+    "arm": "default",
+    "family": "v41",
+    "seed": 20261112,
+    "thermal_max": 2,
+    "sampling": {
+      "mode": "greedy",
+      "fields": {
+        "temperature": 0,
+        "top_p": 1
+      }
+    },
+    "metric": "delivered text+reasoning tokens retokenized; excludes EOS/format control",
+    "thermal_flagged": true,
+    "timing_thermal_max": 2,
+    "timing_thermal_seconds": {
+      "0": 74.80228304862976,
+      "1": 1.0444309711456299,
+      "2": 44.15328598022461,
+      "unknown": 0.0
+    },
+    "compile_observed": true,
+    "compile_overlapped": true,
+    "max_thermal_pressure": 2,
+    "load_after": [
+      20.48193359375,
+      19.34912109375,
+      20.17919921875
+    ],
+    "arm_thermal_seconds": {
+      "0": 250.5272810459137,
+      "1": 1.0444309711456299,
+      "2": 43.84276103973389,
+      "unknown": 0.0
+    }
+  }
+}

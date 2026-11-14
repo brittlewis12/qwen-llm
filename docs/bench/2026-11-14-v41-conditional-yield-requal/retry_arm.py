@@ -4,8 +4,8 @@ from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('tag');p.add_argument('--mode',choices=('baseline','candidate'),required=True);a=p.parse_args()
 TOP=Path('/Users/tito/qwen-runs/2026-11-12-v41-prefill/conditional-yield');REPO=Path('/Users/tito/code/qwen-llm-v41-conditional');out=TOP/a.tag
 if out.exists():raise RuntimeError('refusing arm overwrite')
-# Requalification stage19:12:35–20:42:35 UTC; retained binaries.
-cutoff={'B2r':1794686400,'A2r':1794687480}[a.tag]
+# Corrected queue-first stage19:38:30–21:08:30 UTC; retained binaries.
+cutoff={'B2r':1794687900,'A2r':1794689040}[a.tag]
 if time.time()>cutoff:raise SystemExit('bounded-stage arm start cutoff reached')
 witness=json.loads((TOP/'witness/result.json').read_text());assert {e.get('event') for e in witness['events'] if e.get('bitwise')}=={'root','append','root_empty','append_empty'}
 out.mkdir();os.chdir(REPO);sys.path.insert(0,str(REPO/'scripts/bench'))
@@ -19,8 +19,8 @@ memory_preflight={}
 def memory_guard(phase):
     # No model load or measured window has started. A deferral releases the
     # lease, preserves preparation evidence and permits a later queued attempt.
-    leave=650 if phase=='lease_entry' else 550
-    until=min(cutoff,time.time()+max(0,deadline-time.monotonic()-leave))
+    leave=480
+    until=min(cutoff,time.time()+min(300,max(0,deadline-time.monotonic()-leave)))
     report=wait_until_ready(TOP/(a.tag+'-memory-'+phase+'.jsonl'),until)
     if report is None:
         deferred=TOP/'deferrals';deferred.mkdir(exist_ok=True)
@@ -63,7 +63,12 @@ while True:
         if time.monotonic()-cool>=60:break
     else:cool=None
     (out/'preload-thermal.json').write_text(json.dumps(levels))
-    if time.monotonic()+550>=deadline:raise RuntimeError('preload settling budget exhausted')
+    if time.monotonic()+480>=deadline:
+        destination=TOP/'deferrals'/(a.tag+'-'+str(int(start)))
+        destination.parent.mkdir(exist_ok=True)
+        out.rename(destination)
+        print(json.dumps(dict(event='preparation_deferred',phase='thermal_budget',preparation=str(destination))),flush=True)
+        raise SystemExit(75)
     time.sleep(2)
 (out/'preload-thermal.json').write_text(json.dumps(levels));pair.resident_check()
 memory_guard('before_purge')

@@ -1,7 +1,7 @@
 {
   "stage_start_utc": "2026-11-14 19:12:35 UTC",
-  "stage_end_utc": "2026-11-14 20:42:35 UTC",
-  "latest_arm_start_utc": "2026-11-14 20:18:00 UTC",
+  "stage_end_utc": "2026-11-14 21:08:30 UTC",
+  "latest_arm_start_utc": "2026-11-14 20:44:00 UTC",
   "runtime": "e41e037e2",
   "pins": "metagross:~/qwen-runs/2026-11-12-v41-prefill/conditional-yield/pins",
   "order": [
@@ -15,5 +15,13 @@
     "observed_device_and_shadow_bytes": 171370217472,
     "peak_observed_process_footprint": 32601915016,
     "margin_bytes": 4294967296
-  }
+  },
+  "corrected_stage_start_utc": "2026-11-14 19:38:30 UTC",
+  "latest_first_arm_start_utc": "2026-11-14 20:25:00 UTC",
+  "memory_check_order": "after lease acquisition only",
+  "max_ram_wait_inside_hold_seconds": 300,
+  "original_waiter_killed_by_lead": [
+    15561,
+    15563
+  ]
 }

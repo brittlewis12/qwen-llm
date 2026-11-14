@@ -721,6 +721,7 @@ impl Workspace {
                                 false,
                             );
                         }
+                        metal::dispatch_profile_label("prefill_attention_prepare", Some(id));
                         self.attention.encode_rows_prepare_with_dense(
                             ctx,
                             &enc,
@@ -731,6 +732,9 @@ impl Workspace {
                             &attention,
                             scratch.dense_weight.as_ref(),
                         )?;
+                        // Keep the index/selection serial and wide-PV work out
+                        // of the prepare/finish dispatch buckets.
+                        metal::dispatch_profile_label("", None);
                         if let Some(samples) = &samples {
                             enc.finish();
                             enc = KernelEncoder::begin_sampled(
@@ -772,6 +776,7 @@ impl Workspace {
                                 false,
                             );
                         }
+                        metal::dispatch_profile_label("prefill_attention_finish_post", Some(id));
                         self.attention.finish_rows_with_dense(
                             ctx,
                             &enc,
@@ -801,6 +806,7 @@ impl Workspace {
                             ctx, &enc, c.hidden, n, &outputs, &x, &hc.post, &hc.comb, &half,
                         )
                         .map_err(|e| e.to_string())?;
+                        metal::dispatch_profile_label("", None);
                         if let Some(samples) = &samples {
                             enc.finish();
                             enc = KernelEncoder::begin_sampled(

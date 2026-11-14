@@ -217,6 +217,133 @@ fn run_append_stage_grid(f: &Forward<'_>, common: &[u32], state: &mut State) -> 
     Ok(())
 }
 
+fn profile_attention_post_cell(
+    ctx: &MetalContext,
+    f: &Forward<'_>,
+    state: &mut State,
+    common: &[u32],
+    depth: usize,
+    rows: usize,
+) -> Result<()> {
+    ensure!(state.position() == depth, "attention-post prefix position");
+    ensure!(depth + rows <= common.len(), "attention-post input extent");
+    let snapshot = f.capture_snapshot(state)?;
+    let tokens = &common[depth..depth + rows];
+    let warm_start = Instant::now();
+    let expected = f.prefill(state, tokens, Some(&CANCEL))?;
+    let warm_wall_ms = warm_start.elapsed().as_secs_f64() * 1e3;
+    std::hint::black_box(&expected);
+    let expected_hash = blake3::hash(bytemuck::cast_slice(&expected))
+        .to_hex()
+        .to_string();
+    f.restore_snapshot(state, &snapshot)?;
+
+    for rep in 0..3 {
+        let scope = qwen_llm::deepseek_v41::forward::profile::Scope::begin_stages()
+            .map_err(anyhow::Error::msg)?;
+        let started = Instant::now();
+        let actual = f.prefill(state, tokens, Some(&CANCEL))?;
+        let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        let report = scope.finish();
+        ensure!(
+            actual.len() == expected.len()
+                && actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "attention-post stage profile changed logits"
+        );
+        let stages: Vec<_> = ["prefill_attention_prepare", "prefill_attention_finish_post"]
+            .into_iter()
+            .map(|name| {
+                let selected = report
+                    .operations
+                    .iter()
+                    .filter(|op| op.operation == name)
+                    .collect::<Vec<_>>();
+                serde_json::json!({
+                    "stage": name,
+                    "gpu_ms": selected.iter().filter_map(|op| op.gpu_ms).sum::<f64>(),
+                    "valid_layers": selected.iter().filter(|op| op.gpu_ms.is_some()).count(),
+                    "invalid_intervals": selected.iter().map(|op| op.invalid_gpu_timestamps).sum::<usize>()
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind":"v41_attention_post_stage_profile", "depth":depth, "rows":rows,
+                "rep":rep, "warm_wall_ms":warm_wall_ms, "wall_ms":wall_ms,
+                "profile_wall_ms":report.token_wall_ms, "bitwise":true,
+                "expected_hash":expected_hash, "actual_hash":blake3::hash(bytemuck::cast_slice(&actual)).to_hex().to_string(),
+                "stages":stages
+            })
+        );
+        f.restore_snapshot(state, &snapshot)?;
+    }
+
+    for rep in 0..3 {
+        let profile = metal::dispatch_profile_begin(ctx, 16384)?;
+        let started = Instant::now();
+        let actual = f.prefill(state, tokens, Some(&CANCEL))?;
+        let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+        let report = metal::dispatch_profile_finish(ctx, profile)?;
+        ensure!(
+            actual.len() == expected.len()
+                && actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "attention-post dispatch profile changed logits"
+        );
+        let dispatches = report
+            .rows
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.label,
+                    "prefill_attention_prepare" | "prefill_attention_finish_post"
+                )
+            })
+            .map(|row| {
+                serde_json::json!({
+                    "label":row.label, "layer":row.layer, "kernel":row.kernel,
+                    "grid":row.grid, "threads":row.threads, "gpu_ns":row.gpu_ns,
+                    "gpu_start":row.gpu_start, "gpu_end":row.gpu_end,
+                    "bindings":row.bindings(), "constants":row.constants()
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind":"v41_attention_post_dispatch_profile", "depth":depth, "rows":rows,
+                "rep":rep, "wall_ms":wall_ms, "bitwise":true,
+                "dispatch_overflow":report.overflow, "dispatches":dispatches
+            })
+        );
+        f.restore_snapshot(state, &snapshot)?;
+    }
+    Ok(())
+}
+
+fn run_attention_post_profile(
+    ctx: &MetalContext,
+    f: &Forward<'_>,
+    common: &[u32],
+    state: &mut State,
+) -> Result<()> {
+    ensure!(
+        common.len() >= 81_920 + 1024,
+        "attention-post corpus does not cover 80K append cells"
+    );
+    fill_stage_grid_depth(f, state, common, 81_920)?;
+    for rows in [256usize, 1024] {
+        profile_attention_post_cell(ctx, f, state, common, 81_920, rows)?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGINT, cancel as *const () as libc::sighandler_t);
@@ -227,11 +354,12 @@ fn main() -> Result<()> {
         return compare(&args[2], &args[3]);
     }
     let is_stage_grid = args.get(5).is_some_and(|s| s == "stage-grid");
+    let is_attention_post = args.get(5).is_some_and(|s| s == "attention-post");
     // A host-load probe deliberately runs hot; the paired on/off arms share
     // whatever pressure is present. The stage-grid wrapper applies the current
     // thermal policy externally (settle <=1, allow 2, abort 3).
     let probe_load: usize = args.get(8).and_then(|v| v.parse().ok()).unwrap_or(0);
-    if probe_load == 0 && !is_stage_grid {
+    if probe_load == 0 && !is_stage_grid && !is_attention_post {
         thermal()?;
     }
     let g = Arc::new(GgufFile::open(&args[1])?);
@@ -258,7 +386,7 @@ fn main() -> Result<()> {
     let text = corpus(prose)?;
     let long_suffix = matches!(
         args.get(5).map(String::as_str),
-        Some("append-nodes" | "cells" | "stage-grid")
+        Some("append-nodes" | "cells" | "stage-grid" | "attention-post")
     );
     let mut repeats = 1;
     let common = loop {
@@ -286,6 +414,10 @@ fn main() -> Result<()> {
     let depth: usize = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(32768);
     if is_stage_grid {
         run_append_stage_grid(&f, &common, &mut base)?;
+        return Ok(());
+    }
+    if is_attention_post {
+        run_attention_post_profile(&ctx, &f, &common, &mut base)?;
         return Ok(());
     }
     ensure!([32768, 49152, 65536].contains(&depth), "depth 32K/48K/64K");

@@ -1126,3 +1126,152 @@ fn mma_subtile_offsets_are_observable() {
     }
     eprintln!("MMA_SUBTILE_REUSE_PROOF full_vs_tile_bits_exact=true row0_0_vs_2_differ=true");
 }
+
+#[test]
+fn compact_masked_mma_preserves_scores_and_selected_ids_bitwise() {
+    let ctx = MetalContext::new().unwrap();
+    let config = Config::default();
+    let (first, n) = (3usize, 5usize);
+    for start in [81915usize, 131067] {
+        let qrows = first + n;
+        let last = start + qrows;
+        let stride = last + 3;
+        let mask_stride = last.div_ceil(8) + 5;
+        let make = |n: usize, seed: usize| {
+            (0..n)
+                .map(|i| ((i * 2654435761usize + seed) % 1000003) as f32 / 500000.0 - 1.0)
+                .collect::<Vec<_>>()
+        };
+        let up = |v: &[f32]| upload(&ctx, v, vec![v.len() as u64]).unwrap();
+        let q = up(&make(qrows * 4096, 3));
+        let weights = up(&make(qrows * 32, 5));
+        let keys = up(&make(last * 128, 7));
+        let mut mask = vec![0u32; qrows * mask_stride];
+        for row in 0..qrows {
+            let blocks = (start + row + 1).div_ceil(8);
+            for j in 0..2047 {
+                mask[row * mask_stride + (j * (blocks - 1) / 2047 + row * 37) % (blocks - 1)] = 1;
+            }
+            mask[row * mask_stride + blocks - 1] = 1;
+        }
+        let mask_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&mask),
+            vec![mask.len() as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let ids = tensor(&ctx, qrows * 2048, GgmlType::I32).unwrap();
+        let scores = [
+            up(&vec![-12345.; n * stride]),
+            up(&vec![-12345.; n * stride]),
+        ];
+        let selected = [
+            tensor(&ctx, qrows * 512, GgmlType::I32).unwrap(),
+            tensor(&ctx, qrows * 512, GgmlType::I32).unwrap(),
+        ];
+        let status = [
+            tensor(&ctx, 1, GgmlType::I32).unwrap(),
+            tensor(&ctx, 1, GgmlType::I32).unwrap(),
+        ];
+        execute(&ctx, |enc| {
+            encode_index_scores_rows_kernel(
+                &ctx,
+                enc,
+                &config,
+                IndexRowsKernel::MmaMasked,
+                [start, 1, last, first, n, stride],
+                &q,
+                &weights,
+                &keys,
+                &scores[0],
+                Some((&mask_t, mask_stride)),
+            )
+            .unwrap();
+            query_batch::compact_mask_ids(
+                &ctx,
+                enc,
+                start,
+                first,
+                n,
+                &mask_t,
+                mask_stride,
+                &ids,
+                &status[1],
+            )
+            .unwrap();
+            query_batch::compact_index_scores(
+                &ctx,
+                enc,
+                [start, 1, last, first, n, stride],
+                &q,
+                &weights,
+                &keys,
+                &scores[1],
+                &ids,
+            )
+            .unwrap();
+            for i in 0..2 {
+                pipeline(&ctx, enc, "select_radix_rows").unwrap();
+                enc.set_bytes(0, &[start as u32, 1, 512, 8]);
+                enc.set_bytes(1, &[stride as u32, mask_stride as u32, n as u32, 1]);
+                enc.set_bytes(2, &[512u32, first as u32, 2048, 0]);
+                for (slot, t) in [
+                    (3, &scores[i]),
+                    (4, &mask_t),
+                    (5, &selected[i]),
+                    (6, &status[i]),
+                ] {
+                    enc.set_tensor(slot, t);
+                }
+                enc.dispatch(
+                    MTLSize {
+                        width: 1,
+                        height: n,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 1024,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+            }
+        });
+        let old = f32_slice(&scores[0]).unwrap();
+        let new = f32_slice(&scores[1]).unwrap();
+        for local in 0..n {
+            let row = first + local;
+            let length = start + row + 1;
+            for key in 0..stride {
+                let i = local * stride + key;
+                if key < length && mask[row * mask_stride + key / 8] != 0 {
+                    assert_eq!(
+                        old[i].to_bits(),
+                        new[i].to_bits(),
+                        "start={start} row={row} key={key}"
+                    );
+                } else {
+                    assert_eq!(new[i], -12345.);
+                }
+            }
+            let want: Vec<u32> = (0..length.div_ceil(8))
+                .filter(|&b| mask[row * mask_stride + b] != 0)
+                .map(|b| b as u32)
+                .collect();
+            assert_eq!(
+                &u32_vec(&ids, qrows * 2048)[row * 2048..(row + 1) * 2048],
+                want.as_slice()
+            );
+        }
+        assert_eq!(
+            &u32_vec(&selected[0], qrows * 512)[first * 512..],
+            &u32_vec(&selected[1], qrows * 512)[first * 512..]
+        );
+        assert_eq!(u32_vec(&status[0], 1), vec![0]);
+        assert_eq!(u32_vec(&status[1], 1), vec![0]);
+    }
+    eprintln!(
+        "COMPACT_INDEX_EXACT allowed_score_bits=true block_ids=true selected_ids=true status=true depths=81920,131072 nonzero_offsets=true partial_tails=true"
+    );
+}

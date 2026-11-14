@@ -59,6 +59,14 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 - At 57 GB, corrected mixed-format speeded-work coverage is 72.9-76.3% by cell,
   but the slower tile implies a first-order **3.6-5.2% wall regression**.
   Closed; no runtime change. [Record](bench/2026-11-13-glm-level-code-expert-cache.md).
+## 2026-11-14 - V4.1 Append Depth Attribution
+
+- Measurement only on production file A: two profiled reps plus warmup for
+  256/1,024-row appends at 32K/80K/128K, one model load and progressive fill.
+  At 1,024 rows the wall rises 926→1,027 ms; endpoint slope +16.71 ms/16K.
+  Sparse `prefill_attention_serial` alone scales clearly (+20.15 ms/16K over
+  its eight active global layers); other stages are flat or decrease. [Stage
+  tables and M5 run artifacts](bench/2026-11-13-v41-depth-attribution.md).
 
 ## 2026-11-13 - GLM KDA Parallel Preparation: Ship
 

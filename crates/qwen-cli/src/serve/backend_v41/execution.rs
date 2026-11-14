@@ -450,20 +450,33 @@ impl Settings {
             let start = engine.now();
             let mut peer_ms = 0.0;
             let result = if let Some(callback) = between.as_deref_mut() {
-                engine.cold_prefill_layered(
-                    &mut run.state,
-                    &ids[position..target],
-                    cancel,
-                    begin,
-                    max_rows,
-                    self.layer_slice_ms,
-                    self.layer_slice_min_ms,
-                    &mut |engine| {
-                        let started = engine.now();
-                        callback(engine, reuse);
-                        peer_ms += (engine.now() - started).as_secs_f64() * 1000.0;
-                    },
-                )
+                let mut service = |engine: &mut E| {
+                    let started = engine.now();
+                    callback(engine, reuse);
+                    peer_ms += (engine.now() - started).as_secs_f64() * 1000.0;
+                };
+                if self.prefill_yield {
+                    engine.cold_prefill_conditional(
+                        &mut run.state,
+                        &ids[position..target],
+                        cancel,
+                        begin,
+                        max_rows,
+                        self.layer_slice_min_ms,
+                        &mut service,
+                    )
+                } else {
+                    engine.cold_prefill_layered(
+                        &mut run.state,
+                        &ids[position..target],
+                        cancel,
+                        begin,
+                        max_rows,
+                        self.layer_slice_ms,
+                        self.layer_slice_min_ms,
+                        &mut service,
+                    )
+                }
             } else {
                 engine.cold_prefill(
                     &mut run.state,
@@ -506,19 +519,31 @@ impl Settings {
             let start = engine.now();
             let mut peer_ms = 0.0;
             let result = if let Some(callback) = between.as_deref_mut() {
-                engine.prefill_layered(
-                    &mut run.state,
-                    &ids[position..endpoint],
-                    cancel,
-                    with_logits,
-                    self.layer_slice_ms,
-                    self.layer_slice_min_ms,
-                    &mut |engine| {
-                        let started = engine.now();
-                        callback(engine, reuse);
-                        peer_ms += (engine.now() - started).as_secs_f64() * 1000.0;
-                    },
-                )
+                let mut service = |engine: &mut E| {
+                    let started = engine.now();
+                    callback(engine, reuse);
+                    peer_ms += (engine.now() - started).as_secs_f64() * 1000.0;
+                };
+                if self.prefill_yield {
+                    engine.prefill_conditional(
+                        &mut run.state,
+                        &ids[position..endpoint],
+                        cancel,
+                        with_logits,
+                        self.layer_slice_min_ms,
+                        &mut service,
+                    )
+                } else {
+                    engine.prefill_layered(
+                        &mut run.state,
+                        &ids[position..endpoint],
+                        cancel,
+                        with_logits,
+                        self.layer_slice_ms,
+                        self.layer_slice_min_ms,
+                        &mut service,
+                    )
+                }
             } else {
                 engine.prefill(
                     &mut run.state,
@@ -631,8 +656,8 @@ impl Settings {
         super::super::lifecycle_timing::mark(
             super::super::lifecycle_timing::Stage::PrefillComplete,
         );
-        tracing::info!(target:"qwen_diag", "serve prefill: family=deepseek_v41 complete=true prefill_ms={:.3} reused_tokens={} prefill_tokens={} reused_source={} layer_rounds={}",
-            run.prefill_ms, run.matched, run.ids.len()-run.matched, run.reuse_source, run.prefill_work.peer_rounds);
+        tracing::info!(target:"qwen_diag", "serve prefill: family=deepseek_v41 complete=true prefill_ms={:.3} reused_tokens={} prefill_tokens={} reused_source={} layer_rounds={} conditional_yields={} yield_polls={}",
+            run.prefill_ms, run.matched, run.ids.len()-run.matched, run.reuse_source, run.prefill_work.peer_rounds,run.prefill_work.conditional_yields,run.prefill_work.yield_polls);
         run.consumed = run.ids.clone();
         Ok(())
     }
@@ -698,7 +723,7 @@ impl Settings {
             "serve phases: family=deepseek_v41 prefill_ms={prefill_ms:.3} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.3} prefill_tokens={} prefill_mode={prefill_mode} prefill_rows={prefill_rows} prefill_chunks={prefill_chunks} prefill_calls={prefill_calls} prefill_selected_rows={selected_rows:?} prefill_rows_max={} decode_ms={:.3} required_forwards={required} capacity={} transitions={transitions} transition_ms={transition_ms:.3} ced_episodes={ced_episodes} ced_yields={ced_yields} ladder_capture_ms={ladder_capture_ms:.3} retention_ms={retention_ms:.3}",
             ids.len() - matched, crate::family_options::V41_PREFILL_ROWS, generation.wall_ms, capacity);
         let mut phases = serde_json::json!({
-            "family":"deepseek_v41", "prefill_ms":prefill_ms, "layer_rounds":prefill_work.peer_rounds, "peer_prefills":prefill_work.peer_prefills, "ladder_capture_ms":ladder_capture_ms, "retention_ms":retention_ms, "prefill_tokens":ids.len() - matched,
+            "family":"deepseek_v41", "prefill_ms":prefill_ms, "layer_rounds":prefill_work.peer_rounds, "peer_prefills":prefill_work.peer_prefills, "yield_polls":prefill_work.yield_polls, "conditional_yields":prefill_work.conditional_yields, "ladder_capture_ms":ladder_capture_ms, "retention_ms":retention_ms, "prefill_tokens":ids.len() - matched,
             "prefill_mode":prefill_mode, "prefill_rows":prefill_rows, "prefill_chunks":prefill_chunks,
             "prefill_rows_max":crate::family_options::V41_PREFILL_ROWS,
             "prefill_selected_rows":selected_rows, "prefill_calls":prefill_calls,
@@ -768,6 +793,35 @@ pub(super) trait Engine<S> {
         begin: bool,
         max_rows: usize,
         _: usize,
+        _: usize,
+        _: &mut dyn FnMut(&mut Self),
+    ) -> std::result::Result<Option<qwen_llm::deepseek_v41::forward::ColdPrefillSlice>, ServeError>
+    where
+        Self: Sized,
+    {
+        self.cold_prefill(state, tokens, cancel, begin, max_rows)
+    }
+    fn prefill_conditional(
+        &mut self,
+        state: &mut S,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        with_logits: bool,
+        _: usize,
+        _: &mut dyn FnMut(&mut Self),
+    ) -> std::result::Result<Vec<f32>, ServeError>
+    where
+        Self: Sized,
+    {
+        self.prefill(state, tokens, cancel, with_logits)
+    }
+    fn cold_prefill_conditional(
+        &mut self,
+        state: &mut S,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        begin: bool,
+        max_rows: usize,
         _: usize,
         _: &mut dyn FnMut(&mut Self),
     ) -> std::result::Result<Option<qwen_llm::deepseek_v41::forward::ColdPrefillSlice>, ServeError>

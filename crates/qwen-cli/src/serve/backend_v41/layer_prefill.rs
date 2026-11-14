@@ -15,6 +15,8 @@ pub(super) struct Work {
     pub elapsed_ms: f64,
     pub peer_rounds: usize,
     pub peer_prefills: usize,
+    pub yield_polls: usize,
+    pub conditional_yields: usize,
     pub matched: usize,
     pub prompt: usize,
     pub reuse_source: &'static str,
@@ -27,8 +29,8 @@ impl Work {
 impl Drop for Work {
     fn drop(&mut self) {
         if self.armed && !self.finished && self.elapsed_ms > 0.0 {
-            tracing::info!(target:"qwen_diag", "serve prefill: family=deepseek_v41 complete=false cancelled=true phase=layer prefill_ms={:.3} reused_tokens={} prefill_tokens={} reused_source={} layer_rounds={}",
-                self.elapsed_ms, self.matched, self.prompt.saturating_sub(self.matched), self.reuse_source, self.peer_rounds);
+            tracing::info!(target:"qwen_diag", "serve prefill: family=deepseek_v41 complete=false cancelled=true phase=layer prefill_ms={:.3} reused_tokens={} prefill_tokens={} reused_source={} layer_rounds={} conditional_yields={} yield_polls={}",
+                self.elapsed_ms, self.matched, self.prompt.saturating_sub(self.matched), self.reuse_source, self.peer_rounds,self.conditional_yields,self.yield_polls);
         }
     }
 }

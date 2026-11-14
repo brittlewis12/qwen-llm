@@ -6,6 +6,16 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-14 - V4.1 Conditional Yield: Qualification Started
+
+- Default-off refinement uses incumbent command drains only: no empty GPU
+  cuts, no empty decode rounds, no short-call slicing. Read-only live-prefix
+  hints avoid admitting long work at a poll; a ready short runs once without
+  recursion. Normal decode credit and suspended slots/reserves are retained.
+- Bitwise/empty-command-topology witness and unchanged AB/BA/AB scheduling
+  gate are frozen before measurement. Hard report cutoff19:22:42UTC.
+  [Policy, rule and results](bench/2026-11-14-v41-conditional-yield.md).
+
 ## 2026-11-14 - V4.1 Row-Preserving Prefill Yield: Served Gate FAILED
 
 - Bitwise native PASS: 48K CED root (53 callbacks), 1K@80K (2 callbacks),

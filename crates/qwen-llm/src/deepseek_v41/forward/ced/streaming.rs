@@ -177,6 +177,12 @@ impl Forward<'_> {
             &mut progress.counters,
             interleave.as_deref_mut(),
         )?;
+        // The original encoder command and prefetch readers have drained.
+        // Poll/service here without splitting or draining the decoder pipeline.
+        if let Some(slicing) = interleave.as_deref_mut().filter(|s| s.natural_only) {
+            (slicing.between)()?;
+            cancelled(cancel)?;
+        }
         progress.addresses = addresses;
         progress.next = end;
         cancelled(cancel)?;
@@ -190,7 +196,7 @@ impl Forward<'_> {
             });
         }
         if let Some(slicing) = interleave.as_deref_mut() {
-            if slicing.ends.iter().any(|&l| l <= plan.encoder_layers.end) {
+            if !slicing.natural_only && slicing.ends.iter().any(|&l| l <= plan.encoder_layers.end) {
                 (slicing.between)()?;
                 cancelled(cancel)?;
             }
@@ -202,7 +208,7 @@ impl Forward<'_> {
             Arithmetic::Production,
             &mut progress.storage,
             &mut progress.counters,
-            interleave.as_deref_mut(),
+            interleave.as_deref_mut().filter(|s| !s.natural_only),
         )?;
         progress.counters.validate(plan)?;
         workspace.attention().validate_snapshot_position(end)?;

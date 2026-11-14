@@ -425,10 +425,18 @@ impl<S> Scheduler<S> {
             self.admit(pending, settings, engine, reuse);
             progressed = true;
         }
-        let prefilling = self
+        let oldest = self
             .active
             .iter()
             .position(|a| a.cursor.is_none() && a.finished.is_none());
+        let prefilling = if settings.prefill_yield {
+            self.ready_short().or(oldest)
+        } else {
+            oldest
+        };
+        if settings.prefill_yield && prefilling.is_some() && prefilling != oldest {
+            tracing::info!(target:"qwen_diag", "serve prefill priority: family=deepseek_v41 request_id={}",self.active[prefilling.unwrap()].sink.lifecycle().id());
+        }
         let decoders: Vec<usize> = (0..self.active.len())
             .filter(|&i| self.active[i].next.is_some() && !self.active[i].parked())
             .collect();
@@ -455,9 +463,9 @@ impl<S> Scheduler<S> {
                 intake,
                 true,
             );
-            if interleaved {
+            if interleaved && !settings.prefill_yield {
                 self.decode_budget = Duration::ZERO;
-            } else if settings.prefill_fair && mixed {
+            } else if settings.prefill_fair && (mixed || interleaved) {
                 self.decode_budget = (engine.now() - started)
                     .mul_f64(
                         settings.decode_percent as f64 / (100 - settings.decode_percent) as f64,
@@ -632,6 +640,7 @@ impl<S> Scheduler<S> {
         allow_interleave: bool,
     ) -> bool {
         let timing = self.active[index].sink.lifecycle();
+        let parent_id = timing.id();
         let _lifecycle = timing.enter();
         let run = self.active[index].run.as_ref().expect("prefill run");
         let _round = super::super::lifecycle_timing::Round::new(
@@ -650,11 +659,17 @@ impl<S> Scheduler<S> {
         } else {
             crate::family_options::V41_PREFILL_ROWS
         };
-        if allow_interleave
-            && settings.prefill_fair
-            && settings.layer_slice_ms > 0
-            && (loaded || settings.prefill_yield)
-        {
+        let input_rows = run.next_endpoint(rows).saturating_sub(run.position);
+        let conditional = settings.prefill_yield;
+        let eligible = if conditional {
+            qwen_llm::deepseek_v41::forward::conditional_prefill_eligible(
+                input_rows,
+                settings.layer_slice_min_ms,
+            )
+        } else {
+            loaded
+        };
+        if allow_interleave && settings.prefill_fair && settings.layer_slice_ms > 0 && eligible {
             // Keep the provisional appender outside every decode scan. Peer
             // retirement may compact the active vector between checkpoints.
             let mut active = self.active.remove(index);
@@ -662,6 +677,8 @@ impl<S> Scheduler<S> {
             self.suspended_reserve = self.suspended_reserve.saturating_add(active.own_reserve);
             let mut rounds = 0;
             let mut prefills = 0;
+            let mut polls = 0;
+            let mut yields = 0;
             let result = {
                 let run = active.run.as_mut().expect("prefilling run");
                 let position = engine.position(&run.state);
@@ -681,40 +698,31 @@ impl<S> Scheduler<S> {
                             Some(&mut |engine, reuse| {
                                 self.reap();
                                 self.deliver();
-                                if settings.prefill_yield {
-                                    for job in intake() {
-                                        self.submit(job);
+                                if conditional {
+                                    polls += 1;
+                                    for job in intake() { self.submit(job); }
+                                    // A pure live-prefix hint prevents restoring or
+                                    // allocating a long request at an empty poll.
+                                    if self.active.len()+self.suspended_count<self.max_active {
+                                        let pending=self.pending.iter().enumerate().filter_map(|(i,p)| {
+                                            p.job.prepared.tokens.as_deref().and_then(|ids|reuse.pending_rows(ids)).filter(|&n|n<512).map(|n|(i,n))
+                                        }).min_by_key(|&(_,n)|n).map(|(i,_)|i);
+                                        if let Some(i)=pending { let pending=self.pending.remove(i).unwrap(); self.admit(pending,settings,engine,reuse); }
                                     }
-                                    if self.active.len() + self.suspended_count < self.max_active
-                                        && let Some(pending) = self.pending.pop_front()
-                                    {
-                                        self.admit(pending, settings, engine, reuse);
+                                    if let Some(i)=self.ready_short() {
+                                        let child_id=self.active[i].sink.lifecycle().id();
+                                        let child_rows=self.active[i].run.as_ref().unwrap().ids.len()-self.active[i].run.as_ref().unwrap().position;
+                                        let started=engine.now();
+                                        let calls=self.finish_short(i,settings,engine,reuse);
+                                        prefills+=calls;
+                                        if calls>0 {
+                                            yields+=1;
+                                            tracing::info!(target:"qwen_diag", "serve prefill yield: family=deepseek_v41 parent_request_id={} child_request_id={} rows={} native_calls={} service_ms={:.3}",parent_id,child_id,child_rows,calls,(engine.now()-started).as_secs_f64()*1000.0);
+                                        }
                                     }
-                                    // One ready short append per boundary. No nested
-                                    // layer callback: stack depth stays one, and the
-                                    // provisional parent is absent from every scan.
-                                    let short = self
-                                        .active
-                                        .iter()
-                                        .enumerate()
-                                        .filter(|(_, a)| a.cursor.is_none() && a.finished.is_none())
-                                        .filter_map(|(i, a)| a.run.as_ref().map(|r| (i, r)))
-                                        .filter(|(_, r)| {
-                                            r.ids.len().saturating_sub(r.position) < 512
-                                        })
-                                        .min_by_key(|(_, r)| r.ids.len().saturating_sub(r.position))
-                                        .map(|(i, _)| i);
-                                    if let Some(i) = short {
-                                        self.prefill(
-                                            i,
-                                            settings,
-                                            engine,
-                                            reuse,
-                                            &mut Vec::new,
-                                            false,
-                                        );
-                                        prefills += 1;
-                                    }
+                                    // Empty polls never decode. Any actual short
+                                    // service earns normal post-quantum credit.
+                                    return;
                                 }
                                 let members = (0..self.active.len())
                                     .filter(|&i| {
@@ -730,7 +738,7 @@ impl<S> Scheduler<S> {
                     },
                 )
             };
-            if rounds > 0 && result.is_ok() {
+            if !conditional && rounds > 0 && result.is_ok() {
                 let members = (0..self.active.len())
                     .filter(|&i| self.active[i].decoding() && !self.active[i].parked())
                     .collect::<Vec<_>>();
@@ -751,6 +759,8 @@ impl<S> Scheduler<S> {
                 .expect("prefill run")
                 .prefill_work
                 .peer_prefills += prefills;
+            active.run.as_mut().unwrap().prefill_work.yield_polls += polls;
+            active.run.as_mut().unwrap().prefill_work.conditional_yields += yields;
             self.suspended_count -= 1;
             self.suspended_reserve = self.suspended_reserve.saturating_sub(active.own_reserve);
             let index = index.min(self.active.len());
@@ -793,6 +803,73 @@ impl<S> Scheduler<S> {
             self.start_decode(index, settings, engine, reuse);
         }
         false
+    }
+
+    fn ready_short(&self) -> Option<usize> {
+        self.active
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.cursor.is_none() && a.finished.is_none())
+            .filter_map(|(i, a)| {
+                a.run
+                    .as_ref()
+                    .map(|r| (i, r.ids.len().saturating_sub(r.position)))
+            })
+            .filter(|&(_, n)| n > 0 && n < 512)
+            .min_by_key(|&(_, n)| n)
+            .map(|(i, _)| i)
+    }
+
+    /// Complete one short request's original checkpoint/header calls as one
+    /// service event. No intake, decoder round, or recursive layer callback.
+    fn finish_short(
+        &mut self,
+        index: usize,
+        settings: &Settings,
+        engine: &mut impl BatchEngine<S>,
+        reuse: &mut impl reuse::Reuse<S>,
+    ) -> usize {
+        let mut child = self.active.remove(index);
+        self.suspended_count += 1;
+        self.suspended_reserve = self.suspended_reserve.saturating_add(child.own_reserve);
+        let timing = child.sink.lifecycle();
+        let _scope = timing.enter();
+        let run = child.run.as_mut().unwrap();
+        let position = run.position;
+        let rows = run.ids.len() - position;
+        let _round = super::super::lifecycle_timing::Round::new(
+            "prefill",
+            std::iter::once(timing),
+            position,
+            rows,
+        );
+        let mut calls = 0;
+        let result = (|| {
+            while !run.prefilled() {
+                calls += 1;
+                settings.prefill_slice(
+                    run,
+                    crate::family_options::V41_PREFILL_ROWS,
+                    &mut Publish(child.sink.as_mut()),
+                    &mut Observed {
+                        engine,
+                        token_io: None,
+                        prefill_io: child.prefill_io.as_mut(),
+                    },
+                    reuse,
+                )?;
+            }
+            Ok::<_, BackendFailure>(())
+        })();
+        self.suspended_count -= 1;
+        self.suspended_reserve = self.suspended_reserve.saturating_sub(child.own_reserve);
+        let index = index.min(self.active.len());
+        self.active.insert(index, child);
+        match result {
+            Err(e) => self.fail(index, e),
+            Ok(()) => self.start_decode(index, settings, engine, reuse),
+        }
+        calls
     }
 
     fn start_decode(

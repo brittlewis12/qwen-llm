@@ -209,6 +209,10 @@ impl execution::Engine<Seq> for StubEngine {
         let previous = state.unready;
         state.unready = true;
         for layer in 0..3 {
+            self.log
+                .borrow_mut()
+                .events
+                .push(format!("cold_layer {layer}"));
             self.clock += Duration::from_millis(100);
             if self.cancel_layer == Some(layer) {
                 cancel.store(true, Ordering::Release);
@@ -223,6 +227,29 @@ impl execution::Engine<Seq> for StubEngine {
         }
         state.unready = previous;
         self.cold_prefill(state, tokens, cancel, begin, max_rows)
+    }
+    fn prefill_conditional(
+        &mut self,
+        state: &mut Seq,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        with_logits: bool,
+        min: usize,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> Result<Vec<f32>, ServeError> {
+        self.prefill_layered(state, tokens, cancel, with_logits, 400, min, between)
+    }
+    fn cold_prefill_conditional(
+        &mut self,
+        state: &mut Seq,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        begin: bool,
+        rows: usize,
+        min: usize,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> Result<Option<qwen_llm::deepseek_v41::forward::ColdPrefillSlice>, ServeError> {
+        self.cold_prefill_layered(state, tokens, cancel, begin, rows, 400, min, between)
     }
     fn cold_prefill(
         &mut self,
@@ -1653,7 +1680,15 @@ fn cancellation_between_layers_discards_appender_and_keeps_peers_consistent() {
     }
 }
 
-fn held_job(prepared: Arc<PreparedResponse>) -> (Job, Client) {
+fn held_job(mut prepared: Arc<PreparedResponse>) -> (Job, Client) {
+    let ids = tokenizer_fixture::tokenizer(Some("answer"))
+        .encode(&prepared.prompt, false)
+        .unwrap()
+        .into_iter()
+        .map(|n| n as u32)
+        .collect();
+    Arc::get_mut(&mut prepared).unwrap().tokens = Some(ids);
+
     let state = Rc::new(RefCell::new(SinkState::default()));
     let cancel = Arc::new(AtomicBool::new(false));
     let job = Job {
@@ -1705,6 +1740,10 @@ fn yielded_intake_services_short_before_parent_finishes_without_changing_outputs
                 "peer service excluded from native work"
             );
             assert!(phases["peer_prefills"].as_u64().unwrap() > 0);
+            assert_eq!(
+                phases["conditional_yields"], 1,
+                "one complete nonrecursive short service"
+            );
             let log = engine.log.borrow();
             let first = log.events.iter().position(|e| e == "layer 0").unwrap();
             let last = log.events.iter().position(|e| e == "layer 2").unwrap();
@@ -1789,4 +1828,127 @@ fn yielded_intake_cancellation_discards_parent_and_preserves_serviced_peer() {
     assert!(matches!(parent.terminal(), Some(Err((true, _, _)))));
     assert!(matches!(short.terminal(), Some(Ok(_))));
     assert_eq!(reuse.commits.len(), 1, "partial parent never published");
+}
+
+#[test]
+fn conditional_empty_polls_do_not_decode_and_keep_post_quantum_credit() {
+    let mut settings = settings();
+    settings.prefill_fair = true;
+    settings.prefill_yield = true;
+    settings.layer_slice_ms = 400;
+    settings.layer_slice_min_ms = 700;
+    settings.cold_ced = true;
+    let mut scheduler = Scheduler::new(3);
+    let mut engine = StubEngine {
+        layered: true,
+        cold: true,
+        step_ms: 20,
+        ..Default::default()
+    };
+    let mut reuse = Recording {
+        ready_short: true,
+        ..Default::default()
+    };
+    submit(&mut scheduler, prepared(&settings, "hi", true));
+    scheduler.pump(&settings, &mut engine, &mut reuse);
+    let mut request = prepared(&settings, &"x".repeat(12000), true);
+    Arc::get_mut(&mut request).unwrap().boundaries = None;
+    submit(&mut scheduler, request);
+    let mut polls = 0;
+    scheduler.pump_with_intake(&settings, &mut engine, &mut reuse, &mut || {
+        polls += 1;
+        Vec::new()
+    });
+    assert!(polls > 0);
+    {
+        let log = engine.log.borrow();
+        let first = log
+            .events
+            .iter()
+            .rposition(|e| e == "cold_layer 0")
+            .unwrap();
+        let last = log
+            .events
+            .iter()
+            .rposition(|e| e == "cold_layer 2")
+            .unwrap();
+        assert!(
+            !log.events[first..last]
+                .iter()
+                .any(|e| e.starts_with("step"))
+        );
+    }
+    let before = engine.log.borrow().events.len();
+    scheduler.pump(&settings, &mut engine, &mut reuse);
+    assert!(
+        engine.log.borrow().events[before].starts_with("step"),
+        "normal decode credit must precede the next CED quantum"
+    );
+    drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+}
+
+#[test]
+fn conditional_short_calls_are_unsliced_even_with_zero_minimum() {
+    let mut settings = settings();
+    settings.prefill_fair = true;
+    settings.prefill_yield = true;
+    settings.layer_slice_ms = 1;
+    settings.layer_slice_min_ms = 0;
+    settings.cold_ced = false;
+    let mut scheduler = Scheduler::new(2);
+    let mut engine = StubEngine {
+        layered: true,
+        ..Default::default()
+    };
+    let mut reuse = Recording::default();
+    let mut request = prepared(&settings, &"x".repeat(340), true);
+    Arc::get_mut(&mut request).unwrap().boundaries = None;
+    let client = submit(&mut scheduler, request);
+    let mut polls = 0;
+    scheduler.pump_with_intake(&settings, &mut engine, &mut reuse, &mut || {
+        polls += 1;
+        Vec::new()
+    });
+    assert_eq!(polls, 0);
+    assert!(
+        !engine
+            .log
+            .borrow()
+            .events
+            .iter()
+            .any(|e| e.starts_with("layer"))
+    );
+    drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+    assert!(matches!(client.terminal(), Some(Ok(_))));
+}
+
+#[test]
+fn conditional_empty_poll_does_not_admit_waiting_long_work() {
+    let mut settings = settings();
+    settings.prefill_fair = true;
+    settings.prefill_yield = true;
+    settings.layer_slice_ms = 400;
+    settings.layer_slice_min_ms = 700;
+    settings.cold_ced = false;
+    let mut scheduler = Scheduler::new(3);
+    let mut engine = StubEngine {
+        layered: true,
+        ..Default::default()
+    };
+    let mut reuse = Recording::default();
+    let mut request = prepared(&settings, &"x".repeat(1500), true);
+    Arc::get_mut(&mut request).unwrap().boundaries = None;
+    let parent = submit(&mut scheduler, request);
+    let (job, peer) = held_job(prepared(&settings, &"y".repeat(1000), true));
+    let mut arriving = Some(job);
+    scheduler.pump_with_intake(&settings, &mut engine, &mut reuse, &mut || {
+        arriving.take().into_iter().collect()
+    });
+    assert_eq!(
+        engine.log.borrow().reserves.len(),
+        1,
+        "no long allocation/restore during a poll"
+    );
+    drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+    assert!(matches!(parent.terminal(), Some(Ok(_))) && matches!(peer.terminal(), Some(Ok(_))));
 }

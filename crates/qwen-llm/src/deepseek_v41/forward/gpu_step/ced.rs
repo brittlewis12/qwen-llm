@@ -936,6 +936,7 @@ impl Workspace {
         while first < plan.encoder_layers.end {
             let end = interleave
                 .as_ref()
+                .filter(|s| !s.natural_only)
                 .and_then(|s| s.ends.iter().copied().find(|&l| l > first))
                 .unwrap_or(plan.encoder_layers.end)
                 .min(plan.encoder_layers.end);

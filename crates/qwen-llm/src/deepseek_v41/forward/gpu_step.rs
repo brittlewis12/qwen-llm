@@ -638,7 +638,7 @@ impl Workspace {
             } else {
                 model.layers.len()
             };
-            if let Some(slicing) = &interleave {
+            if let Some(slicing) = interleave.as_ref().filter(|s| !s.natural_only) {
                 segment_end = segment_end.min(
                     *slicing
                         .ends
@@ -927,7 +927,7 @@ impl Workspace {
                 }
                 // On a read/cancellation/encode error the guard drains before
                 // this pool or the caller's chunk resources can be released.
-                let gpu_ms = if interleave.is_some() {
+                let gpu_ms = if interleave.as_ref().is_some_and(|s| !s.natural_only) {
                     pending.wait_timed()?
                 } else {
                     pending.wait()?;
@@ -935,8 +935,12 @@ impl Workspace {
                 };
                 cancelled(cancel)?;
                 if let Some(slicing) = interleave.as_deref_mut() {
-                    slicing.commands.push((segment_end, gpu_ms));
-                    if segment_end < model.layers.len() && slicing.ends.contains(&segment_end) {
+                    if !slicing.natural_only {
+                        slicing.commands.push((segment_end, gpu_ms));
+                    }
+                    if segment_end < model.layers.len()
+                        && (slicing.natural_only || slicing.ends.contains(&segment_end))
+                    {
                         (slicing.between)()?;
                         cancelled(cancel)?;
                     }

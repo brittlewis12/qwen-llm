@@ -261,6 +261,22 @@ impl<S> LivePool<S> {
         }
     }
 
+    /// Inspect the same longest compatible live prefix without taking,
+    /// restoring, allocating, or changing its recency.
+    pub(super) fn peek_prefix(
+        &self,
+        ids: &[u32],
+        describe: impl Fn(&S) -> (usize, bool),
+    ) -> Option<usize> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let (position, healthy) = describe(&entry.live.state);
+                live_prefix_len(&entry.live, ids, position, healthy)
+            })
+            .max()
+    }
+
     /// Remove the compatible idle state with the longest prefix (most
     /// recently used among equals).
     pub(super) fn take(
@@ -326,5 +342,30 @@ impl<S> LivePool<S> {
             released = released.saturating_add(freed);
         }
         (states, released)
+    }
+}
+
+#[cfg(test)]
+mod peek_tests {
+    use super::*;
+    #[test]
+    fn peek_is_read_only_and_agrees_with_longest_compatible_take() {
+        let mut pool = LivePool::new(3, None);
+        for n in [2, 4, 3] {
+            pool.commit(
+                Live {
+                    state: n,
+                    tokens: (0..n as u32).collect(),
+                    logits: vec![1.],
+                },
+                n as u64,
+            );
+        }
+        let before = pool.tokens();
+        let ids = (0..6).collect::<Vec<u32>>();
+        assert_eq!(pool.peek_prefix(&ids, |&n| (n, true)), Some(4));
+        assert_eq!(pool.peek_prefix(&ids, |&n| (n, false)), None);
+        assert_eq!(pool.tokens(), before);
+        assert_eq!(pool.take(&ids, |&n| (n, true)).unwrap().tokens.len(), 4);
     }
 }

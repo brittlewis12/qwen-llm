@@ -14,6 +14,7 @@ pub use ced::{
 };
 mod engram_gpu;
 mod layer_prefill;
+pub use layer_prefill::conditional_eligible as conditional_prefill_eligible;
 mod prefill;
 pub use prefill::DEFAULT_CHUNK_ROWS as PREFILL_CHUNK_ROWS;
 pub use prefill::MAX_CHUNK_ROWS as MAX_PREFILL_CHUNK_ROWS;
@@ -1003,6 +1004,7 @@ impl<'a> Forward<'a> {
             )?
             .selected_rows;
         let mut slicing = prefill::LayerInterleave {
+            natural_only: false,
             ends,
             between,
             commands: Vec::new(),
@@ -1038,6 +1040,7 @@ impl<'a> Forward<'a> {
             "layer boundaries",
         )?;
         let mut slicing = prefill::LayerInterleave {
+            natural_only: false,
             ends,
             between,
             commands: Vec::new(),

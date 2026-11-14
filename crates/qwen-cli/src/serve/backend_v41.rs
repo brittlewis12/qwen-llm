@@ -54,15 +54,14 @@ const PREFILL_FAIR_ENV: &str = "QWEN_SERVE_V41_PREFILL_FAIR";
 /// fair prefilling (default 10; integer 1..=90). Each unsliced prefill quantum
 /// earns at most one second of service; idle service earns no credit.
 const DECODE_PERCENT_ENV: &str = "QWEN_SERVE_V41_DECODE_PERCENT";
-/// Target GPU milliseconds for selective row-preserving layer slices. Zero
-/// restores the incumbent native calls and decode budget. Default 0; enabling
-/// PREFILL_YIELD selects a 400 ms default instead. An explicit zero disables
-/// layer boundaries independently of the yield switch.
+/// Target milliseconds for legacy timed layer slices. Default0, or400 when
+/// PREFILL_YIELD is enabled; zero also disables conditional polls. Conditional
+/// mode uses incumbent drains only, irrespective of a positive target value.
 const LAYER_SLICE_MS_ENV: &str = "QWEN_SERVE_V41_LAYER_SLICE_MS";
-/// Minimum predicted original append wall before layer slicing (default 500 ms).
+/// Minimum predicted work before polling existing drains: 700 ms with PREFILL_YIELD, otherwise legacy 500 ms. Short calls below 512 rows always remain unsliced in conditional mode.
 const LAYER_SLICE_MIN_MS_ENV: &str = "QWEN_SERVE_V41_LAYER_SLICE_MIN_MS";
 qwen_llm::env_flag!(
-    /// At drained original-row layer boundaries, collect prepared HTTP jobs and service one waiting short append. Default-off; 0 restores the incumbent pump. Uses 400 ms layer targets unless LAYER_SLICE_MS is set; never changes rows or layer order.
+    /// Poll incumbent command drains and service one actual waiting short append, without new GPU cuts or empty decode rounds. Default-off; 0 restores the incumbent pump. Short calls remain unsliced; positive LAYER_SLICE_MS enables polls and zero disables them. Original rows/order and normal decode credit remain intact.
     default_off prefill_yield_enabled,
     "QWEN_SERVE_V41_PREFILL_YIELD"
 );
@@ -212,7 +211,9 @@ pub(super) fn start(
     }
     let mut settings = prepared.settings;
     settings.model_id = listening.model_id.clone();
-    if settings.layer_slice_ms > 0 {
+    if settings.prefill_yield && settings.layer_slice_ms > 0 {
+        tracing::info!(target:"qwen_diag", "serve conditional prefill: family=deepseek_v41 boundaries=incumbent_drains minimum_predicted_ms={} short_rows_lt=512",settings.layer_slice_min_ms);
+    } else if settings.layer_slice_ms > 0 {
         tracing::info!(target:"qwen_diag", "serve layer prefill: family=deepseek_v41 target_gpu_ms={} minimum_predicted_ms={} rows=original", settings.layer_slice_ms, settings.layer_slice_min_ms);
     }
     let mut backend = Backend::new(&ctx, &weights, forward, settings, idle_window);
@@ -406,7 +407,11 @@ impl Settings {
                 if prefill_yield_enabled() { 400 } else { 0 },
                 10_000,
             )?,
-            layer_slice_min_ms: layer_prefill::parse(LAYER_SLICE_MIN_MS_ENV, 500, 1_000_000)?,
+            layer_slice_min_ms: layer_prefill::parse(
+                LAYER_SLICE_MIN_MS_ENV,
+                if prefill_yield_enabled() { 700 } else { 500 },
+                1_000_000,
+            )?,
         })
     }
 
@@ -639,6 +644,61 @@ impl execution::Engine<qwen_llm::deepseek_v41::forward::State> for ForwardEngine
                     Some(cancel),
                     max_rows,
                     target_ms,
+                    minimum_ms,
+                    &mut || {
+                        between(self);
+                        Ok(())
+                    },
+                )
+                .map(Some)
+        })();
+        track_native_failure(&self.native_failed, result).map_err(state_error)
+    }
+    fn prefill_conditional(
+        &mut self,
+        state: &mut qwen_llm::deepseek_v41::forward::State,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        with_logits: bool,
+        minimum_ms: usize,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> std::result::Result<Vec<f32>, ServeError> {
+        let forward = self.forward;
+        let result = forward.prefill_waiting_interleaved(
+            state,
+            tokens,
+            Some(cancel),
+            with_logits,
+            minimum_ms,
+            &mut || {
+                between(self);
+                Ok(())
+            },
+        );
+        track_native_failure(&self.native_failed, result).map_err(state_error)
+    }
+    fn cold_prefill_conditional(
+        &mut self,
+        state: &mut qwen_llm::deepseek_v41::forward::State,
+        tokens: &[u32],
+        cancel: &AtomicBool,
+        begin: bool,
+        max_rows: usize,
+        minimum_ms: usize,
+        between: &mut dyn FnMut(&mut Self),
+    ) -> std::result::Result<Option<qwen_llm::deepseek_v41::forward::ColdPrefillSlice>, ServeError>
+    {
+        let forward = self.forward;
+        let result = (|| {
+            if begin && !forward.begin_cold_prefill_episode(state, tokens.len())? {
+                return Ok(None);
+            }
+            forward
+                .cold_prefill_episode_waiting_interleaved(
+                    state,
+                    tokens,
+                    Some(cancel),
+                    max_rows,
                     minimum_ms,
                     &mut || {
                         between(self);

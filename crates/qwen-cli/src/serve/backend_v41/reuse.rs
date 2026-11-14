@@ -21,6 +21,11 @@ pub(super) struct Restored<S> {
 }
 
 pub(super) trait Reuse<S> {
+    /// Read-only readiness hint; unknown or large cold prompts wait for normal admission.
+    fn pending_rows(&self, ids: &[u32]) -> Option<usize> {
+        (ids.len() < 512).then_some(ids.len())
+    }
+
     /// Non-allocating request preparation. Retire incompatible idle ownership
     /// before output admission; do not grow, restore, or consume compatible live.
     fn prepare(&mut self, _: &[u32]) {}
@@ -140,6 +145,13 @@ fn describe(state: &State) -> (usize, bool) {
 }
 
 impl Reuse<State> for Session<'_, '_> {
+    fn pending_rows(&self, ids: &[u32]) -> Option<usize> {
+        self.store
+            .live
+            .peek_prefix(ids, describe)
+            .map(|n| ids.len() - n)
+            .or_else(|| (ids.len() < 512).then_some(ids.len()))
+    }
     fn prepare(&mut self, ids: &[u32]) {
         self.store.live.prepare(ids, describe);
         self.protect = ids.to_vec();

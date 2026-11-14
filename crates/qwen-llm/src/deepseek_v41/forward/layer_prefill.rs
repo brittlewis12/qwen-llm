@@ -63,6 +63,7 @@ impl Forward<'_> {
             )?
             .selected_rows;
         let mut slicing = prefill::LayerInterleave {
+            natural_only: false,
             ends: &ends,
             between,
             commands: Vec::new(),
@@ -104,6 +105,7 @@ impl Forward<'_> {
             return self.cold_prefill_episode_slice(state, tokens, cancel, max_rows);
         }
         let mut slicing = prefill::LayerInterleave {
+            natural_only: false,
             ends: &ends,
             between,
             commands: Vec::new(),
@@ -118,9 +120,105 @@ impl Forward<'_> {
     }
 }
 
+/// Conditional scheduling keeps short calls intact and uses only incumbent
+/// completion points. This predicate does not change any row geometry.
+pub fn conditional_eligible(rows: usize, minimum_ms: usize) -> bool {
+    rows >= 512 && predicted_ms(rows) > minimum_ms as f64
+}
+
+impl Forward<'_> {
+    /// Poll only at existing drained Engram commands. Empty polls submit the
+    /// same command ranges as ordinary prefill and perform no peer service.
+    pub fn prefill_waiting_interleaved(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        cancel: Option<&AtomicBool>,
+        with_logits: bool,
+        minimum_ms: usize,
+        between: &mut dyn FnMut() -> Result<()>,
+    ) -> std::result::Result<Vec<f32>, StateError> {
+        let rows = self
+            .select_prefill(
+                state,
+                tokens.len(),
+                state.caller_cpu_reserve,
+                state.prefill_rows,
+            )?
+            .selected_rows;
+        if !conditional_eligible(tokens.len().min(rows), minimum_ms) {
+            return if with_logits {
+                self.prefill(state, tokens, cancel)
+            } else {
+                self.advance_prefill(state, tokens, cancel)
+                    .map(|_| Vec::new())
+            };
+        }
+        let mut service = prefill::LayerInterleave {
+            natural_only: true,
+            ends: &[],
+            between,
+            commands: Vec::new(),
+        };
+        prefill::run_interleaved(
+            self,
+            state,
+            tokens,
+            cancel,
+            rows,
+            with_logits,
+            None,
+            Some(&mut service),
+        )
+    }
+    /// CED polls after its original encoder quantum drains; the decoder
+    /// pipeline, group widths and command submission schedule remain intact.
+    pub fn cold_prefill_episode_waiting_interleaved(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        cancel: Option<&AtomicBool>,
+        max_rows: usize,
+        minimum_ms: usize,
+        between: &mut dyn FnMut() -> Result<()>,
+    ) -> std::result::Result<ColdPrefillSlice, StateError> {
+        let rows = tokens
+            .len()
+            .min(max_rows)
+            .min(state.prefill_rows.unwrap_or(self.prefill_rows));
+        if !conditional_eligible(rows, minimum_ms) {
+            return self.cold_prefill_episode_slice(state, tokens, cancel, max_rows);
+        }
+        let mut service = prefill::LayerInterleave {
+            natural_only: true,
+            ends: &[],
+            between,
+            commands: Vec::new(),
+        };
+        self.cold_prefill_episode_slice_interleaved(
+            state,
+            tokens,
+            cancel,
+            max_rows,
+            Some(&mut service),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn conditional_mode_keeps_every_short_call_unsliced() {
+        for rows in 0..512 {
+            assert!(!conditional_eligible(rows, 0));
+            assert!(!conditional_eligible(rows, 700));
+        }
+        for rows in [611, 1024, 1149, 4096] {
+            assert!(conditional_eligible(rows, 700));
+        }
+        assert!(!conditional_eligible(512, 700));
+    }
     #[test]
     fn selective_cuts_preserve_small_appends_and_exact_zero_rollback() {
         for rows in [0, 1, 32, 128, 281] {

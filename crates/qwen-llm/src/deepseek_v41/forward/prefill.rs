@@ -1280,6 +1280,7 @@ pub(super) fn run_captured(
 }
 
 pub(super) struct LayerInterleave<'a> {
+    pub natural_only: bool,
     pub ends: &'a [usize],
     pub between: &'a mut dyn FnMut() -> Result<()>,
     pub commands: Vec<(usize, f64)>,

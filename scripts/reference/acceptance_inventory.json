@@ -6662,5 +6662,40 @@
     "class": "cpu",
     "ignored": false,
     "reason": "Loopback HTTP prepared work is drained inside a blocked fake prefill boundary; no Metal context or model import."
+  },
+  {
+    "target": "lib",
+    "name": "deepseek_v41::forward::layer_prefill::tests::conditional_mode_keeps_every_short_call_unsliced",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure conditional geometry/read-only prefix lookup or scripted no-work/short-work scheduling and normal-credit lifecycle; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::reuse::operations::peek_tests::peek_is_read_only_and_agrees_with_longest_compatible_take",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure conditional geometry/read-only prefix lookup or scripted no-work/short-work scheduling and normal-credit lifecycle; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::conditional_empty_polls_do_not_decode_and_keep_post_quantum_credit",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure conditional geometry/read-only prefix lookup or scripted no-work/short-work scheduling and normal-credit lifecycle; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::conditional_short_calls_are_unsliced_even_with_zero_minimum",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure conditional geometry/read-only prefix lookup or scripted no-work/short-work scheduling and normal-credit lifecycle; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::conditional_empty_poll_does_not_admit_waiting_long_work",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Pure conditional geometry/read-only prefix lookup or scripted no-work/short-work scheduling and normal-credit lifecycle; no Metal context or model import."
   }
 ]

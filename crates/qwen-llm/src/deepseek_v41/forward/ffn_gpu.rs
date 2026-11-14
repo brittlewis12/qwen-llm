@@ -34,12 +34,36 @@ crate::env_flag!(
 );
 fn cooperative_experts_enabled() -> bool {
     #[cfg(feature = "perf-ablations")]
-    if let Some(super::PrefillExperiment::CooperativeExperts(enabled)) =
-        super::PREFILL_EXPERIMENT.with(|s| s.get())
+    if let Some(
+        super::PrefillExperiment::CooperativeExperts(enabled)
+        | super::PrefillExperiment::CooperativeGather(enabled),
+    ) = super::PREFILL_EXPERIMENT.with(|s| s.get())
     {
         return enabled;
     }
     cooperative_experts_env()
+}
+
+crate::env_flag!(
+    /// Experimental cooperative expert GU reads normalized F32 through route IDs into shared Half tiles, skipping sorted-pack and only an otherwise dead expert input conversion. Requires the cooperative path; default off.
+    default_off cooperative_gather_env,
+    "QWEN_V41_EXPERT_F32_GATHER"
+);
+fn cooperative_gather_enabled() -> bool {
+    #[cfg(feature = "perf-ablations")]
+    if let Some(e) = super::PREFILL_EXPERIMENT.with(|s| s.get()) {
+        match e {
+            super::PrefillExperiment::CooperativeGather(enabled) => return enabled,
+            super::PrefillExperiment::CooperativeExperts(_) => return false,
+            _ => {}
+        }
+    }
+    cooperative_experts_env() && cooperative_gather_env()
+}
+fn experimental_expert_rows(c: &Config, rows: usize) -> bool {
+    (256..=4096).contains(&rows)
+        && (c.hidden, c.intermediate, c.experts, c.topk) == (5120, 2304, 384, 6)
+        && (cooperative_experts_enabled() || cooperative_gather_enabled())
 }
 
 pub(super) struct Workspace {
@@ -1127,6 +1151,7 @@ impl Workspace {
             n,
             scratch.arithmetic,
         )?;
+        metal::dispatch_profile_label("ffn_input", Some(id));
         // One half copy of the normalized input for the shared gate/up here
         // and the routed gate/up below.
         let input_half = match &scratch.half_input {
@@ -1135,13 +1160,15 @@ impl Workspace {
                     .iter()
                     .any(|w| w.tensor_rows_selected_with_arithmetic(n, scratch.arithmetic))
                     || (half_grouped_selected_with_arithmetic(c, layer, n, scratch.arithmetic)
-                        && metal::moe_grouped_tensor_selected(ctx)) =>
+                        && metal::moe_grouped_tensor_selected(ctx)
+                        && !cooperative_gather_enabled()) =>
             {
                 Some(half.convert(ctx, e.enc(), &scratch.hc.normalized, c.hidden * n)?)
             }
             _ => None,
         };
         e.mark(2);
+        metal::dispatch_profile_label("ffn_shared", Some(id));
         for j in 0..2 {
             if !layer.shared[j].encode_rows_with_arithmetic_and_half_preweight(
                 e.enc(),
@@ -1262,6 +1289,7 @@ impl Workspace {
         let b = &scratch.buffers;
         let status = scratch.status_view(id)?;
         let counts = b[10].view_subrange(0, vec![c.experts as u64]);
+        metal::dispatch_profile_label("ffn_routed", Some(id));
         e.mark(3);
         encode_route_rows(
             ctx,
@@ -1299,8 +1327,10 @@ impl Workspace {
                 c.topk,
             )?;
             e.mark(4);
+            #[cfg(feature = "perf-ablations")]
+            profile::capture_expert_routes(ctx, e.enc(), id, n, c.topk, &counts)?;
             if tensor
-                && sorted_rows_geometry(c, n)
+                && (sorted_rows_geometry(c, n) || experimental_expert_rows(c, n))
                 && layer.banks[0].dtype == layer.banks[1].dtype
                 && layer
                     .banks
@@ -1309,13 +1339,18 @@ impl Workspace {
                 && !crate::half_telemetry::enabled()
                 && sorted_experts_enabled()
             {
-                let owned_half = match (input_half, &scratch.half_input) {
-                    (None, Some(half)) => {
+                let gather_f32 = cooperative_gather_enabled();
+                let owned_half = match (gather_f32, input_half, &scratch.half_input) {
+                    (false, None, Some(half)) => {
                         Some(half.convert(ctx, e.enc(), &scratch.hc.normalized, c.hidden * n)?)
                     }
                     _ => None,
                 };
-                let x = input_half.or(owned_half.as_ref()).unwrap();
+                let x = if gather_f32 {
+                    &scratch.hc.normalized
+                } else {
+                    input_half.or(owned_half.as_ref()).unwrap()
+                };
                 let plan =
                     b[10].view_subrange(c.experts as u64, vec![(2 * (c.experts + 1)) as u64]);
                 // Down output is dead until GU completes; weighted F32 scratch
@@ -1347,7 +1382,8 @@ impl Workspace {
                         rows: n,
                         clamp: c.clamp,
                         cooperative: ctx.device_facts().name == "Apple M5 Ultra"
-                            && cooperative_experts_enabled(),
+                            && (cooperative_experts_enabled() || gather_f32),
+                        gather_f32,
                     },
                 )?;
                 experts.encode_gate_up(e.enc());

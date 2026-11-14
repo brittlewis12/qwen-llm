@@ -10,6 +10,20 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
 
 
+
+## 2026-11-14 - Cooperative Experts: Real-Population Gate Starts
+
+- Separate cooperative branch, no edits to the attention landing branch.
+  Packed M32/M64 and F32-gather variants remain default-off.
+- Target 2048 around 48K and 256/1K at 80K: real mean populations 32/4/16.
+  Dispatch-only GPU snapshots capture full route counts before scratch reuse.
+  Preserve the rectangular incumbent at 256; only experimental candidates
+  extend sorted eligibility there.
+- Warmup +3 interleaved pairs, bitwise, nice 0, >=1.25x combined GU/down
+  per requested cell. Include required epilogues and report movement, with
+  only attributable input-copy/pack removals. No isolated/native claim yet.
+  [Predeclared protocol and implementation](bench/2026-11-14-v41-cooperative-isolation.md).
+
 ## 2026-11-13 - Cooperative V4.1 Experts: M5 Functional Pass, Still Default-Off
 
 - Existing differential passes 180 cases / 73,048,064 strict components,

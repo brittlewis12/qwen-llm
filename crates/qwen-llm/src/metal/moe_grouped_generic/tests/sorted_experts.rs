@@ -106,7 +106,23 @@ fn sorted_iq_experts_match_rectangular_and_preserve_scratch_guards() {
             let input: Vec<f32> = (0..h * n)
                 .map(|i| ((i * 17 % 61) as f32 - 30.) * if i / h % 7 == 0 { 2. } else { 0.03125 })
                 .collect();
-            let x = f16_tensor(&ctx, &input);
+            let input: Vec<f32> = input
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| match i % 97 {
+                    0 => 1.0004883,
+                    1 => -1.0004883,
+                    2 => 1e-8,
+                    3 => -1e-8,
+                    _ => v + ((i % 5) as f32 - 2.) * 0.0001,
+                })
+                .collect();
+            let x_f32 = f32_tensor(&ctx, &input);
+            let x = MetalTensor::zeros_f16(&ctx, vec![(h * n) as u64]).unwrap();
+            run(&ctx, |enc| {
+                crate::metal::encode_scatter_offset_f32_to_f16(&ctx, enc, &x_f32, &x, 0, h * n)
+                    .unwrap()
+            });
             let weights: Vec<f32> = (0..slots).map(|i| (i % 7) as f32 / 8.).collect();
             let weights_t = f32_tensor(&ctx, &weights);
             let raw_gu = MetalTensor::zeros_f32(&ctx, vec![(f * slots) as u64]).unwrap();
@@ -220,9 +236,11 @@ fn sorted_iq_experts_match_rectangular_and_preserve_scratch_guards() {
                             )
                             .unwrap()
                         });
-                        for cooperative in [false, true] {
+                        for (cooperative, gather_f32) in
+                            [(false, false), (true, false), (true, true)]
+                        {
                             eprintln!(
-                                "COOPERATIVE_EXPERT_CASE hidden={h} inner={f} gu={dtype:?} down={down_type:?} rows={n} histogram={histogram} cooperative={cooperative} counts={counts:?}"
+                                "COOPERATIVE_EXPERT_CASE hidden={h} inner={f} gu={dtype:?} down={down_type:?} rows={n} histogram={histogram} cooperative={cooperative} gather_f32={gather_f32} counts={counts:?}"
                             );
                             let plan = guarded(&ctx, 2 * (E + 1), GgmlType::I32);
                             let output = guarded(&ctx, h * slots, GgmlType::F32);
@@ -237,7 +255,7 @@ fn sorted_iq_experts_match_rectangular_and_preserve_scratch_guards() {
                                     &ctx,
                                     enc,
                                     [&gate, &up, &down],
-                                    &x,
+                                    if gather_f32 { &x_f32 } else { &x },
                                     &counts_t,
                                     &ids_t,
                                     &weights_t,
@@ -253,6 +271,7 @@ fn sorted_iq_experts_match_rectangular_and_preserve_scratch_guards() {
                                         rows: n,
                                         clamp: 10.,
                                         cooperative,
+                                        gather_f32,
                                     },
                                 )
                                 .unwrap();
@@ -267,7 +286,7 @@ fn sorted_iq_experts_match_rectangular_and_preserve_scratch_guards() {
                             for e in 0..E {
                                 assert_eq!(plan_values[e], off);
                                 assert_eq!(plan_values[E + 1 + e], tiles);
-                                for j in 0..counts[e] as usize {
+                                for j in 0..if gather_f32 { 0 } else { counts[e] as usize } {
                                     let slot = ids[e * n + j] as usize;
                                     let row = off as usize + j;
                                     assert_eq!(
@@ -304,7 +323,7 @@ fn sorted_iq_experts_match_rectangular_and_preserve_scratch_guards() {
                                 .collect();
                             assert_bits(
                                 &format!(
-                                    "{dtype:?} rows={n} histogram={histogram} inner cooperative={cooperative}"
+                                    "{dtype:?} rows={n} histogram={histogram} inner cooperative={cooperative} gather_f32={gather_f32}"
                                 ),
                                 &original_order,
                                 &reference_half,
@@ -316,7 +335,7 @@ fn sorted_iq_experts_match_rectangular_and_preserve_scratch_guards() {
                                     &ctx,
                                     enc,
                                     [&gate, &up, &down],
-                                    &x,
+                                    if gather_f32 { &x_f32 } else { &x },
                                     &counts_t,
                                     &ids_t,
                                     &weights_t,
@@ -332,6 +351,7 @@ fn sorted_iq_experts_match_rectangular_and_preserve_scratch_guards() {
                                         rows: n,
                                         clamp: 10.,
                                         cooperative,
+                                        gather_f32,
                                     },
                                 )
                                 .unwrap();
@@ -339,7 +359,7 @@ fn sorted_iq_experts_match_rectangular_and_preserve_scratch_guards() {
                             });
                             assert_bits(
                                 &format!(
-                                    "{dtype:?} / {down_type:?} rows={n} histogram={histogram} down cooperative={cooperative}"
+                                    "{dtype:?} / {down_type:?} rows={n} histogram={histogram} down cooperative={cooperative} gather_f32={gather_f32}"
                                 ),
                                 &tensor_f32_at_offset(&output.1),
                                 &tensor_f32_at_offset(&reference),
@@ -385,6 +405,7 @@ fn sorted_iq_experts_refuse_bad_bindings_before_dispatch() {
         rows: N,
         clamp: 10.,
         cooperative: false,
+        gather_f32: false,
     };
     let original = [&plan.0, &packed.0, &inner.0, &output.0].map(|t| data(t).to_vec());
     for case in 0..10 {

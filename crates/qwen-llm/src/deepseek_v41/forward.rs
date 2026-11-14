@@ -46,6 +46,7 @@ pub enum PrefillExperiment {
     PvWide(bool),
     AttentionBundle(bool),
     CooperativeExperts(bool),
+    CooperativeGather(bool),
 }
 #[cfg(feature = "perf-ablations")]
 thread_local! {

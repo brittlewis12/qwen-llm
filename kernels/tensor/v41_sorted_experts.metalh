@@ -445,6 +445,123 @@ V41_SORTED_GU_COOPERATIVE(iq2_xs, 1, QT_IQ2_XS_BYTES, qt_dequantize_iq2_xs)
 V41_SORTED_GU_COOPERATIVE(iq2_xxs, 0, QT_IQ2_XXS_BYTES, qt_dequantize_iq2_xxs)
 V41_SORTED_GU_COOPERATIVE(iq3_xxs, 3, QT_IQ3_XXS_BYTES, qt_dequantize_iq3_xxs)
 
+// Direct F32 gather variant: same narrowing, K64 update order and epilogue.
+template <int FORMAT, int BYTES,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &), int ROWS>
+inline void v41_cooperative_gu_gather_run(
+    constant uint4 &dims, device const uchar *gate, device const uchar *up,
+    device const float *x, device const int *plan, device const int *ids,
+    constant uint2 &routes, constant float &limit, device const float *weights,
+    device half *inner, threadgroup uchar *scratch,
+    int expert, int m0, int live, uint n0, ushort tid) {
+    constexpr int KS = 64, WS = 72;
+    const int a0 = min(m0, int(routes.x) - ROWS), shift = m0 - a0;
+    const ulong row_bytes = ulong(dims.x / 256) * BYTES;
+    threadgroup half *wt = (threadgroup half *)scratch;
+    constexpr auto desc = tensor_ops::matmul2d_descriptor(
+        ROWS, 64, KS, false, true, true,
+        tensor_ops::matmul2d_descriptor::mode::multiply_accumulate);
+    tensor_ops::matmul2d<desc, execution_simdgroups<8>> op;
+    threadgroup half *ax = wt + 128 * WS;
+    tensor<threadgroup half, dextents<int, 2>, tensor_inline> A(
+        ax, dextents<int, 2>(KS, ROWS), array<int, 2>{1, WS});
+    tensor<threadgroup half, dextents<int, 2>, tensor_inline> G(
+        wt, dextents<int, 2>(KS, 64), array<int, 2>{1, WS});
+    tensor<threadgroup half, dextents<int, 2>, tensor_inline> U(
+        wt + 64 * WS, dextents<int, 2>(KS, 64), array<int, 2>{1, WS});
+    auto a = A.template slice<KS, ROWS>(0, 0);
+    auto g = G.template slice<KS, 64>(0, 0);
+    auto u = U.template slice<KS, 64>(0, 0);
+    auto gc = op.template get_destination_cooperative_tensor<
+        metal::remove_addrspace_t<decltype(a)>, metal::remove_addrspace_t<decltype(g)>, float>();
+    auto uc = op.template get_destination_cooperative_tensor<
+        metal::remove_addrspace_t<decltype(a)>, metal::remove_addrspace_t<decltype(u)>, float>();
+    for (ushort i = 0; i < gc.get_capacity(); ++i) { gc[i] = 0.0f; uc[i] = 0.0f; }
+    for (uint k = 0; k < dims.x; k += KS) {
+        // Match the old F32->Half copy exactly, directly in the operand slab.
+        // Padding is never observed by a live output row.
+        for (uint t = tid; t < ROWS * (KS / 4); t += 256) {
+            const uint r = t / (KS / 4), q = t % (KS / 4);
+            half4 value = half4(0);
+            if (int(r) >= shift && int(r) < shift + live) {
+                const int slot = ids[expert * dims.w + a0 + int(r) - plan[expert]];
+                if (slot >= 0 && uint(slot) < routes.x) {
+                    const ulong offset = ulong(slot / int(routes.y)) * dims.x + k + 4 * q;
+                    value = half4(*(device const float4 *)(x + offset));
+                }
+            }
+            *(threadgroup half4 *)(ax + r * WS + 4 * q) = value;
+        }
+        if (tid < 128) {
+            const uint row = n0 + tid % 64;
+            device const uchar *w = (tid < 64 ? gate : up)
+                + (ulong(expert) * dims.y + row) * row_bytes;
+            v41_cooperative_decode<FORMAT, BYTES, DEQ>(w, k, wt + tid * WS);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        auto at = A.template slice<KS, ROWS>(0, 0);
+        op.run(at, g, gc);
+        op.run(at, u, uc);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (ushort i = 0; i < gc.get_capacity(); ++i) {
+        if (!gc.is_valid_element(i)) continue;
+        const auto ij = gc.get_multidimensional_index(i);
+        const uint col = ij[0];
+        const int r = int(ij[1]);
+        if (r < shift || r >= shift + live || col >= 64) continue;
+        const float gval = min(gc[i], limit);
+        const float uval = clamp(uc[i], -limit, limit);
+        volatile float activation = gval / (1.0f + exp(-gval)) * uval;
+        const int slot = ids[expert * dims.w + a0 + r - plan[expert]];
+        float value = activation;
+        if (slot >= 0 && uint(slot) < routes.x) {
+            volatile float weighted = activation * weights[slot];
+            value = weighted;
+        }
+        inner[ulong(a0 + r) * dims.y + n0 + col] = half(value);
+    }
+}
+
+template <int FORMAT, int BYTES,
+          void (*DEQ)(device const uchar *, short, thread half4x4 &)>
+kernel void v41_sorted_gu_cooperative_gather(
+    constant uint4 &dims [[buffer(0)]], device const uchar *gate [[buffer(1)]],
+    device const uchar *up [[buffer(2)]], device const float *x [[buffer(3)]],
+    device const int *plan [[buffer(4)]], device const int *ids [[buffer(5)]],
+    constant uint2 &routes [[buffer(7)]], constant float &limit [[buffer(8)]],
+    device const float *weights [[buffer(9)]], device half *inner [[buffer(10)]],
+    threadgroup uchar *scratch [[threadgroup(0)]],
+    uint2 group [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]]) {
+    const device int *tiles = plan + dims.z + 1;
+    const int tile = group.y;
+    if (tile >= tiles[dims.z]) return;
+    int lo = 0, hi = int(dims.z) - 1;
+    while (lo < hi) {
+        const int mid = (lo + hi + 1) / 2;
+        if (tiles[mid] <= tile) lo = mid; else hi = mid - 1;
+    }
+    const int m0 = plan[lo] + (tile - tiles[lo]) * 64;
+    const int live = min(64, plan[lo + 1] - m0);
+    if (live <= 32) {
+        v41_cooperative_gu_gather_run<FORMAT, BYTES, DEQ, 32>(
+            dims, gate, up, x, plan, ids, routes, limit, weights, inner, scratch,
+            lo, m0, live, group.x * 64, tid);
+    } else {
+        v41_cooperative_gu_gather_run<FORMAT, BYTES, DEQ, 64>(
+            dims, gate, up, x, plan, ids, routes, limit, weights, inner, scratch,
+            lo, m0, live, group.x * 64, tid);
+    }
+}
+
+typedef decltype(v41_sorted_gu_cooperative_gather<2, QT_IQ2_S_BYTES, qt_dequantize_iq2_s>) v41_sorted_gu_cooperative_gather_t;
+#define V41_SORTED_GU_COOPERATIVE_GATHER(suffix, FORMAT, BYTES, DEQ) \
+    template [[host_name("v41_sorted_gu_cooperative_gather_" #suffix)]] kernel v41_sorted_gu_cooperative_gather_t v41_sorted_gu_cooperative_gather<FORMAT, BYTES, DEQ>;
+V41_SORTED_GU_COOPERATIVE_GATHER(iq2_s, 2, QT_IQ2_S_BYTES, qt_dequantize_iq2_s)
+V41_SORTED_GU_COOPERATIVE_GATHER(iq2_xs, 1, QT_IQ2_XS_BYTES, qt_dequantize_iq2_xs)
+V41_SORTED_GU_COOPERATIVE_GATHER(iq2_xxs, 0, QT_IQ2_XXS_BYTES, qt_dequantize_iq2_xxs)
+V41_SORTED_GU_COOPERATIVE_GATHER(iq3_xxs, 3, QT_IQ3_XXS_BYTES, qt_dequantize_iq3_xxs)
+
 template <int FORMAT, int BYTES,
           void (*DEQ)(device const uchar *, short, thread half4x4 &), int ROWS>
 inline void v41_cooperative_down_run(

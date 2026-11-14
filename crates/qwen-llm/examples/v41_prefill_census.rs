@@ -112,11 +112,13 @@ fn execute(
                 "masked-reindex-mid" => E::MaskedReindexMid(false),
                 "attention-bundle" => E::AttentionBundle(false),
                 "cooperative-experts" => E::CooperativeExperts(false),
+                "cooperative-gather" => E::CooperativeGather(false),
                 _ => E::Production,
             },
             "masked-reindex-mid" => E::MaskedReindexMid(true),
             "attention-bundle" => E::AttentionBundle(true),
             "cooperative-experts" => E::CooperativeExperts(true),
+            "cooperative-gather" => E::CooperativeGather(true),
             _ => anyhow::bail!("experiment"),
         };
         with_prefill_experiment(e, run)
@@ -148,7 +150,11 @@ fn main() -> Result<()> {
     ensure!(
         matches!(
             candidate,
-            "baseline" | "masked-reindex-mid" | "attention-bundle" | "cooperative-experts"
+            "baseline"
+                | "masked-reindex-mid"
+                | "attention-bundle"
+                | "cooperative-experts"
+                | "cooperative-gather"
         ),
         "experiment"
     );
@@ -222,6 +228,10 @@ fn main() -> Result<()> {
         } else {
             None
         };
+        #[cfg(feature = "perf-ablations")]
+        if mode == "dispatch" {
+            profile::expert_routes_begin();
+        }
         let t = Instant::now();
         let logits = execute(
             &f,
@@ -234,6 +244,12 @@ fn main() -> Result<()> {
             rep,
         )?;
         let wall = t.elapsed().as_secs_f64() * 1e3;
+        #[cfg(feature = "perf-ablations")]
+        if mode == "dispatch" {
+            emit(
+                json!({"kind":"route_counts","rep":rep,"policy":policy,"layers":profile::expert_routes_finish().map_err(anyhow::Error::msg)?}),
+            );
+        }
         let report = scope.finish();
         emit(
             json!({"kind":"cell", "rep":rep,"depth":depth,"rows":rows,"mode":mode,"policy":policy,

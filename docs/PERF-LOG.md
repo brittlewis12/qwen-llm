@@ -6,17 +6,21 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
-## 2026-11-14 - V4.1 Compact + Radix: Native Append Wall Qualification
+## 2026-11-14 - V4.1 Compact + Radix: Native Wins, Served Gate Fails
 
-- Lead judgment advances the bitwise composition despite the 256-row stage
-  misses; both components default-on with separate `=0` rollbacks. Rebased on
-  main `411228dc0`; ENV and CPU contracts pass.
-- Same pinned iter binary, nice0, warmup +3 interleaved pairs: **1.025358x**
-  at 1K@80K, **1.014970x** at 256@80K, **1.044608x** at 1K@128K. Root
-  control **1.004386x**. All 32 endpoints bitwise; measured append disk
-  counters 0/thermal0, root thermal<=2 with tiny reads retained.
-- Frozen three-pair served gate pending behind the shared
-  lease queue. No landing verdict. [Protocol, pairs and binary pins](bench/2026-11-14-v41-radix-wall.md).
+- Lead judgment advanced the composition despite the 256-row stage misses.
+  Same pinned iter binary/nice0: **1.025358x** 1K@80K, **1.014970x**
+  256@80K, **1.044608x** 1K@128K; 48K root control **1.004386x**.
+  All 32 causal signatures bitwise; measured append reads0/thermal0.
+- Three purged greedy served pairs AB/BA/AB, one arm per <=15m lease,
+  symmetric warmup, same release binary, nice0, thermal<=2, all controls pass.
+  Frozen geomeans: root **1.031178x**, TPS **1.015278x**, short prefill/TTFT
+  **1.021668/1.115103x**, 1K prefill/TTFT **1.018564/0.975477x**.
+  **FAIL on 1K client TTFT**; no exclusions or rule override.
+- Both implementations retained **default-off** with independent knobs; M2
+  stays removed. All arm disk counters/load retained. Gate closed; M5 worktree,
+  target, bundle and pins removed, no task workers left. [All cells, pairs,
+  launch controls and cleanup](bench/2026-11-14-v41-radix-wall.md).
 
 ## 2026-11-14 - GLM Gate/Up Epilogue Edge Closed at Route-Partition Check
 

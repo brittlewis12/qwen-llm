@@ -25,8 +25,9 @@ pub(super) const TILE: usize = 512;
 const MASKED_REINDEX_ENV: &str = "QWEN_V41_MASKED_REINDEX";
 
 crate::env_flag!(
-    /// Exact compact-block launch for masked F32 index MMA; reuses long-selection pair scratch. Default on for lead-authorized wall qualification; 0 restores the incumbent launch independently of radix coalescing.
-    default_on masked_index_compact_env,
+    /// Exact compact launch for masked F32 index MMA; reuses long-selection pair scratch.
+    /// Default off after the served TTFT gate miss; 1 opts in independently of radix coalescing.
+    default_off masked_index_compact_env,
     "QWEN_V41_MASKED_INDEX_COMPACT"
 );
 fn masked_index_compact_enabled() -> bool {
@@ -42,8 +43,9 @@ fn masked_index_compact_enabled() -> bool {
 }
 
 crate::env_flag!(
-    /// Exact SIMD coalescing of masked negative-infinity radix histogram updates. Default on for lead-authorized wall qualification; 0 restores per-key atomics independently of compact scoring.
-    default_on radix_neg_inf_coalesce_env,
+    /// Exact SIMD coalescing of masked negative-infinity radix histogram updates.
+    /// Default off after the served TTFT gate miss; 1 opts in independently of compact scoring.
+    default_off radix_neg_inf_coalesce_env,
     "QWEN_V41_RADIX_NEG_INF_COALESCE"
 );
 fn radix_neg_inf_coalesce_enabled() -> bool {

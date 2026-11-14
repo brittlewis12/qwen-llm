@@ -1,0 +1,13 @@
+{
+  "time": "2026-11-14T07:01:59.571723+00:00",
+  "gate_closed": true,
+  "pins_retained": false,
+  "removed": [
+    "/Users/tito/code/qwen-llm-v41-radix-wall",
+    "/Users/tito/qwen-runs/2026-11-12-v41-prefill/radix-wall/target",
+    "/Users/tito/qwen-runs/2026-11-12-v41-prefill/radix-wall-source.bundle",
+    "/Users/tito/qwen-runs/2026-11-12-v41-prefill/radix-wall/pins"
+  ],
+  "checked_workers": 28,
+  "active_started_workers": 0
+}

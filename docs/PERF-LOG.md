@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-14 - V4.1 Three-Agent TTFT: Peer-Prefill Tails Priced
+
+- Records only:18 paired arms plus1 diagnostic,164 input hashes verified;
+  375 completed short/~1K append profiles joined. Engram agent-default traffic
+  is kept separate from the greedy attention/radix arms. No GPU or model work.
+- Radix short TTFT p50/p95 **596/1,464ms**, native wall **420/671ms**;
+  ~1K **1,110/1,604ms**, native **1,028/1,484ms**. Internal `queue_ms` is
+  microseconds, missing pre-submit admission/mailbox time. Pre-native gaps
+  **81/776ms** short and **78/90ms** ~1K; response tail after prefill-complete
+  is only **1.3/1.7ms**. First-token versus transport is not separately logged.
+- Pair1 swaps611/462 and1,149/249-row call order: faster ~1K native work
+  still crosses624/461ms of peer prefill. Two ~1K outliers hide above pooled
+  p95; all affected waits, I/O limits and censoring remain in the record.
+- An ideal200–500ms peer-service bound prices **340–640ms short p95**
+  opportunity, with unpriced work transfer onto ~1K requests. Recommend a
+  row-preserving conditional inter-request yield and ready-job tracing;
+  existing layer callbacks service decoders only. FAIR0 changes geometry;
+  MAX_ACTIVE capacity is not the evidenced bottleneck. Headers/first-token
+  clocks already collected can be retained with little extra logging.
+  [Decomposition, all arms, source audit and ranked levers](bench/2026-11-14-v41-serve-ttft.md).
+
 ## 2026-11-14 - V4.1 Compact + Radix: Default-On by Lead Judgment
 
 - The stage gate missed at256 rows: **1.183782/1.223085x** at80K/128K,

@@ -1,0 +1,167 @@
+{
+  "interpretation": "Optimistic exposure prices, not policy simulations; deferred peers and chunk inefficiency are unpriced.",
+  "campaigns": {
+    "attention": {
+      "short": {
+        "cf_remove_peer_exposure_ms": {
+          "p50_client_ms": 707.8043222427368,
+          "p95_client_ms": 844.3231463432312,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 719.9820756912231
+        },
+        "cf_peer_cap_200_ms": {
+          "p50_client_ms": 707.8043222427368,
+          "p95_client_ms": 1044.3231463432312,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 519.9820756912231
+        },
+        "cf_peer_cap_400_ms": {
+          "p50_client_ms": 707.8043222427368,
+          "p95_client_ms": 1244.3231463432312,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 319.98207569122314
+        },
+        "cf_peer_cap_500_ms": {
+          "p50_client_ms": 707.8043222427368,
+          "p95_client_ms": 1344.3231463432312,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 219.98207569122314
+        }
+      },
+      "1k": {
+        "cf_remove_peer_exposure_ms": {
+          "p50_client_ms": 1101.178526878357,
+          "p95_client_ms": 1163.1216764450073,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 0.0
+        },
+        "cf_peer_cap_200_ms": {
+          "p50_client_ms": 1101.178526878357,
+          "p95_client_ms": 1163.1216764450073,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 0.0
+        },
+        "cf_peer_cap_400_ms": {
+          "p50_client_ms": 1101.178526878357,
+          "p95_client_ms": 1163.1216764450073,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 0.0
+        },
+        "cf_peer_cap_500_ms": {
+          "p50_client_ms": 1101.178526878357,
+          "p95_client_ms": 1163.1216764450073,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 0.0
+        }
+      }
+    },
+    "radix": {
+      "short": {
+        "cf_remove_peer_exposure_ms": {
+          "p50_client_ms": 484.5292568206787,
+          "p95_client_ms": 776.9688606262207,
+          "p50_reduction_ms": 111.34886741638184,
+          "p95_reduction_ms": 686.9748592376707
+        },
+        "cf_peer_cap_200_ms": {
+          "p50_client_ms": 553.884220123291,
+          "p95_client_ms": 823.5445499420166,
+          "p50_reduction_ms": 41.99390411376953,
+          "p95_reduction_ms": 640.3991699218748
+        },
+        "cf_peer_cap_400_ms": {
+          "p50_client_ms": 595.8781242370605,
+          "p95_client_ms": 1023.5445499420166,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 440.3991699218748
+        },
+        "cf_peer_cap_500_ms": {
+          "p50_client_ms": 595.8781242370605,
+          "p95_client_ms": 1123.5445499420166,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 340.3991699218748
+        }
+      },
+      "1k": {
+        "cf_remove_peer_exposure_ms": {
+          "p50_client_ms": 1106.9178581237793,
+          "p95_client_ms": 1563.8230085372925,
+          "p50_reduction_ms": 2.752065658569336,
+          "p95_reduction_ms": 40.09044170379639
+        },
+        "cf_peer_cap_200_ms": {
+          "p50_client_ms": 1106.9178581237793,
+          "p95_client_ms": 1563.8230085372925,
+          "p50_reduction_ms": 2.752065658569336,
+          "p95_reduction_ms": 40.09044170379639
+        },
+        "cf_peer_cap_400_ms": {
+          "p50_client_ms": 1109.6699237823486,
+          "p95_client_ms": 1570.3237390518188,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 33.58971118927002
+        },
+        "cf_peer_cap_500_ms": {
+          "p50_client_ms": 1109.6699237823486,
+          "p95_client_ms": 1603.9134502410889,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 0.0
+        }
+      }
+    },
+    "engram": {
+      "short": {
+        "cf_remove_peer_exposure_ms": {
+          "p50_client_ms": 758.1440210342407,
+          "p95_client_ms": 1021.1591482162476,
+          "p50_reduction_ms": 8.568286895751953,
+          "p95_reduction_ms": 363.0314111709599
+        },
+        "cf_peer_cap_200_ms": {
+          "p50_client_ms": 766.7123079299927,
+          "p95_client_ms": 1023.115029335022,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 361.0755300521855
+        },
+        "cf_peer_cap_400_ms": {
+          "p50_client_ms": 766.7123079299927,
+          "p95_client_ms": 1163.7181448936462,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 220.47241449356125
+        },
+        "cf_peer_cap_500_ms": {
+          "p50_client_ms": 766.7123079299927,
+          "p95_client_ms": 1224.3230819702148,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 159.86747741699264
+        }
+      },
+      "1k": {
+        "cf_remove_peer_exposure_ms": {
+          "p50_client_ms": 1248.6603260040283,
+          "p95_client_ms": 1808.789730072021,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 164.76726531982376
+        },
+        "cf_peer_cap_200_ms": {
+          "p50_client_ms": 1248.6603260040283,
+          "p95_client_ms": 1847.37434387207,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 126.18265151977471
+        },
+        "cf_peer_cap_400_ms": {
+          "p50_client_ms": 1248.6603260040283,
+          "p95_client_ms": 1890.0604724884033,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 83.49652290344147
+        },
+        "cf_peer_cap_500_ms": {
+          "p50_client_ms": 1248.6603260040283,
+          "p95_client_ms": 1890.0604724884033,
+          "p50_reduction_ms": 0.0,
+          "p95_reduction_ms": 83.49652290344147
+        }
+      }
+    }
+  }
+}

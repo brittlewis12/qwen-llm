@@ -1,0 +1,955 @@
+[
+  {
+    "campaign": "attention",
+    "tag": "pair1-a",
+    "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-bundle/bundle-serve-pair1-a",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 363474,
+        "sha256": "7f8739eba9db547e70b5e4c0a99f23c6caaa1e9aae4895c71f1d3dade02f3d71"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 1506765,
+        "sha256": "86b0eb70b0107bc792cde04d60ddee7399ae1637b0be076397ce2885c240ae81"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3461,
+        "sha256": "780845af37a1202ec1d7b99dd262d287236087c1c7b758e22a140f36a8c703bc"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 3715,
+        "sha256": "f6a61301ea536b8fd622e2bbb9d3b83cc66d220976912a412f42a14adf8c00b2"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9265,
+        "sha256": "58199708e309367161660cd6e063e90daf4558b46ac2d2bd32e8b239dced6dc2"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 372682,
+        "sha256": "dc4909a3d4d7f4053182a7acea60b05abdec2fec0a19c8f9ed58499ba96a67a7"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6850,
+        "sha256": "805030f4d151fe52201bdd55f6d2292369a97b655db62aeff424fa1509369a7c"
+      },
+      {
+        "name": "harness.log",
+        "bytes": 6335,
+        "sha256": "f2af98f7e523416fdeb9f0b1d191225ecc09a7c231007b08c3f88d41573b5751"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 256,
+        "sha256": "5391f5f7780e590d760b998a6cad2a60b42d674d8206b0dd14d629104dc621f6"
+      }
+    ]
+  },
+  {
+    "campaign": "radix",
+    "tag": "pair1-a",
+    "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/radix-wall/serve/wall-pair1-a",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 701619,
+        "sha256": "f742b7129314ec7e3a69a85c2a00e1ad443e661be8ef3083edaa48e0ef5b296b"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 2694744,
+        "sha256": "1356d4b5743a0bb22b5ed538313221af603ce141fa37a5cd93b03eff6672806e"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3440,
+        "sha256": "df425a0ad1dfdaaebbfbf7993f05ef2bf3e4fa6996dae4f63f4d6a8edd3e8d7c"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 4897,
+        "sha256": "b9d96df256a26206fc1d5cb5a192ce8ada52648e81e87d52034e31e3cb57e618"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9260,
+        "sha256": "0f96bdb8de47c60b7026a34911e8215d15680ae13ce55e849663228004e2e909"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 505939,
+        "sha256": "1daf59b20a042fb5f5984cfba24cb34347bea92f2535f8f578d35137f0562394"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6851,
+        "sha256": "f27485bfc8061dd04c3d6403182314840d7f9fac3b039b919f362caf5bc410cf"
+      },
+      {
+        "name": "harness.log",
+        "bytes": 8663,
+        "sha256": "86f8d2ed9255b6644a86c8a6898e4e3fbf72ecf97ba5050a8e43a7914116dcdd"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 257,
+        "sha256": "db600046120841b1908ea49d4b777e237894a305d7a1b2f1edc75af94c7f6a51"
+      }
+    ]
+  },
+  {
+    "campaign": "attention",
+    "tag": "pair1-b",
+    "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-bundle/bundle-serve-pair1-b",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 374023,
+        "sha256": "af2b0a8911da2aeff0d5b73ffbe15c6eaaef8c0219595cb1118cf06a487ab850"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 1541921,
+        "sha256": "84b510a81bef9da173b1555cbac470b8f1c5b1d3bb22e91a9fd5260edded463b"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3460,
+        "sha256": "a5483d32535c656546b57923116abc75e09e38f99b8c8ff94bb6c1107b98bf09"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 3704,
+        "sha256": "39a7804e4bd65037c39dea8b16644caf446c476f6c797b127ff4be65ac91c222"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9250,
+        "sha256": "e4a1e7fba3dddfe4ad361428a3e565ab31786580298b3d7183dcaa2655f244a7"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 302997,
+        "sha256": "2d63525474216223807a93cb52274f046cbf88d635296c3f37244c541e871806"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6850,
+        "sha256": "805030f4d151fe52201bdd55f6d2292369a97b655db62aeff424fa1509369a7c"
+      },
+      {
+        "name": "harness.log",
+        "bytes": 6341,
+        "sha256": "079aebc5ae49c6cf4aad915756eb2c6c17292a3f09ae936cf045137116d9e9c3"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 255,
+        "sha256": "740ccfba526a5e2189bfe22b998976b003a7c1342eef217ecbbb7b6678d41d79"
+      }
+    ]
+  },
+  {
+    "campaign": "radix",
+    "tag": "pair1-b",
+    "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/radix-wall/serve/wall-pair1-b",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 734507,
+        "sha256": "23e3ba304aaceabe6eaeeda47993d76b369d323bf4225eacf2ed6a3b5f5b5407"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 2810455,
+        "sha256": "fb9208a9602e543d0fc7594a4b7ede9b5b4fb976f2ef4cf253ef1bd6991dcfeb"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3440,
+        "sha256": "99c1fcc2d6edaf38d36a18a7df0048a0ef89bef037a44dabbf614044b6e55c09"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 4869,
+        "sha256": "e5bc12ddce0350c53fe09330e89ece7869d416dddab09113ac97856669b42576"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9258,
+        "sha256": "ec0dc4aebf3d53d2223a374290eec6b318dd9b1795e9102ceb28b5853b99465c"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 43796,
+        "sha256": "41443e06e9a11801c9504ee10ec24469bceb0d14291c98721a2be000768cfdc3"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6851,
+        "sha256": "f27485bfc8061dd04c3d6403182314840d7f9fac3b039b919f362caf5bc410cf"
+      },
+      {
+        "name": "harness.log",
+        "bytes": 8847,
+        "sha256": "4e0fda35555a5327a9ce4e02ffde393eaad0ec7d14e3eecba4ae635ecf52dfab"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 256,
+        "sha256": "0abf3cccbd4e145ecd00c2b6d479327c6e9be15ac3ac5920e871d0f7683903de"
+      }
+    ]
+  },
+  {
+    "campaign": "attention",
+    "tag": "pair2-a",
+    "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-close/finish-serve-pair2-a",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 369231,
+        "sha256": "58b0a4332accd1b7a31a28b45dbe89b50a7f873cb5038bb840fe4c7d5b55b15f"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 1525733,
+        "sha256": "9258d70eb7fabe7bda26893620baaffa3bdae508ed2775607613f1f6f0448e8a"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3525,
+        "sha256": "b74f5b32dd3c0ad5ac77d5a6e4805447ef5412c6fdbe341d9917f346a149f27c"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 3709,
+        "sha256": "54ebafd1245043980e38a11f1c34fad9e5d5e66928cb7088c25decee494e3328"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9262,
+        "sha256": "b5023a8862aea43f4d0d718e084965d7c75d589b76e17586342ed022a0821c0d"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 22515,
+        "sha256": "141fc0bcec0f817e338f7587573629130b74c9d76d3a316cecc23f5d4637543d"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6850,
+        "sha256": "805030f4d151fe52201bdd55f6d2292369a97b655db62aeff424fa1509369a7c"
+      },
+      {
+        "name": "harness.log",
+        "bytes": 6337,
+        "sha256": "7ee22f426e5749ee437d7d9a8352f9f5496b247ff7bb23f2e6b3373aa358659a"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 256,
+        "sha256": "1a1fcb231c0315076dc87d6f57f7366fba261043954a333bf147006c47348bc1"
+      }
+    ]
+  },
+  {
+    "campaign": "radix",
+    "tag": "pair2-a",
+    "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/radix-wall/serve/wall-pair2-a",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 702773,
+        "sha256": "fd4f9e1dad2479cdc99c9108fa451909d284ed7d231d2184c6e8d50834f624fa"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 2700085,
+        "sha256": "1d1fe7015aa2e71005f7f2d322448fc06ffbacae29f9c41272a758850fcadbfb"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3442,
+        "sha256": "f07b953f8f99ef5e117056c575e31d9cd08eda81fc79d2b0ac3639300521cf7b"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 4908,
+        "sha256": "d2ce394158afdddec1eb5e41ba655576479786d93e6e5bac176fb39bc6b6f133"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9253,
+        "sha256": "f590bdd8ca57d410929ea115087009c5427182c78be19331508cb1b7101c662e"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 446121,
+        "sha256": "305b6d636691f14690d1e7de2f188aeccacce6c36a4b869df2591b78198faa4b"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6851,
+        "sha256": "f27485bfc8061dd04c3d6403182314840d7f9fac3b039b919f362caf5bc410cf"
+      },
+      {
+        "name": "harness.log",
+        "bytes": 8680,
+        "sha256": "3da089f5ff9b6e3498d860b53852cdffc08a53966778b02b9c68fa57753eb5c8"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 256,
+        "sha256": "b644e59b4b70b5418f434e92078804cc6ddab03bb77c59b76085ae1bba45606c"
+      }
+    ]
+  },
+  {
+    "campaign": "attention",
+    "tag": "pair2-b",
+    "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-close/finish-serve-pair2-b",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 374260,
+        "sha256": "4fd857c00e3ab43f40ef1bf06219f8ba6fe0fae311dbc63da26adadd3f1c0904"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 1543865,
+        "sha256": "a599b312fe1f7b2dfb4a61778ebd2f55c5e9c38adebd6ca13a80a97765343e63"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3517,
+        "sha256": "48560d1f2ca79b9a131aa0420f74c833d688ee44e13fc1bb4d1177d234bf8003"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 3698,
+        "sha256": "22493c6138b84aa34f6d587d6832bbe46dbdb559a9d638dd5e815ef351148db7"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9255,
+        "sha256": "7d4350031ca3c0a69c745f4d30b8e9a37559ef2f0a1c446966e350c045c4ea52"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 18149,
+        "sha256": "356e0adcae5b3b19e19d9bf84dfa8ee637b59f3de1e01fc04fe7e76e38b5fe00"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6850,
+        "sha256": "805030f4d151fe52201bdd55f6d2292369a97b655db62aeff424fa1509369a7c"
+      },
+      {
+        "name": "harness.log",
+        "bytes": 6332,
+        "sha256": "547a756a5334f5b40d75f3ccc475e63af319c1f76a81cbe561982bc9ca40ab94"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 256,
+        "sha256": "bbbe0dbe1151da8954d4256f14ce195c67b2d6cf054fa759d195bdb0e3e05a09"
+      }
+    ]
+  },
+  {
+    "campaign": "radix",
+    "tag": "pair2-b",
+    "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/radix-wall/serve/wall-pair2-b",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 699513,
+        "sha256": "210e18f9d18c5b9463b291930745f1879b54f80acf00ad2b30da635c84ed56af"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 2687714,
+        "sha256": "850be085de3c7858e75da6079fb2e2a910ae53a4cd598837b256eff920b3530c"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3445,
+        "sha256": "0a7f96a0b217cea7bc2a7c48bf6dd10e834131cc322197218c4f15b8475f4c57"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 4892,
+        "sha256": "b3b0f773e14cacdee344c0783158be5f4aaa6928c294ab207e229e33576e7938"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9259,
+        "sha256": "45ef89847dd15c80e92da9217b386569a73787748b72782a7fce3682746eab85"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 293564,
+        "sha256": "fd3ed9bda07aeded31ed25cae78adca47bf478f426834fb6c3d7c7ffcad71e54"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6851,
+        "sha256": "f27485bfc8061dd04c3d6403182314840d7f9fac3b039b919f362caf5bc410cf"
+      },
+      {
+        "name": "harness.log",
+        "bytes": 8661,
+        "sha256": "5c34f95654a79428ceaf996b424c54881347662ab32f81dad6ee12436c27cf9d"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 256,
+        "sha256": "64040e5369f33bb733728812642509fb4884c561478f67b4114c0c0c08f5f565"
+      }
+    ]
+  },
+  {
+    "campaign": "attention",
+    "tag": "pair3-a",
+    "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-close/finish-serve-pair3-a",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 363747,
+        "sha256": "b59e246012ada815790118291b449ca2e67401580ed7fff0a645c8ba088eb19c"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 1505617,
+        "sha256": "88be946e80a6f725e4c64137317ab2ab667690fc97c5f7ad3cc365309e5a95da"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3529,
+        "sha256": "03ef10cc033bacddc7ed966fa7350363aa00abd7708051fb4a2727f629c6bac7"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 3692,
+        "sha256": "ec6fc1ededaf8b96f7b922e5622d4165b5f3da4d4916d06b8b6cc933ec14d86f"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9253,
+        "sha256": "bd4e5671ad6b4068a585a06afe029ec084c49018b53b45d9cbbc984817008bc0"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 120140,
+        "sha256": "f8a385a1c4fb004edd6c5cb4d6a400b356eceeaaeb319e1db50a07bf9e9b31ce"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6850,
+        "sha256": "805030f4d151fe52201bdd55f6d2292369a97b655db62aeff424fa1509369a7c"
+      },
+      {
+        "name": "harness.log",
+        "bytes": 6310,
+        "sha256": "5c66891799438a1d5c1d872557a4d02fb10afa903dd0a9acdb56e1f417a49e5a"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 256,
+        "sha256": "5523dd84617dde2b830d7f88e9a4aa87d6eb3823087f878ad3136807a83953ca"
+      }
+    ]
+  },
+  {
+    "campaign": "radix",
+    "tag": "pair3-a",
+    "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/radix-wall/serve/wall-pair3-a",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 723783,
+        "sha256": "1dea4202500947deb4a3f0f12cb32019b3ff862a61d9d0be25d6225545e83060"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 2774221,
+        "sha256": "d10c9081964bbb32cfc5c437fa62d12c2c5567f46ff5be1e49dc08f470285fbd"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3444,
+        "sha256": "2589d2bef271a5f48e769b6a8a2d68b380e7fcfb66431f763777ca5d32ddfbcd"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 4914,
+        "sha256": "32b2d03c260e951b4fe9b12e361213fe3d4bf89a437b3ca8603a852aa8f41484"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9262,
+        "sha256": "b286ac5d913229c03f570934185bd2824bc064ad241c2136c486d6df9a7e492b"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 46997,
+        "sha256": "f1bf5d443ba62851375c2752b9b88b2e2841de9ef943f77928638c5662551d3e"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6851,
+        "sha256": "f27485bfc8061dd04c3d6403182314840d7f9fac3b039b919f362caf5bc410cf"
+      },
+      {
+        "name": "harness.log",
+        "bytes": 8779,
+        "sha256": "c3179a24fbdffb694fc4062241c71faefe7b7ba88290fe8430b9816f75e9fdd5"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 255,
+        "sha256": "c7a5753914f97b5e43cbde6647676963f51dfaffaf49b4310206d4980ae3a165"
+      }
+    ]
+  },
+  {
+    "campaign": "attention",
+    "tag": "pair3-b",
+    "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/attention-close/finish-serve-pair3-b",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 365001,
+        "sha256": "2c8e78cf0a81d03f2392b19af4918cfaba8e35bbab41729f93895e6fb89d7a22"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 1509940,
+        "sha256": "436838bd4fd4086b052a17e647d2ed786c11040c54e5fd649090a6d21a3d6e47"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3524,
+        "sha256": "2d84404978016ce0cef0fd21464effbbbf4732b9be60a3365d1ab482ad6eb4ac"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 3689,
+        "sha256": "a8d0e702d8a9fd348af089431abeeec0a3b5ede5342fb7a71883ef7a569746db"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9251,
+        "sha256": "6c189ad0d8321a8c3a9bb3565a3dcd746d6d822cd233d064e5dfe96315d52b40"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 297823,
+        "sha256": "9abf1774c97ab51453ae765879c7102324d160c7d507888d03dcfb07d2a1ae80"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6850,
+        "sha256": "805030f4d151fe52201bdd55f6d2292369a97b655db62aeff424fa1509369a7c"
+      },
+      {
+        "name": "harness.log",
+        "bytes": 6322,
+        "sha256": "450a7d61e1b8b6ae4e1bd704630c3c920326f5c858b492bd292a5212878dc26a"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 256,
+        "sha256": "5bdf1383c4d39ad5121d76200c5a40f0a49149cceb35527148455c24f8b89729"
+      }
+    ]
+  },
+  {
+    "campaign": "radix",
+    "tag": "pair3-b",
+    "path": "/Users/tito/qwen-runs/2026-11-12-v41-prefill/radix-wall/serve/wall-pair3-b",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 724528,
+        "sha256": "a941c1838f7474e5fa74c07e62aadc5c04d6b6c69cef4cf390f12ae65ee30c9d"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 2775038,
+        "sha256": "b94d64b956ee37a672c2d9eb904dc733cf77bab7e7c260d875bf48614b567499"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3436,
+        "sha256": "8fdcc667f44bd508297c10375f67750b9b867bf70dbb7b4595167f1f65da9abc"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 4951,
+        "sha256": "9b8456a58ff3aab46514a62ad258d2a6cfb0e038f699ad602fceb3b752734173"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9253,
+        "sha256": "46781ff28ee75eb9be5e022236cc39054a3970b52fe8c6e22e2d34706019414c"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 26511,
+        "sha256": "a6b5eca962b36d1a2e8661045733a9afc2826a6632f16069da4343ad889b0c21"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6851,
+        "sha256": "f27485bfc8061dd04c3d6403182314840d7f9fac3b039b919f362caf5bc410cf"
+      },
+      {
+        "name": "harness.log",
+        "bytes": 8817,
+        "sha256": "bfa22ce1cb8ea75f5fc0dbf358746f88f018ba6ce7496bd0fce312934a70ed6f"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 256,
+        "sha256": "947c5f310e7da0bd4c42ddc33ca5d8aa9a9a33fb35380b9bdfc724077740c3d0"
+      }
+    ]
+  },
+  {
+    "campaign": "engram",
+    "tag": "a1-off",
+    "path": "/Users/tito/qwen-runs/2026-11-13-v41-engram-cache/serve/a1-off",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 954082,
+        "sha256": "1708731c3a3331d359c63820c34310a4ef1c9a2e0f219a39a4c76e82be75d059"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 3563715,
+        "sha256": "936ed7ab8e3ad47220c9e3f6d15e47d78eb8157d3fd4add1886e144c4217db69"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3123,
+        "sha256": "2ecd1a1b4d91e75b63f25d7432e19cb03b0f82bad83f68e40bf845ca3bfe95f0"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 5947,
+        "sha256": "5209fc37a4b57f8873e7475ab58a04eeef9c7b193cd013d52387e85e46280d89"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9270,
+        "sha256": "b6c2e99f4b687f82c2b18e39880cd799688bceed03a1865e0d9088eb5441c178"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 1116861,
+        "sha256": "6296deb78161d512e2d38bc5e07351d473ec7735dd1cbfbb25b83621b5fb2555"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6851,
+        "sha256": "44f38865e3c29e126eefeadd165acaccb8264e70df2537e562d40f37827630fe"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 256,
+        "sha256": "5be62501d47088bfcd59b9616814447a9e880bfde57c71090e8cbc97b7e70140"
+      }
+    ]
+  },
+  {
+    "campaign": "engram",
+    "tag": "b1-on",
+    "path": "/Users/tito/qwen-runs/2026-11-13-v41-engram-cache/serve/b1-on",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 1043206,
+        "sha256": "65ae6a1a6b89abd8e111de866f8dabe17d445bf1f7a1d8f36713f9206fba0a77"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 3911964,
+        "sha256": "29ed1e6c1083f62e3c0904ee6075deaa0d8daca7c89ef419b606f9f50f9a731c"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 2994,
+        "sha256": "d617e021cc929c22e73f3f9747139f44dc3151664f539db1e486759c03ec4fe8"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 5911,
+        "sha256": "2a58c1d181a4963f49cd53b9440dc074bda6a0204531ad537741cb0c8e28136e"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9247,
+        "sha256": "3e0cb87e2b7ada748efc888113ee693992040b813423c8bcb3d2472b6165ebea"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 803223,
+        "sha256": "ec326c6de95ee6b9603dbc7de581a2f9129784a21e52e918660fd2f529ba9bba"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6851,
+        "sha256": "44f38865e3c29e126eefeadd165acaccb8264e70df2537e562d40f37827630fe"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 255,
+        "sha256": "11ad2b41eb63f6e460c4cccfb8f29c2f4c193bf3dc9f14952bd09baee611b3b3"
+      }
+    ]
+  },
+  {
+    "campaign": "engram",
+    "tag": "a2-off",
+    "path": "/Users/tito/qwen-runs/2026-11-13-v41-engram-cache/serve/a2-off",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 984402,
+        "sha256": "cf3e91e476c155f6dc25ea67c23c9d19e2b4f59e16109afefdee4e58116eedac"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 3774479,
+        "sha256": "f403a15ac52b5df0da69aa1033b2c11eb1c5ea7ce3c883ee5784f0f0002ec6f3"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3121,
+        "sha256": "22fcd29527f5130922d512a37e3ac8fb3ba50849a260da9b95c2e888b5446928"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 5925,
+        "sha256": "ff5e5da98da71f6d4ff3d0d8f8169bb90876bf731dba5239999466ecf86aa404"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9247,
+        "sha256": "18058a60ec189f406fae3f2ac45d8ac3d8e1ea58d265d869f0767e2a53b572e2"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 460200,
+        "sha256": "b1398f8a7c32811f93308d941d98a2f562b0d5f160f71edb82d7e3278eb00a14"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6851,
+        "sha256": "44f38865e3c29e126eefeadd165acaccb8264e70df2537e562d40f37827630fe"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 254,
+        "sha256": "97a37da9f8d2a5d1e3691cf90d32b95ac4f6f73827fcba172ff4435c9b16adf3"
+      }
+    ]
+  },
+  {
+    "campaign": "engram",
+    "tag": "b2-on",
+    "path": "/Users/tito/qwen-runs/2026-11-13-v41-engram-cache/serve/b2-on",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 953230,
+        "sha256": "30b836f409918c6ff8f1104a10e4433f1893d6e6442f473bb925936a844fc7fc"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 3611906,
+        "sha256": "90e60ca2d0d1b0b575f139c555c2448b6e31791838a1156efa1d35d17d269c7e"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 2988,
+        "sha256": "f1cdad48234cf5414396fcdf0d5cd7274b4606ca168d272c89c38fa24534985c"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 5943,
+        "sha256": "f7e17e8f1fa99bb080fe31d4ad3dd6911f3188865be21cea088586102818869c"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 12413,
+        "sha256": "8ad51881d77833068a44239f48c4c1b297dd097641e31af6c4abe6f390e48f12"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 1942762,
+        "sha256": "3fdef874cf9162c90068d1a6fc39f4e0e6c323e132166e1ffacfed3e5896f9cb"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6851,
+        "sha256": "44f38865e3c29e126eefeadd165acaccb8264e70df2537e562d40f37827630fe"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 256,
+        "sha256": "2274bfa5a3ef07fb06353490b5539a66e5232fbe01855eaac28d699aec5e474e"
+      }
+    ]
+  },
+  {
+    "campaign": "engram",
+    "tag": "a3-off",
+    "path": "/Users/tito/qwen-runs/2026-11-13-v41-engram-cache/serve/a3-off",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 954702,
+        "sha256": "b48aa6b7a860c633a01e76165424a8344a11999d45c4213ec29bb428ec38b5ce"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 3591760,
+        "sha256": "e417503a00fc22179f6ea545412308229c27177b161ca8fb348ebf7e720ac7e1"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3122,
+        "sha256": "2b05f6254e06f8e9790d7f1c926d2c5f00af74e528bbed4010dd819905a3b18c"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 5928,
+        "sha256": "a2aacc0d590d44a81aa8676483500928d618190279b5903f318ee93b2c29f875"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 10878,
+        "sha256": "4ed898356c7677509d754c1adaec00b25126006bd18245bd93f187f1b65cab16"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 175475,
+        "sha256": "5f6de5547bc85c2492eddb579dde1203950043046f9b4ad0678bd77bcfecd505"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6851,
+        "sha256": "44f38865e3c29e126eefeadd165acaccb8264e70df2537e562d40f37827630fe"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 253,
+        "sha256": "ed1d939dbb73b5e2189795831bfa21d382fb26d10b5de37ef6ab3076cf44c0d8"
+      }
+    ]
+  },
+  {
+    "campaign": "engram",
+    "tag": "b3-on",
+    "path": "/Users/tito/qwen-runs/2026-11-13-v41-engram-cache/serve/b3-on",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 973251,
+        "sha256": "64439ce7e458701ad08d21e2610ca16c764b4ee9230a4994a23197b64f320ed4"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 3659793,
+        "sha256": "0ccf29fd1d86b0ba7f65e3c6064194a7af752d43686885695fbfb8a654367592"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 2992,
+        "sha256": "0a2b27457a1097e1c121f2d321f3d389caa9ce5443633f135963f4c75d522888"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 5848,
+        "sha256": "bb9bf6855577b18048bd02c05ec30d64198c07fc450075beb2483e2bbaf8f398"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9256,
+        "sha256": "6181a1f81707f8f4edaab22a97564ab09b10f7989ca8e7fad3a33e35e953681b"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 527084,
+        "sha256": "adecb042b2e16aa5abc8cb96d7887371872b96a78c4a08d06108026b42240410"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6851,
+        "sha256": "44f38865e3c29e126eefeadd165acaccb8264e70df2537e562d40f37827630fe"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 256,
+        "sha256": "bec7a34376a7c977781618bc03f21ff9e9adc265aff5d69cc4402f908397ea25"
+      }
+    ]
+  },
+  {
+    "campaign": "engram_diag",
+    "tag": "diag-on",
+    "path": "/Users/tito/qwen-runs/2026-11-13-v41-engram-cache/serve/diag-on",
+    "files": [
+      {
+        "name": "calls.jsonl",
+        "bytes": 986943,
+        "sha256": "52cc996c7c1eb4e675f370703e4eb83c54fea0cefb4322004ea91a5093b86b9d"
+      },
+      {
+        "name": "native-lines.json",
+        "bytes": 3704886,
+        "sha256": "a69a8243895af84e6330f8e183bdd14612051f89e08612500a37f3ca37f23c47"
+      },
+      {
+        "name": "launch.json",
+        "bytes": 3039,
+        "sha256": "5395cb9431f28cca1d813999a15ce6849bd68b50bbea2e39d75f821079e03f2b"
+      },
+      {
+        "name": "summary.json",
+        "bytes": 5930,
+        "sha256": "1eab14d007a0c5d30c4fc1782fc778ee9fead5fd5addff847f501e1c298500e0"
+      },
+      {
+        "name": "settle.json",
+        "bytes": 9272,
+        "sha256": "16179cc8d190692eb2f1c7bd2a53e77ceadfa51fc8c8f670d90d5ddc71ee7adf"
+      },
+      {
+        "name": "thermal.json",
+        "bytes": 801088,
+        "sha256": "0967a771d4770f474f4eaa6d7dfc8d88d21b20dd5ca7ee900a7ad7b167526d30"
+      },
+      {
+        "name": "plan.json",
+        "bytes": 6851,
+        "sha256": "44f38865e3c29e126eefeadd165acaccb8264e70df2537e562d40f37827630fe"
+      },
+      {
+        "name": "purge.jsonl",
+        "bytes": 254,
+        "sha256": "62ee84fd0fedfc0fead54237264fdbfacfae3f751d4ce473ddf37769a15cb983"
+      }
+    ]
+  }
+]

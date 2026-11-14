@@ -1,0 +1,12 @@
+{
+  "input_files_verified": 164,
+  "arms": 19,
+  "primary_short_1k": 375,
+  "uniquely_joined": 375,
+  "max_phase_profile_difference_ms": 2.2971670000001723,
+  "negative_temporal_rows": [],
+  "root_client_greedy": 36,
+  "root_client_engram": 0,
+  "post_native_peer_exposures": 0,
+  "additional_own_forwards_before_first_visible": 0
+}

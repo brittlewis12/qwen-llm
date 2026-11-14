@@ -1,0 +1,186 @@
+[
+  {
+    "id": "radix/pair1-a/a1-t6",
+    "label": "a1-t6",
+    "agent": 1,
+    "new": 462,
+    "sent": 1794636753.4715579,
+    "first_native_start": 1794636754.2550156,
+    "last_native_end": 1794636754.9201999,
+    "client_ms": 1474.4491577148438,
+    "native_ms": 666.016083,
+    "queue_ms": 0.003959,
+    "before_native_ms": 783.4577560424805,
+    "after_native_ms": 25.80714225769043,
+    "peer_prefill": [
+      {
+        "profile_id": 27,
+        "rows": 611,
+        "wall_ms": 734.857708,
+        "gpu_ms": 707.1791667258367,
+        "engram_prepare_ms": 0.00025,
+        "disk_bytes": 3670016,
+        "call_ids": [
+          "radix/pair1-a/a0-t11"
+        ],
+        "pre_exposure_ms": 695.4591274261475,
+        "post_exposure_ms": 0.0
+      }
+    ],
+    "prefill_io_bytes": 2457600
+  },
+  {
+    "id": "radix/pair1-a/a0-t11",
+    "label": "a0-t11",
+    "agent": 0,
+    "new": 611,
+    "sent": 1794636753.352891,
+    "first_native_start": 1794636753.4321592,
+    "last_native_end": 1794636754.167017,
+    "client_ms": 841.555118560791,
+    "native_ms": 735.6954169999999,
+    "queue_ms": 0.0053750000000000004,
+    "before_native_ms": 79.26821708679199,
+    "after_native_ms": 27.42910385131836,
+    "peer_prefill": [],
+    "prefill_io_bytes": 3670016
+  },
+  {
+    "id": "radix/pair1-a/a0-t18",
+    "label": "a0-t18",
+    "agent": 0,
+    "new": 1149,
+    "sent": 1794636799.74862,
+    "first_native_start": 1794636799.8129268,
+    "last_native_end": 1794636800.9320471,
+    "client_ms": 1213.141918182373,
+    "native_ms": 1119.785625,
+    "queue_ms": 0.0050409999999999995,
+    "before_native_ms": 64.30673599243164,
+    "after_native_ms": 29.71482276916504,
+    "peer_prefill": [],
+    "prefill_io_bytes": 3817472
+  },
+  {
+    "id": "radix/pair1-a/a1-t8",
+    "label": "a1-t8",
+    "agent": 1,
+    "new": 249,
+    "sent": 1794636799.9270148,
+    "first_native_start": 1794636801.0300596,
+    "last_native_end": 1794636801.530744,
+    "client_ms": 1612.4143600463867,
+    "native_ms": 501.4645,
+    "queue_ms": 0.0045000000000000005,
+    "before_native_ms": 1103.0447483062744,
+    "after_native_ms": 8.685111999511719,
+    "peer_prefill": [
+      {
+        "profile_id": 36,
+        "rows": 1149,
+        "wall_ms": 1119.120334,
+        "gpu_ms": 1064.775750041008,
+        "engram_prepare_ms": 0.00033299999999999996,
+        "disk_bytes": 3817472,
+        "call_ids": [
+          "radix/pair1-a/a0-t18"
+        ],
+        "pre_exposure_ms": 1005.0323009490967,
+        "post_exposure_ms": 0.0
+      }
+    ],
+    "prefill_io_bytes": 6701056
+  },
+  {
+    "id": "radix/pair1-b/a1-t6",
+    "label": "a1-t6",
+    "agent": 1,
+    "new": 462,
+    "sent": 1794637256.8948731,
+    "first_native_start": 1794637256.9452941,
+    "last_native_end": 1794637257.569452,
+    "client_ms": 696.1526870727539,
+    "native_ms": 625.097125,
+    "queue_ms": 0.0045000000000000005,
+    "before_native_ms": 50.42099952697754,
+    "after_native_ms": 21.573781967163086,
+    "peer_prefill": [],
+    "prefill_io_bytes": 2457600
+  },
+  {
+    "id": "radix/pair1-b/a0-t11",
+    "label": "a0-t11",
+    "agent": 0,
+    "new": 611,
+    "sent": 1794637256.9081018,
+    "first_native_start": 1794637257.700019,
+    "last_native_end": 1794637258.409188,
+    "client_ms": 1523.498296737671,
+    "native_ms": 710.1206249999999,
+    "queue_ms": 0.0029170000000000003,
+    "before_native_ms": 791.917085647583,
+    "after_native_ms": 22.41206169128418,
+    "peer_prefill": [
+      {
+        "profile_id": 27,
+        "rows": 462,
+        "wall_ms": 624.1578330000001,
+        "gpu_ms": 589.8709166795015,
+        "engram_prepare_ms": 15.225624999999999,
+        "disk_bytes": 2457600,
+        "call_ids": [
+          "radix/pair1-b/a1-t6"
+        ],
+        "pre_exposure_ms": 624.1579055786133,
+        "post_exposure_ms": 0.0
+      }
+    ],
+    "prefill_io_bytes": 3686400
+  },
+  {
+    "id": "radix/pair1-b/a0-t18",
+    "label": "a0-t18",
+    "agent": 0,
+    "new": 1149,
+    "sent": 1794637300.739056,
+    "first_native_start": 1794637301.2734668,
+    "last_native_end": 1794637302.345494,
+    "client_ms": 1632.2638988494873,
+    "native_ms": 1072.8217499999998,
+    "queue_ms": 0.003458,
+    "before_native_ms": 534.4107151031494,
+    "after_native_ms": 25.825977325439453,
+    "peer_prefill": [
+      {
+        "profile_id": 36,
+        "rows": 249,
+        "wall_ms": 462.155166,
+        "gpu_ms": 425.6565833929926,
+        "engram_prepare_ms": 22.311833,
+        "disk_bytes": 6701056,
+        "call_ids": [
+          "radix/pair1-b/a1-t8"
+        ],
+        "pre_exposure_ms": 461.23385429382324,
+        "post_exposure_ms": 0.0
+      }
+    ],
+    "prefill_io_bytes": 3817472
+  },
+  {
+    "id": "radix/pair1-b/a1-t8",
+    "label": "a1-t8",
+    "agent": 1,
+    "new": 249,
+    "sent": 1794637300.693147,
+    "first_native_start": 1794637300.7381349,
+    "last_native_end": 1794637301.20029,
+    "client_ms": 514.9521827697754,
+    "native_ms": 462.944417,
+    "queue_ms": 0.004125,
+    "before_native_ms": 44.98791694641113,
+    "after_native_ms": 7.809162139892578,
+    "peer_prefill": [],
+    "prefill_io_bytes": 6701056
+  }
+]

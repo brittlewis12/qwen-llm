@@ -6455,7 +6455,7 @@
   },
   {
     "target": "qwen",
-    "name": "serve::backend_glm5_next::scheduler::tests::layer_slice_ms_has_an_exact_zero_rollback_and_bounded_input",
+    "name": "serve::backend_glm5_next::scheduler::tests::layer_slice_ms_defaults_to_400_with_exact_rollbacks_and_bounded_input",
     "class": "cpu",
     "ignored": false,
     "reason": "Reviewed model-free layer scheduling, cancellation/accounting or nested host QoS; no Metal context or model import."

@@ -327,6 +327,7 @@ pub(crate) fn admit_request_memory(
 
 pub(crate) struct Settings {
     tokenizer: Arc<NativeTokenizer>,
+    token_cache: Option<Arc<super::token_prefix_cache::Cache>>,
     context: usize,
     limits: OutputLimits,
     sampling: SamplingConfig,
@@ -369,8 +370,14 @@ impl Settings {
             decode_percent <= 90,
             "{DECODE_PERCENT_ENV} must be in 1..=90"
         );
+        let token_cache = super::token_prefix_cache::is_enabled().then(|| {
+            Arc::new(super::token_prefix_cache::Cache::new(Arc::clone(
+                &tokenizer,
+            )))
+        });
         Ok(Self {
             tokenizer,
+            token_cache,
             context,
             limits: OutputLimits {
                 default_max_tokens: default_max,
@@ -393,6 +400,7 @@ impl Settings {
 
     pub(crate) fn prompt_tokens(&self) -> super::http::PromptTokens {
         super::http::PromptTokens {
+            prefix_cache: self.token_cache.clone(),
             tokenizer: Arc::clone(&self.tokenizer)
                 as Arc<dyn qwen_llm::tokenizer::Tokenize + Send + Sync>,
             add_special: false,
@@ -921,7 +929,7 @@ mod scheduler_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-mod tokenizer_fixture;
+pub(super) mod tokenizer_fixture;
 
 fn state_error(error: qwen_llm::deepseek_v41::forward::StateError) -> ServeError {
     match error.memory_admission() {

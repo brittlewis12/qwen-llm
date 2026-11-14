@@ -951,12 +951,50 @@ struct SpecialToken {
     id: i32,
 }
 
+/// A full JoyAI encoding plus exact special-fragment boundaries. The retained
+/// tokenizer identity prevents reuse across vocabularies. No arbitrary BPE cut
+/// is a valid resume point.
+#[derive(Clone)]
+pub struct PartitionedEncoding {
+    text: String,
+    ids: Vec<i32>,
+    cuts: Vec<(usize, usize)>,
+    identity: std::sync::Arc<()>,
+    reused_tokens: usize,
+}
+impl PartitionedEncoding {
+    pub fn ids(&self) -> &[i32] {
+        &self.ids
+    }
+    pub fn reused_tokens(&self) -> usize {
+        self.reused_tokens
+    }
+    pub fn memory_bytes(&self) -> usize {
+        self.text.capacity()
+            + self.ids.capacity() * size_of::<i32>()
+            + self.cuts.capacity() * size_of::<(usize, usize)>()
+    }
+    /// These cuts are boundaries of the full special-token partition, hence
+    /// independent encoding of this exact prefix produces the same ids.
+    pub fn exact_prefix(&self, prefix: &str) -> Option<&[i32]> {
+        if !self.text.starts_with(prefix) {
+            return None;
+        }
+        let i = self
+            .cuts
+            .binary_search_by_key(&prefix.len(), |c| c.0)
+            .ok()?;
+        Some(&self.ids[..self.cuts[i].1])
+    }
+}
+
 /// Pure-Rust byte-level BPE tokenizer for supported GGUF model families.
 ///
 /// This is intentionally not universal. Architecture and pretokenizer
 /// combinations are accepted through a closed dispatch so malformed Qwen
 /// metadata cannot silently select another model family's rules.
 pub struct NativeTokenizer {
+    partition_identity: std::sync::Arc<()>,
     id_to_token: Vec<NativeToken>,
     pair_merges: HashMap<u64, MergeInfo>,
     byte_token_ids: [i32; 256],
@@ -1132,6 +1170,7 @@ impl NativeTokenizer {
             (pretokenizer == PretokenizerKind::Glm4).then(|| whole_piece_ids(&id_to_token));
 
         Ok(Self {
+            partition_identity: std::sync::Arc::new(()),
             id_to_token,
             pair_merges,
             byte_token_ids,
@@ -1198,6 +1237,67 @@ impl NativeTokenizer {
             out.push(self.eos.expect("validated eos id"));
         }
         Ok(out)
+    }
+
+    /// Exact append/fork encoding for JoyAI without implicit BOS/EOS. Reuse
+    /// ends at a special-fragment boundary with a maximum-special-length guard in
+    /// the unchanged byte prefix, so newly completed/longer specials cannot
+    /// change the earlier partition. Other pretokenizers use the ordinary API.
+    pub fn encode_partitioned(
+        &self,
+        text: &str,
+        previous: Option<&PartitionedEncoding>,
+    ) -> Result<Option<PartitionedEncoding>, TokError> {
+        validate_native_input_len(text.len())?;
+        if self.pretokenizer != PretokenizerKind::JoyAi {
+            return Ok(None);
+        }
+        let previous =
+            previous.filter(|p| std::sync::Arc::ptr_eq(&p.identity, &self.partition_identity));
+        let mut resume = 0;
+        let mut ids = Vec::new();
+        let mut cuts = Vec::new();
+        if let Some(p) = previous {
+            let common = p
+                .text
+                .bytes()
+                .zip(text.bytes())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let safe = common.saturating_sub(self.special_matcher.max_len);
+            if let Some((i, &(byte, tokens))) =
+                p.cuts.iter().enumerate().rev().find(|(_, c)| c.0 <= safe)
+            {
+                resume = byte;
+                ids.extend_from_slice(&p.ids[..tokens]);
+                cuts.extend_from_slice(&p.cuts[..=i]);
+            }
+        }
+        let reused_tokens = ids.len();
+        let mut byte = resume;
+        for fragment in self.partition_special(&text[resume..]) {
+            match fragment {
+                Fragment::Text(part) => {
+                    self.encode_raw(part, &mut ids)?;
+                    byte += part.len();
+                }
+                Fragment::Token(id) => {
+                    if cuts.last().is_none_or(|c: &(usize, usize)| c.0 != byte) {
+                        cuts.push((byte, ids.len()));
+                    }
+                    ids.push(id);
+                    byte += self.id_to_token[id as usize].text.len();
+                    cuts.push((byte, ids.len()));
+                }
+            }
+        }
+        Ok(Some(PartitionedEncoding {
+            text: text.to_owned(),
+            ids,
+            cuts,
+            identity: std::sync::Arc::clone(&self.partition_identity),
+            reused_tokens,
+        }))
     }
 
     fn partition_special<'a>(&self, text: &'a str) -> Vec<Fragment<'a>> {
@@ -1407,6 +1507,7 @@ struct SpecialTrieNode {
 }
 
 struct SpecialMatcher {
+    max_len: usize,
     nodes: Vec<SpecialTrieNode>,
 }
 
@@ -1431,7 +1532,10 @@ impl SpecialMatcher {
             }
             nodes[idx].terminal = Some(token.id);
         }
-        Self { nodes }
+        Self {
+            nodes,
+            max_len: tokens.iter().map(|t| t.text.len()).max().unwrap_or(0),
+        }
     }
 
     fn partition<'a>(&self, text: &'a str) -> Vec<Fragment<'a>> {

@@ -223,9 +223,10 @@ impl Settings {
                     ids.len(),
                 );
                 let prefix = prompt.get(..offset).and_then(|prefix| {
-                    self.tokenizer
-                        .encode(prefix, false)
-                        .ok()
+                    self.token_cache
+                        .as_ref()
+                        .and_then(|c| c.prefix(prefix))
+                        .or_else(|| self.tokenizer.encode(prefix, false).ok())
                         .map(|ids| ids.into_iter().map(|id| id as u32).collect::<Vec<_>>())
                 });
                 if let Some(prefix) = prefix.filter(|prefix| {

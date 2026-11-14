@@ -1858,6 +1858,7 @@ impl<'w, 'g> Glm5NextBackend<'w, 'g> {
 impl GenerationBackend for Glm5NextBackend<'_, '_> {
     fn prompt_tokens(&self) -> Option<super::http::PromptTokens> {
         Some(super::http::PromptTokens {
+            prefix_cache: None,
             tokenizer: self.prepared.artifact.tokenizer_arc()
                 as std::sync::Arc<dyn qwen_llm::tokenizer::Tokenize + Send + Sync>,
             add_special: false,

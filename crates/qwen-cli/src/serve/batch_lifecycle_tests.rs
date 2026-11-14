@@ -24,6 +24,8 @@ struct Active {
 /// drain is parked and aborted after `park_timeout`.
 struct BatchStub {
     max_active: usize,
+    tokenizer: Option<Arc<dyn qwen_llm::tokenizer::Tokenize + Send + Sync>>,
+    pump_gate: Option<(Sender<()>, Receiver<()>)>,
     owner: ThreadId,
     address: SocketAddr,
     events: Sender<String>,
@@ -38,6 +40,8 @@ impl BatchStub {
     fn new(max_active: usize, address: SocketAddr, events: Sender<String>) -> Self {
         Self {
             max_active,
+            tokenizer: None,
+            pump_gate: None,
             owner: std::thread::current().id(),
             address,
             events,
@@ -102,6 +106,15 @@ impl http::GenerationBackend for BatchStub {
     ) -> Result<http::GenerationOutcome, http::BackendFailure> {
         unreachable!("a batched backend is never asked to generate serially")
     }
+    fn prompt_tokens(&self) -> Option<http::PromptTokens> {
+        self.tokenizer.as_ref().map(|t| http::PromptTokens {
+            tokenizer: Arc::clone(t),
+            prefix_cache: None,
+            add_special: false,
+            vocab_size: t.n_vocab(),
+            family: "test",
+        })
+    }
     fn max_active(&self) -> usize {
         self.max_active
     }
@@ -118,6 +131,12 @@ impl http::GenerationBackend for BatchStub {
         });
     }
     fn pump(&mut self) -> bool {
+        if !self.active.is_empty()
+            && let Some((entered, release)) = self.pump_gate.take()
+        {
+            entered.send(()).unwrap();
+            release.recv_timeout(WAIT).unwrap();
+        }
         let mut progressed = false;
         let mut index = 0;
         while index < self.active.len() {
@@ -545,4 +564,74 @@ fn a_client_that_does_not_drain_parks_without_stalling_others() {
     server.stop();
     seen.extend(observed.try_iter());
     assert_eq!(seen.iter().filter(|e| *e == "finished").count(), 2);
+}
+
+struct RecordingTokenizer {
+    native: qwen_llm::tokenizer::NativeTokenizer,
+    encoded: Sender<String>,
+}
+impl qwen_llm::tokenizer::Tokenize for RecordingTokenizer {
+    fn encode(&self, text: &str, special: bool) -> Result<Vec<i32>, qwen_llm::tokenizer::TokError> {
+        if text.contains("req-2") {
+            self.encoded
+                .send("second rendered and tokenized".into())
+                .unwrap();
+        }
+        self.native.encode(text, special)
+    }
+    fn try_decode_piece(&self, id: i32) -> Result<String, qwen_llm::tokenizer::TokError> {
+        self.native.try_decode_piece(id)
+    }
+    fn try_decode_piece_bytes(&self, id: i32) -> Result<Vec<u8>, qwen_llm::tokenizer::TokError> {
+        self.native
+            .try_decode_piece_bytes_exact(id)
+            .map(<[u8]>::to_vec)
+    }
+    fn try_decode(&self, ids: &[i32]) -> Result<String, qwen_llm::tokenizer::TokError> {
+        self.native.try_decode(ids)
+    }
+    fn decode(&self, ids: &[i32]) -> String {
+        self.native.decode(ids)
+    }
+    fn n_vocab(&self) -> u32 {
+        self.native.n_vocab()
+    }
+    fn bos(&self) -> Option<i32> {
+        self.native.bos()
+    }
+    fn eos(&self) -> Option<i32> {
+        self.native.eos()
+    }
+}
+#[test]
+fn accepted_request_renders_and_tokenizes_while_peer_pump_is_blocked() {
+    let listener = bind_loopback("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (events, _observed) = channel();
+    let (entered, blocked) = channel();
+    let (release, wait_release) = channel();
+    let (encoded, observed) = channel();
+    let server = serve(
+        listener,
+        4,
+        move |b| {
+            ASYNC_PREPARE_OVERRIDE.set(true);
+            b.tokenizer = Some(Arc::new(RecordingTokenizer {
+                native: backend_v41::tokenizer_fixture::tokenizer(None),
+                encoded,
+            }));
+            b.pump_gate = Some((entered, wait_release));
+        },
+        events,
+    );
+    let first = send(address, 1, true);
+    blocked.recv_timeout(WAIT).unwrap();
+    let second = send(address, 2, true);
+    let overlapped = observed.recv_timeout(Duration::from_secs(2));
+    release.send(()).unwrap();
+    let a = read_all(first);
+    let b = read_all(second);
+    server.stop();
+    assert_eq!(overlapped.unwrap(), "second rendered and tokenized");
+    assert!(a.contains("req-1:0 ") && b.contains("req-2:0 "));
 }

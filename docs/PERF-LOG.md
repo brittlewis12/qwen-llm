@@ -39,6 +39,26 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   Completion pairs use identical labels, inputs and output token counts. TPS
   remains noisy: **0.931/1.601/0.985×**, and the available gap is delta-event
   rather than exact token ITL. [Per-arm output counts and full tables](bench/2026-11-14-glm-layer-slice-ab.md).
+## 2026-11-14 - V4.1 Exact Token-Prefix Cache: Qualification Prototype
+
+- Default-off `QWEN_SERVE_TOKEN_PREFIX_CACHE=1`, independent 0 rollback.
+  Four conversations / 8 MiB retained payload; exact unchanged bytes and
+  special-fragment cuts with a maximum-special-length guard. Full encode
+  fallback; immutable tokenizer identity. Reuses full-encode boundary IDs.
+- CPU plan/renderer/adversarial token-ID and cut properties pass. One composed
+  M5 diagnostic arm pending; no standalone wall attribution or promotion.
+  [Design, proof, controls and results](bench/2026-11-14-v41-serve-prepare.md).
+
+## 2026-11-14 - Concurrent HTTP Preparation: Qualification Prototype
+
+- The 1,082 ms pre-handler wait is synchronous inference-loop dispatch:
+  baseline `serve/mod.rs:1173` pumps before `:1206` starts the worker.
+  Default-off `QWEN_SERVE_ASYNC_PREPARE=1` starts bounded CPU workers on
+  acceptance, retaining the original inference thread and FIFO channel.
+- CPU blocked-pump concurrency, cap and shutdown checks; combined served
+  diagnostic pending. Mutable KV state and checkpoint capture unchanged.
+  [Serialization, bounds and measurement](bench/2026-11-14-v41-serve-prepare.md).
+
 ## 2026-11-14 - Shared Serve TTFT Lifecycle Trace
 
 - Opt-in `QWEN_SERVE_TTFT_TIMING=1`: shared monotonic request/round IDs,

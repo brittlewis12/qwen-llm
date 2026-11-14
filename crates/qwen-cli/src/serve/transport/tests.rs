@@ -106,6 +106,7 @@ impl Tokenize for ByteTokenizer {
 fn worker_tokenizes_the_prepared_prompt_off_the_owner() {
     let (_activity, mut proxy, _incoming) = pipeline();
     proxy.prompt_tokens = Some(http::PromptTokens {
+        prefix_cache: None,
         tokenizer: Arc::new(ByteTokenizer),
         add_special: false,
         vocab_size: 256,
@@ -248,6 +249,7 @@ fn explicit_owner_settlement_reports_worker_panic_after_releasing_activity() {
     });
     let connection = Connection {
         _execution: None,
+        _prepare: None,
         incoming: Some(incoming),
         worker: Worker {
             socket,
@@ -888,4 +890,40 @@ fn sse_delta_reaches_the_socket_before_generation_completes() {
     }
     assert!(first && second && terminal);
     server.join().unwrap();
+}
+
+#[test]
+fn preparation_cap_preserves_queued_socket_and_releases_on_shutdown() {
+    let backend = Backend(
+        |_: &mut dyn GenerationSink| -> Result<GenerationOutcome, BackendFailure> {
+            unreachable!()
+        },
+    );
+    let mut activity = OwnerActivity::default();
+    let factory = PrepareFactory::new(&backend, None, activity.admission());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let _client1 = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (socket1, _) = listener.accept().unwrap();
+    let connection = match factory.start(socket1).unwrap() {
+        Ok(c) => c,
+        Err(_) => panic!("first worker refused"),
+    };
+    let _client2 = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (socket2, _) = listener.accept().unwrap();
+    use std::os::fd::AsRawFd;
+    let queued_fd = socket2.as_raw_fd();
+    match factory.start(socket2).unwrap() {
+        Err(socket) => assert_eq!(socket.as_raw_fd(), queued_fd),
+        Ok(_) => panic!("unbounded preparation"),
+    }
+    drop(connection);
+    activity.drain_finished(|| {});
+    assert!(activity.is_settled());
+    assert_eq!(
+        factory
+            .permits
+            .outstanding
+            .load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
 }

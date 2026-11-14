@@ -75,7 +75,9 @@ pub(crate) type Headroom = fn() -> Option<u64>;
 
 /// A backend's prompt tokenizer, made available to the HTTP worker so a long
 /// prompt is encoded beside the owner rather than on the decode thread.
+#[derive(Clone)]
 pub(crate) struct PromptTokens {
+    pub(crate) prefix_cache: Option<Arc<super::token_prefix_cache::Cache>>,
     pub(crate) tokenizer: Arc<dyn qwen_llm::tokenizer::Tokenize + Send + Sync>,
     pub(crate) add_special: bool,
     pub(crate) vocab_size: u32,

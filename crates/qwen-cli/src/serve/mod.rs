@@ -51,6 +51,7 @@ pub(crate) mod render_k2;
 pub(crate) mod render_muse;
 pub(crate) mod request_profile;
 pub(crate) mod snapshot_cache;
+mod token_prefix_cache;
 mod trace;
 mod transport;
 mod transport_memory;
@@ -796,11 +797,37 @@ fn drain_completions(
     });
 }
 
+qwen_llm::env_flag!(
+    /// Start bounded batched HTTP rendering/tokenization on the accept side while inference runs. Default-off qualification switch; 0 restores inference-loop dispatch.
+    default_off async_prepare_enabled,
+    "QWEN_SERVE_ASYNC_PREPARE"
+);
+
+#[cfg(test)]
+std::thread_local! { static ASYNC_PREPARE_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+fn use_async_prepare() -> bool {
+    #[cfg(test)]
+    if ASYNC_PREPARE_OVERRIDE.get() {
+        return true;
+    }
+    async_prepare_enabled()
+}
+
 fn spawn_acceptor(
     listener: TcpListener,
     sender: SyncSender<control::Event>,
     slots: Arc<AcceptSlots>,
     stopping: Arc<AtomicBool>,
+) -> Result<JoinHandle<Result<()>>> {
+    spawn_preparing_acceptor(listener, sender, slots, stopping, None)
+}
+
+fn spawn_preparing_acceptor(
+    listener: TcpListener,
+    sender: SyncSender<control::Event>,
+    slots: Arc<AcceptSlots>,
+    stopping: Arc<AtomicBool>,
+    prepare: Option<transport::PrepareFactory>,
 ) -> Result<JoinHandle<Result<()>>> {
     listener
         .set_nonblocking(true)
@@ -817,9 +844,19 @@ fn spawn_acceptor(
                             continue;
                         }
                         if slots.try_reserve() {
-                            if sender.send(control::Event::Incoming(stream, timing)).is_err() {
-                                break;
-                            }
+                            let _request = timing.enter();
+                            let event = if let Some(factory) = &prepare {
+                                match factory.start(stream) {
+                                    Ok(Ok(connection)) => control::Event::Prepared(connection),
+                                    Ok(Err(stream)) => control::Event::Incoming(stream, timing),
+                                    Err(error) => {
+                                        slots.release();
+                                        tracing::warn!("serve: HTTP preparation failed: {error:#}");
+                                        continue;
+                                    }
+                                }
+                            } else { control::Event::Incoming(stream, timing) };
+                            if sender.send(event).is_err() { break; }
                         } else if let Err(error) = http::write_busy_response(&stream) {
                             tracing::info!(target: "qwen_diag", "serve: busy response aborted: {error}");
                         }
@@ -998,7 +1035,14 @@ fn accept_loop_inner(
             }
         }
     } else {
-        spawn_acceptor(listener, sender, accept_slots, accept_stopping)?
+        let prepare = (backend.max_active() > 1 && use_async_prepare()).then(|| {
+            transport::PrepareFactory::new(
+                backend,
+                trace.as_ref().map(http::TraceLog::factory),
+                admission.clone(),
+            )
+        });
+        spawn_preparing_acceptor(listener, sender, accept_slots, accept_stopping, prepare)?
     };
     let mut connection: Option<transport::Connection> = None;
     // Opt-in owner-side batching (plain acceptor only); single-flight

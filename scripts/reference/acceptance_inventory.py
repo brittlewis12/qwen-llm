@@ -69,6 +69,8 @@ SCOPES = {
     ],
     "qwen": [
         "serve::lifecycle_timing::tests::",
+        "serve::token_prefix_cache::tests::",
+        "serve::batch_lifecycle_tests::accepted_request_renders_and_tokenizes_while_peer_pump_is_blocked",
         "serve::http::tests::ttft_trace_marks_visible_flush_without_changing_sse_bytes",
         "serve::decode_cursor::gpu_burst_tests::",
         "family_options::tests::qwen4exp_decode_flags_follow_the_documented_contract",

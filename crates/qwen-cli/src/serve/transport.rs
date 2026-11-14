@@ -263,12 +263,7 @@ impl GenerationBackend for HttpProxy {
         self.profile.render_prepared(request)
     }
     fn prompt_tokens(&self) -> Option<http::PromptTokens> {
-        self.prompt_tokens.as_ref().map(|p| http::PromptTokens {
-            tokenizer: Arc::clone(&p.tokenizer),
-            add_special: p.add_special,
-            vocab_size: p.vocab_size,
-            family: p.family,
-        })
+        self.prompt_tokens.clone()
     }
     fn render_and_tokenize_prepared(
         &self,
@@ -287,13 +282,17 @@ impl GenerationBackend for HttpProxy {
         let tokens = match &self.prompt_tokens {
             Some(p) if http::worker_tokenize_enabled() => {
                 let _span = super::lifecycle_timing::Span::current("tokenize_full", 0, 0);
-                Some(super::decode_loop::encode_checked(
-                    p.tokenizer.as_ref(),
-                    &prompt,
-                    p.add_special,
-                    p.vocab_size,
-                    p.family,
-                )?)
+                Some(if let Some(cache) = &p.prefix_cache {
+                    cache.encode(request, &prompt)?
+                } else {
+                    super::decode_loop::encode_checked(
+                        p.tokenizer.as_ref(),
+                        &prompt,
+                        p.add_special,
+                        p.vocab_size,
+                        p.family,
+                    )?
+                })
             }
             _ => None,
         };
@@ -448,6 +447,7 @@ pub(super) struct Connection {
     incoming: Option<Receiver<Work>>,
     worker: Worker,
     _execution: Option<super::control::ExecutionPermit>,
+    _prepare: Option<PreparePermit>,
 }
 
 #[cfg(test)]
@@ -472,6 +472,71 @@ pub(super) fn inject_proxy_headroom(headroom: super::http::Headroom) {
     PROXY_HEADROOM.set(Some(headroom));
 }
 
+/// Immutable preparation state; never borrows the resident inference backend.
+#[derive(Clone)]
+pub(super) struct PrepareFactory {
+    model_id: String,
+    profile: RequestProfile,
+    tokens: Option<http::PromptTokens>,
+    dispatch: Thread,
+    trace: Option<super::trace::TraceFactory>,
+    admission: super::owner_activity::Admission,
+    permits: Arc<super::AcceptSlots>,
+    reserve: u64,
+}
+struct PreparePermit(Arc<super::AcceptSlots>);
+impl Drop for PreparePermit {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+impl PrepareFactory {
+    pub(super) fn new(
+        backend: &dyn GenerationBackend,
+        trace: Option<super::trace::TraceFactory>,
+        admission: super::owner_activity::Admission,
+    ) -> Self {
+        Self {
+            model_id: backend.model_id().to_owned(),
+            profile: backend.request_profile(),
+            tokens: backend.prompt_tokens(),
+            dispatch: std::thread::current(),
+            trace,
+            admission,
+            permits: Arc::new(super::AcceptSlots::new(backend.max_active())),
+            // Pending CPU preparations have not reached the scheduler yet.
+            // Each admitted caller conservatively covers the whole early pool.
+            reserve: backend.max_active() as u64 * 128 * 1024 * 1024,
+        }
+    }
+    /// None leaves the socket in the existing bounded arrival queue.
+    pub(super) fn start(&self, stream: TcpStream) -> Result<Result<Connection, TcpStream>> {
+        if !self.permits.try_reserve() {
+            return Ok(Err(stream));
+        }
+        let permit = PreparePermit(Arc::clone(&self.permits));
+        let guard = self
+            .admission
+            .try_admit()
+            .context("HTTP preparation admission is closed")?;
+        let mut connection = Connection::spawn(
+            stream,
+            self.model_id.clone(),
+            self.profile.clone(),
+            self.trace.as_ref().map(|t| t.subscriber()),
+            guard,
+            None,
+            None,
+            self.reserve,
+            true,
+            self.tokens.clone(),
+            Some(self.dispatch.clone()),
+        )?;
+        connection._prepare = Some(permit);
+        Ok(Ok(connection))
+    }
+}
+
 impl Connection {
     pub(super) fn start(
         stream: TcpStream,
@@ -490,6 +555,7 @@ impl Connection {
             0,
             false,
             backend.prompt_tokens(),
+            None,
         )
     }
 
@@ -512,6 +578,7 @@ impl Connection {
             0,
             true,
             backend.prompt_tokens(),
+            None,
         )
     }
 
@@ -536,6 +603,7 @@ impl Connection {
             extra_cpu_reserve,
             false,
             None,
+            None,
         )
     }
 
@@ -551,6 +619,7 @@ impl Connection {
         extra_cpu_reserve: u64,
         batched: bool,
         prompt_tokens: Option<http::PromptTokens>,
+        dispatch: Option<Thread>,
     ) -> Result<Self> {
         #[cfg(test)]
         let fault = START_FAULT.take();
@@ -566,9 +635,10 @@ impl Connection {
             server: execution
                 .as_ref()
                 .map(super::control::ExecutionPermit::gate),
-            owner: execution
-                .as_ref()
-                .map_or_else(std::thread::current, super::control::ExecutionPermit::owner),
+            owner: execution.as_ref().map_or_else(
+                || dispatch.unwrap_or_else(std::thread::current),
+                super::control::ExecutionPermit::owner,
+            ),
         });
         let (sender, incoming) = sync_channel(1);
         let extra_cpu_reserve = extra_cpu_reserve.saturating_add(control.timing.reserve_bytes());
@@ -616,6 +686,7 @@ impl Connection {
         Ok(Self {
             incoming: Some(incoming),
             _execution: execution,
+            _prepare: None,
             worker: Worker {
                 socket,
                 control,

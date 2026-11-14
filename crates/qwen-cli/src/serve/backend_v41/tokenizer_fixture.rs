@@ -4,7 +4,13 @@ use std::io::Write;
 pub(super) const EOS: u32 = 256;
 pub(super) const EMISSION: u32 = 257;
 
-pub(super) fn tokenizer(emission: Option<&str>) -> NativeTokenizer {
+pub(crate) fn tokenizer(emission: Option<&str>) -> NativeTokenizer {
+    tokenizer_parts(emission, &[], false)
+}
+pub(crate) fn tokenizer_with_markers(markers: &[&str]) -> NativeTokenizer {
+    tokenizer_parts(None, markers, true)
+}
+fn tokenizer_parts(emission: Option<&str>, markers: &[&str], merge: bool) -> NativeTokenizer {
     fn string(out: &mut Vec<u8>, text: &str) {
         out.extend((text.len() as u64).to_le_bytes());
         out.extend(text.as_bytes());
@@ -38,9 +44,22 @@ pub(super) fn tokenizer(emission: Option<&str>) -> NativeTokenizer {
     if let Some(emission) = emission {
         tokens.push(emission.into());
     }
+    for marker in markers {
+        if !tokens.iter().any(|t| t == marker) {
+            tokens.push(marker.to_string());
+        }
+    }
+    if merge {
+        tokens.push("ab".into());
+    }
+    let merges = if merge {
+        vec!["a b".to_string()]
+    } else {
+        Vec::new()
+    };
     for (key, values) in [
         ("tokenizer.ggml.tokens", tokens.as_slice()),
-        ("tokenizer.ggml.merges", &[][..]),
+        ("tokenizer.ggml.merges", merges.as_slice()),
     ] {
         string(&mut out, key);
         out.extend(9u32.to_le_bytes());
@@ -55,7 +74,14 @@ pub(super) fn tokenizer(emission: Option<&str>) -> NativeTokenizer {
     out.extend(5u32.to_le_bytes());
     out.extend((tokens.len() as u64).to_le_bytes());
     for id in 0..tokens.len() {
-        out.extend((if id < 256 { 1i32 } else { 3i32 }).to_le_bytes());
+        out.extend(
+            (if id < 256 || (merge && id + 1 == tokens.len()) {
+                1i32
+            } else {
+                3i32
+            })
+            .to_le_bytes(),
+        );
     }
     string(&mut out, "tokenizer.ggml.eos_token_id");
     out.extend(4u32.to_le_bytes());

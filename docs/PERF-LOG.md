@@ -11,6 +11,21 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
 
 
+
+## 2026-11-14 - Cooperative Experts: Isolation Fails, Candidates Removed
+
+- Real populations across 40 routed layers / 384 experts: means 32/4/16,
+  medians 7/1/3, p95 149/18/75, maxima 1695/172/847 for 2048/256/1K rows.
+- Packed GU+down 0.662878/0.717106/0.678607x; F32 gather
+  0.584585/0.728312/0.632817x. All fail >=1.25x, including inclusive work.
+  Warmup +3 pairs per cell, 48 full signatures bitwise; functional
+  270 cases /109,572,096 strict components. No native/serve gate attempted.
+- Gather deletes pack but not the shared input copy: root attribution
+  about 5.7ms +35ms, not the entire 71ms audit. Slower math dominates.
+- Rebased onto landed main0b0ea5f12; remove both kernel families/knobs,
+  eligibility, temporary observer and scoped policy. Keep source backup/data.
+  [All pairs, components and route vectors](bench/2026-11-14-v41-cooperative-isolation.md).
+
 ## 2026-11-14 - Cooperative Experts: Real-Population Gate Starts
 
 - Separate cooperative branch, no edits to the attention landing branch.

@@ -1,7 +1,5 @@
 //! Opt-in synchronous forward measurements. CPU intervals are inclusive wall
 //! times, not additive CPU work or claims about CPU/GPU overlap.
-#[cfg(feature = "perf-ablations")]
-use objc2_metal::MTLBuffer as _;
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
@@ -683,89 +681,4 @@ mod tests {
         assert!(!stages());
         assert!(scope.finish().operations.is_empty());
     }
-}
-
-// Explicit bench observer: copy route counts at their producer before scratch
-// reuse, then read only after the forward's GPU completion. Never active in
-// production or native wall measurements.
-#[cfg(feature = "perf-ablations")]
-thread_local! {
-    static EXPERT_ROUTES: RefCell<Option<Vec<(usize, usize, usize, crate::metal::MetalTensor)>>> = const { RefCell::new(None) };
-}
-#[cfg(feature = "perf-ablations")]
-pub fn expert_routes_begin() {
-    EXPERT_ROUTES.with(|s| {
-        assert!(s.borrow().is_none());
-        *s.borrow_mut() = Some(Vec::new());
-    });
-}
-#[cfg(feature = "perf-ablations")]
-pub(crate) fn capture_expert_routes(
-    ctx: &crate::metal::MetalContext,
-    enc: &crate::metal::KernelEncoder,
-    layer: usize,
-    rows: usize,
-    topk: usize,
-    counts: &crate::metal::MetalTensor,
-) -> Result<(), crate::metal::MetalError> {
-    EXPERT_ROUTES.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        let Some(values) = slot.as_mut() else {
-            return Ok(());
-        };
-        if values.len() >= 4096 {
-            return Err(crate::metal::checks::bad_shape(
-                "expert route capture",
-                "capacity exceeded",
-            ));
-        }
-        let n = counts.n_elements() as usize;
-        let copy = crate::metal::MetalTensor::zeros_i32(ctx, vec![n as u64])?;
-        crate::metal::encode_copy_offset_i32(ctx, enc, counts, 0, &copy, n)?;
-        values.push((layer, rows, topk, copy));
-        Ok(())
-    })
-}
-#[cfg(feature = "perf-ablations")]
-#[derive(Serialize)]
-pub struct ExpertRouteCounts {
-    pub layer: usize,
-    pub rows: usize,
-    pub topk: usize,
-    pub counts: Vec<i32>,
-}
-#[cfg(feature = "perf-ablations")]
-pub fn expert_routes_finish() -> Result<Vec<ExpertRouteCounts>, String> {
-    EXPERT_ROUTES.with(|slot| {
-        slot.borrow_mut()
-            .take()
-            .ok_or("expert route capture inactive")?
-            .into_iter()
-            .map(|(layer, rows, topk, t)| {
-                let counts = unsafe {
-                    std::slice::from_raw_parts(
-                        t.buffer
-                            .contents()
-                            .as_ptr()
-                            .cast::<u8>()
-                            .add(t.offset as usize)
-                            .cast::<i32>(),
-                        t.n_elements() as usize,
-                    )
-                }
-                .to_vec();
-                if counts.iter().any(|&n| n < 0)
-                    || counts.iter().map(|&n| n as usize).sum::<usize>() != rows * topk
-                {
-                    return Err("invalid captured expert population".into());
-                }
-                Ok(ExpertRouteCounts {
-                    layer,
-                    rows,
-                    topk,
-                    counts,
-                })
-            })
-            .collect()
-    })
 }

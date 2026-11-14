@@ -1,5 +1,7 @@
 # V4.1 cooperative experts: default-off preparation
 
+**Retired:** [both variants failed real-population isolation](2026-11-14-v41-cooperative-isolation.md). Functional success below is historical; no cooperative candidate remains in active source.
+
 The M32/M64 prototype from `03bbba12c`, with the scoped device policy from
 `dff2b125c`, is replayed on the attention-qualified base. It stays on the
 separate `perf/v41-cooperative-prepared` branch and is not part of the

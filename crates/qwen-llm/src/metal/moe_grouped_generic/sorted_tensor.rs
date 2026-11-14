@@ -23,13 +23,10 @@ pub(crate) struct SortedExpertGeometry {
     pub topk: usize,
     pub rows: usize,
     pub clamp: f32,
-    pub cooperative: bool,
-    pub gather_f32: bool,
 }
 
 const KERNEL: &str = "v41_sorted_experts";
 const SHARED_BYTES: usize = 128 * 72 * 2;
-const GATHER_SHARED_BYTES: usize = SHARED_BYTES + 64 * 72 * 2;
 
 fn extent(dims: &[usize]) -> Result<usize, MetalError> {
     dims.iter()
@@ -74,15 +71,6 @@ impl<'a> SortedExperts<'a> {
         g: SortedExpertGeometry,
     ) -> Result<Self, MetalError> {
         require_serial(KERNEL, enc)?;
-        if g.cooperative && ctx.device_facts().name != "Apple M5 Ultra" {
-            return Err(bad_shape(
-                KERNEL,
-                "cooperative expert device is not qualified",
-            ));
-        }
-        if g.gather_f32 && !g.cooperative {
-            return Err(bad_shape(KERNEL, "F32 gather requires cooperative experts"));
-        }
         if !(1..=4096).contains(&g.rows)
             || !(1..=1024).contains(&g.experts)
             || !(1..=g.experts).contains(&g.topk)
@@ -115,11 +103,7 @@ impl<'a> SortedExperts<'a> {
         for (t, dtype, elements, writable, name) in [
             (
                 x,
-                if g.gather_f32 {
-                    GgmlType::F32
-                } else {
-                    GgmlType::F16
-                },
+                GgmlType::F16,
                 extent(&[g.hidden, g.rows])?,
                 false,
                 "input",
@@ -191,28 +175,17 @@ impl<'a> SortedExperts<'a> {
         )?;
         check_disjoint(KERNEL, inner, &[(packed, "packed"), (output, "output")])?;
         let suffix = |w: &MetalTensor| moe_grouped_generic_layout(w.dtype).unwrap().suffix;
-        let family = if g.cooperative { "cooperative_" } else { "" };
-        let gu_family = if g.gather_f32 {
-            "cooperative_gather_"
-        } else {
-            family
-        };
         let pipelines = [
             ctx.tensor_pipeline("v41_sorted_plan")?,
             ctx.tensor_pipeline("v41_sorted_pack")?,
-            ctx.tensor_pipeline(&format!("v41_sorted_gu_{gu_family}{}", suffix(banks[0])))?,
-            ctx.tensor_pipeline(&format!("v41_sorted_down_{family}{}", suffix(banks[2])))?,
+            ctx.tensor_pipeline(&format!("v41_sorted_gu_{}", suffix(banks[0])))?,
+            ctx.tensor_pipeline(&format!("v41_sorted_down_{}", suffix(banks[2])))?,
         ];
-        for (i, p) in pipelines[2..].iter().enumerate() {
-            let shared = if i == 0 && g.gather_f32 {
-                GATHER_SHARED_BYTES
-            } else {
-                SHARED_BYTES
-            };
+        for p in &pipelines[2..] {
             if p.threadExecutionWidth() != 32
-                || p.maxTotalThreadsPerThreadgroup() < if g.cooperative { 256 } else { 128 }
+                || p.maxTotalThreadsPerThreadgroup() < 128
                 || p.staticThreadgroupMemoryLength()
-                    .checked_add(shared)
+                    .checked_add(SHARED_BYTES)
                     .is_none_or(|n| n > ctx.device.maxThreadgroupMemoryLength())
             {
                 return Err(bad_shape(KERNEL, "unsupported tensor pipeline resources"));
@@ -253,36 +226,34 @@ impl<'a> SortedExperts<'a> {
                 depth: 1,
             },
         );
-        if !g.gather_f32 {
-            enc.set_pipeline(&self.pipelines[1]);
-            for (i, t) in [self.x, self.ids, self.plan, self.packed]
-                .iter()
-                .enumerate()
-            {
-                enc.set_tensor(i, t);
-            }
-            enc.set_bytes(
-                4,
-                &[
-                    g.hidden as u32,
-                    g.rows as u32,
-                    g.experts as u32,
-                    g.topk as u32,
-                ],
-            );
-            enc.dispatch(
-                MTLSize {
-                    width: g.hidden.div_ceil(256),
-                    height: self.slots,
-                    depth: 1,
-                },
-                MTLSize {
-                    width: 256,
-                    height: 1,
-                    depth: 1,
-                },
-            );
+        enc.set_pipeline(&self.pipelines[1]);
+        for (i, t) in [self.x, self.ids, self.plan, self.packed]
+            .iter()
+            .enumerate()
+        {
+            enc.set_tensor(i, t);
         }
+        enc.set_bytes(
+            4,
+            &[
+                g.hidden as u32,
+                g.rows as u32,
+                g.experts as u32,
+                g.topk as u32,
+            ],
+        );
+        enc.dispatch(
+            MTLSize {
+                width: g.hidden.div_ceil(256),
+                height: self.slots,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
         enc.set_pipeline(&self.pipelines[2]);
         enc.set_bytes(
             0,
@@ -295,22 +266,14 @@ impl<'a> SortedExperts<'a> {
         );
         enc.set_tensor(1, self.banks[0]);
         enc.set_tensor(2, self.banks[1]);
-        enc.set_tensor(3, if g.gather_f32 { self.x } else { self.packed });
+        enc.set_tensor(3, self.packed);
         enc.set_tensor(4, self.plan);
         enc.set_tensor(5, self.ids);
         enc.set_bytes(7, &[self.slots as u32, g.topk as u32]);
         enc.set_bytes(8, &g.clamp);
         enc.set_tensor(9, self.weights);
         enc.set_tensor(10, self.inner);
-        self.dispatch(
-            enc,
-            g.inner / 64,
-            if g.gather_f32 {
-                GATHER_SHARED_BYTES
-            } else {
-                SHARED_BYTES
-            },
-        );
+        self.dispatch(enc, g.inner / 64);
     }
 
     pub(crate) fn encode_down(&self, enc: &KernelEncoder) {
@@ -331,11 +294,11 @@ impl<'a> SortedExperts<'a> {
         enc.set_tensor(5, self.ids);
         enc.set_tensor(6, self.output);
         enc.set_bytes(7, &[self.slots as u32, g.topk as u32]);
-        self.dispatch(enc, g.hidden / 128, SHARED_BYTES);
+        self.dispatch(enc, g.hidden / 128);
     }
 
-    fn dispatch(&self, enc: &KernelEncoder, columns: usize, shared: usize) {
-        enc.set_threadgroup_memory(0, shared);
+    fn dispatch(&self, enc: &KernelEncoder, columns: usize) {
+        enc.set_threadgroup_memory(0, SHARED_BYTES);
         enc.dispatch(
             MTLSize {
                 width: columns,
@@ -343,7 +306,7 @@ impl<'a> SortedExperts<'a> {
                 depth: 1,
             },
             MTLSize {
-                width: if self.g.cooperative { 256 } else { 128 },
+                width: 128,
                 height: 1,
                 depth: 1,
             },

@@ -70,305 +70,232 @@ fn sorted_iq_experts_match_rectangular_and_preserve_scratch_guards() {
     let _lease = crate::metal::acquire_metal_benchmark_lease().unwrap();
     let ctx = MetalContext::new().unwrap();
     assert!(moe_grouped_tensor_available(&ctx));
-    // Header-only read of the matched GGUF: hidden 5120, expert inner 2304.
-    // Keep all four native IQ families at the compact shape, and exercise the
-    // artifact's IQ2_XS GU at the actual K/N lengths with same/mixed down types.
-    for (h, f, actual_model_shape) in [(256usize, 256usize, false), (5120, 2304, true)] {
-        // Real average routed populations: 1024*6/384=16, 2048*6/384=32.
-        // Include M32/M64 decisions and a fresh panel's one-row tail.
-        for (n, histograms) in [
-            (
-                64usize,
-                vec![
-                    [16, 16, 16, 16, 16, 16, 16, 16],
-                    [0, 1, 7, 15, 16, 17, 32, 40],
-                    [64, 0, 0, 0, 64, 0, 0, 0],
-                ],
-            ),
-            (
-                128usize,
-                vec![
-                    [32, 32, 32, 32, 32, 32, 32, 32],
-                    [0, 0, 0, 0, 64, 64, 64, 64],
-                ],
-            ),
-            (
-                129usize,
-                vec![
-                    [0, 1, 15, 16, 31, 32, 64, 99],
-                    [0, 1, 31, 32, 33, 63, 64, 34],
-                    [0, 1, 15, 16, 31, 32, 65, 98],
-                    [129, 0, 0, 0, 129, 0, 0, 0],
-                ],
-            ),
-        ] {
-            let slots = n * TOPK;
-            let input: Vec<f32> = (0..h * n)
-                .map(|i| ((i * 17 % 61) as f32 - 30.) * if i / h % 7 == 0 { 2. } else { 0.03125 })
-                .collect();
-            let input: Vec<f32> = input
-                .into_iter()
-                .enumerate()
-                .map(|(i, v)| match i % 97 {
-                    0 => 1.0004883,
-                    1 => -1.0004883,
-                    2 => 1e-8,
-                    3 => -1e-8,
-                    _ => v + ((i % 5) as f32 - 2.) * 0.0001,
-                })
-                .collect();
-            let x_f32 = f32_tensor(&ctx, &input);
-            let x = MetalTensor::zeros_f16(&ctx, vec![(h * n) as u64]).unwrap();
-            run(&ctx, |enc| {
-                crate::metal::encode_scatter_offset_f32_to_f16(&ctx, enc, &x_f32, &x, 0, h * n)
-                    .unwrap()
-            });
-            let weights: Vec<f32> = (0..slots).map(|i| (i % 7) as f32 / 8.).collect();
-            let weights_t = f32_tensor(&ctx, &weights);
-            let raw_gu = MetalTensor::zeros_f32(&ctx, vec![(f * slots) as u64]).unwrap();
-            let reference = MetalTensor::zeros_f32(&ctx, vec![(h * slots) as u64]).unwrap();
-            let weighted = MetalTensor::zeros_f32(&ctx, vec![(f * slots) as u64]).unwrap();
-            let reference_inner = MetalTensor::zeros_f16(&ctx, vec![(f * slots) as u64]).unwrap();
-            let statuses = i32_typed_tensor(&ctx, &vec![1; n]);
-            let types = [
-                GgmlType::IQ2_XXS,
-                GgmlType::IQ2_XS,
-                GgmlType::IQ2_S,
-                GgmlType::IQ3_XXS,
-            ];
-            for (format, dtype) in types.into_iter().enumerate() {
-                if actual_model_shape && dtype != GgmlType::IQ2_XS {
-                    continue;
+    let input: Vec<f32> = (0..H * N)
+        .map(|i| ((i * 17 % 61) as f32 - 30.) * if i / H % 7 == 0 { 2. } else { 0.03125 })
+        .collect();
+    let x = f16_tensor(&ctx, &input);
+    let weights: Vec<f32> = (0..S).map(|i| (i % 7) as f32 / 8.).collect();
+    let weights_t = f32_tensor(&ctx, &weights);
+    let raw_gu = MetalTensor::zeros_f32(&ctx, vec![(F * S) as u64]).unwrap();
+    let reference = MetalTensor::zeros_f32(&ctx, vec![(H * S) as u64]).unwrap();
+    let weighted = MetalTensor::zeros_f32(&ctx, vec![(F * S) as u64]).unwrap();
+    let reference_inner = MetalTensor::zeros_f16(&ctx, vec![(F * S) as u64]).unwrap();
+    let statuses = i32_typed_tensor(&ctx, &vec![1; N]);
+    let types = [
+        GgmlType::IQ2_XXS,
+        GgmlType::IQ2_XS,
+        GgmlType::IQ2_S,
+        GgmlType::IQ3_XXS,
+    ];
+    for (format, dtype) in types.into_iter().enumerate() {
+        let bank = |dt, seed| {
+            MetalTensor::from_bytes(
+                &ctx,
+                &synthetic_bank(dt, H, F, E, seed),
+                vec![H as u64, F as u64, E as u64],
+                dt,
+            )
+            .unwrap()
+        };
+        let gate = bank(dtype, 11);
+        let up = bank(dtype, 29);
+        // Different down type as well as a second run with the same format.
+        for down_type in [dtype, types[(format + 1) % types.len()]] {
+            let down = bank(down_type, 47);
+            for counts in [[0, 1, 15, 16, 31, 32, 64, 99], [129, 0, 0, 0, 129, 0, 0, 0]] {
+                let mut ids = vec![-1; E * N];
+                let mut at = 0;
+                for (e, &count) in counts.iter().enumerate() {
+                    for j in 0..count as usize {
+                        ids[e * N + j] = ((at * 17) % S) as i32;
+                        at += 1;
+                    }
                 }
-                let bank = |dt, seed, bank_k, bank_n| {
-                    MetalTensor::from_bytes(
+                assert_eq!(at, S);
+                let counts_t = i32_typed_tensor(&ctx, &counts);
+                let ids_t = i32_typed_tensor(&ctx, &ids);
+                run(&ctx, |enc| {
+                    encode_moe_swiglu_f32_grouped_slots_tensor(
                         &ctx,
-                        &synthetic_bank(dt, bank_k, bank_n, E, seed),
-                        vec![bank_k as u64, bank_n as u64, E as u64],
-                        dt,
+                        enc,
+                        &gate,
+                        &up,
+                        &x,
+                        &counts_t,
+                        &ids_t,
+                        &raw_gu,
+                        H,
+                        F,
+                        E,
+                        TOPK,
+                        N,
+                        Some(10.),
                     )
                     .unwrap()
-                };
-                let gate = bank(dtype, 11, h, f);
-                let up = bank(dtype, 29, h, f);
-                // Different down type as well as a second run with the same format.
-                for down_type in [dtype, types[(format + 1) % types.len()]] {
-                    let down = bank(down_type, 47, f, h);
-                    for (histogram, &counts) in histograms.iter().enumerate() {
-                        let mut ids = vec![-1; E * n];
-                        let mut at = 0;
-                        for (e, &count) in counts.iter().enumerate() {
-                            for j in 0..count as usize {
-                                ids[e * n + j] = ((at * 17) % slots) as i32;
-                                at += 1;
-                            }
-                        }
-                        assert_eq!(at, slots);
-                        let counts_t = i32_typed_tensor(&ctx, &counts);
-                        let ids_t = i32_typed_tensor(&ctx, &ids);
-                        run(&ctx, |enc| {
-                            encode_moe_swiglu_f32_grouped_slots_tensor(
-                                &ctx,
-                                enc,
-                                &gate,
-                                &up,
-                                &x,
-                                &counts_t,
-                                &ids_t,
-                                &raw_gu,
-                                h,
-                                f,
-                                E,
-                                TOPK,
-                                n,
-                                Some(10.),
-                            )
-                            .unwrap()
-                        });
-                        // Use the real GPU weight/half chain, including its rounding,
-                        // rather than a CPU multiplication at a half rounding boundary.
-                        run(&ctx, |enc| {
-                            enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_weight").unwrap());
-                            enc.set_bytes(0, &((f * slots) as u32));
-                            enc.set_bytes(1, &(f as u32));
-                            for (i, t) in [&raw_gu, &weights_t, &weighted, &statuses]
-                                .iter()
-                                .enumerate()
-                            {
-                                enc.set_tensor(i + 2, t);
-                            }
-                            enc.set_bytes(6, &(TOPK as u32));
-                            enc.dispatch(
-                                MTLSize {
-                                    width: (f * slots).div_ceil(256),
-                                    height: 1,
-                                    depth: 1,
-                                },
-                                MTLSize {
-                                    width: 256,
-                                    height: 1,
-                                    depth: 1,
-                                },
-                            );
-                            crate::metal::encode_scatter_offset_f32_to_f16(
-                                &ctx,
-                                enc,
-                                &weighted,
-                                &reference_inner,
-                                0,
-                                f * slots,
-                            )
-                            .unwrap();
-                        });
-                        run(&ctx, |enc| {
-                            encode_moe_down_f32_grouped_slots_tensor(
-                                &ctx,
-                                enc,
-                                &down,
-                                &reference_inner,
-                                &counts_t,
-                                &ids_t,
-                                &reference,
-                                f,
-                                h,
-                                E,
-                                n,
-                            )
-                            .unwrap()
-                        });
-                        for (cooperative, gather_f32) in
-                            [(false, false), (true, false), (true, true)]
-                        {
-                            eprintln!(
-                                "COOPERATIVE_EXPERT_CASE hidden={h} inner={f} gu={dtype:?} down={down_type:?} rows={n} histogram={histogram} cooperative={cooperative} gather_f32={gather_f32} counts={counts:?}"
-                            );
-                            let plan = guarded(&ctx, 2 * (E + 1), GgmlType::I32);
-                            let output = guarded(&ctx, h * slots, GgmlType::F32);
-                            // The production lifetime aliases sorted input with down output.
-                            let mut packed =
-                                output.1.view_subrange(0, vec![(h * slots / 2) as u64]);
-                            packed.dtype = GgmlType::F16;
-                            packed.shape = vec![(h * slots) as u64];
-                            let inner = guarded(&ctx, f * slots, GgmlType::F16);
-                            run(&ctx, |enc| {
-                                let op = SortedExperts::prepare(
-                                    &ctx,
-                                    enc,
-                                    [&gate, &up, &down],
-                                    if gather_f32 { &x_f32 } else { &x },
-                                    &counts_t,
-                                    &ids_t,
-                                    &weights_t,
-                                    &plan.1,
-                                    &packed,
-                                    &inner.1,
-                                    &output.1,
-                                    SortedExpertGeometry {
-                                        hidden: h,
-                                        inner: f,
-                                        experts: E,
-                                        topk: TOPK,
-                                        rows: n,
-                                        clamp: 10.,
-                                        cooperative,
-                                        gather_f32,
-                                    },
-                                )
-                                .unwrap();
-                                op.encode_gate_up(enc);
-                            });
-                            let plan_values: Vec<i32> = data(&plan.1)
-                                .chunks_exact(4)
-                                .map(|b| i32::from_le_bytes(b.try_into().unwrap()))
-                                .collect();
-                            let mut off = 0;
-                            let mut tiles = 0;
-                            for e in 0..E {
-                                assert_eq!(plan_values[e], off);
-                                assert_eq!(plan_values[E + 1 + e], tiles);
-                                for j in 0..if gather_f32 { 0 } else { counts[e] as usize } {
-                                    let slot = ids[e * n + j] as usize;
-                                    let row = off as usize + j;
-                                    assert_eq!(
-                                        &data(&packed)[row * h * 2..(row + 1) * h * 2],
-                                        &data(&x)[slot / TOPK * h * 2..(slot / TOPK + 1) * h * 2]
-                                    );
-                                }
-                                off += counts[e];
-                                tiles += (counts[e] + 63) / 64;
-                            }
-                            let mut original_order = vec![0f32; f * slots];
-                            for e in 0..E {
-                                for j in 0..counts[e] as usize {
-                                    let slot = ids[e * n + j] as usize;
-                                    let row = plan_values[e] as usize + j;
-                                    for k in 0..f {
-                                        let offset = (row * f + k) * 2;
-                                        original_order[slot * f + k] =
-                                            half::f16::from_bits(u16::from_le_bytes(
-                                                data(&inner.1)[offset..offset + 2]
-                                                    .try_into()
-                                                    .unwrap(),
-                                            ))
-                                            .to_f32();
-                                    }
-                                }
-                            }
-                            let reference_half: Vec<f32> = data(&reference_inner)
-                                .chunks_exact(2)
-                                .map(|b| {
-                                    half::f16::from_bits(u16::from_le_bytes(b.try_into().unwrap()))
-                                        .to_f32()
-                                })
-                                .collect();
-                            assert_bits(
-                                &format!(
-                                    "{dtype:?} rows={n} histogram={histogram} inner cooperative={cooperative} gather_f32={gather_f32}"
-                                ),
-                                &original_order,
-                                &reference_half,
-                            );
-                            assert_eq!(plan_values[E], slots as i32);
-                            assert_eq!(plan_values[2 * E + 1], tiles);
-                            run(&ctx, |enc| {
-                                let op = SortedExperts::prepare(
-                                    &ctx,
-                                    enc,
-                                    [&gate, &up, &down],
-                                    if gather_f32 { &x_f32 } else { &x },
-                                    &counts_t,
-                                    &ids_t,
-                                    &weights_t,
-                                    &plan.1,
-                                    &packed,
-                                    &inner.1,
-                                    &output.1,
-                                    SortedExpertGeometry {
-                                        hidden: h,
-                                        inner: f,
-                                        experts: E,
-                                        topk: TOPK,
-                                        rows: n,
-                                        clamp: 10.,
-                                        cooperative,
-                                        gather_f32,
-                                    },
-                                )
-                                .unwrap();
-                                op.encode_down(enc);
-                            });
-                            assert_bits(
-                                &format!(
-                                    "{dtype:?} / {down_type:?} rows={n} histogram={histogram} down cooperative={cooperative} gather_f32={gather_f32}"
-                                ),
-                                &tensor_f32_at_offset(&output.1),
-                                &tensor_f32_at_offset(&reference),
-                            );
-                            for t in [&plan.0, &inner.0, &output.0] {
-                                guards(t);
-                            }
+                });
+                // Use the real GPU weight/half chain, including its rounding,
+                // rather than a CPU multiplication at a half rounding boundary.
+                run(&ctx, |enc| {
+                    enc.set_pipeline(&ctx.pipeline("kernel_deepseek_v41_weight").unwrap());
+                    enc.set_bytes(0, &((F * S) as u32));
+                    enc.set_bytes(1, &(F as u32));
+                    for (i, t) in [&raw_gu, &weights_t, &weighted, &statuses]
+                        .iter()
+                        .enumerate()
+                    {
+                        enc.set_tensor(i + 2, t);
+                    }
+                    enc.set_bytes(6, &(TOPK as u32));
+                    enc.dispatch(
+                        MTLSize {
+                            width: (F * S).div_ceil(256),
+                            height: 1,
+                            depth: 1,
+                        },
+                        MTLSize {
+                            width: 256,
+                            height: 1,
+                            depth: 1,
+                        },
+                    );
+                    crate::metal::encode_scatter_offset_f32_to_f16(
+                        &ctx,
+                        enc,
+                        &weighted,
+                        &reference_inner,
+                        0,
+                        F * S,
+                    )
+                    .unwrap();
+                });
+                run(&ctx, |enc| {
+                    encode_moe_down_f32_grouped_slots_tensor(
+                        &ctx,
+                        enc,
+                        &down,
+                        &reference_inner,
+                        &counts_t,
+                        &ids_t,
+                        &reference,
+                        F,
+                        H,
+                        E,
+                        N,
+                    )
+                    .unwrap()
+                });
+                let plan = guarded(&ctx, 2 * (E + 1), GgmlType::I32);
+                let output = guarded(&ctx, H * S, GgmlType::F32);
+                // The production lifetime aliases sorted input with down output.
+                let mut packed = output.1.view_subrange(0, vec![(H * S / 2) as u64]);
+                packed.dtype = GgmlType::F16;
+                packed.shape = vec![(H * S) as u64];
+                let inner = guarded(&ctx, F * S, GgmlType::F16);
+                run(&ctx, |enc| {
+                    let op = SortedExperts::prepare(
+                        &ctx,
+                        enc,
+                        [&gate, &up, &down],
+                        &x,
+                        &counts_t,
+                        &ids_t,
+                        &weights_t,
+                        &plan.1,
+                        &packed,
+                        &inner.1,
+                        &output.1,
+                        SortedExpertGeometry {
+                            hidden: H,
+                            inner: F,
+                            experts: E,
+                            topk: TOPK,
+                            rows: N,
+                            clamp: 10.,
+                        },
+                    )
+                    .unwrap();
+                    op.encode_gate_up(enc);
+                });
+                let plan_values: Vec<i32> = data(&plan.1)
+                    .chunks_exact(4)
+                    .map(|b| i32::from_le_bytes(b.try_into().unwrap()))
+                    .collect();
+                let mut off = 0;
+                let mut tiles = 0;
+                for e in 0..E {
+                    assert_eq!(plan_values[e], off);
+                    assert_eq!(plan_values[E + 1 + e], tiles);
+                    for j in 0..counts[e] as usize {
+                        let slot = ids[e * N + j] as usize;
+                        let row = off as usize + j;
+                        assert_eq!(
+                            &data(&packed)[row * H * 2..(row + 1) * H * 2],
+                            &data(&x)[slot / TOPK * H * 2..(slot / TOPK + 1) * H * 2]
+                        );
+                    }
+                    off += counts[e];
+                    tiles += (counts[e] + 63) / 64;
+                }
+                let mut original_order = vec![0f32; F * S];
+                for e in 0..E {
+                    for j in 0..counts[e] as usize {
+                        let slot = ids[e * N + j] as usize;
+                        let row = plan_values[e] as usize + j;
+                        for k in 0..F {
+                            let offset = (row * F + k) * 2;
+                            original_order[slot * F + k] =
+                                half::f16::from_bits(u16::from_le_bytes(
+                                    data(&inner.1)[offset..offset + 2].try_into().unwrap(),
+                                ))
+                                .to_f32();
                         }
                     }
+                }
+                let reference_half: Vec<f32> = data(&reference_inner)
+                    .chunks_exact(2)
+                    .map(|b| {
+                        half::f16::from_bits(u16::from_le_bytes(b.try_into().unwrap())).to_f32()
+                    })
+                    .collect();
+                assert_bits(
+                    &format!("{dtype:?} inner"),
+                    &original_order,
+                    &reference_half,
+                );
+                assert_eq!(plan_values[E], S as i32);
+                assert_eq!(plan_values[2 * E + 1], tiles);
+                run(&ctx, |enc| {
+                    let op = SortedExperts::prepare(
+                        &ctx,
+                        enc,
+                        [&gate, &up, &down],
+                        &x,
+                        &counts_t,
+                        &ids_t,
+                        &weights_t,
+                        &plan.1,
+                        &packed,
+                        &inner.1,
+                        &output.1,
+                        SortedExpertGeometry {
+                            hidden: H,
+                            inner: F,
+                            experts: E,
+                            topk: TOPK,
+                            rows: N,
+                            clamp: 10.,
+                        },
+                    )
+                    .unwrap();
+                    op.encode_down(enc);
+                });
+                assert_bits(
+                    &format!("{dtype:?} / {down_type:?} down"),
+                    &tensor_f32_at_offset(&output.1),
+                    &tensor_f32_at_offset(&reference),
+                );
+                for t in [&plan.0, &inner.0, &output.0] {
+                    guards(t);
                 }
             }
         }
@@ -404,8 +331,6 @@ fn sorted_iq_experts_refuse_bad_bindings_before_dispatch() {
         topk: TOPK,
         rows: N,
         clamp: 10.,
-        cooperative: false,
-        gather_f32: false,
     };
     let original = [&plan.0, &packed.0, &inner.0, &output.0].map(|t| data(t).to_vec());
     for case in 0..10 {

@@ -95,10 +95,11 @@ These are **logical payload bytes, not measured DRAM transactions**. The MMA
 model loads keys once per query rather than once per head; real SIMD loads
 repeat some data, while caches reuse keys and queries. Radix counts five
 score/mask passes and output IDs/masks; it excludes on-chip histograms and
-atomics. In particular, rates above the 800 GB/s reference demonstrate cache
-reuse in this model, not physical DRAM bandwidth above its roof. Hardware
-transaction counters were not captured. FP32 SIMD-group MMA is also not the
-Half tensor tier whose advertised reference peak is 131.7 TFLOP/s.
+atomics. Rates above the prior waste audit's 800 GB/s pricing reference are
+logical request rates; caches can serve repeated loads. They are not measured
+DRAM bandwidth or a measurement of its hardware roof. Hardware transaction
+counters were not captured. FP32 SIMD-group MMA is also not the Half tensor
+tier whose supplied reference peak is 131.7 TFLOP/s.
 
 **81,920 depth / 256 rows**
 
@@ -294,8 +295,8 @@ relaxing this failed gate. No additional GPU lever ran in this stage.
   captures. Legacy matches now receive **zero priced gain**, not a reuse
   recommendation. The original three legacy matches and corrected pricing
   are retained in [audit-correction.json](2026-11-13-v41-attention-serial/audit-correction.json).
-- One preliminary contracts run was invalidated by concurrent ENV
-  regeneration; it is not counted as a pass. Final committed-tree
+- Preliminary contracts attempts were invalidated by concurrent ENV
+  regeneration; neither is counted as a pass. Final committed-tree
   `scripts/check-contracts.sh` output is retained in the closing run log.
   ENV is regenerated after candidate withdrawal (830 knobs).
 - A first candidate build was interrupted when its private driver was updated

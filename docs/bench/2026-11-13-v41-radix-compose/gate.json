@@ -1,0 +1,1458 @@
+{
+  "threshold": 1.25,
+  "aggregate_stage_pass": false,
+  "cells": [
+    {
+      "file": "stages-81920-256.jsonl",
+      "sha256": "e5e5815caad8ebbf010275c49a7d2091648ef85378d21ef64f30f6242fe6e5a7",
+      "depth": 81920,
+      "rows": 256,
+      "native": false,
+      "bitwise_endpoints": 12,
+      "pairs": [
+        {
+          "order": [
+            "index-radix",
+            "baseline",
+            "masked-index-compact"
+          ],
+          "baseline_wall_ms": 451.02675,
+          "composed_wall_ms": 449.08583400000003,
+          "wall_ratio": 1.0043219265740633,
+          "baseline_serial_ms": 40.068084,
+          "compact_serial_ms": 34.241957000000006,
+          "composed_serial_ms": 33.906876,
+          "ratio": 1.1817096921580155,
+          "compact_ratio": 1.170145853521164,
+          "radix_incremental_ratio": 1.0098823908165415,
+          "compact_saved_ms": 5.8261269999999925,
+          "radix_saved_ms": 0.3350810000000095
+        },
+        {
+          "order": [
+            "masked-index-compact",
+            "baseline",
+            "index-radix"
+          ],
+          "baseline_wall_ms": 454.86820900000004,
+          "composed_wall_ms": 445.471542,
+          "wall_ratio": 1.021093753728493,
+          "baseline_serial_ms": 40.157748999999995,
+          "compact_serial_ms": 34.308543,
+          "composed_serial_ms": 33.915293,
+          "ratio": 1.1840602114214374,
+          "compact_ratio": 1.170488324147137,
+          "radix_incremental_ratio": 1.0115950642089397,
+          "compact_saved_ms": 5.849205999999995,
+          "radix_saved_ms": 0.3932500000000019
+        },
+        {
+          "order": [
+            "index-radix",
+            "baseline",
+            "masked-index-compact"
+          ],
+          "baseline_wall_ms": 451.020958,
+          "composed_wall_ms": 449.505625,
+          "wall_ratio": 1.0033711102057956,
+          "baseline_serial_ms": 40.138333,
+          "compact_serial_ms": 34.255039999999994,
+          "composed_serial_ms": 33.855419,
+          "ratio": 1.185580748535412,
+          "compact_ratio": 1.1717497045690213,
+          "radix_incremental_ratio": 1.0118037528940345,
+          "compact_saved_ms": 5.883293000000009,
+          "radix_saved_ms": 0.39962099999999623
+        }
+      ],
+      "arms": [
+        {
+          "rep": 0,
+          "policy": "baseline",
+          "wall_ms": 891.738417,
+          "disk_read_bytes": 76578816,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ],
+          "serial_ms": 40.09371,
+          "serial_layers_ms": {
+            "2": 5.2785,
+            "8": 5.246667,
+            "14": 5.238042,
+            "20": 9.420125,
+            "24": 3.743458,
+            "28": 3.721584,
+            "32": 3.724125,
+            "36": 3.721209
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 1,
+          "policy": "index-radix",
+          "wall_ms": 452.226792,
+          "disk_read_bytes": 147456,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ],
+          "serial_ms": 33.917376,
+          "serial_layers_ms": {
+            "2": 5.300583,
+            "8": 5.257042,
+            "14": 5.25275,
+            "20": 9.418709,
+            "24": 2.178333,
+            "28": 2.174375,
+            "32": 2.166375,
+            "36": 2.169209
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 2,
+          "policy": "masked-index-compact",
+          "wall_ms": 451.461083,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ],
+          "serial_ms": 34.259040999999996,
+          "serial_layers_ms": {
+            "2": 5.291167,
+            "8": 5.242959,
+            "14": 5.251375,
+            "20": 9.399458,
+            "24": 2.272166,
+            "28": 2.268541,
+            "32": 2.264375,
+            "36": 2.269
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 3,
+          "policy": "index-radix",
+          "wall_ms": 449.08583400000003,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ],
+          "serial_ms": 33.906876,
+          "serial_layers_ms": {
+            "2": 5.293542,
+            "8": 5.252209,
+            "14": 5.259208,
+            "20": 9.400708,
+            "24": 2.180292,
+            "28": 2.168542,
+            "32": 2.178625,
+            "36": 2.17375
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 4,
+          "policy": "baseline",
+          "wall_ms": 451.02675,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ],
+          "serial_ms": 40.068084,
+          "serial_layers_ms": {
+            "2": 5.2795,
+            "8": 5.233167,
+            "14": 5.240625,
+            "20": 9.405875,
+            "24": 3.738125,
+            "28": 3.725292,
+            "32": 3.718667,
+            "36": 3.726833
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 5,
+          "policy": "masked-index-compact",
+          "wall_ms": 448.259833,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ],
+          "serial_ms": 34.241957000000006,
+          "serial_layers_ms": {
+            "2": 5.284333,
+            "8": 5.228583,
+            "14": 5.230416,
+            "20": 9.42875,
+            "24": 2.2725,
+            "28": 2.267875,
+            "32": 2.27025,
+            "36": 2.25925
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 6,
+          "policy": "masked-index-compact",
+          "wall_ms": 443.016834,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ],
+          "serial_ms": 34.308543,
+          "serial_layers_ms": {
+            "2": 5.285709,
+            "8": 5.261791,
+            "14": 5.251584,
+            "20": 9.433667,
+            "24": 2.28275,
+            "28": 2.267792,
+            "32": 2.265542,
+            "36": 2.259708
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 7,
+          "policy": "baseline",
+          "wall_ms": 454.86820900000004,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ],
+          "serial_ms": 40.157748999999995,
+          "serial_layers_ms": {
+            "2": 5.303625,
+            "8": 5.245416,
+            "14": 5.245834,
+            "20": 9.442125,
+            "24": 3.738083,
+            "28": 3.72625,
+            "32": 3.723333,
+            "36": 3.733083
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 8,
+          "policy": "index-radix",
+          "wall_ms": 445.471542,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ],
+          "serial_ms": 33.915293,
+          "serial_layers_ms": {
+            "2": 5.295542,
+            "8": 5.249417,
+            "14": 5.245417,
+            "20": 9.438792,
+            "24": 2.17075,
+            "28": 2.167,
+            "32": 2.170792,
+            "36": 2.177583
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 9,
+          "policy": "index-radix",
+          "wall_ms": 449.505625,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ],
+          "serial_ms": 33.855419,
+          "serial_layers_ms": {
+            "2": 5.274625,
+            "8": 5.231875,
+            "14": 5.229708,
+            "20": 9.440834,
+            "24": 2.170459,
+            "28": 2.170959,
+            "32": 2.167417,
+            "36": 2.169542
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 10,
+          "policy": "baseline",
+          "wall_ms": 451.020958,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ],
+          "serial_ms": 40.138333,
+          "serial_layers_ms": {
+            "2": 5.284541,
+            "8": 5.247042,
+            "14": 5.245666,
+            "20": 9.450542,
+            "24": 3.741167,
+            "28": 3.727375,
+            "32": 3.717792,
+            "36": 3.724208
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 11,
+          "policy": "masked-index-compact",
+          "wall_ms": 451.387625,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "8f3478bec0851f6cadb16aa44fdb7e2c5559b70eb67975ee5d5d16830a020264",
+            "8992980cf9bb6c0d528f892798407a767b4dc58b2c8a3f85432d113ea1ac1786",
+            "06d6413214683521740c818d90bb4e956f0e3202e7ee6183eba58a06c0ea474b"
+          ],
+          "serial_ms": 34.255039999999994,
+          "serial_layers_ms": {
+            "2": 5.294458,
+            "8": 5.223208,
+            "14": 5.235125,
+            "20": 9.449708,
+            "24": 2.273125,
+            "28": 2.258208,
+            "32": 2.258708,
+            "36": 2.2625
+          },
+          "empty_serial_layers": 32
+        }
+      ],
+      "wall_speedup_geomean": 1.0095629068236844,
+      "serial_speedup_geomean": 1.183782479408394,
+      "compact_speedup_geomean": 1.1707944243341744,
+      "radix_incremental_speedup_geomean": 1.0110933694287159,
+      "compact_saved_ms": 5.8528753333333325,
+      "radix_saved_ms": 0.37598400000000254,
+      "compact_share_of_saved_span": 0.9396383864397212,
+      "radix_share_of_saved_span": 0.06036161356027879,
+      "pass_gate": false
+    },
+    {
+      "file": "stages-81920-1024.jsonl",
+      "sha256": "346d00a2676f01b141385ce75417135d11ff2d1f0b5babe4511f70d773ea5972",
+      "depth": 81920,
+      "rows": 1024,
+      "native": false,
+      "bitwise_endpoints": 12,
+      "pairs": [
+        {
+          "order": [
+            "index-radix",
+            "baseline",
+            "masked-index-compact"
+          ],
+          "baseline_wall_ms": 963.8022910000001,
+          "composed_wall_ms": 938.848083,
+          "wall_ratio": 1.0265796015903461,
+          "baseline_serial_ms": 122.70216699999999,
+          "compact_serial_ms": 99.196874,
+          "composed_serial_ms": 97.838668,
+          "ratio": 1.254127529618453,
+          "compact_ratio": 1.2369559851250957,
+          "radix_incremental_ratio": 1.0138820982313455,
+          "compact_saved_ms": 23.505292999999995,
+          "radix_saved_ms": 1.3582059999999956
+        },
+        {
+          "order": [
+            "masked-index-compact",
+            "baseline",
+            "index-radix"
+          ],
+          "baseline_wall_ms": 964.754875,
+          "composed_wall_ms": 938.6563329999999,
+          "wall_ratio": 1.0278041505527242,
+          "baseline_serial_ms": 122.70683400000001,
+          "compact_serial_ms": 99.255875,
+          "composed_serial_ms": 97.80570700000001,
+          "ratio": 1.2545978937609439,
+          "compact_ratio": 1.2362677171502443,
+          "radix_incremental_ratio": 1.0148270284473275,
+          "compact_saved_ms": 23.45095900000001,
+          "radix_saved_ms": 1.4501679999999908
+        },
+        {
+          "order": [
+            "index-radix",
+            "baseline",
+            "masked-index-compact"
+          ],
+          "baseline_wall_ms": 963.427,
+          "composed_wall_ms": 936.88625,
+          "wall_ratio": 1.0283286791753001,
+          "baseline_serial_ms": 122.692583,
+          "compact_serial_ms": 99.237708,
+          "composed_serial_ms": 97.845585,
+          "ratio": 1.253940921299617,
+          "compact_ratio": 1.2363504304230808,
+          "radix_incremental_ratio": 1.0142277548854146,
+          "compact_saved_ms": 23.454875,
+          "radix_saved_ms": 1.392122999999998
+        }
+      ],
+      "arms": [
+        {
+          "rep": 0,
+          "policy": "baseline",
+          "wall_ms": 1050.9365,
+          "disk_read_bytes": 188170240,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ],
+          "serial_ms": 122.704331,
+          "serial_layers_ms": {
+            "2": 13.1935,
+            "8": 13.124083,
+            "14": 13.115083,
+            "20": 27.414416,
+            "24": 13.974708,
+            "28": 13.974625,
+            "32": 13.961916,
+            "36": 13.946
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 1,
+          "policy": "index-radix",
+          "wall_ms": 939.9188750000001,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ],
+          "serial_ms": 97.80458099999998,
+          "serial_layers_ms": {
+            "2": 13.178041,
+            "8": 13.127708,
+            "14": 13.108417,
+            "20": 27.401084,
+            "24": 7.756666,
+            "28": 7.744666,
+            "32": 7.739333,
+            "36": 7.748666
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 2,
+          "policy": "masked-index-compact",
+          "wall_ms": 941.769042,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ],
+          "serial_ms": 99.26295800000001,
+          "serial_layers_ms": {
+            "2": 13.197084,
+            "8": 13.124208,
+            "14": 13.118791,
+            "20": 27.427459,
+            "24": 8.108666,
+            "28": 8.112541,
+            "32": 8.093292,
+            "36": 8.080917
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 3,
+          "policy": "index-radix",
+          "wall_ms": 938.848083,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ],
+          "serial_ms": 97.838668,
+          "serial_layers_ms": {
+            "2": 13.189167,
+            "8": 13.12275,
+            "14": 13.11875,
+            "20": 27.409833,
+            "24": 7.761584,
+            "28": 7.748709,
+            "32": 7.741833,
+            "36": 7.746042
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 4,
+          "policy": "baseline",
+          "wall_ms": 963.8022910000001,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ],
+          "serial_ms": 122.70216699999999,
+          "serial_layers_ms": {
+            "2": 13.184375,
+            "8": 13.116542,
+            "14": 13.110916,
+            "20": 27.412042,
+            "24": 13.978917,
+            "28": 13.98575,
+            "32": 13.9585,
+            "36": 13.955125
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 5,
+          "policy": "masked-index-compact",
+          "wall_ms": 938.7424159999999,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ],
+          "serial_ms": 99.196874,
+          "serial_layers_ms": {
+            "2": 13.190083,
+            "8": 13.125333,
+            "14": 13.115417,
+            "20": 27.371,
+            "24": 8.104666,
+            "28": 8.1165,
+            "32": 8.090542,
+            "36": 8.083333
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 6,
+          "policy": "masked-index-compact",
+          "wall_ms": 940.543667,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ],
+          "serial_ms": 99.255875,
+          "serial_layers_ms": {
+            "2": 13.191084,
+            "8": 13.121875,
+            "14": 13.114459,
+            "20": 27.438583,
+            "24": 8.105708,
+            "28": 8.103583,
+            "32": 8.088125,
+            "36": 8.092458
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 7,
+          "policy": "baseline",
+          "wall_ms": 964.754875,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ],
+          "serial_ms": 122.70683400000001,
+          "serial_layers_ms": {
+            "2": 13.196917,
+            "8": 13.114708,
+            "14": 13.116167,
+            "20": 27.405667,
+            "24": 13.98175,
+            "28": 13.972541,
+            "32": 13.961542,
+            "36": 13.957542
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 8,
+          "policy": "index-radix",
+          "wall_ms": 938.6563329999999,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ],
+          "serial_ms": 97.80570700000001,
+          "serial_layers_ms": {
+            "2": 13.187833,
+            "8": 13.126625,
+            "14": 13.114833,
+            "20": 27.404375,
+            "24": 7.753792,
+            "28": 7.740916,
+            "32": 7.737625,
+            "36": 7.739708
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 9,
+          "policy": "index-radix",
+          "wall_ms": 936.88625,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ],
+          "serial_ms": 97.845585,
+          "serial_layers_ms": {
+            "2": 13.196542,
+            "8": 13.120542,
+            "14": 13.113875,
+            "20": 27.425792,
+            "24": 7.756875,
+            "28": 7.742917,
+            "32": 7.744417,
+            "36": 7.744625
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 10,
+          "policy": "baseline",
+          "wall_ms": 963.427,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ],
+          "serial_ms": 122.692583,
+          "serial_layers_ms": {
+            "2": 13.190166,
+            "8": 13.12675,
+            "14": 13.115333,
+            "20": 27.428334,
+            "24": 13.983708,
+            "28": 13.972708,
+            "32": 13.934375,
+            "36": 13.941209
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 11,
+          "policy": "masked-index-compact",
+          "wall_ms": 939.550958,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "0741dd112c7a8e63c74bac3ae69d02750723efc2f5a3804fd50d4991c707d00b",
+            "93e7e3862ac308ad30003af28893b856e51acecd0014e25d310bf832509ddc0a",
+            "fd6287e17d8670c9bb11ec3d07c8ca68e2a134ef13cacca8b30a63e0f1d01d64"
+          ],
+          "serial_ms": 99.237708,
+          "serial_layers_ms": {
+            "2": 13.197,
+            "8": 13.120917,
+            "14": 13.11225,
+            "20": 27.408292,
+            "24": 8.108542,
+            "28": 8.120041,
+            "32": 8.083416,
+            "36": 8.08725
+          },
+          "empty_serial_layers": 32
+        }
+      ],
+      "wall_speedup_geomean": 1.0275705490383005,
+      "serial_speedup_geomean": 1.2542220844345457,
+      "compact_speedup_geomean": 1.2365246728377333,
+      "radix_incremental_speedup_geomean": 1.0143122187414166,
+      "compact_saved_ms": 23.47037566666667,
+      "radix_saved_ms": 1.4001656666666615,
+      "compact_share_of_saved_span": 0.943701841954278,
+      "radix_share_of_saved_span": 0.056298158045722003,
+      "pass_gate": true
+    },
+    {
+      "file": "stages-131072-256.jsonl",
+      "sha256": "7396b94bcc3b21307f8e3e7e2def0d52a8a732132769b235279de11bbd8c5993",
+      "depth": 131072,
+      "rows": 256,
+      "native": false,
+      "bitwise_endpoints": 12,
+      "pairs": [
+        {
+          "order": [
+            "index-radix",
+            "baseline",
+            "masked-index-compact"
+          ],
+          "baseline_wall_ms": 473.336333,
+          "composed_wall_ms": 461.50162500000005,
+          "wall_ratio": 1.0256439140382225,
+          "baseline_serial_ms": 61.563081,
+          "compact_serial_ms": 51.865916999999996,
+          "composed_serial_ms": 50.92983300000001,
+          "ratio": 1.2087823064332448,
+          "compact_ratio": 1.1869660185512578,
+          "radix_incremental_ratio": 1.0183798757007505,
+          "compact_saved_ms": 9.697164,
+          "radix_saved_ms": 0.9360839999999868
+        },
+        {
+          "order": [
+            "masked-index-compact",
+            "baseline",
+            "index-radix"
+          ],
+          "baseline_wall_ms": 482.09825,
+          "composed_wall_ms": 469.440958,
+          "wall_ratio": 1.0269624790600398,
+          "baseline_serial_ms": 63.0,
+          "compact_serial_ms": 51.669082,
+          "composed_serial_ms": 51.02070899999999,
+          "ratio": 1.2347927191682109,
+          "compact_ratio": 1.2192978385023368,
+          "radix_incremental_ratio": 1.0127080358683376,
+          "compact_saved_ms": 11.330917999999997,
+          "radix_saved_ms": 0.6483730000000136
+        },
+        {
+          "order": [
+            "index-radix",
+            "baseline",
+            "masked-index-compact"
+          ],
+          "baseline_wall_ms": 478.649583,
+          "composed_wall_ms": 468.1675,
+          "wall_ratio": 1.0223895998761128,
+          "baseline_serial_ms": 62.356291000000006,
+          "compact_serial_ms": 52.76675,
+          "composed_serial_ms": 50.868874999999996,
+          "ratio": 1.2258240623564018,
+          "compact_ratio": 1.181734539269521,
+          "radix_incremental_ratio": 1.0373091600708686,
+          "compact_saved_ms": 9.589541000000004,
+          "radix_saved_ms": 1.8978750000000062
+        }
+      ],
+      "arms": [
+        {
+          "rep": 0,
+          "policy": "baseline",
+          "wall_ms": 1155.3766249999999,
+          "disk_read_bytes": 50266112,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ],
+          "serial_ms": 61.299918000000005,
+          "serial_layers_ms": {
+            "2": 7.439042,
+            "8": 7.350084,
+            "14": 7.377958,
+            "20": 14.875834,
+            "24": 6.078958,
+            "28": 6.055125,
+            "32": 6.06525,
+            "36": 6.057667
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 1,
+          "policy": "index-radix",
+          "wall_ms": 465.75958299999996,
+          "disk_read_bytes": 147456,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ],
+          "serial_ms": 50.72470899999999,
+          "serial_layers_ms": {
+            "2": 7.444041,
+            "8": 7.526459,
+            "14": 7.394958,
+            "20": 15.014209,
+            "24": 3.337084,
+            "28": 3.33075,
+            "32": 3.337166,
+            "36": 3.340042
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 2,
+          "policy": "masked-index-compact",
+          "wall_ms": 459.219542,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ],
+          "serial_ms": 51.65004,
+          "serial_layers_ms": {
+            "2": 7.457416,
+            "8": 7.450125,
+            "14": 7.391958,
+            "20": 14.981625,
+            "24": 3.638,
+            "28": 3.578833,
+            "32": 3.5775,
+            "36": 3.574583
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 3,
+          "policy": "index-radix",
+          "wall_ms": 461.50162500000005,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ],
+          "serial_ms": 50.92983300000001,
+          "serial_layers_ms": {
+            "2": 7.438291,
+            "8": 7.49275,
+            "14": 7.454375,
+            "20": 15.099459,
+            "24": 3.332833,
+            "28": 3.328625,
+            "32": 3.364083,
+            "36": 3.419417
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 4,
+          "policy": "baseline",
+          "wall_ms": 473.336333,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ],
+          "serial_ms": 61.563081,
+          "serial_layers_ms": {
+            "2": 7.447375,
+            "8": 7.465125,
+            "14": 7.384666,
+            "20": 14.901208,
+            "24": 6.118083,
+            "28": 6.071833,
+            "32": 6.087458,
+            "36": 6.087333
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 5,
+          "policy": "masked-index-compact",
+          "wall_ms": 463.40074999999996,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ],
+          "serial_ms": 51.865916999999996,
+          "serial_layers_ms": {
+            "2": 7.438417,
+            "8": 7.479667,
+            "14": 7.369708,
+            "20": 15.138375,
+            "24": 3.656417,
+            "28": 3.601208,
+            "32": 3.609541,
+            "36": 3.572584
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 6,
+          "policy": "masked-index-compact",
+          "wall_ms": 459.402125,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ],
+          "serial_ms": 51.669082,
+          "serial_layers_ms": {
+            "2": 7.445375,
+            "8": 7.446625,
+            "14": 7.438334,
+            "20": 15.018791,
+            "24": 3.595333,
+            "28": 3.575375,
+            "32": 3.576208,
+            "36": 3.573041
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 7,
+          "policy": "baseline",
+          "wall_ms": 482.09825,
+          "disk_read_bytes": 0,
+          "thermal": 0,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ],
+          "serial_ms": 63.0,
+          "serial_layers_ms": {
+            "2": 7.44025,
+            "8": 7.481125,
+            "14": 7.536166,
+            "20": 15.236,
+            "24": 6.223333,
+            "28": 6.3175,
+            "32": 6.406792,
+            "36": 6.358834
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 8,
+          "policy": "index-radix",
+          "wall_ms": 469.440958,
+          "disk_read_bytes": 0,
+          "thermal": 1,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ],
+          "serial_ms": 51.02070899999999,
+          "serial_layers_ms": {
+            "2": 7.437708,
+            "8": 7.420292,
+            "14": 7.366334,
+            "20": 14.965958,
+            "24": 3.430125,
+            "28": 3.421167,
+            "32": 3.529458,
+            "36": 3.449667
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 9,
+          "policy": "index-radix",
+          "wall_ms": 468.1675,
+          "disk_read_bytes": 0,
+          "thermal": 2,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ],
+          "serial_ms": 50.868874999999996,
+          "serial_layers_ms": {
+            "2": 7.444291,
+            "8": 7.459125,
+            "14": 7.360125,
+            "20": 14.913042,
+            "24": 3.392542,
+            "28": 3.414542,
+            "32": 3.467333,
+            "36": 3.417875
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 10,
+          "policy": "baseline",
+          "wall_ms": 478.649583,
+          "disk_read_bytes": 0,
+          "thermal": 2,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ],
+          "serial_ms": 62.356291000000006,
+          "serial_layers_ms": {
+            "2": 7.455834,
+            "8": 7.435041,
+            "14": 7.413916,
+            "20": 14.873583,
+            "24": 6.400417,
+            "28": 6.20375,
+            "32": 6.319583,
+            "36": 6.254167
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 11,
+          "policy": "masked-index-compact",
+          "wall_ms": 467.085834,
+          "disk_read_bytes": 0,
+          "thermal": 2,
+          "signature": [
+            "5d6d9799f0c943e430208a612343f866f6968ef72ced8e198149dc23bb1493b4",
+            "20040490844c30e7d8ac486b93beca067ea210e80b7c570d93495ef70d6bd58d",
+            "2687d701e0072c2900dc9e60117c4bc9920a6190c2fa218937bab8824d8a4aed"
+          ],
+          "serial_ms": 52.76675,
+          "serial_layers_ms": {
+            "2": 7.442,
+            "8": 7.448958,
+            "14": 7.412958,
+            "20": 15.459709,
+            "24": 3.824792,
+            "28": 3.645958,
+            "32": 3.715042,
+            "36": 3.817333
+          },
+          "empty_serial_layers": 32
+        }
+      ],
+      "wall_speedup_geomean": 1.024996861622736,
+      "serial_speedup_geomean": 1.2230853535049118,
+      "compact_speedup_geomean": 1.1958847825760226,
+      "radix_incremental_speedup_geomean": 1.022745143449603,
+      "compact_saved_ms": 10.205874333333334,
+      "radix_saved_ms": 1.1607773333333355,
+      "compact_share_of_saved_span": 0.8978786922152828,
+      "radix_share_of_saved_span": 0.10212130778471719,
+      "pass_gate": false
+    },
+    {
+      "file": "stages-131072-1024.jsonl",
+      "sha256": "4f5d873cae671f1458799d7a6b497ea6b308e81c75809bce17e5b8737abc29ee",
+      "depth": 131072,
+      "rows": 1024,
+      "native": false,
+      "bitwise_endpoints": 12,
+      "pairs": [
+        {
+          "order": [
+            "index-radix",
+            "baseline",
+            "masked-index-compact"
+          ],
+          "baseline_wall_ms": 1024.556042,
+          "composed_wall_ms": 986.144917,
+          "wall_ratio": 1.0389507914484337,
+          "baseline_serial_ms": 191.419207,
+          "compact_serial_ms": 154.12121000000002,
+          "composed_serial_ms": 149.10745699999998,
+          "ratio": 1.2837668273022724,
+          "compact_ratio": 1.2420043094652577,
+          "radix_incremental_ratio": 1.033625098978115,
+          "compact_saved_ms": 37.29799699999998,
+          "radix_saved_ms": 5.013753000000037
+        },
+        {
+          "order": [
+            "masked-index-compact",
+            "baseline",
+            "index-radix"
+          ],
+          "baseline_wall_ms": 1024.59475,
+          "composed_wall_ms": 983.5174169999999,
+          "wall_ratio": 1.0417657402807337,
+          "baseline_serial_ms": 191.408833,
+          "compact_serial_ms": 151.59654099999997,
+          "composed_serial_ms": 149.05874799999998,
+          "ratio": 1.2841167363085595,
+          "compact_ratio": 1.2626200554272542,
+          "radix_incremental_ratio": 1.0170254549568603,
+          "compact_saved_ms": 39.812292000000014,
+          "radix_saved_ms": 2.5377929999999935
+        },
+        {
+          "order": [
+            "index-radix",
+            "baseline",
+            "masked-index-compact"
+          ],
+          "baseline_wall_ms": 1024.746458,
+          "composed_wall_ms": 983.6337080000001,
+          "wall_ratio": 1.0417968087771143,
+          "baseline_serial_ms": 191.731959,
+          "compact_serial_ms": 151.47533400000003,
+          "composed_serial_ms": 149.275254,
+          "ratio": 1.2844189097812555,
+          "compact_ratio": 1.265763566495915,
+          "radix_incremental_ratio": 1.0147384106946489,
+          "compact_saved_ms": 40.25662499999996,
+          "radix_saved_ms": 2.2000800000000424
+        }
+      ],
+      "arms": [
+        {
+          "rep": 0,
+          "policy": "baseline",
+          "wall_ms": 1387.188792,
+          "disk_read_bytes": 121896960,
+          "thermal": 1,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ],
+          "serial_ms": 191.36737499999995,
+          "serial_layers_ms": {
+            "2": 21.172541,
+            "8": 21.051834,
+            "14": 21.0615,
+            "20": 44.810292,
+            "24": 20.853458,
+            "28": 20.8125,
+            "32": 20.821542,
+            "36": 20.783708
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 1,
+          "policy": "index-radix",
+          "wall_ms": 984.4889999999999,
+          "disk_read_bytes": 0,
+          "thermal": 1,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ],
+          "serial_ms": 149.071709,
+          "serial_layers_ms": {
+            "2": 21.140542,
+            "8": 21.046042,
+            "14": 21.046583,
+            "20": 44.7885,
+            "24": 10.2725,
+            "28": 10.262417,
+            "32": 10.255375,
+            "36": 10.25975
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 2,
+          "policy": "masked-index-compact",
+          "wall_ms": 985.200333,
+          "disk_read_bytes": 0,
+          "thermal": 1,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ],
+          "serial_ms": 151.569334,
+          "serial_layers_ms": {
+            "2": 21.157375,
+            "8": 21.050333,
+            "14": 21.041875,
+            "20": 44.843125,
+            "24": 10.883,
+            "28": 10.8375,
+            "32": 10.921667,
+            "36": 10.834459
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 3,
+          "policy": "index-radix",
+          "wall_ms": 986.144917,
+          "disk_read_bytes": 0,
+          "thermal": 1,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ],
+          "serial_ms": 149.10745699999998,
+          "serial_layers_ms": {
+            "2": 21.159083,
+            "8": 21.050625,
+            "14": 21.047875,
+            "20": 44.808375,
+            "24": 10.2705,
+            "28": 10.262083,
+            "32": 10.254875,
+            "36": 10.254041
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 4,
+          "policy": "baseline",
+          "wall_ms": 1024.556042,
+          "disk_read_bytes": 0,
+          "thermal": 1,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ],
+          "serial_ms": 191.419207,
+          "serial_layers_ms": {
+            "2": 21.159333,
+            "8": 21.054458,
+            "14": 21.041792,
+            "20": 44.880958,
+            "24": 20.87275,
+            "28": 20.822167,
+            "32": 20.807583,
+            "36": 20.780166
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 5,
+          "policy": "masked-index-compact",
+          "wall_ms": 1003.6682500000001,
+          "disk_read_bytes": 0,
+          "thermal": 1,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ],
+          "serial_ms": 154.12121000000002,
+          "serial_layers_ms": {
+            "2": 21.175417,
+            "8": 21.392459,
+            "14": 21.284125,
+            "20": 45.527,
+            "24": 11.095042,
+            "28": 11.002834,
+            "32": 11.061,
+            "36": 11.583333
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 6,
+          "policy": "masked-index-compact",
+          "wall_ms": 984.630375,
+          "disk_read_bytes": 0,
+          "thermal": 1,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ],
+          "serial_ms": 151.59654099999997,
+          "serial_layers_ms": {
+            "2": 21.160708,
+            "8": 21.044042,
+            "14": 21.051541,
+            "20": 44.756375,
+            "24": 10.869041,
+            "28": 10.864542,
+            "32": 10.956459,
+            "36": 10.893833
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 7,
+          "policy": "baseline",
+          "wall_ms": 1024.59475,
+          "disk_read_bytes": 0,
+          "thermal": 1,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ],
+          "serial_ms": 191.408833,
+          "serial_layers_ms": {
+            "2": 21.162333,
+            "8": 21.056083,
+            "14": 21.052834,
+            "20": 44.830833,
+            "24": 20.854792,
+            "28": 20.817625,
+            "32": 20.846833,
+            "36": 20.7875
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 8,
+          "policy": "index-radix",
+          "wall_ms": 983.5174169999999,
+          "disk_read_bytes": 0,
+          "thermal": 1,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ],
+          "serial_ms": 149.05874799999998,
+          "serial_layers_ms": {
+            "2": 21.149916,
+            "8": 21.05025,
+            "14": 21.043416,
+            "20": 44.746542,
+            "24": 10.270458,
+            "28": 10.271708,
+            "32": 10.260333,
+            "36": 10.266125
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 9,
+          "policy": "index-radix",
+          "wall_ms": 983.6337080000001,
+          "disk_read_bytes": 0,
+          "thermal": 1,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ],
+          "serial_ms": 149.275254,
+          "serial_layers_ms": {
+            "2": 21.154833,
+            "8": 21.053334,
+            "14": 21.045334,
+            "20": 44.951292,
+            "24": 10.276584,
+            "28": 10.269834,
+            "32": 10.265334,
+            "36": 10.258709
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 10,
+          "policy": "baseline",
+          "wall_ms": 1024.746458,
+          "disk_read_bytes": 0,
+          "thermal": 1,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ],
+          "serial_ms": 191.731959,
+          "serial_layers_ms": {
+            "2": 21.167375,
+            "8": 21.075875,
+            "14": 21.079917,
+            "20": 45.152459,
+            "24": 20.8415,
+            "28": 20.800375,
+            "32": 20.808541,
+            "36": 20.805917
+          },
+          "empty_serial_layers": 32
+        },
+        {
+          "rep": 11,
+          "policy": "masked-index-compact",
+          "wall_ms": 979.348542,
+          "disk_read_bytes": 0,
+          "thermal": 1,
+          "signature": [
+            "2fa6ca4b14b21ad8a7b796efc1ec9527432adb4c85d537335056675a72239911",
+            "482ace39999ea6017659dd0459a2516fce0f0dde0f7d8f45940fed4279d22bf9",
+            "b1a639b3d1b6a04827a4c573f7e70a5d98748f0946f52cccc4a187787f908ed3"
+          ],
+          "serial_ms": 151.47533400000003,
+          "serial_layers_ms": {
+            "2": 21.257709,
+            "8": 21.043667,
+            "14": 21.03025,
+            "20": 44.731917,
+            "24": 10.846667,
+            "28": 10.840166,
+            "32": 10.876458,
+            "36": 10.8485
+          },
+          "empty_serial_layers": 32
+        }
+      ],
+      "wall_speedup_geomean": 1.0408369243191737,
+      "serial_speedup_geomean": 1.2841007968197569,
+      "compact_speedup_geomean": 1.2567516352527186,
+      "radix_incremental_speedup_geomean": 1.0217617871342881,
+      "compact_saved_ms": 39.12230466666665,
+      "radix_saved_ms": 3.2505420000000242,
+      "compact_share_of_saved_span": 0.923287145997743,
+      "radix_share_of_saved_span": 0.07671285400225704,
+      "pass_gate": true
+    }
+  ]
+}

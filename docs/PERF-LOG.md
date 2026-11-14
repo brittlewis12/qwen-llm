@@ -21,6 +21,21 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   64×2,051 F32 scores (512.75 KiB vs 32 KiB current scratch). Exact recompute
   adds about 178/90 ms of score production for 30/15 ms priced traffic savings.
   No NI path or gate/up follow-on. [Design record](bench/2026-11-14-glm-latent-score-softmax.md).
+## 2026-11-14 - V4.1 Compact + Exact Radix Coalescing: Kept Default-Off
+
+- Frozen every-cell >=1.25x serial gate fails on 256-row cells. Three-arm
+  paired geomeans, compact/composed: **1.170794/1.183782x** at 80K/256,
+  **1.236525/1.254222x** at 80K/1K, **1.195885/1.223085x** at 128K/256,
+  **1.256752/1.284101x** at 128K/1K. All 48 causal signatures bitwise.
+- Compact saves **23.47/39.12 ms** at 1K @80K/128K; coalescing adds
+  **1.40/3.25 ms**. Both components are 3/3 positive per cell; compact
+  accounts for about 90–94% of the observed saving. Measured disk reads 0,
+  nice 0, thermal <=2; all samples retained under the allowed protocol.
+- Both implementations and independent rollbacks remain default-off for
+  lead/Britt review; native/serve not run after failure. M2 stays removed.
+  Pins retained, M5 bulk output/worktree/bundle removed. [Strict differential,
+  all triplets, component shares and pinned hashes](bench/2026-11-13-v41-radix-compose.md).
+
 ## 2026-11-14 - V4.1 Compact + Exact M2: Composed Gate Fails
 
 - Compact was restored for composition under the unchanged >=1.25x-every-cell

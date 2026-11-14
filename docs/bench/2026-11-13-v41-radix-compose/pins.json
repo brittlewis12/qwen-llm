@@ -1,0 +1,10 @@
+{
+  "pins/iter": "b1cad0ae6e96bd6e011951c07339cb3dcb8e5f1696576ea9213619310f435643",
+  "pins/test": "e95618fcf666735415d131639ab0391cdf486c4e3bf27935a94e2a437d54660e",
+  "target/iter/build/qwen-llm-15f36f8cb4d8798e/out/kernels_tensor.metallib": "43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c",
+  "target/iter/build/qwen-llm-15f36f8cb4d8798e/out/kernels.metallib": "35ac100a2ceb16fdcfdbc435fb7d941910183e873570c50a2044c52cce168c7b",
+  "target/iter/build/qwen-llm-15f36f8cb4d8798e/out/kernels_research.metallib": "be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f",
+  "target/debug/build/qwen-llm-af22b627655964df/out/kernels_tensor.metallib": "43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c",
+  "target/debug/build/qwen-llm-af22b627655964df/out/kernels.metallib": "35ac100a2ceb16fdcfdbc435fb7d941910183e873570c50a2044c52cce168c7b",
+  "target/debug/build/qwen-llm-af22b627655964df/out/kernels_research.metallib": "be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f"
+}

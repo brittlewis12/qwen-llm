@@ -1,0 +1,40 @@
+{
+  "cases": 13,
+  "selected_buffer_words": 1332736,
+  "complete_masks": true,
+  "nan_status": true,
+  "cpu_sort_reference": true,
+  "canaries": true,
+  "offsets": true,
+  "all_masked": true,
+  "diagnostic_timings": [
+    {
+      "depth": 81920,
+      "rows": 256,
+      "old_us": 733.903,
+      "coalesced_us": 482.583,
+      "speedup": 1.520779
+    },
+    {
+      "depth": 81920,
+      "rows": 1024,
+      "old_us": 1521.208,
+      "coalesced_us": 1483.528,
+      "speedup": 1.025399
+    },
+    {
+      "depth": 131072,
+      "rows": 256,
+      "old_us": 794.375,
+      "coalesced_us": 726.875,
+      "speedup": 1.092863
+    },
+    {
+      "depth": 131072,
+      "rows": 1024,
+      "old_us": 2311.833,
+      "coalesced_us": 2228.139,
+      "speedup": 1.037562
+    }
+  ]
+}

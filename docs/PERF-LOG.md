@@ -75,6 +75,17 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   rows versus F32 MMA. On the 80K real-model screen, aggregate top-512 overlap
   ranged 6.6–90.0% (worst layer 24). No integration; three-session 128K key
   payload saving priced at 416.25 MiB. [Bench record](bench/2026-11-14-v41-fp4-indexer.md).
+## 2026-11-14 - GLM Three-Agent Append TTFT Decomposition
+
+- Across six counted 180 s arms, `batch.queue_ms` p95 is 4.7–6.7 μs; slot
+  admission is not the tail. Short / ~1K / 4K–7.5K append TTFT p50/p95 is
+  0.724/1.456 s, 1.931/2.254 s, 5.295/9.594 s. Their server prefill p50/p95
+  is 0.384/0.725 s, 1.387/1.645 s, 4.092/7.783 s.
+- 32–56 slices on long appends incur a decode round after every unfinished
+  slice; estimated interleaved decode service is about 1.0–1.8 s. First-token,
+  pre-submit admission and transport remain unseparated in the retained calls.
+  First A/B recommendation: test `QWEN_SERVE_GLM_LAYER_SLICE_MS=400` vs 200 ms.
+  [Method, per-class record and limits](bench/2026-11-14-glm-serve-ttft-decomposition.md).
 
 ## 2026-11-14 - GLM Gate/Up Epilogue Edge Closed at Route-Partition Check
 

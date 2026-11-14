@@ -37,6 +37,14 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   stays removed. All arm disk counters/load retained. Gate closed; M5 worktree,
   target, bundle and pins removed, no task workers left. [All cells, pairs,
   launch controls and cleanup](bench/2026-11-14-v41-radix-wall.md).
+## 2026-11-14 - V4.1 BF16/F16 Index MMA Bound Closed
+
+- Native BF16 and F16 simdgroup operand variants retain F32 weights/accumulation.
+  At 256/1,024 queries, 80K/128K keys, both formats give only 1.008–1.011×;
+  decode rows can improve up to 1.48×, but the prefill gate is >=1.25× and fails.
+- Foreground test process verified nice 0; thermal 0 after the 60s settle. No
+  quality screen or runtime knob. [Speed table and limits](bench/2026-11-14-v41-fp4-indexer.md).
+
 ## 2026-11-14 - V4.1 Packed-Reference Index Scorer Closed
 
 - E2M1/UE8M0 pack and F32 dequant matched the scalar contract bitwise; the

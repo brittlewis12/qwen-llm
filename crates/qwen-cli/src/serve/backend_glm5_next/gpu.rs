@@ -32,6 +32,7 @@ pub(super) fn advance(
             let bytes = tokenizer
                 .try_decode_piece_bytes_exact(token)
                 .map_err(|e| ServeError::server_error(format!("decode {FAMILY}: {e}")))?;
+            lifecycle.sampled_piece(token as u32, bytes);
             sink.piece(bytes)
                 .and_then(|()| sink.tick())
                 .map_err(BackendFailure::Aborted)?;
@@ -58,7 +59,9 @@ pub(super) fn advance(
         .into())),
         Ok(stats) => {
             if stats.stopped_on_eos {
-                tokens.push(stats.terminal_token.expect("GPU EOS token"));
+                let terminal = stats.terminal_token.expect("GPU EOS token");
+                lifecycle.sampled_piece(terminal as u32, &[]);
+                tokens.push(terminal);
             }
             Some(Ok(cursor.append_gpu_burst(&tokens, stats, offset)))
         }

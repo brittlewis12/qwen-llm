@@ -226,6 +226,7 @@ impl DecodeCursor {
             .get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
         self.tokens.push(token);
         if self.stop_tokens.contains(&token) {
+            super::lifecycle_timing::current().sampled_piece(token as u32, &[]);
             return Ok(Advance::Done(self.finish(crate::StopReason::Eos)));
         }
         let family = self.family;
@@ -233,6 +234,7 @@ impl DecodeCursor {
             .try_decode_piece_bytes(token)
             .with_context(|| format!("decode {family} token {token}"))
             .map_err(|error| self.server(error))?;
+        super::lifecycle_timing::current().sampled_piece(token as u32, &bytes);
         sink.piece(&bytes)
             .and_then(|()| sink.tick())
             .map_err(BackendFailure::Aborted)?;

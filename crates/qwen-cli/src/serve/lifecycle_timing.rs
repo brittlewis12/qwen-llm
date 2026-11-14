@@ -13,9 +13,15 @@ qwen_llm::env_flag!(
     default_off enabled,
     "QWEN_SERVE_TTFT_TIMING"
 );
+qwen_llm::env_flag!(
+    /// Capture at most 32 generated GLM token IDs and decoded piece bytes (hex) per opt-in timing trace. Diagnostic only; off by default.
+    default_off first_pieces_enabled,
+    "QWEN_SERVE_GLM_TRACE_FIRST_PIECES"
+);
 const MISSING: u64 = u64::MAX;
 const HISTORY: usize = 8192;
 const MAX_SPANS: usize = 8192;
+const MAX_FIRST_PIECES: usize = 32;
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 static NEXT_ROUND: AtomicU64 = AtomicU64::new(1);
 static EPOCH: OnceLock<(Instant, u128)> = OnceLock::new();
@@ -89,6 +95,8 @@ struct Details {
     prompt: usize,
     reused: usize,
     spans: Vec<SpanRecord>,
+    first_pieces: Vec<PieceRecord>,
+    first_pieces_dropped: usize,
     dropped: usize,
 }
 #[derive(Debug, Serialize)]
@@ -99,6 +107,12 @@ struct SpanRecord {
     end_ns: u64,
     position: usize,
     rows: usize,
+}
+#[derive(Debug, Serialize)]
+struct PieceRecord {
+    index: usize,
+    token_id: u32,
+    bytes_hex: String,
 }
 thread_local! {
     static CURRENT: RefCell<Trace> = const { RefCell::new(Trace(None)) };
@@ -185,6 +199,29 @@ impl Trace {
             self.emit("first_visible");
         }
     }
+    pub(crate) fn sampled_piece(&self, token_id: u32, bytes: &[u8]) {
+        if !first_pieces_enabled() {
+            return;
+        }
+        let Some(x) = &self.0 else { return };
+        let mut d = x.details.lock().unwrap_or_else(|e| e.into_inner());
+        if d.first_pieces.len() >= MAX_FIRST_PIECES {
+            d.first_pieces_dropped = d.first_pieces_dropped.saturating_add(1);
+            return;
+        }
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut bytes_hex = String::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            bytes_hex.push(char::from(HEX[(byte >> 4) as usize]));
+            bytes_hex.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+        let index = d.first_pieces.len();
+        d.first_pieces.push(PieceRecord {
+            index,
+            token_id,
+            bytes_hex,
+        });
+    }
     pub(crate) fn finish(&self) {
         self.mark(Stage::Finished);
         self.emit("finished");
@@ -209,9 +246,12 @@ impl Trace {
         let cut = if visible == MISSING { now() } else { visible };
         let h = history().lock().unwrap_or_else(|e| e.into_inner());
         let rounds:Vec<_>=h.iter().filter(|r| r.start<=cut && r.end.unwrap_or(cut)>=start).map(|r| json!({"round_id":r.id,"kind":r.kind,"request_ids":r.requests,"position":r.position,"rows":r.rows,"start_ns":r.start,"end_ns":r.end.map(|e|e.min(cut)).unwrap_or(cut),"clipped":r.end.is_none_or(|e|e>cut)})).collect();
-        Some(
-            json!({"version":1,"event":event,"request_id":x.id,"response_id":response,"family":d.family,"prompt_tokens":d.prompt,"reused_tokens":d.reused,"new_rows":d.prompt.saturating_sub(d.reused),"epoch_unix_ns":epoch().1.to_string(),"stages_ns":stages,"spans":d.spans,"spans_dropped":d.dropped,"rounds":rounds,"history_first_round":h.front().map(|r|r.id)}),
-        )
+        let mut snapshot = json!({"version":1,"event":event,"request_id":x.id,"response_id":response,"family":d.family,"prompt_tokens":d.prompt,"reused_tokens":d.reused,"new_rows":d.prompt.saturating_sub(d.reused),"epoch_unix_ns":epoch().1.to_string(),"stages_ns":stages,"spans":d.spans,"spans_dropped":d.dropped,"rounds":rounds,"history_first_round":h.front().map(|r|r.id)});
+        if first_pieces_enabled() {
+            snapshot["first_pieces"] = json!(d.first_pieces);
+            snapshot["first_pieces_dropped"] = json!(d.first_pieces_dropped);
+        }
+        Some(snapshot)
     }
     fn emit(&self, event: &str) {
         if let Some(v) = self.snapshot(event) {

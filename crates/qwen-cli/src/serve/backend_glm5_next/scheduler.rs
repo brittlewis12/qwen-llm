@@ -507,6 +507,7 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
                             .map_err(|e| {
                                 ServeError::server_error(format!("decode {FAMILY}: {e}"))
                             })?;
+                        lifecycles[member].sampled_piece(token as u32, bytes);
                         sinks[member]
                             .piece(bytes)
                             .and_then(|()| sinks[member].tick())
@@ -555,6 +556,7 @@ impl<'w> Runtime for Adapter<'_, 'w, '_> {
             let terminal = stats.terminal_tokens.get(i).copied().unwrap_or(-1);
             let stopped_on_eos = CHAT_STOPS.contains(&terminal);
             if stopped_on_eos {
+                lifecycles[i].sampled_piece(terminal as u32, &[]);
                 burst[i].push(terminal);
             }
             let member = qwen_llm::metal::GpuTokenLoopStats {

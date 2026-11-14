@@ -572,12 +572,13 @@ struct RecordingTokenizer {
 }
 impl qwen_llm::tokenizer::Tokenize for RecordingTokenizer {
     fn encode(&self, text: &str, special: bool) -> Result<Vec<i32>, qwen_llm::tokenizer::TokError> {
+        let result = self.native.encode(text, special);
         if text.contains("req-2") {
             self.encoded
                 .send("second rendered and tokenized".into())
                 .unwrap();
         }
-        self.native.encode(text, special)
+        result
     }
     fn try_decode_piece(&self, id: i32) -> Result<String, qwen_llm::tokenizer::TokError> {
         self.native.try_decode_piece(id)

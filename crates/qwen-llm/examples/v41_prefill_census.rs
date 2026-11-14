@@ -111,10 +111,16 @@ fn execute(
             "baseline" => match control_for {
                 "masked-reindex-mid" => E::MaskedReindexMid(false),
                 "attention-bundle" => E::AttentionBundle(false),
+                "masked-index-compact" => E::MaskedIndexCompact(false),
+                "index-mma-m2" => E::IndexMmaM2(false),
+                "index-compose" => E::IndexCompose(false),
                 _ => E::Production,
             },
             "masked-reindex-mid" => E::MaskedReindexMid(true),
             "attention-bundle" => E::AttentionBundle(true),
+            "masked-index-compact" => E::MaskedIndexCompact(true),
+            "index-mma-m2" => E::IndexMmaM2(true),
+            "index-compose" => E::IndexCompose(true),
             _ => anyhow::bail!("experiment"),
         };
         with_prefill_experiment(e, run)
@@ -149,7 +155,12 @@ fn main() -> Result<()> {
     ensure!(
         matches!(
             candidate,
-            "baseline" | "masked-reindex-mid" | "attention-bundle"
+            "baseline"
+                | "masked-reindex-mid"
+                | "attention-bundle"
+                | "masked-index-compact"
+                | "index-mma-m2"
+                | "index-compose"
         ),
         "experiment"
     );

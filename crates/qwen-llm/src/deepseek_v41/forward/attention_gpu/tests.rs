@@ -5,7 +5,6 @@ mod candidate_publish;
 mod ced;
 mod f32_pv_batch;
 mod flash_decode;
-mod fp4_probe;
 mod output_a_strategy;
 mod query_batch;
 mod radix_select;

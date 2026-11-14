@@ -17,119 +17,6 @@ mod tests;
 
 type Weights<'a> = op::AttentionWeights<Linear<'a>>;
 
-#[cfg(test)]
-pub(super) struct Fp4IndexInput {
-    pub start: usize,
-    pub ratio: usize,
-    pub max_length: usize,
-    pub query: MetalTensor,
-    pub weights: MetalTensor,
-    pub keys: MetalTensor,
-}
-
-#[cfg(test)]
-thread_local! {
-    static FP4_INDEX_INPUTS: std::cell::RefCell<Option<(usize, Vec<Fp4IndexInput>)>> = const {
-        std::cell::RefCell::new(None)
-    };
-}
-
-#[cfg(test)]
-pub(super) fn with_fp4_index_input_capture<T>(
-    target_position: usize,
-    f: impl FnOnce() -> T,
-) -> (T, Vec<Fp4IndexInput>) {
-    FP4_INDEX_INPUTS.with(|inputs| {
-        assert!(
-            inputs
-                .replace(Some((target_position, Vec::new())))
-                .is_none(),
-            "nested FP4 input capture"
-        );
-    });
-    let result = f();
-    let captured = FP4_INDEX_INPUTS.with(|inputs| {
-        inputs
-            .replace(None)
-            .expect("FP4 input capture was enabled")
-            .1
-    });
-    (result, captured)
-}
-
-#[cfg(test)]
-fn record_fp4_index_input(
-    ctx: &MetalContext,
-    enc: &KernelEncoder,
-    start: usize,
-    ratio: usize,
-    first: usize,
-    n: usize,
-    query: &MetalTensor,
-    weights: &MetalTensor,
-    keys: &MetalTensor,
-) -> Result<()> {
-    let query_row = first
-        .checked_add(n)
-        .and_then(|v| v.checked_sub(1))
-        .ok_or("FP4 capture query row")?;
-    let position = start.checked_add(query_row).ok_or("FP4 capture position")?;
-    let enabled = FP4_INDEX_INPUTS.with(|inputs| {
-        inputs
-            .borrow()
-            .as_ref()
-            .is_some_and(|(target, _)| *target == position)
-    });
-    if !enabled {
-        return Ok(());
-    }
-    let key_rows = start
-        .checked_add(query_row)
-        .and_then(|v| v.checked_add(1))
-        .ok_or("FP4 capture key rows")?
-        / ratio;
-    let query_out = MetalTensor::zeros_f32(ctx, vec![4096]).map_err(|e| e.to_string())?;
-    let weights_out = MetalTensor::zeros_f32(ctx, vec![32]).map_err(|e| e.to_string())?;
-    let keys_out =
-        MetalTensor::zeros_f32(ctx, vec![(key_rows * 128) as u64]).map_err(|e| e.to_string())?;
-    let pso = ctx
-        .pipeline("kernel_deepseek_v41_indexer_capture_f32_inputs")
-        .map_err(|e| e.to_string())?;
-    enc.set_pipeline(&pso);
-    enc.set_bytes(0, &[query_row as u32, key_rows as u32]);
-    enc.set_tensor(1, query);
-    enc.set_tensor(2, weights);
-    enc.set_tensor(3, keys);
-    enc.set_tensor(4, &query_out);
-    enc.set_tensor(5, &weights_out);
-    enc.set_tensor(6, &keys_out);
-    enc.dispatch(
-        MTLSize {
-            width: (key_rows * 128).max(4096).div_ceil(256),
-            height: 1,
-            depth: 1,
-        },
-        MTLSize {
-            width: 256,
-            height: 1,
-            depth: 1,
-        },
-    );
-    FP4_INDEX_INPUTS.with(|inputs| {
-        let mut inputs = inputs.borrow_mut();
-        let (_, captures) = inputs.as_mut().expect("FP4 capture enabled");
-        captures.push(Fp4IndexInput {
-            start: position,
-            ratio,
-            max_length: key_rows,
-            query: query_out,
-            weights: weights_out,
-            keys: keys_out,
-        });
-    });
-    Ok(())
-}
-
 #[derive(Debug)]
 struct OutputANativeLayout {
     group_input: usize,
@@ -1461,8 +1348,6 @@ fn encode_index_scores_rows_kernel(
     candidates: Option<(&MetalTensor, usize)>,
 ) -> Result<()> {
     let [start, ratio, max_length, first, n, stride] = g;
-    #[cfg(test)]
-    record_fp4_index_input(ctx, enc, start, ratio, first, n, query, weights, keys)?;
     op::require(index_ilp_supported(c), "ILP index geometry")?;
     let mask_stride = if let Some((mask, mask_stride)) = candidates {
         let mask_rows = first.checked_add(n).ok_or("index mask rows overflow")?;

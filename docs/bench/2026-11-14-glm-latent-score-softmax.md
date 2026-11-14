@@ -1,11 +1,11 @@
 # GLM latent score→softmax fusion: closed at exact-design gate
 
-**Status: design gate closed; no implementation, build, or GPU timing.** I
-found no credible single-pass mapping that removes the global score surface
-while keeping the current tensor-MMA and softmax reduction order bitwise. This
-is not a proof that no different per-head tensor mapping could ever work; such
-a mapping would need a new exactness witness. No NI comparison was started. I
-did not start the routed gate/up epilogue probe after this exactness stop.
+**Status: design gate closed; no implementation, build, or GPU timing for this
+candidate.** I found no credible single-pass mapping that removes the global
+score surface while keeping the current tensor-MMA and softmax reduction order
+bitwise. This is not a proof that no different per-head tensor mapping could
+ever work; such a mapping would need a new exactness witness. No NI comparison
+was started. The routed gate/up epilogue is a separate candidate and record.
 
 ## Constraint
 

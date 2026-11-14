@@ -33,7 +33,8 @@ kernel whose bitwise identity and speed are unknown.
 The waste audit counted 352 score→softmax pairs at the 48K + 2,048-row cell
 and 176 at 1K@80K. The score producer accounts for 177.8604 ms and 12.0 GB at
 root, and 89.6068 ms and 6.0 GB at append. The modeled memory-round-trip price
-is 29.9893 ms / 14.9946 ms. An exact recompute path therefore adds roughly
+is 29.9893 ms / 14.9946 ms; this is an upper bound on removable cost, not a
+measured saving. An exact recompute path therefore adds roughly
 178 ms / 90 ms of score production to pursue a 30 ms / 15 ms traffic estimate,
 before its additional dispatch and scratch costs. This is not a measured
 candidate result; it rejects exact score recomputation as a plausible route to

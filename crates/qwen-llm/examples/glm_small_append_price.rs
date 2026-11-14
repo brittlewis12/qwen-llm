@@ -25,7 +25,7 @@
 //!  6. `kda-prep`: paired serial/parallel KDA preparation stage samples, then
 //!     three interleaved ordinary-wall pairs if the 1.25x stage gate passes.
 //!
-//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy|kda-prep|kda-prep-appends] [depth]`
+//! Usage: `glm_small_append_price <corpus> [all|census|batch|threshold|routes|route-quality|occupancy|kda-prep|kda-prep-appends|gate-up-fusion] [depth]`
 
 #[cfg(not(feature = "perf-ablations"))]
 fn main() {
@@ -42,6 +42,7 @@ mod probe {
             GLM5_NEXT_MAX_BATCH_SIZE, Glm5NextBatch, Glm5NextCapturedRows, Glm5NextExpertRoute,
             Glm5NextRowBank, Glm5NextRowBankPlan, Glm5NextSession, Glm5NextSnapshot,
             Glm5NextStageReport, Glm5NextWeights, set_expert_packet_max_rows, set_expert_route,
+            set_gate_up_fusion_bench_override,
         },
         metal::*,
         tokenizer::Tokenizer,
@@ -1471,6 +1472,219 @@ mod probe {
         Ok(())
     }
 
+    struct GateUpFusionOverride(Option<bool>);
+
+    impl GateUpFusionOverride {
+        fn new(enabled: bool) -> Self {
+            Self(set_gate_up_fusion_bench_override(Some(enabled)))
+        }
+    }
+
+    impl Drop for GateUpFusionOverride {
+        fn drop(&mut self) {
+            set_gate_up_fusion_bench_override(self.0);
+        }
+    }
+
+    fn same_bits(a: &[f32], b: &[f32]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+    }
+
+    fn gate_up_stage_span(report: &DispatchProfileReport, fused: bool) -> (usize, f64) {
+        let mut calls = 0usize;
+        let mut ms = 0.0;
+        for row in &report.rows {
+            let selected = if fused {
+                row.kernel == "kernel_moe_swiglu_clamped_iq2_s_f32_grouped_slots_generic"
+            } else {
+                matches!(
+                    row.kernel.as_str(),
+                    "kernel_moe_wide_probe_iq2_s_f16act"
+                        | "kernel_moe_up_clamped_iq2_s_f16act_grouped_slots_tensor"
+                )
+            };
+            if selected {
+                calls += 1;
+                ms += row.gpu_ns.unwrap_or(0) as f64 / 1e6;
+            }
+        }
+        (calls, ms)
+    }
+
+    fn gate_up_stage_cell(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        ids: &[u32],
+        session: &mut Glm5NextSession<'_>,
+        depth: usize,
+        rows: usize,
+    ) -> anyhow::Result<(bool, bool)> {
+        let tokens = &ids[depth..depth + rows];
+        let prefix = session.capture_snapshot()?;
+        let mut baseline_logits: Option<Vec<f32>> = None;
+        let mut baseline_state: Option<Glm5NextSnapshot> = None;
+        for enabled in [false, true] {
+            let _arm = GateUpFusionOverride::new(enabled);
+            gate();
+            session.restore_snapshot(&prefix)?;
+            let logits = session.prefill_packed(ctx, tokens)?;
+            anyhow::ensure!(
+                logits.iter().all(|value| value.is_finite()),
+                "non-finite gate/up warm logits"
+            );
+            let state = session.capture_snapshot()?;
+            if enabled {
+                let bitwise = baseline_logits
+                    .as_ref()
+                    .is_some_and(|expected| same_bits(expected, &logits))
+                    && baseline_state
+                        .as_ref()
+                        .is_some_and(|expected: &Glm5NextSnapshot| expected.same_state(&state));
+                if !bitwise {
+                    emit(
+                        json!({"kind":"gate_up_fusion_bitwise_warmup","depth":depth,"rows":rows,"bitwise":false}),
+                    );
+                    return Ok((false, false));
+                }
+            } else {
+                baseline_logits = Some(logits);
+                baseline_state = Some(state);
+            }
+        }
+
+        let expected = baseline_logits.as_ref().expect("baseline warm logits");
+        let expected_state = baseline_state.as_ref().expect("baseline warm state");
+        let mut span_samples = [Vec::new(), Vec::new()];
+        let mut wall_samples = [Vec::new(), Vec::new()];
+        let mut calls = [Vec::new(), Vec::new()];
+        let mut bitwise = true;
+        for rep in 0..3 {
+            let order = if rep % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for enabled in order {
+                let index = usize::from(enabled);
+                let _arm = GateUpFusionOverride::new(enabled);
+                gate();
+                session.restore_snapshot(&prefix)?;
+                let profile = dispatch_profile_begin(ctx, 16384)?;
+                let started = Instant::now();
+                let logits = session.prefill_packed(ctx, tokens)?;
+                let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+                let report = dispatch_profile_finish(ctx, profile)?;
+                anyhow::ensure!(
+                    logits.iter().all(|value| value.is_finite()),
+                    "non-finite gate/up staged logits"
+                );
+                let state = session.capture_snapshot()?;
+                let equal = same_bits(expected, &logits) && expected_state.same_state(&state);
+                bitwise &= equal;
+                let (count, stage_ms) = gate_up_stage_span(&report, enabled);
+                anyhow::ensure!(
+                    count > 0 && stage_ms.is_finite() && stage_ms > 0.0,
+                    "missing {} gate/up span ({} matching calls)",
+                    if enabled { "fused" } else { "baseline" },
+                    count
+                );
+                calls[index].push(count);
+                span_samples[index].push(stage_ms);
+                wall_samples[index].push(wall_ms);
+                emit(
+                    json!({"kind":"gate_up_fusion_stage_sample","depth":depth,"rows":rows,"rep":rep,"candidate":enabled,"stage_ms":stage_ms,"wall_ms":wall_ms,"calls":count,"bitwise_logits_and_state":equal,"dispatch_overflow":report.overflow}),
+                );
+                if !equal {
+                    return Ok((false, false));
+                }
+            }
+        }
+        let baseline_ms = median(span_samples[0].clone());
+        let fused_ms = median(span_samples[1].clone());
+        let speedup = baseline_ms / fused_ms;
+        let passed = bitwise && speedup >= 1.25;
+        emit(json!({
+            "kind":"gate_up_fusion_stage_gate","depth":depth,"rows":rows,
+            "baseline_span_ms":span_samples[0],"fused_span_ms":span_samples[1],
+            "baseline_calls":calls[0],"fused_calls":calls[1],
+            "baseline_wall_ms":wall_samples[0],"fused_wall_ms":wall_samples[1],
+            "speedup":speedup,"gate_1_25x_passed":passed,"bitwise_logits_and_state":bitwise
+        }));
+        let _ = weights;
+        Ok((true, passed))
+    }
+
+    fn gate_up_fusion_gate(
+        ctx: &MetalContext,
+        weights: &Glm5NextWeights,
+        ids: &[u32],
+        capacity: usize,
+    ) -> anyhow::Result<()> {
+        let mut results = Vec::new();
+        for (depth, rows) in [(49_152usize, 2_048usize), (81_920usize, 1_024usize)] {
+            let mut session = new_session(ctx, weights, ids, depth, capacity)?;
+            let (bitwise, passed) =
+                gate_up_stage_cell(ctx, weights, ids, &mut session, depth, rows)?;
+            if !bitwise {
+                emit(
+                    json!({"kind":"gate_up_fusion_stop","depth":depth,"rows":rows,"reason":"bitwise witness failed; no NI path"}),
+                );
+                return Ok(());
+            }
+            results.push((depth, rows, passed));
+        }
+        if !results.iter().all(|(_, _, passed)| *passed) {
+            emit(
+                json!({"kind":"gate_up_fusion_native_gate_skipped","reason":"one or both fused-span stage gates failed"}),
+            );
+            return Ok(());
+        }
+
+        for (depth, rows) in [(49_152usize, 2_048usize), (81_920usize, 1_024usize)] {
+            let mut session = new_session(ctx, weights, ids, depth, capacity)?;
+            let prefix = session.capture_snapshot()?;
+            let tokens = &ids[depth..depth + rows];
+            let mut samples = [Vec::new(), Vec::new()];
+            let mut controls = [None, None];
+            for rep in 0..3 {
+                let order = if rep % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                };
+                for enabled in order {
+                    let index = usize::from(enabled);
+                    let _arm = GateUpFusionOverride::new(enabled);
+                    gate();
+                    session.restore_snapshot(&prefix)?;
+                    let started = Instant::now();
+                    let logits = session.prefill_packed(ctx, tokens)?;
+                    samples[index].push(started.elapsed().as_secs_f64() * 1e3);
+                    let state = session.capture_snapshot()?;
+                    if rep == 2 {
+                        controls[index] = Some((logits, state));
+                    }
+                }
+            }
+            let baseline = controls[0].as_ref().expect("baseline native control");
+            let fused = controls[1].as_ref().expect("fused native control");
+            let bitwise = same_bits(&baseline.0, &fused.0) && baseline.1.same_state(&fused.1);
+            anyhow::ensure!(
+                bitwise,
+                "native gate/up fusion changed logits or state at {depth}+{rows}"
+            );
+            let paired = (0..3)
+                .map(|i| samples[0][i] / samples[1][i])
+                .collect::<Vec<_>>();
+            emit(json!({
+                "kind":"gate_up_fusion_native_cell","depth":depth,"rows":rows,
+                "baseline_wall_ms":samples[0],"fused_wall_ms":samples[1],"paired_speedups":paired,
+                "speedup":median(samples[0].clone())/median(samples[1].clone()),"bitwise_logits_and_state":bitwise
+            }));
+        }
+        Ok(())
+    }
+
     fn read_f32(t: &MetalTensor) -> Vec<f32> {
         let bytes = t.n_bytes() as usize;
         assert_eq!(bytes % 4, 0, "F32 view");
@@ -1638,6 +1852,7 @@ mod probe {
                     | "occupancy"
                     | "kda-prep"
                     | "kda-prep-appends"
+                    | "gate-up-fusion"
             ),
             "unknown mode {mode}"
         );
@@ -1648,7 +1863,7 @@ mod probe {
         };
         let capacity = if matches!(
             mode,
-            "routes" | "route-quality" | "occupancy" | "kda-prep-appends"
+            "routes" | "route-quality" | "occupancy" | "kda-prep-appends" | "gate-up-fusion"
         ) {
             std::env::var("GLM_APPEND_CAPACITY")
                 .ok()
@@ -1659,6 +1874,8 @@ mod probe {
         };
         let needed_width = if mode == "kda-prep" {
             2048
+        } else if mode == "gate-up-fusion" {
+            2048
         } else if mode == "kda-prep-appends" {
             1024
         } else if mode == "routes" || mode == "occupancy" {
@@ -1668,7 +1885,9 @@ mod probe {
         } else {
             256
         };
-        let max_depth = if mode == "occupancy" {
+        let max_depth = if mode == "gate-up-fusion" {
+            81_920
+        } else if mode == "occupancy" {
             occupancy_depths.iter().copied().max().unwrap_or(depth)
         } else {
             depth
@@ -1732,6 +1951,9 @@ mod probe {
         }
         if mode == "kda-prep-appends" {
             kda_prep_append_gates(&ctx, &weights, &ids, depth, capacity)?;
+        }
+        if mode == "gate-up-fusion" {
+            gate_up_fusion_gate(&ctx, &weights, &ids, capacity)?;
         }
         emit(json!({
             "kind": "done", "pressure": pressure(), "loadavg": loadavg(),

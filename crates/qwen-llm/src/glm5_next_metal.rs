@@ -2946,6 +2946,13 @@ pub fn set_expert_packet_max_rows(rows: usize) {
     packed::set_packet_half_max_rows(rows);
 }
 
+/// Probe-only same-thread override for the default-off GLM clamped gate/up
+/// fusion arm. Restore the returned prior value after the measured call.
+#[cfg(feature = "perf-ablations")]
+pub fn set_gate_up_fusion_bench_override(enabled: Option<bool>) -> Option<bool> {
+    crate::metal::expert_tensor_gate_up::set_gate_up_fusion_bench_override(enabled)
+}
+
 /// Probe-only routed-expert route selector for the append route sweep.
 #[cfg(feature = "perf-ablations")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

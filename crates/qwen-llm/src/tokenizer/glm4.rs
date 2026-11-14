@@ -154,6 +154,7 @@ mod tests {
 
         let n = tokens.len();
         let mut tokenizer = NativeTokenizer {
+            partition_identity: std::sync::Arc::new(()),
             id_to_token: tokens,
             pair_merges: Default::default(),
             byte_token_ids: std::array::from_fn(|i| i as i32),

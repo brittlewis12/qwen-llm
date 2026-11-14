@@ -23,7 +23,10 @@ def resources(record):
     row = record["row"]
     k = row["kernel"].removeprefix("kernel_")
     a = dict(record["constants"])
-    if "index_heads_rows_mma" in k:
+    if k in {
+        "deepseek_v41_attention_index_heads_rows_mma",
+        "deepseek_v41_attention_index_heads_rows_mma_masked",
+    }:
         start, ratio, _, _ = a[0]
         dim, heads, _, _ = a[1]
         _, n, block, _ = a[2]

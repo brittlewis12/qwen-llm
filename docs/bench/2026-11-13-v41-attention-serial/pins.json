@@ -1,0 +1,22 @@
+{
+  "baseline": {
+    "pins/iter": "8c93ead862d8eb92f271fd8b19be0ab7aa8c9f10b74b0623d3b4708a45471162",
+    "pins/test": "62f70bf2b958041535a615a47ceebfdfca03987a05fde99161f4603d749c948d",
+    "target/iter/build/qwen-llm-15f36f8cb4d8798e/out/kernels_tensor.metallib": "43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c",
+    "target/iter/build/qwen-llm-15f36f8cb4d8798e/out/kernels.metallib": "d52890108ebc1e3ab428b6d65d5a586158415efe1d697a720aa3f10395b95836",
+    "target/iter/build/qwen-llm-15f36f8cb4d8798e/out/kernels_research.metallib": "be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f",
+    "target/debug/build/qwen-llm-af22b627655964df/out/kernels_tensor.metallib": "43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c",
+    "target/debug/build/qwen-llm-af22b627655964df/out/kernels.metallib": "d52890108ebc1e3ab428b6d65d5a586158415efe1d697a720aa3f10395b95836",
+    "target/debug/build/qwen-llm-af22b627655964df/out/kernels_research.metallib": "be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f"
+  },
+  "compact": {
+    "compact/pins/iter": "49c78442d3c87c81793213e29cdfabb7a8314810155b32d5b160277742a299fa",
+    "compact/pins/test": "dc3523ac93a03317fbfe29bcecb37e8baf9e32a1036726f84f68c76506fcb3fc",
+    "target/iter/build/qwen-llm-15f36f8cb4d8798e/out/kernels_tensor.metallib": "43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c",
+    "target/iter/build/qwen-llm-15f36f8cb4d8798e/out/kernels.metallib": "adbace11c5eecbc44e324eeb5141d364ef4546eeb989c2080b4e320b163a9fb6",
+    "target/iter/build/qwen-llm-15f36f8cb4d8798e/out/kernels_research.metallib": "be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f",
+    "target/debug/build/qwen-llm-af22b627655964df/out/kernels_tensor.metallib": "43ae770545fa60f1f51d2bb3220a93c0aaf3bfc13d382a99ea2345920eaf184c",
+    "target/debug/build/qwen-llm-af22b627655964df/out/kernels.metallib": "adbace11c5eecbc44e324eeb5141d364ef4546eeb989c2080b4e320b163a9fb6",
+    "target/debug/build/qwen-llm-af22b627655964df/out/kernels_research.metallib": "be63c8ae9332529da45c21328333191834bd767917f5f9bc55d94eb3702b557f"
+  }
+}

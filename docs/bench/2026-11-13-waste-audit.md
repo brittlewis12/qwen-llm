@@ -1,5 +1,13 @@
 # Prefill waste audit: GLM-5.3 Flash and DeepSeek V4.1
 
+**Correction (2026-11-14 UTC):** the three V4.1 append index-head matches
+below are false positives. The original recorder omitted inline constants;
+successive query sub-tiles use `row0=612` and `row0=816` despite identical
+rounded grids and buffer spans. Their outputs differ. Do not reuse these
+results. The constant-aware audit and strict GPU witness are recorded in
+[the serial-attention follow-up](2026-11-13-v41-attention-serial.md).
+The original timing tables remain as historical evidence.
+
 **Scope.** GPU dispatch graph only. Two prefill cells per model: a 2,048-row
 chunk at 48K and a 1,024-row append at 80K. Flash-Next capture code is kept
 but not run (focus/licence change). One model per lease; both cells of a model
@@ -46,8 +54,9 @@ the comparable number for that cell. Raw captures and generated tables:
 ## Findings
 
 Dead writes and recomputation are almost absent: 0 in either GLM cell, 0 in
-the V4.1 chunk, and 3 identical index-head MMAs in the V4.1 append (7.53 ms,
-0.68% of wall). The dominant waste is memory round trips inside attention and
+the V4.1 chunk, and 3 initially suspected index-head MMAs in the V4.1 append
+(7.53 ms, 0.68% of wall), subsequently disproven by the inline arguments.
+The dominant waste is memory round trips inside attention and
 the routed-expert chain. That is consistent with the earlier two-queue finding
 that these tiers are bandwidth/serialization-bound rather than launch-bound.
 
@@ -77,10 +86,11 @@ pattern applies to V4.1.
    14.3 / 7.2 GB) and `v41_sorted_pack` 40 calls (32.3 / 15.1 ms, 5.0 /
    2.5 GB). A producer that writes F16/packed directly removes the auxiliary
    dispatch; check the producer's rounding contract.
-4. **Exact duplicate index heads (append only).** Three
-   `attention_index_heads_rows_mma` dispatches recompute the same 75 MB input
-   set with no intervening write to it. 7.53 ms, 0.68% of wall; reuse the
-   first result.
+4. **Disproven duplicate index heads (append only).** Three
+   `attention_index_heads_rows_mma` dispatches share the same 75 MB buffer
+   spans and rounded grids, but their inline `row0` arguments differ.
+   Their 7.53 ms is required work for different query rows, not recoverable
+   recomputation. See the correction above.
 
 **Build first:** the two attention fusions (score->softmax and PV->normalize)
 as one online-attention epilogue change. Together they are the largest
@@ -100,9 +110,14 @@ repeated chain in both V4.1 cells and mirror the GLM item.
 - **Opus "GLM GPU loop allocates a buffer per token" and pipeline lookups:**
   host-side; our node service times exclude them.
 - **Opus "RoPE and mask recompute in-kernel and negligible":** agrees; the
-  only repeated V4.1 index-head pair is the small exact item above.
+  suspected repeated V4.1 index-head pairs above were later disproven.
 
 ## Limits
+
+- These original captures omit inline constants. Equal spans and grids
+  cannot prove identical computations; the updated tool reports such legacy
+  matches as `unverified_recomputation`. New captures include constants,
+  threadgroup memory and pipeline identity in the comparison key.
 
 - The movement classifier is name-based. An early pass counted
   `kda_prefill_*` as copies because "prefill" contains "fill"; the final
@@ -204,7 +219,7 @@ GPU service 988.081 ms (988.081 ms/chunk); uninstrumented wall 1102.384666000000
 | data_movement | `[1:4] kernel_scatter_offset_f32_to_f16 (x280)` | 19.2433 | 1.75% | 7172259840 | have the producer write the consumer format / bind the source | 19.2433 ms/call (1.75% wall) |
 | data_movement | `[1:57] v41_sorted_pack (x40)` | 15.0799 | 1.37% | 2516582400 | have the producer write the consumer format / bind the source | 15.0799 ms/call (1.37% wall) |
 | fusable_chain | `[1:5] kernel_mat_mat_q8_0_f16act_tensor_wide -> kernel_rms_norm_mul_rows_f32 (x80)` | 10.3437 | 0.94% | 293601280 | fuse the producer into its single consumer | 0.7340 ms/call (0.07% wall) |
-| recomputation | `[2:103] kernel_deepseek_v41_attention_index_heads_rows_mma (x3)` | 7.5339 | 0.68% | 0 | delete the duplicate dispatch and reuse the first result | 7.5339 ms/call (0.68% wall) |
+| unverified_recomputation (disproven) | `[2:103] kernel_deepseek_v41_attention_index_heads_rows_mma (x3)` | 7.5339 | 0.68% | 0 | retain: inline row0 differs between query sub-tiles | 0.0000 ms/call (0.00% wall) |
 | fusable_chain | `[3:1875] v41_sorted_down_iq2_s -> kernel_deepseek_v41_sum (x1)` | 4.0983 | 0.37% | 125829120 | fuse the producer into its single consumer | 0.3146 ms/call (0.03% wall) |
 | fusable_chain | `[2:79] kernel_mat_mat_bf16_f16act_tensor -> kernel_deepseek_v41_attention_rope_rows (x8)` | 1.2682 | 0.12% | 134217728 | fuse the producer into its single consumer | 0.3355 ms/call (0.03% wall) |
 | fusable_chain | `[3:1865] kernel_mat_mat_q5_K_f16act_tensor_wide -> kernel_deepseek_v4_clamped_swiglu (x2)` | 0.7305 | 0.07% | 18874368 | fuse the producer into its single consumer | 0.0472 ms/call (0.00% wall) |

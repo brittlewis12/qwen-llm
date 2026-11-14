@@ -1,0 +1,58 @@
+{
+  "matches": [
+    {
+      "category": "unverified_recomputation",
+      "family_file": "old-cells.jsonl",
+      "phase": "append",
+      "kernel": "kernel_deepseek_v41_attention_index_heads_rows_mma",
+      "gpu_ms": 2.496375,
+      "round": 0,
+      "scope": 2,
+      "node": 103,
+      "duplicate_of_scope": 2,
+      "duplicate_of_node": 100,
+      "input_bytes": 75628544,
+      "evidence": "legacy capture omits argument/pipeline identity; reuse is not proven"
+    },
+    {
+      "category": "unverified_recomputation",
+      "family_file": "old-cells.jsonl",
+      "phase": "append",
+      "kernel": "kernel_deepseek_v41_attention_index_heads_rows_mma",
+      "gpu_ms": 2.53125,
+      "round": 0,
+      "scope": 2,
+      "node": 506,
+      "duplicate_of_scope": 2,
+      "duplicate_of_node": 503,
+      "input_bytes": 75628544,
+      "evidence": "legacy capture omits argument/pipeline identity; reuse is not proven"
+    },
+    {
+      "category": "unverified_recomputation",
+      "family_file": "old-cells.jsonl",
+      "phase": "append",
+      "kernel": "kernel_deepseek_v41_attention_index_heads_rows_mma",
+      "gpu_ms": 2.50625,
+      "round": 0,
+      "scope": 3,
+      "node": 40,
+      "duplicate_of_scope": 3,
+      "duplicate_of_node": 37,
+      "input_bytes": 75628544,
+      "evidence": "legacy capture omits argument/pipeline identity; reuse is not proven"
+    }
+  ],
+  "aggregated": [
+    {
+      "category": "unverified_recomputation",
+      "label": "kernel_deepseek_v41_attention_index_heads_rows_mma",
+      "ms": 7.533875,
+      "count": 3,
+      "bytes": 0,
+      "scope": 2,
+      "node": 103,
+      "gain_ms": 0.0
+    }
+  ]
+}

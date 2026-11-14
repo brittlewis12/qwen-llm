@@ -284,9 +284,14 @@ def recomputation(cap: Capture):
                     ):
                         seen[key] = (pi, ni)
                         continue
+                    previous = cap.plans[first[0]]["nodes"][first[1]]
+                    verified_args = all(
+                        field in node and field in previous
+                        for field in ("constants", "threadgroup_memory", "pipeline")
+                    )
                     items.append(
                         {
-                            "category": "recomputation" if "constants" in node and "constants" in cap.plans[first[0]]["nodes"][first[1]] else "unverified_recomputation",
+                            "category": "recomputation" if verified_args else "unverified_recomputation",
                             "family_file": cap.path.name,
                             "phase": cap.phase,
                             "kernel": node["kernel"],
@@ -301,7 +306,11 @@ def recomputation(cap: Capture):
                                 for s in node["spans"]
                                 if not s["write"]
                             ),
-                            "evidence": "identical kernel/arguments/grid/threads/input spans" if "constants" in node else "legacy capture omits inline constants; reuse is not proven",
+                            "evidence": (
+                                "identical kernel/arguments/grid/threads/input spans"
+                                if verified_args else
+                                "legacy capture omits argument/pipeline identity; reuse is not proven"
+                            ),
                         }
                     )
                 else:
@@ -634,6 +643,8 @@ def self_test():
     }
     for node in plan["nodes"]:
         node["constants"] = []
+        node["threadgroup_memory"] = []
+        node["pipeline"] = 1
     # Same spans and launch, different row0: not a duplicate.
     altered = dict(plan["nodes"][3], id=len(plan["nodes"]), constants=[(7,[1,0,0,0])])
     plan["nodes"].append(altered)
@@ -679,6 +690,11 @@ def self_test():
         i["category"] == "recomputation" and i["kernel"] == "kernel_mul_f32"
         for i in result["items"]
     )
+    for node in plan["nodes"]:
+        node.pop("constants", None)
+    legacy = recomputation(Capture(Path("legacy.jsonl"), capture))
+    assert legacy and all(i["category"] == "unverified_recomputation" for i in legacy)
+    assert all(i["gain_ms"] == 0 for i in _aggregate({"items": legacy}))
     print("waste_audit self-tests: passed")
 
 
@@ -737,6 +753,8 @@ def _aggregate(result):
             entry["gain_ms"] = min(
                 entry["ms"], 2 * entry["bytes"] / (FUSION_BW_GBPS * 1e6)
             )
+        elif entry["category"] == "unverified_recomputation":
+            entry["gain_ms"] = 0.0
         else:
             entry["gain_ms"] = entry["ms"]
     return sorted(groups.values(), key=lambda x: -x["ms"])

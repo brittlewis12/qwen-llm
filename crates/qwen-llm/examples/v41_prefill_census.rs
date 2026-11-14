@@ -111,12 +111,10 @@ fn execute(
             "baseline" => match control_for {
                 "masked-reindex-mid" => E::MaskedReindexMid(false),
                 "attention-bundle" => E::AttentionBundle(false),
-                "masked-index-compact" => E::MaskedIndexCompact(false),
                 _ => E::Production,
             },
             "masked-reindex-mid" => E::MaskedReindexMid(true),
             "attention-bundle" => E::AttentionBundle(true),
-            "masked-index-compact" => E::MaskedIndexCompact(true),
             _ => anyhow::bail!("experiment"),
         };
         with_prefill_experiment(e, run)
@@ -142,14 +140,16 @@ fn main() -> Result<()> {
     let rows: usize = a[4].parse()?;
     let mode = a.get(5).map_or("native", String::as_str);
     let reps: usize = a.get(6).map_or(Ok(1), |v| v.parse())?;
-    let context = (depth + rows + 1).next_multiple_of(4096).max(98_304);
+    let end = depth
+        .checked_add(rows)
+        .ok_or_else(|| anyhow::anyhow!("shape overflow"))?;
     let experiment = a.get(7).map_or("baseline", String::as_str);
     let paired = experiment.starts_with("paired-");
     let candidate = experiment.strip_prefix("paired-").unwrap_or(experiment);
     ensure!(
         matches!(
             candidate,
-            "baseline" | "masked-reindex-mid" | "attention-bundle" | "masked-index-compact"
+            "baseline" | "masked-reindex-mid" | "attention-bundle"
         ),
         "experiment"
     );
@@ -157,10 +157,8 @@ fn main() -> Result<()> {
         matches!(mode, "native" | "stages" | "dispatch"),
         "profile mode"
     );
-    ensure!(
-        rows > 0 && depth + rows <= 196_608 && reps <= 8,
-        "bounded shape"
-    );
+    ensure!(rows > 0 && end <= 196_608 && reps <= 8, "bounded shape");
+    let context = (end + 1).next_multiple_of(4096).max(98_304);
     thermal()?;
     let ctx = MetalContext::new()?;
     let g = Arc::new(GgufFile::open(&a[1])?);

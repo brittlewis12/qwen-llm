@@ -21,6 +21,24 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   64×2,051 F32 scores (512.75 KiB vs 32 KiB current scratch). Exact recompute
   adds about 178/90 ms of score production for 30/15 ms priced traffic savings.
   No NI path or gate/up follow-on. [Design record](bench/2026-11-14-glm-latent-score-softmax.md).
+## 2026-11-14 - V4.1 Serial Attention: Audit Corrected, Compact Gate Fails
+
+- The alleged three duplicate index MMAs (7.534 ms) process different query
+  sub-tiles: inline `row0=612/816` was absent from the old audit. Strict M5
+  bitwise offset witness passes; no unsafe reuse. Audit keys now include
+  constants, threadgroup memory and pipeline identity; legacy matches are
+  unverified and have zero priced gain.
+- Four-cell decomposition: at 1K, dense index MMA / masked MMA / radix explain
+  53.9% / 24.6% / 21.1% of the 80K->128K service increase. Dense useful F32
+  dot throughput is about 27 TFLOP/s; logical traffic rates include caches,
+  not measured DRAM bandwidth. Native serial spans are 40.18/122.73 ms at
+  80K (256/1K), 61.15/191.32 ms at 128K.
+- Exact compact masked-block launches fail the frozen full-serial >=1.25x
+  gate: three-pair geomeans **1.170638/1.226401x** at 80K, and
+  **1.192790/1.262352x** at 128K (256/1K). All 32 causal signatures bitwise;
+  nice 0, thermal 0, all append-window process disk reads 0. Candidate and
+  knob removed; no serve or default-on promotion. Next: exact two-query
+  dense-index MMA isolation. [Full decomposition, roofs and gate](bench/2026-11-13-v41-attention-serial.md).
 
 
 

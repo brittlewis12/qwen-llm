@@ -45,7 +45,6 @@ pub enum PrefillExperiment {
     MaskedReindexShort(bool),
     PvWide(bool),
     AttentionBundle(bool),
-    MaskedIndexCompact(bool),
 }
 #[cfg(feature = "perf-ablations")]
 thread_local! {

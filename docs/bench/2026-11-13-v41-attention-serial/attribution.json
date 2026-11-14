@@ -1,0 +1,554 @@
+[
+  {
+    "file": "dispatch-81920-256.jsonl",
+    "depth": 81920,
+    "rows": 256,
+    "warmup_plus_two_reps": true,
+    "logits_bitwise": true,
+    "isolated_serial_service_ms": 46.1287495,
+    "kernels": [
+      {
+        "kernel": "kernel_deepseek_v41_attention_index_heads_rows_mma",
+        "calls": 15,
+        "ms": 15.6000835,
+        "per_rep_ms": [
+          15.599999,
+          15.600168
+        ],
+        "logical_bytes": 27112505856,
+        "flops": 430168866816,
+        "logical_GBs": 1737.9718420096917,
+        "logical_bandwidth_roof_fraction": 2.1724648025121147,
+        "useful_TFLOPs": 27.5747797642237,
+        "tensor_peak_fraction": 0.20937570056358162,
+        "caveat": "dot FLOPs only; masked cardinality from publisher contract"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_index_heads_rows_mma_masked",
+        "calls": 24,
+        "ms": 11.4458545,
+        "per_rep_ms": [
+          11.414834,
+          11.476875
+        ],
+        "logical_bytes": 8983089152,
+        "flops": 137409593344,
+        "logical_GBs": 784.8334217423435,
+        "logical_bandwidth_roof_fraction": 0.9810417771779294,
+        "useful_TFLOPs": 12.005184352465777,
+        "tensor_peak_fraction": 0.09115553798379482,
+        "caveat": "dot FLOPs only; masked cardinality from publisher contract"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_select_radix_rows",
+        "calls": 45,
+        "ms": 5.2732315,
+        "per_rep_ms": [
+          5.268917,
+          5.277546
+        ],
+        "logical_bytes": 3133253120,
+        "flops": null,
+        "logical_GBs": 594.1808395857455,
+        "logical_bandwidth_roof_fraction": 0.7427260494821819,
+        "useful_TFLOPs": null,
+        "tensor_peak_fraction": null,
+        "caveat": "five score/mask passes; histogram atomics and on-chip traffic excluded"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_compress_publish",
+        "calls": 640,
+        "ms": 3.9404925,
+        "per_rep_ms": [
+          3.938894,
+          3.942091
+        ],
+        "logical_bytes": 3686400,
+        "flops": 614400,
+        "logical_GBs": 0.9355175780692389,
+        "logical_bandwidth_roof_fraction": 0.0011693969725865485,
+        "useful_TFLOPs": 0.00015591959634487314,
+        "tensor_peak_fraction": 1.1838997444561363e-06,
+        "caveat": "also rsqrt and sin/cos; ordinary arithmetic estimate"
+      },
+      {
+        "kernel": "kernel_mat_vec_bf16_f32_tg",
+        "calls": 640,
+        "ms": 2.7672350000000003,
+        "per_rep_ms": [
+          2.766007,
+          2.768463
+        ],
+        "logical_bytes": 85524480,
+        "flops": 83886080,
+        "logical_GBs": 30.90611386456155,
+        "logical_bandwidth_roof_fraction": 0.03863264233070194,
+        "useful_TFLOPs": 0.03031404271773087,
+        "tensor_peak_fraction": 0.00023017496368816153,
+        "caveat": "logical vector once; issued vector loads repeat per output"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_copy",
+        "calls": 768,
+        "ms": 2.4061695,
+        "per_rep_ms": [
+          2.410448,
+          2.401891
+        ],
+        "logical_bytes": 3145728,
+        "flops": 0,
+        "logical_GBs": 1.307359269577642,
+        "logical_bandwidth_roof_fraction": 0.0016341990869720524,
+        "useful_TFLOPs": 0.0,
+        "tensor_peak_fraction": 0.0,
+        "caveat": "F32 read plus write"
+      },
+      {
+        "kernel": "kernel_rms_norm_mul_f32",
+        "calls": 640,
+        "ms": 2.3178495000000003,
+        "per_rep_ms": [
+          2.326042,
+          2.309657
+        ],
+        "logical_bytes": 3932160,
+        "flops": 1310720,
+        "logical_GBs": 1.6964690761846268,
+        "logical_bandwidth_roof_fraction": 0.0021205863452307835,
+        "useful_TFLOPs": 0.0005654896920615423,
+        "tensor_peak_fraction": 4.293771389988932e-06,
+        "caveat": "also one rsqrt; reduction overhead excluded"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_pool",
+        "calls": 384,
+        "ms": 1.230311,
+        "per_rep_ms": [
+          1.234503,
+          1.226119
+        ],
+        "logical_bytes": 3932160,
+        "flops": 1572864,
+        "logical_GBs": 3.1960699367883407,
+        "logical_bandwidth_roof_fraction": 0.003995087420985426,
+        "useful_TFLOPs": 0.0012784279747153362,
+        "tensor_peak_fraction": 9.707122055545453e-06,
+        "caveat": "also two exp per element, excluded from ordinary FLOPs"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_selection_prepare_rows",
+        "calls": 39,
+        "ms": 1.079814,
+        "per_rep_ms": [
+          0.860043,
+          1.299585
+        ],
+        "logical_bytes": 10502656,
+        "flops": null,
+        "logical_GBs": 9.726356576225164,
+        "logical_bandwidth_roof_fraction": 0.012157945720281456,
+        "useful_TFLOPs": null,
+        "tensor_peak_fraction": null,
+        "caveat": "pruned non-publisher writes nothing; otherwise ID/mask fill"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_select_block_scores_rows",
+        "calls": 6,
+        "ms": 0.0677085,
+        "per_rep_ms": [
+          0.067335,
+          0.068082
+        ],
+        "logical_bytes": 94520320,
+        "flops": null,
+        "logical_GBs": 1395.988982180967,
+        "logical_bandwidth_roof_fraction": 1.7449862277262087,
+        "useful_TFLOPs": null,
+        "tensor_peak_fraction": null,
+        "caveat": "max comparisons; no matrix FLOPs"
+      }
+    ]
+  },
+  {
+    "file": "dispatch-81920-1024.jsonl",
+    "depth": 81920,
+    "rows": 1024,
+    "warmup_plus_two_reps": true,
+    "logits_bitwise": true,
+    "isolated_serial_service_ms": 128.67639749999998,
+    "kernels": [
+      {
+        "kernel": "kernel_deepseek_v41_attention_index_heads_rows_mma",
+        "calls": 30,
+        "ms": 62.641147000000004,
+        "per_rep_ms": [
+          62.61671,
+          62.665584
+        ],
+        "logical_bytes": 108957272064,
+        "flops": 1728728530944,
+        "logical_GBs": 1739.388202198788,
+        "logical_bandwidth_roof_fraction": 2.1742352527484847,
+        "useful_TFLOPs": 27.59733200517545,
+        "tensor_peak_fraction": 0.2095469400544833,
+        "caveat": "dot FLOPs only; masked cardinality from publisher contract"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_index_heads_rows_mma_masked",
+        "calls": 44,
+        "ms": 45.3686235,
+        "per_rep_ms": [
+          45.425622,
+          45.311625
+        ],
+        "logical_bytes": 35939434496,
+        "flops": 549638373376,
+        "logical_GBs": 792.1649748972437,
+        "logical_bandwidth_roof_fraction": 0.9902062186215547,
+        "useful_TFLOPs": 12.114944888640935,
+        "tensor_peak_fraction": 0.09198895131845813,
+        "caveat": "dot FLOPs only; masked cardinality from publisher contract"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_select_radix_rows",
+        "calls": 86,
+        "ms": 16.3365595,
+        "per_rep_ms": [
+          16.476579,
+          16.19654
+        ],
+        "logical_bytes": 12585310208,
+        "flops": null,
+        "logical_GBs": 770.3770312225166,
+        "logical_bandwidth_roof_fraction": 0.9629712890281458,
+        "useful_TFLOPs": null,
+        "tensor_peak_fraction": null,
+        "caveat": "five score/mask passes; histogram atomics and on-chip traffic excluded"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_selection_prepare_rows",
+        "calls": 74,
+        "ms": 3.801672,
+        "per_rep_ms": [
+          4.478923,
+          3.124421
+        ],
+        "logical_bytes": 42207232,
+        "flops": null,
+        "logical_GBs": 11.102281312012188,
+        "logical_bandwidth_roof_fraction": 0.013877851640015235,
+        "useful_TFLOPs": null,
+        "tensor_peak_fraction": null,
+        "caveat": "pruned non-publisher writes nothing; otherwise ID/mask fill"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_select_block_scores_rows",
+        "calls": 12,
+        "ms": 0.32631299999999996,
+        "per_rep_ms": [
+          0.392084,
+          0.260542
+        ],
+        "logical_bytes": 379850752,
+        "flops": null,
+        "logical_GBs": 1164.0687070389474,
+        "logical_bandwidth_roof_fraction": 1.4550858837986842,
+        "useful_TFLOPs": null,
+        "tensor_peak_fraction": null,
+        "caveat": "max comparisons; no matrix FLOPs"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_compress_rows",
+        "calls": 4,
+        "ms": 0.2020825,
+        "per_rep_ms": [
+          0.232583,
+          0.171582
+        ],
+        "logical_bytes": 363659264,
+        "flops": 349536256,
+        "logical_GBs": 1799.5584179728576,
+        "logical_bandwidth_roof_fraction": 2.249448022466072,
+        "useful_TFLOPs": 1.7296710798807418,
+        "tensor_peak_fraction": 0.013133417463027652,
+        "caveat": "weights/norms repeat per group logically; exp/rsqrt/sin/cos excluded"
+      }
+    ]
+  },
+  {
+    "file": "dispatch-131072-256.jsonl",
+    "depth": 131072,
+    "rows": 256,
+    "warmup_plus_two_reps": true,
+    "logits_bitwise": true,
+    "isolated_serial_service_ms": 69.36223199999999,
+    "kernels": [
+      {
+        "kernel": "kernel_deepseek_v41_attention_index_heads_rows_mma",
+        "calls": 25,
+        "ms": 25.627167,
+        "per_rep_ms": [
+          25.836334,
+          25.418
+        ],
+        "logical_bytes": 43344462336,
+        "flops": 687866904576,
+        "logical_GBs": 1691.348182809282,
+        "logical_bandwidth_roof_fraction": 2.1141852285116025,
+        "useful_TFLOPs": 26.84131666118225,
+        "tensor_peak_fraction": 0.20380650464071567,
+        "caveat": "dot FLOPs only; masked cardinality from publisher contract"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_index_heads_rows_mma_masked",
+        "calls": 36,
+        "ms": 15.8587285,
+        "per_rep_ms": [
+          15.863832,
+          15.853625
+        ],
+        "logical_bytes": 9209581568,
+        "flops": 137409593344,
+        "logical_GBs": 580.7263531877729,
+        "logical_bandwidth_roof_fraction": 0.7259079414847162,
+        "useful_TFLOPs": 8.664603429209347,
+        "tensor_peak_fraction": 0.06579045883985837,
+        "caveat": "dot FLOPs only; masked cardinality from publisher contract"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_select_radix_rows",
+        "calls": 71,
+        "ms": 12.507813500000001,
+        "per_rep_ms": [
+          12.508374,
+          12.507253
+        ],
+        "logical_bytes": 4806780416,
+        "flops": null,
+        "logical_GBs": 384.30221365229016,
+        "logical_bandwidth_roof_fraction": 0.4803777670653627,
+        "useful_TFLOPs": null,
+        "tensor_peak_fraction": null,
+        "caveat": "five score/mask passes; histogram atomics and on-chip traffic excluded"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_compress_publish",
+        "calls": 640,
+        "ms": 3.9276809999999998,
+        "per_rep_ms": [
+          3.890893,
+          3.964469
+        ],
+        "logical_bytes": 3686400,
+        "flops": 614400,
+        "logical_GBs": 0.9385690945878753,
+        "logical_bandwidth_roof_fraction": 0.001173211368234844,
+        "useful_TFLOPs": 0.00015642818243131253,
+        "tensor_peak_fraction": 1.1877614459477033e-06,
+        "caveat": "also rsqrt and sin/cos; ordinary arithmetic estimate"
+      },
+      {
+        "kernel": "kernel_mat_vec_bf16_f32_tg",
+        "calls": 640,
+        "ms": 2.770902,
+        "per_rep_ms": [
+          2.796137,
+          2.745667
+        ],
+        "logical_bytes": 85524480,
+        "flops": 83886080,
+        "logical_GBs": 30.865212844048617,
+        "logical_bandwidth_roof_fraction": 0.03858151605506077,
+        "useful_TFLOPs": 0.030273925241672207,
+        "tensor_peak_fraction": 0.0002298703511136842,
+        "caveat": "logical vector once; issued vector loads repeat per output"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_selection_prepare_rows",
+        "calls": 61,
+        "ms": 2.5178775,
+        "per_rep_ms": [
+          1.970293,
+          3.065462
+        ],
+        "logical_bytes": 16794112,
+        "flops": null,
+        "logical_GBs": 6.669948001838851,
+        "logical_bandwidth_roof_fraction": 0.008337435002298563,
+        "useful_TFLOPs": null,
+        "tensor_peak_fraction": null,
+        "caveat": "pruned non-publisher writes nothing; otherwise ID/mask fill"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_copy",
+        "calls": 768,
+        "ms": 2.41561,
+        "per_rep_ms": [
+          2.415462,
+          2.415758
+        ],
+        "logical_bytes": 3145728,
+        "flops": 0,
+        "logical_GBs": 1.3022499492881716,
+        "logical_bandwidth_roof_fraction": 0.0016278124366102145,
+        "useful_TFLOPs": 0.0,
+        "tensor_peak_fraction": 0.0,
+        "caveat": "F32 read plus write"
+      },
+      {
+        "kernel": "kernel_rms_norm_mul_f32",
+        "calls": 640,
+        "ms": 2.3784115,
+        "per_rep_ms": [
+          2.433909,
+          2.322914
+        ],
+        "logical_bytes": 3932160,
+        "flops": 1310720,
+        "logical_GBs": 1.6532715217698872,
+        "logical_bandwidth_roof_fraction": 0.002066589402212359,
+        "useful_TFLOPs": 0.000551090507256629,
+        "tensor_peak_fraction": 4.184438172032111e-06,
+        "caveat": "also one rsqrt; reduction overhead excluded"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_pool",
+        "calls": 384,
+        "ms": 1.230624,
+        "per_rep_ms": [
+          1.224713,
+          1.236535
+        ],
+        "logical_bytes": 3932160,
+        "flops": 1572864,
+        "logical_GBs": 3.195257040330759,
+        "logical_bandwidth_roof_fraction": 0.0039940713004134485,
+        "useful_TFLOPs": 0.0012781028161323036,
+        "tensor_peak_fraction": 9.704653121733514e-06,
+        "caveat": "also two exp per element, excluded from ordinary FLOPs"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_select_block_scores_rows",
+        "calls": 10,
+        "ms": 0.127417,
+        "per_rep_ms": [
+          0.126667,
+          0.128167
+        ],
+        "logical_bytes": 151143424,
+        "flops": null,
+        "logical_GBs": 1186.210819592362,
+        "logical_bandwidth_roof_fraction": 1.4827635244904525,
+        "useful_TFLOPs": null,
+        "tensor_peak_fraction": null,
+        "caveat": "max comparisons; no matrix FLOPs"
+      }
+    ]
+  },
+  {
+    "file": "dispatch-131072-1024.jsonl",
+    "depth": 131072,
+    "rows": 1024,
+    "warmup_plus_two_reps": true,
+    "logits_bitwise": true,
+    "isolated_serial_service_ms": 198.4416275,
+    "kernels": [
+      {
+        "kernel": "kernel_deepseek_v41_attention_index_heads_rows_mma",
+        "calls": 46,
+        "ms": 100.2457085,
+        "per_rep_ms": [
+          99.950627,
+          100.54079
+        ],
+        "logical_bytes": 173885097984,
+        "flops": 2759520681984,
+        "logical_GBs": 1734.5889473562852,
+        "logical_bandwidth_roof_fraction": 2.1682361841953566,
+        "useful_TFLOPs": 27.527569242368116,
+        "tensor_peak_fraction": 0.20901723039003886,
+        "caveat": "dot FLOPs only; masked cardinality from publisher contract"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_index_heads_rows_mma_masked",
+        "calls": 68,
+        "ms": 62.5430225,
+        "per_rep_ms": [
+          62.309126,
+          62.776919
+        ],
+        "logical_bytes": 36845404160,
+        "flops": 549638373376,
+        "logical_GBs": 589.120939270244,
+        "logical_bandwidth_roof_fraction": 0.7364011740878049,
+        "useful_TFLOPs": 8.788164553064252,
+        "tensor_peak_fraction": 0.06672866023587132,
+        "caveat": "dot FLOPs only; masked cardinality from publisher contract"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_select_radix_rows",
+        "calls": 133,
+        "ms": 31.08323,
+        "per_rep_ms": [
+          31.126038,
+          31.040422
+        ],
+        "logical_bytes": 19279419392,
+        "flops": null,
+        "logical_GBs": 620.25147939902,
+        "logical_bandwidth_roof_fraction": 0.7753143492487751,
+        "useful_TFLOPs": null,
+        "tensor_peak_fraction": null,
+        "caveat": "five score/mask passes; histogram atomics and on-chip traffic excluded"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_selection_prepare_rows",
+        "calls": 114,
+        "ms": 3.8413969999999997,
+        "per_rep_ms": [
+          2.983877,
+          4.698917
+        ],
+        "logical_bytes": 67373056,
+        "flops": null,
+        "logical_GBs": 17.538686056140516,
+        "logical_bandwidth_roof_fraction": 0.021923357570175647,
+        "useful_TFLOPs": null,
+        "tensor_peak_fraction": null,
+        "caveat": "pruned non-publisher writes nothing; otherwise ID/mask fill"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_select_block_scores_rows",
+        "calls": 19,
+        "ms": 0.5500605000000001,
+        "per_rep_ms": [
+          0.550705,
+          0.549416
+        ],
+        "logical_bytes": 606343168,
+        "flops": null,
+        "logical_GBs": 1102.320868340846,
+        "logical_bandwidth_roof_fraction": 1.3779010854260574,
+        "useful_TFLOPs": null,
+        "tensor_peak_fraction": null,
+        "caveat": "max comparisons; no matrix FLOPs"
+      },
+      {
+        "kernel": "kernel_deepseek_v41_attention_compress_rows",
+        "calls": 4,
+        "ms": 0.178209,
+        "per_rep_ms": [
+          0.180084,
+          0.176334
+        ],
+        "logical_bytes": 363659264,
+        "flops": 349536256,
+        "logical_GBs": 2040.6335482495272,
+        "logical_bandwidth_roof_fraction": 2.550791935311909,
+        "useful_TFLOPs": 1.9613838582787626,
+        "tensor_peak_fraction": 0.014892815932260916,
+        "caveat": "weights/norms repeat per group logically; exp/rsqrt/sin/cos excluded"
+      }
+    ]
+  }
+]

@@ -39,6 +39,16 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   and metallib pins, every root/load, outside-native p50/p95, per-arm process
   and sampled-window disk reads, matched-call exclusions and output controls
   are in the [qualification record](bench/2026-11-14-v41-intake-qualification.md).
+## 2026-11-14 - GLM First Visible Gap: Tool Validation Is the Hold
+
+- A 60 s three-agent trace captured token IDs and bytes: short client TTFT
+  **1,142/2,310 ms p50/p95**, about-1K **2,721/6,210 ms**. Short tool calls
+  hold raw-to-visible **467/950 ms**; reasoning streams in about **1 ms**.
+- `<think>` close and `<tool_call>` were single tokens. GLM buffers the whole
+  tool block until terminal parse/schema validation; incremental publication
+  would change current all-or-error behavior. No exact fix was made. [Token
+  trace, parser rule, and class timings](bench/2026-11-14-glm-first-visible-gap.md).
+
 ## 2026-11-14 - GLM Served TTFT: Single-Arm Lifecycle Attribution
 
 - One opt-in, 180 s greedy three-agent arm on current-main `e70da3f8a` plus

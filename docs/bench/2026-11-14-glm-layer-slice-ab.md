@@ -9,9 +9,10 @@ arms. No source or runtime-default changes. A is the current default
 serve settings fixed at max active 4, prefill fairness enabled, decode budget
 10%, 2,048 loaded rows and 3 sample workers.
 
-Use the existing GLM three-agent 180-second plan and corpus at 48K roots,
-`--sampling greedy`, three agents, the same stock UD-IQ3_XXS artifact, and symmetric warm-up
-(`--ramp 15`, 48,000 warm tokens, 8 warm reply tokens). Run one arm per
+Use the existing plan `serve-plan-180.json` (seed `20261109`) and corpus
+`metal-code-corpus.txt` at 48K roots, `--sampling greedy`, three agents, the
+same stock UD-IQ3_XXS artifact, and symmetric warm-up (`--ramp 15`, 48,000
+warm tokens, 8 warm reply tokens). Run one arm per
 Metal-lease acquisition with a separate model load; each arm must settle at
 thermal pressure ≤1 for 60 seconds, allow 2, and abort at 3. Both the driver
 and server must measure at nice 0. Record each arm's process priorities, load,

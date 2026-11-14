@@ -1188,7 +1188,7 @@ fn compact_masked_mma_preserves_scores_and_selected_ids_bitwise() {
                 Some((&mask_t, mask_stride)),
             )
             .unwrap();
-            query_batch::compact_mask_ids(
+            super::super::query_batch::compact_mask_ids(
                 &ctx,
                 enc,
                 start,
@@ -1200,7 +1200,7 @@ fn compact_masked_mma_preserves_scores_and_selected_ids_bitwise() {
                 &status[1],
             )
             .unwrap();
-            query_batch::compact_index_scores(
+            super::super::query_batch::compact_index_scores(
                 &ctx,
                 enc,
                 [start, 1, last, first, n, stride],

@@ -80,14 +80,6 @@ fn v41_indexer_f16_mma_speed_bound() {
         .iter()
         .map(|&x| half::f16::from_f32(x).to_bits())
         .collect::<Vec<_>>();
-    let bf16_query = raw_query
-        .iter()
-        .map(|&x| half::bf16::from_f32(x).to_bits())
-        .collect::<Vec<_>>();
-    let bf16_keys = raw_keys
-        .iter()
-        .map(|&x| half::bf16::from_f32(x).to_bits())
-        .collect::<Vec<_>>();
     let raw_query_t = tensor(
         &ctx,
         bytemuck::cast_slice(&raw_query),
@@ -112,18 +104,6 @@ fn v41_indexer_f16_mma_speed_bound() {
         &[half_keys.len()],
         GgmlType::F16,
     );
-    let bf16_query_t = tensor(
-        &ctx,
-        bytemuck::cast_slice(&bf16_query),
-        &[bf16_query.len()],
-        GgmlType::BF16,
-    );
-    let bf16_keys_t = tensor(
-        &ctx,
-        bytemuck::cast_slice(&bf16_keys),
-        &[bf16_keys.len()],
-        GgmlType::BF16,
-    );
     let weights = vec![1.0f32; max_queries * HEADS];
     let weights_t = tensor(
         &ctx,
@@ -136,9 +116,8 @@ fn v41_indexer_f16_mma_speed_bound() {
         for queries in [1usize, 2, 3, 256, 1_024] {
             let base_scores = MetalTensor::zeros_f32(&ctx, vec![(depth * queries) as u64]).unwrap();
             let half_scores = MetalTensor::zeros_f32(&ctx, vec![(depth * queries) as u64]).unwrap();
-            let bf16_scores = MetalTensor::zeros_f32(&ctx, vec![(depth * queries) as u64]).unwrap();
-            let mut measure = |arm| match arm {
-                0 => score(
+            for _ in 0..2 {
+                score(
                     &ctx,
                     "kernel_deepseek_v41_attention_index_heads_rows_mma",
                     &raw_query_t,
@@ -147,8 +126,8 @@ fn v41_indexer_f16_mma_speed_bound() {
                     &base_scores,
                     depth,
                     queries,
-                ),
-                1 => score(
+                );
+                score(
                     &ctx,
                     "kernel_deepseek_v41_attention_index_heads_rows_mma_f16_probe",
                     &half_query_t,
@@ -157,51 +136,62 @@ fn v41_indexer_f16_mma_speed_bound() {
                     &half_scores,
                     depth,
                     queries,
-                ),
-                _ => score(
-                    &ctx,
-                    "kernel_deepseek_v41_attention_index_heads_rows_mma_bf16_probe",
-                    &bf16_query_t,
-                    &weights_t,
-                    &bf16_keys_t,
-                    &bf16_scores,
-                    depth,
-                    queries,
-                ),
-            };
-            for _ in 0..2 {
-                for arm in 0..3 {
-                    measure(arm);
-                }
+                );
             }
-            let mut timings = [
-                Vec::with_capacity(3),
-                Vec::with_capacity(3),
-                Vec::with_capacity(3),
-            ];
+            let mut base = Vec::with_capacity(3);
+            let mut candidate = Vec::with_capacity(3);
             for pair in 0..3 {
-                for offset in 0..3 {
-                    let arm = (pair + offset) % 3;
-                    timings[arm].push(measure(arm));
+                if pair % 2 == 0 {
+                    base.push(score(
+                        &ctx,
+                        "kernel_deepseek_v41_attention_index_heads_rows_mma",
+                        &raw_query_t,
+                        &weights_t,
+                        &raw_keys_t,
+                        &base_scores,
+                        depth,
+                        queries,
+                    ));
+                    candidate.push(score(
+                        &ctx,
+                        "kernel_deepseek_v41_attention_index_heads_rows_mma_f16_probe",
+                        &half_query_t,
+                        &weights_t,
+                        &half_keys_t,
+                        &half_scores,
+                        depth,
+                        queries,
+                    ));
+                } else {
+                    candidate.push(score(
+                        &ctx,
+                        "kernel_deepseek_v41_attention_index_heads_rows_mma_f16_probe",
+                        &half_query_t,
+                        &weights_t,
+                        &half_keys_t,
+                        &half_scores,
+                        depth,
+                        queries,
+                    ));
+                    base.push(score(
+                        &ctx,
+                        "kernel_deepseek_v41_attention_index_heads_rows_mma",
+                        &raw_query_t,
+                        &weights_t,
+                        &raw_keys_t,
+                        &base_scores,
+                        depth,
+                        queries,
+                    ));
                 }
             }
-            let median = |samples: &Vec<f64>| {
-                let mut values = samples.clone();
-                values.sort_by(f64::total_cmp);
-                values[1]
-            };
-            let medians = [
-                median(&timings[0]),
-                median(&timings[1]),
-                median(&timings[2]),
-            ];
+            let mut a = base.clone();
+            let mut b = candidate.clone();
+            a.sort_by(f64::total_cmp);
+            b.sort_by(f64::total_cmp);
             println!(
-                "v41_indexer_half_mma depth={depth} queries={queries} f32_ms={:?} f16_ms={:?} bf16_ms={:?} speedup_f16={:.4} speedup_bf16={:.4}",
-                timings[0],
-                timings[1],
-                timings[2],
-                medians[0] / medians[1],
-                medians[0] / medians[2]
+                "v41_indexer_f16_mma depth={depth} queries={queries} f32_ms={base:?} f16_ms={candidate:?} median_speedup={:.4}",
+                a[1] / b[1]
             );
         }
     }

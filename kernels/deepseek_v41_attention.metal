@@ -304,7 +304,6 @@ kernel void kernel_deepseek_v41_attention_index_heads_rows_mma(
 // query accumulators. Each query retains its 16 K updates and head-sum order.
 // The last partial eight-key block can have different shifted windows in the
 // two queries; load it separately in that case. No input precision change.
-[[max_total_threads_per_threadgroup(256)]]
 kernel void kernel_deepseek_v41_attention_index_heads_rows_mma_m2(
     constant uint4 &a [[buffer(0)]], constant uint4 &b [[buffer(1)]],
     constant uint4 &c [[buffer(2)]], device const float *q [[buffer(3)]],

@@ -6,6 +6,14 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-14 - GLM Latent Score→Softmax Fusion Closed at Exact-Design Gate
+
+- No code, build, or GPU timing: preserving the current MMA and softmax order
+  while eliminating the score surface needs a single-query workgroup to retain
+  64×2,051 F32 scores (512.75 KiB vs 32 KiB current scratch). Exact recompute
+  adds about 178/90 ms of score production for 30/15 ms priced traffic savings.
+  No NI path or gate/up follow-on. [Design record](bench/2026-11-14-glm-latent-score-softmax.md).
+
 
 
 

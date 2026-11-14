@@ -334,6 +334,7 @@ kernel void kernel_deepseek_v41_attention_index_heads_rows_mma_m2(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     const uint hg = sg % 4u, kg = sg / 4u;
     simdgroup_float8x8 qt0[16],qt1[16];
+    #pragma clang loop unroll(full)
     for (uint i=0;i<16u;++i) {
         simdgroup_load(qt0[i],q0 + hg * 8u * 128u + i * 8u,128,ulong2(0,0),true);
         simdgroup_load(qt1[i],q1 + hg * 8u * 128u + i * 8u,128,ulong2(0,0),true);
@@ -350,16 +351,30 @@ kernel void kernel_deepseek_v41_attention_index_heads_rows_mma_m2(
         const uint base0 = active0 ? min(key0,length0 - 8u) : 0u;
         const uint base1 = active1 ? min(key0,length1 - 8u) : 0u;
         simdgroup_float8x8 acc0=simdgroup_float8x8(0.0f),acc1=simdgroup_float8x8(0.0f);
-        for (uint i=0;i<16u;++i) {
-            simdgroup_float8x8 km;
-            if (active0) {
+        if (active0 && active1 && base0 == base1) {
+            #pragma clang loop unroll(full)
+            for (uint i=0;i<16u;++i) {
+                simdgroup_float8x8 km;
                 simdgroup_load(km,keys + (ulong)base0 * 128u + i * 8u,128);
                 simdgroup_multiply_accumulate(acc0,km,qt0[i],acc0);
+                simdgroup_multiply_accumulate(acc1,km,qt1[i],acc1);
+            }
+        } else {
+            if (active0) {
+                #pragma clang loop unroll(full)
+                for (uint i=0;i<16u;++i) {
+                    simdgroup_float8x8 km;
+                    simdgroup_load(km,keys + (ulong)base0 * 128u + i * 8u,128);
+                    simdgroup_multiply_accumulate(acc0,km,qt0[i],acc0);
+                }
             }
             if (active1) {
-                if (!active0 || base1 != base0)
+                #pragma clang loop unroll(full)
+                for (uint i=0;i<16u;++i) {
+                    simdgroup_float8x8 km;
                     simdgroup_load(km,keys + (ulong)base1 * 128u + i * 8u,128);
-                simdgroup_multiply_accumulate(acc1,km,qt1[i],acc1);
+                    simdgroup_multiply_accumulate(acc1,km,qt1[i],acc1);
+                }
             }
         }
         if (active0) {

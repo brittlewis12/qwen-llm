@@ -72,6 +72,7 @@ SCOPES = {
         "serve::token_prefix_cache::tests::",
         "serve::transport::tests::preparation_cap_preserves_queued_socket_and_releases_on_shutdown",
         "serve::batch_lifecycle_tests::accepted_request_renders_and_tokenizes_while_peer_pump_is_blocked",
+        "serve::batch_lifecycle_tests::prepared_peer_is_submitted_inside_boundary_before_parent_pump_returns",
         "serve::http::tests::ttft_trace_marks_visible_flush_without_changing_sse_bytes",
         "serve::decode_cursor::gpu_burst_tests::",
         "family_options::tests::qwen4exp_decode_flags_follow_the_documented_contract",

@@ -14,6 +14,7 @@ pub(super) struct Work {
     pub finished: bool,
     pub elapsed_ms: f64,
     pub peer_rounds: usize,
+    pub peer_prefills: usize,
     pub matched: usize,
     pub prompt: usize,
     pub reuse_source: &'static str,

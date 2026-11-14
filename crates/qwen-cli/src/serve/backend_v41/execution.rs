@@ -698,7 +698,7 @@ impl Settings {
             "serve phases: family=deepseek_v41 prefill_ms={prefill_ms:.3} reused_tokens={matched} reuse_source={reuse_source} restore_ms={restore_ms:.3} prefill_tokens={} prefill_mode={prefill_mode} prefill_rows={prefill_rows} prefill_chunks={prefill_chunks} prefill_calls={prefill_calls} prefill_selected_rows={selected_rows:?} prefill_rows_max={} decode_ms={:.3} required_forwards={required} capacity={} transitions={transitions} transition_ms={transition_ms:.3} ced_episodes={ced_episodes} ced_yields={ced_yields} ladder_capture_ms={ladder_capture_ms:.3} retention_ms={retention_ms:.3}",
             ids.len() - matched, crate::family_options::V41_PREFILL_ROWS, generation.wall_ms, capacity);
         let mut phases = serde_json::json!({
-            "family":"deepseek_v41", "prefill_ms":prefill_ms, "layer_rounds":prefill_work.peer_rounds, "ladder_capture_ms":ladder_capture_ms, "retention_ms":retention_ms, "prefill_tokens":ids.len() - matched,
+            "family":"deepseek_v41", "prefill_ms":prefill_ms, "layer_rounds":prefill_work.peer_rounds, "peer_prefills":prefill_work.peer_prefills, "ladder_capture_ms":ladder_capture_ms, "retention_ms":retention_ms, "prefill_tokens":ids.len() - matched,
             "prefill_mode":prefill_mode, "prefill_rows":prefill_rows, "prefill_chunks":prefill_chunks,
             "prefill_rows_max":crate::family_options::V41_PREFILL_ROWS,
             "prefill_selected_rows":selected_rows, "prefill_calls":prefill_calls,

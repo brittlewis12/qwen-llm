@@ -1190,6 +1190,7 @@ fn batched_loop(
     checkpoint: &mut impl FnMut(OwnerCheckpoint) -> Result<()>,
 ) -> Result<()> {
     let max_active = backend.max_active();
+    let mut deferred = std::collections::VecDeque::new();
     loop {
         let mut progressed = false;
         let mut index = 0;
@@ -1217,11 +1218,31 @@ fn batched_loop(
         }
         if !connections.is_empty() {
             checkpoint(OwnerCheckpoint::DuringHandling)?;
-            progressed |= backend.pump();
+            progressed |= backend.pump_with_intake(&mut || {
+                // Only already-prepared connections are safe inside a native
+                // boundary. Raw HTTP and native control work retain outer-loop
+                // settlement and ordering; never join a worker here.
+                while deferred.is_empty() && connections.len() < max_active {
+                    match receiver.try_recv() {
+                        Ok(control::Event::Prepared(connection)) => connections.push(connection),
+                        Ok(other) => {
+                            deferred.push_back(other);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                connections
+                    .iter_mut()
+                    .filter_map(transport::Connection::take_batched_job)
+                    .collect()
+            });
         }
         if connections.len() < max_active {
             checkpoint(OwnerCheckpoint::BeforeAdmission)?;
-            let event = if connections.is_empty() {
+            let event = if let Some(event) = deferred.pop_front() {
+                Some(event)
+            } else if connections.is_empty() {
                 match receiver.recv_timeout(ADMISSION_POLL_INTERVAL) {
                     Ok(event) => Some(event),
                     Err(RecvTimeoutError::Timeout) => {

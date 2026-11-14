@@ -151,6 +151,8 @@ pub(super) struct Scheduler<S> {
     /// One clock for every request's phase timings across pumps.
     epoch: Instant,
     max_active: usize,
+    suspended_reserve: u64,
+    suspended_count: usize,
     park_timeout: Duration,
     pending: VecDeque<Pending>,
     active: Vec<Active<S>>,
@@ -260,6 +262,8 @@ impl<S> Scheduler<S> {
         Self {
             epoch: Instant::now(),
             max_active: max_active.max(1),
+            suspended_reserve: 0,
+            suspended_count: 0,
             park_timeout: PARK_TIMEOUT,
             pending: VecDeque::new(),
             active: Vec::new(),
@@ -318,7 +322,7 @@ impl<S> Scheduler<S> {
 
     /// A waiting request will be admitted by the next pump.
     pub(super) fn admitting(&self) -> bool {
-        !self.pending.is_empty() && self.active.len() < self.max_active
+        !self.pending.is_empty() && self.active.len() + self.suspended_count < self.max_active
     }
 
     #[cfg(test)]
@@ -398,6 +402,16 @@ impl<S> Scheduler<S> {
         engine: &mut impl BatchEngine<S>,
         reuse: &mut impl reuse::Reuse<S>,
     ) -> bool {
+        self.pump_with_intake(settings, engine, reuse, &mut Vec::new)
+    }
+
+    pub(super) fn pump_with_intake(
+        &mut self,
+        settings: &Settings,
+        engine: &mut impl BatchEngine<S>,
+        reuse: &mut impl reuse::Reuse<S>,
+        intake: &mut dyn FnMut() -> Vec<Job>,
+    ) -> bool {
         // Every GPU-feeding call in this round (plain and sliced prefill, CED,
         // serial and batched steps, device sampling) commits and then blocks on
         // command completion on this thread. One scope per round keeps it
@@ -405,7 +419,7 @@ impl<S> Scheduler<S> {
         let _qos = qwen_llm::metal::GpuThreadQos::enter();
         let mut progressed = self.reap();
         progressed |= self.deliver();
-        if self.active.len() < self.max_active
+        if self.active.len() + self.suspended_count < self.max_active
             && let Some(pending) = self.pending.pop_front()
         {
             self.admit(pending, settings, engine, reuse);
@@ -433,8 +447,14 @@ impl<S> Scheduler<S> {
         };
         let started = engine.now();
         if prefill_turn {
-            let interleaved =
-                self.prefill(prefilling.expect("prefill turn"), settings, engine, reuse);
+            let interleaved = self.prefill(
+                prefilling.expect("prefill turn"),
+                settings,
+                engine,
+                reuse,
+                intake,
+                true,
+            );
             if interleaved {
                 self.decode_budget = Duration::ZERO;
             } else if settings.prefill_fair && mixed {
@@ -544,7 +564,12 @@ impl<S> Scheduler<S> {
             self.complete(job.sink, Err(error.into()));
             return;
         };
-        let others: u64 = self.active.iter().map(|a| a.own_reserve).sum();
+        let others: u64 = self
+            .active
+            .iter()
+            .map(|a| a.own_reserve)
+            .sum::<u64>()
+            .saturating_add(self.suspended_reserve);
         let echo = job.prepared.request().echo_stats;
         let mut prefill_io = echo.then(memory_io::ChunkObservations::default);
         let begun = settings.begin(
@@ -603,6 +628,8 @@ impl<S> Scheduler<S> {
         settings: &Settings,
         engine: &mut impl BatchEngine<S>,
         reuse: &mut impl reuse::Reuse<S>,
+        intake: &mut dyn FnMut() -> Vec<Job>,
+        allow_interleave: bool,
     ) -> bool {
         let timing = self.active[index].sink.lifecycle();
         let _lifecycle = timing.enter();
@@ -623,11 +650,18 @@ impl<S> Scheduler<S> {
         } else {
             crate::family_options::V41_PREFILL_ROWS
         };
-        if loaded && settings.prefill_fair && settings.layer_slice_ms > 0 {
+        if allow_interleave
+            && settings.prefill_fair
+            && settings.layer_slice_ms > 0
+            && (loaded || settings.prefill_yield)
+        {
             // Keep the provisional appender outside every decode scan. Peer
             // retirement may compact the active vector between checkpoints.
             let mut active = self.active.remove(index);
+            self.suspended_count += 1;
+            self.suspended_reserve = self.suspended_reserve.saturating_add(active.own_reserve);
             let mut rounds = 0;
+            let mut prefills = 0;
             let result = {
                 let run = active.run.as_mut().expect("prefilling run");
                 let position = engine.position(&run.state);
@@ -647,6 +681,41 @@ impl<S> Scheduler<S> {
                             Some(&mut |engine, reuse| {
                                 self.reap();
                                 self.deliver();
+                                if settings.prefill_yield {
+                                    for job in intake() {
+                                        self.submit(job);
+                                    }
+                                    if self.active.len() + self.suspended_count < self.max_active
+                                        && let Some(pending) = self.pending.pop_front()
+                                    {
+                                        self.admit(pending, settings, engine, reuse);
+                                    }
+                                    // One ready short append per boundary. No nested
+                                    // layer callback: stack depth stays one, and the
+                                    // provisional parent is absent from every scan.
+                                    let short = self
+                                        .active
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(_, a)| a.cursor.is_none() && a.finished.is_none())
+                                        .filter_map(|(i, a)| a.run.as_ref().map(|r| (i, r)))
+                                        .filter(|(_, r)| {
+                                            r.ids.len().saturating_sub(r.position) < 512
+                                        })
+                                        .min_by_key(|(_, r)| r.ids.len().saturating_sub(r.position))
+                                        .map(|(i, _)| i);
+                                    if let Some(i) = short {
+                                        self.prefill(
+                                            i,
+                                            settings,
+                                            engine,
+                                            reuse,
+                                            &mut Vec::new,
+                                            false,
+                                        );
+                                        prefills += 1;
+                                    }
+                                }
                                 let members = (0..self.active.len())
                                     .filter(|&i| {
                                         self.active[i].decoding() && !self.active[i].parked()
@@ -676,6 +745,14 @@ impl<S> Scheduler<S> {
                 .expect("prefill run")
                 .prefill_work
                 .peer_rounds += rounds;
+            active
+                .run
+                .as_mut()
+                .expect("prefill run")
+                .prefill_work
+                .peer_prefills += prefills;
+            self.suspended_count -= 1;
+            self.suspended_reserve = self.suspended_reserve.saturating_sub(active.own_reserve);
             let index = index.min(self.active.len());
             self.active.insert(index, active);
             if let Err(failure) = result {
@@ -688,7 +765,7 @@ impl<S> Scheduler<S> {
             {
                 self.start_decode(index, settings, engine, reuse);
             }
-            return rounds > 0;
+            return rounds > 0 || prefills > 0;
         }
         let active = &mut self.active[index];
         let run = active.run.as_mut().expect("prefilling request has a run");

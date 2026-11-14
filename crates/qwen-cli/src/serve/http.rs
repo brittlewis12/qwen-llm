@@ -251,6 +251,11 @@ pub(crate) trait GenerationBackend {
     fn pump(&mut self) -> bool {
         false
     }
+    /// At drained prefill boundaries a backend may collect prepared HTTP jobs.
+    /// The default retains one ordinary pump and never calls the intake hook.
+    fn pump_with_intake(&mut self, _intake: &mut dyn FnMut() -> Vec<super::batching::Job>) -> bool {
+        self.pump()
+    }
     /// Complete every submitted request now (shutdown): started requests are
     /// aborted, requests that never started receive `503 server_busy`.
     fn abort_all(&mut self) {}

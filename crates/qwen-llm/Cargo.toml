@@ -160,3 +160,7 @@ required-features = ["perf-ablations"]
 [[example]]
 name = "fn_layer_slice_probe"
 required-features = ["perf-ablations"]
+
+[[example]]
+name = "v41_prefill_yield_witness"
+required-features = ["perf-ablations"]

@@ -6634,5 +6634,33 @@
     "class": "cpu",
     "ignored": false,
     "reason": "CPU exact token-prefix/agent-plan or bounded concurrent HTTP preparation contract; no model or GPU."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::yielded_intake_cancellation_discards_parent_and_preserves_serviced_peer",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted row-preserving boundary intake, bounded admission/reserve, cancellation and output/state lifecycle; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::yielded_intake_counts_suspended_parent_against_active_limit",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted row-preserving boundary intake, bounded admission/reserve, cancellation and output/state lifecycle; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::backend_v41::scheduler_tests::yielded_intake_services_short_before_parent_finishes_without_changing_outputs",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Scripted row-preserving boundary intake, bounded admission/reserve, cancellation and output/state lifecycle; no Metal context or model import."
+  },
+  {
+    "target": "qwen",
+    "name": "serve::batch_lifecycle_tests::prepared_peer_is_submitted_inside_boundary_before_parent_pump_returns",
+    "class": "cpu",
+    "ignored": false,
+    "reason": "Loopback HTTP prepared work is drained inside a blocked fake prefill boundary; no Metal context or model import."
   }
 ]

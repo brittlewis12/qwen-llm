@@ -6,6 +6,15 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-14 - V4.1 Row-Preserving Prefill Yield: Qualification Started
+
+- Default-off `QWEN_SERVE_V41_PREFILL_YIELD=1`: existing drained layer
+  boundaries collect prepared HTTP jobs and service one waiting short append.
+  Same rows/layers/kernels; suspended parent slot/reserve retained; no recursive
+  peer slicing. CPU lifecycle/loopback tests and production native witness.
+- Fresh `1522261bc` base. AB/BA/AB, one purged arm per lease, scheduling gate
+  frozen before any arm. [Design, rule and results](bench/2026-11-14-v41-prefill-yield.md).
+
 ## 2026-11-14 - Intake + Exact Tokenization: Promoted by Lead Decision
 
 - The frozen rule **FAILED** on short/~1K native prefill 0.998399/0.999226x

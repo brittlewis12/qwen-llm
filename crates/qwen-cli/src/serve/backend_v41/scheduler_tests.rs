@@ -1652,3 +1652,141 @@ fn cancellation_between_layers_discards_appender_and_keeps_peers_consistent() {
         assert_eq!(reuse.commits.len(), 1, "partial appender never retained");
     }
 }
+
+fn held_job(prepared: Arc<PreparedResponse>) -> (Job, Client) {
+    let state = Rc::new(RefCell::new(SinkState::default()));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let job = Job {
+        prepared,
+        sink: Box::new(TestSink {
+            state: state.clone(),
+            cancel: cancel.clone(),
+        }),
+    };
+    (job, Client { state, cancel })
+}
+
+#[test]
+fn yielded_intake_services_short_before_parent_finishes_without_changing_outputs() {
+    let mut outputs = Vec::new();
+    for enabled in [false, true] {
+        let mut settings = settings();
+        settings.prefill_fair = true;
+        settings.cold_ced = false;
+        settings.prefill_yield = enabled;
+        settings.layer_slice_ms = if enabled { 400 } else { 0 };
+        let mut scheduler = Scheduler::new(2);
+        let mut engine = StubEngine {
+            layered: true,
+            ..Default::default()
+        };
+        let mut reuse = Recording::default();
+        let mut request = prepared(&settings, &"x".repeat(1500), true);
+        Arc::get_mut(&mut request).unwrap().boundaries = None;
+        let parent = submit(&mut scheduler, request);
+        let (job, short) = held_job(prepared(&settings, "short", true));
+        let mut arriving = Some(job);
+        scheduler.pump_with_intake(&settings, &mut engine, &mut reuse, &mut || {
+            arriving.take().into_iter().collect()
+        });
+        if let Some(job) = arriving.take() {
+            scheduler.submit(job);
+        }
+        drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+        assert!(matches!(parent.terminal(), Some(Ok(_))));
+        assert!(matches!(short.terminal(), Some(Ok(_))));
+        outputs.push((parent.text(), short.text()));
+        if enabled {
+            let Some(Ok((_, _, phases))) = parent.terminal() else {
+                unreachable!()
+            };
+            assert_eq!(
+                phases["prefill_ms"], 300.0,
+                "peer service excluded from native work"
+            );
+            assert!(phases["peer_prefills"].as_u64().unwrap() > 0);
+            let log = engine.log.borrow();
+            let first = log.events.iter().position(|e| e == "layer 0").unwrap();
+            let last = log.events.iter().position(|e| e == "layer 2").unwrap();
+            assert!(
+                log.events[first..last]
+                    .iter()
+                    .any(|e| e.starts_with("prefill "))
+            );
+            assert!(
+                log.reserves[1] > log.reserves[0],
+                "admission retains suspended parent's reserve"
+            );
+        }
+    }
+    assert_eq!(outputs[0], outputs[1]);
+}
+
+#[test]
+fn yielded_intake_counts_suspended_parent_against_active_limit() {
+    let mut settings = settings();
+    settings.prefill_fair = true;
+    settings.cold_ced = false;
+    settings.prefill_yield = true;
+    settings.layer_slice_ms = 400;
+    let mut scheduler = Scheduler::new(1);
+    let mut engine = StubEngine {
+        layered: true,
+        ..Default::default()
+    };
+    let mut reuse = Recording::default();
+    let mut request = prepared(&settings, &"x".repeat(1500), true);
+    Arc::get_mut(&mut request).unwrap().boundaries = None;
+    let parent = submit(&mut scheduler, request);
+    let (job, short) = held_job(prepared(&settings, "short", true));
+    let mut arriving = Some(job);
+    scheduler.pump_with_intake(&settings, &mut engine, &mut reuse, &mut || {
+        arriving.take().into_iter().collect()
+    });
+    {
+        let log = engine.log.borrow();
+        let first = log.events.iter().position(|e| e == "layer 0").unwrap();
+        let last = log.events.iter().position(|e| e == "layer 2").unwrap();
+        assert!(
+            !log.events[first..last]
+                .iter()
+                .any(|e| e.starts_with("prefill "))
+        );
+        assert_eq!(
+            log.reserves.len(),
+            1,
+            "peer not admitted while parent occupies the only slot"
+        );
+    }
+    drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+    assert!(matches!(parent.terminal(), Some(Ok(_))) && matches!(short.terminal(), Some(Ok(_))));
+}
+
+#[test]
+fn yielded_intake_cancellation_discards_parent_and_preserves_serviced_peer() {
+    let mut settings = settings();
+    settings.prefill_fair = true;
+    settings.cold_ced = false;
+    settings.prefill_yield = true;
+    settings.layer_slice_ms = 400;
+    let mut scheduler = Scheduler::new(2);
+    let mut engine = StubEngine {
+        layered: true,
+        cancel_layer: Some(0),
+        ..Default::default()
+    };
+    let mut reuse = Recording::default();
+    let mut request = prepared(&settings, &"x".repeat(1500), true);
+    Arc::get_mut(&mut request).unwrap().boundaries = None;
+    let parent = submit(&mut scheduler, request);
+    let (job, short) = held_job(prepared(&settings, "short", true));
+    let mut arriving = Some(job);
+    scheduler.pump_with_intake(&settings, &mut engine, &mut reuse, &mut || {
+        arriving.take().into_iter().collect()
+    });
+    engine.cancel_layer = None;
+    drain(&mut scheduler, &settings, &mut engine, &mut reuse);
+    assert!(matches!(parent.terminal(), Some(Err((true, _, _)))));
+    assert!(matches!(short.terminal(), Some(Ok(_))));
+    assert_eq!(reuse.commits.len(), 1, "partial parent never published");
+}

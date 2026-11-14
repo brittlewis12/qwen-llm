@@ -55,11 +55,17 @@ const PREFILL_FAIR_ENV: &str = "QWEN_SERVE_V41_PREFILL_FAIR";
 /// earns at most one second of service; idle service earns no credit.
 const DECODE_PERCENT_ENV: &str = "QWEN_SERVE_V41_DECODE_PERCENT";
 /// Target GPU milliseconds for selective row-preserving layer slices. Zero
-/// restores the incumbent native calls and decode budget. Default 0 (opt-in)
-/// pending the append-I/O lane; the worst serve gap did not move consistently.
+/// restores the incumbent native calls and decode budget. Default 0; enabling
+/// PREFILL_YIELD selects a 400 ms default instead. An explicit zero disables
+/// layer boundaries independently of the yield switch.
 const LAYER_SLICE_MS_ENV: &str = "QWEN_SERVE_V41_LAYER_SLICE_MS";
 /// Minimum predicted original append wall before layer slicing (default 500 ms).
 const LAYER_SLICE_MIN_MS_ENV: &str = "QWEN_SERVE_V41_LAYER_SLICE_MIN_MS";
+qwen_llm::env_flag!(
+    /// At drained original-row layer boundaries, collect prepared HTTP jobs and service one waiting short append. Default-off; 0 restores the incumbent pump. Uses 400 ms layer targets unless LAYER_SLICE_MS is set; never changes rows or layer order.
+    default_off prefill_yield_enabled,
+    "QWEN_SERVE_V41_PREFILL_YIELD"
+);
 /// Default off. Log per-call native V4.1 serve prefill wall time and unsplit
 /// forward timings to stderr as JSON; no stage or per-dispatch profiling.
 /// Driver scheduling can overlap GPU and commit/wait; wait minus GPU is not
@@ -340,6 +346,7 @@ pub(crate) struct Settings {
     prefill_fair: bool,
     gpu_sample: bool,
     decode_percent: usize,
+    prefill_yield: bool,
     layer_slice_ms: usize,
     layer_slice_min_ms: usize,
 }
@@ -393,7 +400,12 @@ impl Settings {
             prefill_fair: qwen_llm::env_flag::read_default_on(PREFILL_FAIR_ENV),
             gpu_sample: qwen_llm::env_flag::read_default_on(GPU_SAMPLE_ENV),
             decode_percent,
-            layer_slice_ms: layer_prefill::parse(LAYER_SLICE_MS_ENV, 0, 10_000)?,
+            prefill_yield: prefill_yield_enabled(),
+            layer_slice_ms: layer_prefill::parse(
+                LAYER_SLICE_MS_ENV,
+                if prefill_yield_enabled() { 400 } else { 0 },
+                10_000,
+            )?,
             layer_slice_min_ms: layer_prefill::parse(LAYER_SLICE_MIN_MS_ENV, 500, 1_000_000)?,
         })
     }
@@ -781,6 +793,9 @@ impl GenerationBackend for Backend<'_> {
         }
     }
     fn pump(&mut self) -> bool {
+        self.pump_with_intake(&mut Vec::new)
+    }
+    fn pump_with_intake(&mut self, intake: &mut dyn FnMut() -> Vec<super::batching::Job>) -> bool {
         let Backend {
             ctx,
             forward,
@@ -805,10 +820,11 @@ impl GenerationBackend for Backend<'_> {
             native_failed: std::cell::Cell::new(false),
         };
         idle_residency.observe_work(|| {
-            let progressed = scheduler.pump(
+            let progressed = scheduler.pump_with_intake(
                 settings,
                 &mut engine,
                 &mut reuse::Session::new(forward, reuse, ctx),
+                intake,
             );
             let failed = scheduler.take_server_failures() > 0;
             // Cancellation can mask a native fault in the published outcome.

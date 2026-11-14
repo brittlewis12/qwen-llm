@@ -722,6 +722,12 @@ impl Connection {
         }
     }
 
+    /// Take ready work without borrowing the backend or joining a worker.
+    /// Disconnection and worker failures remain for ordinary loop settlement.
+    pub(super) fn take_batched_job(&mut self) -> Option<super::batching::Job> {
+        self.incoming.as_ref()?.try_recv().ok().map(batch_job)
+    }
+
     /// Batched owner: hand a received request to the backend's scheduler
     /// without waiting. Settled means the CPU worker is joined.
     pub(super) fn poll_batched(&mut self, backend: &mut dyn GenerationBackend) -> Result<Polled> {
@@ -732,20 +738,7 @@ impl Connection {
             .try_recv()
         {
             Ok(work) => {
-                work.control
-                    .timing
-                    .mark(super::lifecycle_timing::Stage::Dequeued);
-                backend.submit(super::batching::Job {
-                    prepared: work.prepared,
-                    sink: Box::new(OwnerBatchSink {
-                        pieces: work.pieces,
-                        queued: Default::default(),
-                        terminal: work.terminal,
-                        control: work.control,
-                        _activity: work._activity,
-                        extra_cpu_reserve: work.extra_cpu_reserve,
-                    }),
-                });
+                backend.submit(batch_job(work));
                 Ok(Polled::Submitted)
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => Ok(Polled::Idle),
@@ -793,3 +786,20 @@ pub(super) fn handle_connection(
 
 #[cfg(test)]
 mod tests;
+
+fn batch_job(work: Work) -> super::batching::Job {
+    work.control
+        .timing
+        .mark(super::lifecycle_timing::Stage::Dequeued);
+    super::batching::Job {
+        prepared: work.prepared,
+        sink: Box::new(OwnerBatchSink {
+            pieces: work.pieces,
+            queued: Default::default(),
+            terminal: work.terminal,
+            control: work.control,
+            _activity: work._activity,
+            extra_cpu_reserve: work.extra_cpu_reserve,
+        }),
+    }
+}

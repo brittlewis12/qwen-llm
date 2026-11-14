@@ -26,6 +26,7 @@ struct BatchStub {
     max_active: usize,
     tokenizer: Option<Arc<dyn qwen_llm::tokenizer::Tokenize + Send + Sync>>,
     pump_gate: Option<(Sender<()>, Receiver<()>)>,
+    boundary_intake: bool,
     owner: ThreadId,
     address: SocketAddr,
     events: Sender<String>,
@@ -42,6 +43,7 @@ impl BatchStub {
             max_active,
             tokenizer: None,
             pump_gate: None,
+            boundary_intake: false,
             owner: std::thread::current().id(),
             address,
             events,
@@ -129,6 +131,25 @@ impl http::GenerationBackend for BatchStub {
             emitted: 0,
             parked_since: None,
         });
+    }
+    fn pump_with_intake(&mut self, intake: &mut dyn FnMut() -> Vec<batching::Job>) -> bool {
+        if self.boundary_intake
+            && !self.active.is_empty()
+            && let Some((entered, release)) = self.pump_gate.take()
+        {
+            entered.send(()).unwrap();
+            release.recv_timeout(WAIT).unwrap();
+            self.record("boundary-enter".into());
+            let deadline = Instant::now() + WAIT;
+            while self.active.len() < 2 && Instant::now() < deadline {
+                for job in intake() {
+                    self.submit(job);
+                }
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+            self.record("boundary-exit".into());
+        }
+        self.pump()
     }
     fn pump(&mut self) -> bool {
         if !self.active.is_empty()
@@ -634,5 +655,36 @@ fn accepted_request_renders_and_tokenizes_while_peer_pump_is_blocked() {
     let b = read_all(second);
     server.stop();
     assert_eq!(overlapped.unwrap(), "second rendered and tokenized");
+    assert!(a.contains("req-1:0 ") && b.contains("req-2:0 "));
+}
+
+#[test]
+fn prepared_peer_is_submitted_inside_boundary_before_parent_pump_returns() {
+    let listener = bind_loopback("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (events, observed) = channel();
+    let (entered, blocked) = channel();
+    let (release, wait_release) = channel();
+    let server = serve(
+        listener,
+        4,
+        move |b| {
+            ASYNC_PREPARE_OVERRIDE.set(true);
+            b.boundary_intake = true;
+            b.pump_gate = Some((entered, wait_release));
+        },
+        events,
+    );
+    let first = send(address, 1, true);
+    blocked.recv_timeout(WAIT).unwrap();
+    let second = send(address, 2, true);
+    release.send(()).unwrap();
+    let mut seen = Vec::new();
+    wait_for(&observed, &mut seen, "boundary-exit");
+    assert!(position(&seen, "boundary-enter") < position(&seen, "submit req-2"));
+    assert!(position(&seen, "submit req-2") < position(&seen, "boundary-exit"));
+    let a = read_all(first);
+    let b = read_all(second);
+    server.stop();
     assert!(a.contains("req-1:0 ") && b.contains("req-2:0 "));
 }

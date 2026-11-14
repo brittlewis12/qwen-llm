@@ -13,7 +13,8 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   is kept separate from the greedy attention/radix arms. No GPU or model work.
 - Radix short TTFT p50/p95 **596/1,464ms**, native wall **420/671ms**;
   ~1K **1,110/1,604ms**, native **1,028/1,484ms**. Internal `queue_ms` is
-  microseconds, missing pre-submit admission/mailbox time. Pre-native gaps
+  microseconds, omitting pre-submit mailbox and post-admission service wait.
+  Pre-native gaps
   **81/776ms** short and **78/90ms** ~1K; response tail after prefill-complete
   is only **1.3/1.7ms**. First-token versus transport is not separately logged.
 - Pair1 swaps611/462 and1,149/249-row call order: faster ~1K native work

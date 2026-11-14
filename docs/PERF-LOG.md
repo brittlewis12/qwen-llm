@@ -118,6 +118,16 @@ See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
   bytes are compulsory-footprint estimates, not DRAM counters.
 - No exact, cheap candidate is projected to clear a 1.25x stage gate at both
   widths; measurement only. [Kernel census and limits](bench/2026-11-14-v41-attention-post-attribution.md).
+## 2026-11-14 - Indexer Reference Precision Research
+
+- V4.1 reference Q/K use E2M1/UE8M0 QAT; qwen-llm currently scores F32
+  Q/K. At 128 dims that is 512 B/key vs 68 B packed (or 256 B in the MLX
+  fake-quant mirror); nominal QK work is unchanged.
+- GLM's DSA reference uses model-dtype Q/K (BF16 in the captured config), no
+  FP4 QAT; qwen-llm already caches F16 keys and uses F16 query TensorOps.
+- Recommend a V4.1 packed-reference scorer behind selection-agreement and NI
+  gates; no target-geometry GPU microbenchmark ran. [Formats, cell pricing,
+  and quality plan](bench/2026-11-14-indexer-reference-precision.md).
 
 ## 2026-11-14 - Cooperative Experts: Isolation Fails, Candidates Removed
 

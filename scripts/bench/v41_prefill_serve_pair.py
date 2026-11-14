@@ -64,10 +64,10 @@ def run_harness(command,log_path,binary,deadline,fd):
     return model_pids,model_niceness
 
 
-def attention_warmup(binary,log_path,fd):
+def attention_warmup(binary,log_path,fd,names=None):
     """Dispatch both candidate and rollback kernels identically before each arm."""
-    names=("deepseek_v41::forward::attention_gpu::tests::radix_select::masked_mma_index_preserves_allowed_scores_and_selection",
-           "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::tensor64_sink_tile_matches_tensor32_sink")
+    names=names or ("deepseek_v41::forward::attention_gpu::tests::radix_select::masked_mma_index_preserves_allowed_scores_and_selection",
+                   "deepseek_v41::forward::attention_gpu::tests::f32_pv_batch::tensor64_sink_tile_matches_tensor32_sink")
     record=[]
     for i,name in enumerate(names):
         dest=log_path.with_name(log_path.name+f"-{i}.log")
@@ -92,12 +92,14 @@ def attention_warmup(binary,log_path,fd):
                     except subprocess.TimeoutExpired:child.kill();child.wait(timeout=5)
         text=dest.read_text()
         if child.returncode or "1 passed" not in text:raise RuntimeError("attention warmup failed: "+str(dest))
-        if i==1 and text.count("raw_and_rope_bits_exact=true")!=15:raise RuntimeError("wide warmup did not exercise all15 cases")
+        if name.endswith("tensor64_sink_tile_matches_tensor32_sink") and text.count("raw_and_rope_bits_exact=true")!=15:raise RuntimeError("wide warmup did not exercise all15 cases")
+        if name.endswith("coalesced_radix_matches_incumbent_bits_and_status") and "RADIX_COALESCE_EXACT cases=13" not in text:raise RuntimeError("radix warmup witness missing")
+        if name.endswith("compact_masked_mma_preserves_scores_and_selected_ids_bitwise") and "COMPACT_INDEX_EXACT allowed_score_bits=true" not in text:raise RuntimeError("compact warmup witness missing")
         record.append(dict(test=name,pid=child.pid,niceness=nice,seconds=time.time()-started,thermal_max=max(thermal_trace),log=dest.name))
     return record
 
 
-def model_weight_warmup(binary,model,corpus,log_path,deadline,fd):
+def model_weight_warmup(binary,model,corpus,log_path,deadline,fd,experiment="paired-attention-bundle"):
     """Warm GGUF pages with both policies, then discard all KV and Engram pages."""
     cool=None
     while True:
@@ -110,7 +112,7 @@ def model_weight_warmup(binary,model,corpus,log_path,deadline,fd):
         if time.monotonic()+90>=deadline:raise RuntimeError("weight warmup settle budget exhausted")
         time.sleep(2)
     resident_check()
-    command=packet.nice_command([str(binary.resolve()),str(model),str(corpus),"0","4096","native","1","paired-attention-bundle"])
+    command=packet.nice_command([str(binary.resolve()),str(model),str(corpus),"0","4096","native","1",experiment])
     started=time.time();samples=[];levels=[]
     with log_path.open("w") as log:
         child=subprocess.Popen(command,stdout=log,stderr=subprocess.STDOUT,pass_fds=(fd,))
@@ -150,6 +152,8 @@ def main():
     p.add_argument("--flag",action="append",required=True)
     p.add_argument("--attention-warmup-binary",type=Path)
     p.add_argument("--model-warmup-binary",type=Path)
+    p.add_argument("--model-warmup-experiment",default="paired-attention-bundle")
+    p.add_argument("--warmup-test",action="append",help="exact GPU test name; identically run before both arms")
     p.add_argument("--engram",type=Path,required=True)
     p.add_argument("--tag",required=True);p.add_argument("--order",choices=("ab","ba"),required=True)
     p.add_argument("--only-arm",choices=("a","b"),help="run the next arm of this ordered pair; refuse any overwrite")
@@ -182,8 +186,8 @@ def main():
         processes=resident_check()
         (out/f"{a.tag}-{arm}-processes.txt").write_text(processes)
         weight_binary=a.model_warmup_binary or a.binary.resolve().parents[1]/"iter/examples/v41_prefill_census"
-        weight_warmup=model_weight_warmup(weight_binary,a.model,a.corpus,out/f"{a.tag}-{arm}-weight-warmup.log",deadline,fd) if a.attention_warmup_binary else None
-        warmup=attention_warmup(a.attention_warmup_binary,out/f"{a.tag}-{arm}-attention-warmup",fd) if a.attention_warmup_binary else []
+        weight_warmup=model_weight_warmup(weight_binary,a.model,a.corpus,out/f"{a.tag}-{arm}-weight-warmup.log",deadline,fd,a.model_warmup_experiment) if a.attention_warmup_binary else None
+        warmup=attention_warmup(a.attention_warmup_binary,out/f"{a.tag}-{arm}-attention-warmup",fd,a.warmup_test) if a.attention_warmup_binary else []
         resident_check()
         purge=out/f"{a.tag}-{arm}-purge.jsonl"
         subprocess.run(["python3","scripts/bench/invalidate_file_cache.py",str(a.engram),"--out",str(purge)],check=True,timeout=60)

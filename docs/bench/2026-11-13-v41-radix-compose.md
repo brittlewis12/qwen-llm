@@ -1,5 +1,7 @@
 # V4.1 compact + radix coalescing: frozen gate fails, default-off controls retained
 
+The 256-row cells missed the stage gate, and compact plus radix coalescing was promoted to wall qualification by lead judgment.
+
 Bounded stage started 2026-11-14 04:09 UTC; hard stop 06:09 UTC. Compact is
 restored unchanged from its earlier record. Its standalone frozen-gate failure
 stands. M2 remains removed. This stage measures the composition under the

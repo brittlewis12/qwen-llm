@@ -4621,7 +4621,8 @@ fn resolve_cargo_target_directory(
     checkout: &Path,
     environment: &BTreeMap<String, String>,
 ) -> Result<PathBuf> {
-    let mut metadata = Command::new(cargo)
+    let mut metadata = Command::new(cargo);
+    metadata
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .current_dir(checkout)
         .env_remove("CARGO_TARGET_DIR");

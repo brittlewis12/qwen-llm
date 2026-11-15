@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -320,7 +321,7 @@ class BuildScriptIntegrationTests(unittest.TestCase):
         self.git(repo, *args)
 
     def run_fixture(
-        self, repo: Path, target: Path, overrides: dict[str, str] | None = None
+        self, repo: Path, overrides: dict[str, str] | None = None
     ) -> tuple[str, bool, str, str, str]:
         env = os.environ.copy()
         for name in (
@@ -329,8 +330,8 @@ class BuildScriptIntegrationTests(unittest.TestCase):
             "QWEN_BUILD_SOURCE_STATE",
         ):
             env.pop(name, None)
+        env.pop("CARGO_TARGET_DIR", None)
         env.update(overrides or {})
-        env["CARGO_TARGET_DIR"] = str(target)
         proc = subprocess.run(
             ["cargo", "run", "--quiet"],
             cwd=repo,
@@ -342,12 +343,26 @@ class BuildScriptIntegrationTests(unittest.TestCase):
         commit, dirty, state, source, error = proc.stdout.strip().splitlines()
         return commit, dirty == "1", state, source, error
 
+    def target_directory(self, repo: Path) -> Path:
+        env = os.environ.copy()
+        env.pop("CARGO_TARGET_DIR", None)
+        proc = subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            cwd=repo,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return Path(json.loads(proc.stdout)["target_directory"]).resolve()
+
     def test_build_script_tracks_worktree_and_git_topology(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo = root / "repo"
             repo.mkdir()
             self.git(repo, "init", "-q")
+            (repo / ".gitignore").write_text("/target/\n")
             (repo / "src").mkdir()
             (repo / "Cargo.toml").write_text(
                 "[package]\n"
@@ -376,16 +391,16 @@ class BuildScriptIntegrationTests(unittest.TestCase):
             self.git(repo, "add", ".")
             self.commit(repo, "initial")
 
-            target = root / "target-main"
+            resolved_target = self.target_directory(repo)
             clean_commit, clean_dirty, clean_state, clean_source, clean_error = (
-                self.run_fixture(repo, target)
+                self.run_fixture(repo)
             )
+            self.assertTrue((resolved_target / "debug/identity-fixture").is_file())
             self.assertFalse(clean_dirty)
             self.assertEqual((clean_source, clean_error), ("git", "none"))
 
             verified = self.run_fixture(
                 repo,
-                target,
                 {
                     "QWEN_BUILD_COMMIT": clean_commit,
                     "QWEN_BUILD_DIRTY": "0",
@@ -395,7 +410,6 @@ class BuildScriptIntegrationTests(unittest.TestCase):
             self.assertEqual(verified[3:], ("environment-verified", "none"))
             mismatched = self.run_fixture(
                 repo,
-                target,
                 {
                     "QWEN_BUILD_COMMIT": clean_commit,
                     "QWEN_BUILD_DIRTY": "0",
@@ -408,34 +422,34 @@ class BuildScriptIntegrationTests(unittest.TestCase):
             )
 
             watched.write_text("dirty-a\n")
-            _, dirty_a, state_a, _, _ = self.run_fixture(repo, target)
+            _, dirty_a, state_a, _, _ = self.run_fixture(repo)
             watched.write_text("dirty-b\n")
-            _, dirty_b, state_b, _, _ = self.run_fixture(repo, target)
+            _, dirty_b, state_b, _, _ = self.run_fixture(repo)
             self.assertTrue(dirty_a and dirty_b)
             self.assertEqual(len({clean_state, state_a, state_b}), 3)
 
             self.git(repo, "add", "watched.txt")
             self.commit(repo, "tracked update")
-            committed, committed_dirty, _, _, _ = self.run_fixture(repo, target)
+            committed, committed_dirty, _, _, _ = self.run_fixture(repo)
             self.assertFalse(committed_dirty)
             self.assertNotEqual(committed, clean_commit)
 
             head_pointer = (repo / ".git/HEAD").read_text()
             self.commit(repo, "symbolic advance", empty=True)
-            symbolic_commit, _, _, _, _ = self.run_fixture(repo, target)
+            symbolic_commit, _, _, _, _ = self.run_fixture(repo)
             self.assertEqual((repo / ".git/HEAD").read_text(), head_pointer)
             self.assertNotEqual(symbolic_commit, committed)
 
             self.git(repo, "pack-refs", "--all", "--prune")
-            packed_commit, _, _, _, _ = self.run_fixture(repo, target)
+            packed_commit, _, _, _, _ = self.run_fixture(repo)
             self.commit(repo, "packed to loose", empty=True)
-            loose_commit, _, _, _, _ = self.run_fixture(repo, target)
+            loose_commit, _, _, _, _ = self.run_fixture(repo)
             self.assertNotEqual(loose_commit, packed_commit)
 
             self.git(repo, "checkout", "--detach", "-q")
-            detached_commit, _, _, _, _ = self.run_fixture(repo, target)
+            detached_commit, _, _, _, _ = self.run_fixture(repo)
             self.commit(repo, "detached advance", empty=True)
-            detached_advance, _, _, _, _ = self.run_fixture(repo, target)
+            detached_advance, _, _, _, _ = self.run_fixture(repo)
             self.assertNotEqual(detached_advance, detached_commit)
 
             linked = root / "linked"
@@ -448,10 +462,11 @@ class BuildScriptIntegrationTests(unittest.TestCase):
                 str(linked),
                 "HEAD",
             )
-            linked_target = root / "target-linked"
+            linked_target = self.target_directory(linked)
             linked_commit, linked_dirty, linked_state, _, _ = self.run_fixture(
-                linked, linked_target
+                linked
             )
+            self.assertTrue((linked_target / "debug/identity-fixture").is_file())
             self.assertFalse(linked_dirty)
             self.assertEqual(linked_commit, detached_advance)
             self.assertRegex(
@@ -459,7 +474,7 @@ class BuildScriptIntegrationTests(unittest.TestCase):
                 rf"^{family.SOURCE_STATE_PREFIX}[0-9a-f]{{64}}$",
             )
             self.commit(linked, "linked advance", empty=True)
-            linked_advance, _, _, _, _ = self.run_fixture(linked, linked_target)
+            linked_advance, _, _, _, _ = self.run_fixture(linked)
             self.assertNotEqual(linked_advance, linked_commit)
 
 

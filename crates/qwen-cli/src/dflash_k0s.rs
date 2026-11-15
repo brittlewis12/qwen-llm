@@ -64,6 +64,7 @@ const INVENTORY_SPEC_SCHEMA: &str = "qwen.dflash_k0s_inventory_spec";
 const INVENTORY_AUTHORITY: &str =
     "development_k0s_inventory_only_no_model_forward_or_semantic_authority";
 const BUILD_REPORT_SCHEMA: &str = "qwen.dflash_k0s_build_identity_report";
+const BUILD_REPORT_VERSION: u32 = 2;
 const BUILD_REPORT_AUTHORITY: &str =
     "development_k0s_build_identity_only_no_asset_model_forward_or_acquisition_authority";
 const TOKENIZER_METADATA_DOMAIN: &str = "qwen.dflash_k0s.tokenizer_metadata.v1";
@@ -77,8 +78,6 @@ const MAX_GGUF_OBJECTS: u64 = 2_500_000;
 const MAX_GGUF_HEADER_BYTES: u64 = 64 << 20;
 const MAX_BOOTSTRAP_JSON_BYTES: u64 = 1 << 20;
 const MAX_BUILD_TOOL_BYTES: u64 = 1 << 30;
-const MAX_BUILD_ROOT_BYTES: u64 = 64 << 30;
-const MAX_BUILD_ROOT_ENTRIES: usize = 200_000;
 const K0S_SELECTOR_WEIGHT_DTYPE: &str = "Q4_K";
 const K0S_SELECTOR_WEIGHT_DTYPE_ID: i32 = 12;
 const K0S_SELECTOR_KERNEL: &str = "kernel_mat_mat_q4_K_f32";
@@ -557,14 +556,6 @@ struct BuildReportCompiler {
     version_verbose_sha256: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct BuildRootClaim {
-    path: String,
-    bytes: u64,
-    max_bytes: u64,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct BuildInfoReport {
@@ -594,7 +585,7 @@ struct BuildIdentityReport {
     attempt_id: String,
     checkout: CheckoutClaim,
     build_command: Vec<String>,
-    build_root: BuildRootClaim,
+    target_directory: String,
     executable: FileClaim,
     embedded_metallib: FileClaim,
     reducer: FileClaim,
@@ -2374,7 +2365,7 @@ fn validate_build_report_order(value: &Value) -> Result<()> {
             "attempt_id",
             "checkout",
             "build_command",
-            "build_root",
+            "target_directory",
             "executable",
             "embedded_metallib",
             "reducer",
@@ -2392,11 +2383,6 @@ fn validate_build_report_order(value: &Value) -> Result<()> {
         &value["checkout"],
         &["path", "commit", "tree", "dirty"],
         "build report checkout",
-    )?;
-    keys(
-        &value["build_root"],
-        &["path", "bytes", "max_bytes"],
-        "build root",
     )?;
     for name in ["executable", "embedded_metallib", "reducer"] {
         keys(
@@ -2458,7 +2444,7 @@ fn validate_build_report_order(value: &Value) -> Result<()> {
 fn validate_build_report_environment_order(value: &Value) -> Result<()> {
     keys(
         value,
-        &["CARGO_TARGET_DIR", "QWEN_METAL_LEASE_WAIT"],
+        &["QWEN_METAL_LEASE_WAIT"],
         "build report environment",
     )
 }
@@ -4568,149 +4554,10 @@ fn validate_build_report_claim_bindings(
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BuildRootEntrySnapshot {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
-    kind: &'static str,
-    size: u64,
-    mtime: i64,
-    mtime_nsec: i64,
-    ctime: i64,
-    ctime_nsec: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BuildRootSnapshot {
-    total_bytes: u64,
-    custody: Vec<BuildRootEntrySnapshot>,
-    entries: Vec<BuildRootEntrySnapshot>,
-}
-
-fn validate_build_root_entry_count(current: usize) -> Result<()> {
-    ensure!(
-        current < MAX_BUILD_ROOT_ENTRIES,
-        "build root exceeds 200000 entry cap"
-    );
-    Ok(())
-}
-
-fn build_root_entry(path: PathBuf, metadata: &std::fs::Metadata) -> Result<BuildRootEntrySnapshot> {
-    let kind = if metadata.is_dir() {
-        "directory"
-    } else if metadata.is_file() {
-        "file"
-    } else {
-        return Err(anyhow!("build custody contains a non-file entry"));
-    };
-    Ok(BuildRootEntrySnapshot {
-        path,
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        kind,
-        size: metadata.len(),
-        mtime: metadata.mtime(),
-        mtime_nsec: metadata.mtime_nsec(),
-        ctime: metadata.ctime(),
-        ctime_nsec: metadata.ctime_nsec(),
-    })
-}
-
-fn measure_build_root(root: &Path, checkout: &Path, maximum: u64) -> Result<BuildRootSnapshot> {
-    ensure!(
-        (1..=MAX_BUILD_ROOT_BYTES).contains(&maximum),
-        "build root cap must be within 1..=64 GiB"
-    );
-    let lexical = lexical_absolute(root)?;
-    let canonical = root
-        .canonicalize()
-        .with_context(|| format!("canonicalize build root {}", root.display()))?;
-    ensure!(
-        lexical == canonical && canonical.starts_with(checkout) && canonical != checkout,
-        "build root is not canonical beneath checkout X"
-    );
-    let checkout = checkout.canonicalize().context("canonicalize checkout X")?;
-    ensure!(
-        canonical.starts_with(&checkout),
-        "build root escapes checkout X"
-    );
-    let root_metadata = std::fs::symlink_metadata(&canonical)?;
-    ensure!(root_metadata.is_dir(), "build root is not a directory");
-    let mut total = 0u64;
-    let mut entries = Vec::new();
-    let mut custody = Vec::new();
-    let mut inodes = HashSet::new();
-    let mut add_custody = |path: PathBuf, metadata: std::fs::Metadata| -> Result<()> {
-        ensure!(
-            !metadata.file_type().is_symlink(),
-            "build custody contains a symlink"
-        );
-        ensure!(
-            inodes.insert((metadata.dev(), metadata.ino())),
-            "build custody contains a duplicate directory/file inode"
-        );
-        custody.push(build_root_entry(path, &metadata)?);
-        Ok(())
-    };
-    add_custody(canonical.clone(), root_metadata)?;
-
-    let mut parent = canonical.parent();
-    while let Some(path) = parent {
-        if !path.starts_with(&checkout) {
-            break;
-        }
-        add_custody(path.to_owned(), std::fs::symlink_metadata(path)?)?;
-        if path == checkout {
-            break;
-        }
-        parent = path.parent();
-    }
-
-    let mut pending = vec![canonical];
-    while let Some(directory) = pending.pop() {
-        let mut children = std::fs::read_dir(&directory)?.collect::<std::io::Result<Vec<_>>>()?;
-        children.sort_by_key(std::fs::DirEntry::file_name);
-        for entry in children {
-            let path = entry.path();
-            let metadata = std::fs::symlink_metadata(&path)?;
-            ensure!(
-                !metadata.file_type().is_symlink(),
-                "build custody contains a symlink"
-            );
-            ensure!(
-                inodes.insert((metadata.dev(), metadata.ino())),
-                "build custody contains a duplicate directory/file inode"
-            );
-            validate_build_root_entry_count(entries.len())?;
-            entries.push(build_root_entry(path.clone(), &metadata)?);
-            if metadata.is_dir() {
-                pending.push(path);
-            } else if metadata.is_file() {
-                ensure!(metadata.nlink() == 1, "build root file is hard-linked");
-                total = total
-                    .checked_add(metadata.len())
-                    .context("build root byte total overflow")?;
-                ensure!(total <= maximum, "build root exceeds reported cap");
-            } else {
-                return Err(anyhow!("build root contains a non-file entry"));
-            }
-        }
-    }
-    custody.sort_by(|left, right| left.path.cmp(&right.path));
-    entries.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(BuildRootSnapshot {
-        total_bytes: total,
-        custody,
-        entries,
-    })
-}
-
 fn validate_build_command_and_environment(
     command: &[String],
-    build_root: &BuildRootClaim,
     environment: &BTreeMap<String, String>,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let suffix = [
         "build",
         "--locked",
@@ -4722,44 +4569,98 @@ fn validate_build_command_and_environment(
         "qwen-bench",
         "--features",
         "dflash-k0s-diagnostics",
+        "--message-format=json-render-diagnostics",
     ];
     ensure!(
         command.len() == suffix.len() + 1 && command[1..].iter().map(String::as_str).eq(suffix),
         "build report command suffix/order mismatch"
     );
     let cargo = Path::new(&command[0]);
-    let cargo_canonical = cargo
-        .canonicalize()
-        .context("canonicalize Cargo executable")?;
+    let cargo_canonical = cargo.canonicalize().context("resolve Cargo command")?;
     let cargo_metadata = std::fs::metadata(&cargo_canonical)?;
     ensure!(
-        cargo.is_absolute()
-            && cargo_canonical == cargo
-            && cargo_metadata.is_file()
-            && cargo_metadata.mode() & 0o111 != 0,
-        "build command Cargo executable is not canonical/executable"
+        cargo.is_absolute() && cargo_metadata.is_file() && cargo_metadata.mode() & 0o111 != 0,
+        "build command Cargo invocation is not absolute/executable"
     );
-    let expected_environment = BTreeMap::from([
-        ("CARGO_TARGET_DIR".into(), build_root.path.clone()),
-        ("QWEN_METAL_LEASE_WAIT".into(), "1".into()),
-    ]);
+    let expected_environment = BTreeMap::from([("QWEN_METAL_LEASE_WAIT".into(), "1".into())]);
     ensure!(
         environment == &expected_environment,
         "build report contains a missing or unlisted build override"
     );
-    Ok(())
+    Ok(cargo.to_owned())
+}
+
+fn canonicalize_cargo_path(path: &Path) -> Result<PathBuf> {
+    ensure!(path.is_absolute(), "Cargo path must be absolute");
+    let mut current = path;
+    let mut missing_tail = Vec::new();
+    loop {
+        match current.canonicalize() {
+            Ok(mut canonical) => {
+                for component in missing_tail.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = current
+                    .file_name()
+                    .context("Cargo target path has no final component")?;
+                missing_tail.push(name.to_owned());
+                current = current
+                    .parent()
+                    .context("Cargo target path has no existing parent")?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn resolve_cargo_target_directory(
+    cargo: &Path,
+    checkout: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<PathBuf> {
+    let mut metadata = Command::new(cargo)
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(checkout)
+        .env_remove("CARGO_TARGET_DIR");
+    for (name, value) in environment {
+        metadata.env(name, value);
+    }
+    let output = metadata
+        .output()
+        .context("run Cargo metadata for target path")?;
+    ensure!(
+        output.status.success(),
+        "Cargo metadata failed while resolving the default target directory"
+    );
+    ensure!(
+        output.stdout.len() <= 16 << 20,
+        "Cargo metadata output exceeds 16 MiB"
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).context("parse Cargo metadata")?;
+    let target = value
+        .get("target_directory")
+        .and_then(Value::as_str)
+        .context("Cargo metadata omitted target_directory")?;
+    let path = PathBuf::from(target);
+    canonicalize_cargo_path(&path)
 }
 
 fn validate_build_artifact_paths(
-    build_root: &BuildRootClaim,
+    target_directory: &Path,
     executable: &FileClaim,
     metallib: &FileClaim,
     build_report: &FileClaim,
 ) -> Result<()> {
-    let root = Path::new(&build_root.path);
     ensure!(
-        Path::new(&executable.path) == root.join("release/qwen-bench")
-            && Path::new(&metallib.path).starts_with(root)
+        Path::new(&executable.path).is_absolute()
+            && Path::new(&executable.path).starts_with(target_directory)
+            && Path::new(&executable.path)
+                .file_name()
+                .is_some_and(|name| name == "qwen-bench")
+            && Path::new(&metallib.path).starts_with(target_directory)
             && lexical_absolute(Path::new(&metallib.path))?.as_path() == Path::new(&metallib.path)
             && Path::new(&build_report.path).is_absolute()
             && lexical_absolute(Path::new(&build_report.path))?.as_path()
@@ -4787,10 +4688,10 @@ fn validate_build_report(
     report: &BuildIdentityReport,
     spec: &InventorySpec,
     build_identity: &Value,
-) -> Result<BuildRootSnapshot> {
+) -> Result<()> {
     ensure!(
         report.schema == BUILD_REPORT_SCHEMA
-            && report.schema_version == 1
+            && report.schema_version == BUILD_REPORT_VERSION
             && report.authority == BUILD_REPORT_AUTHORITY
             && report.run_id == spec.run_id
             && valid_attempt_id(&report.attempt_id),
@@ -4799,27 +4700,21 @@ fn validate_build_report(
     ensure!(
         report.checkout == spec.checkout
             && !report.checkout.dirty
-            && Path::new(&report.build_root.path).is_absolute()
-            && report.build_root.bytes <= report.build_root.max_bytes
-            && (1..=MAX_BUILD_ROOT_BYTES).contains(&report.build_root.max_bytes),
-        "build report checkout/command/root invalid"
+            && Path::new(&report.target_directory).is_absolute(),
+        "build report checkout/target directory invalid"
     );
-    validate_build_command_and_environment(
-        &report.build_command,
-        &report.build_root,
+    let cargo = validate_build_command_and_environment(&report.build_command, &report.environment)?;
+    let target_directory = resolve_cargo_target_directory(
+        &cargo,
+        Path::new(&spec.checkout.path),
         &report.environment,
     )?;
-    let build_root_snapshot = measure_build_root(
-        Path::new(&report.build_root.path),
-        Path::new(&spec.checkout.path),
-        report.build_root.max_bytes,
-    )?;
     ensure!(
-        build_root_snapshot.total_bytes == report.build_root.bytes,
-        "measured build root bytes differ from report"
+        report.target_directory == target_directory.to_string_lossy() && target_directory.is_dir(),
+        "build report target_directory differs from Cargo metadata"
     );
     validate_build_artifact_paths(
-        &report.build_root,
+        &target_directory,
         &report.executable,
         &report.embedded_metallib,
         &spec.build_report,
@@ -4841,6 +4736,12 @@ fn validate_build_report(
             && report.compiler.path == spec.build.compiler
             && report.compiler.version_verbose == spec.build.compiler_version
             && Path::new(&report.compiler.path).is_absolute()
+            && Path::new(&report.compiler.path)
+                .canonicalize()
+                .ok()
+                .as_deref()
+                == Some(Path::new(&report.compiler.path))
+            && cargo.canonicalize().ok().as_deref() == Some(Path::new(&report.compiler.path))
             && valid_build_tool_bytes(report.compiler.bytes)
             && valid_sha(&report.compiler.sha256)
             && report.compiler.version_verbose_sha256
@@ -4863,6 +4764,10 @@ fn validate_build_report(
         "build report build-info facts are not clean/exact"
     );
     ensure!(
+        Path::new(&info.artifact.path).starts_with(&target_directory),
+        "build-info artifact is outside Cargo target_directory"
+    );
+    ensure!(
         build_identity.get("build_commit").and_then(Value::as_str)
             == Some(info.build_commit.as_str())
             && build_identity.get("runtime_commit").and_then(Value::as_str)
@@ -4883,7 +4788,7 @@ fn validate_build_report(
         environment_keys.windows(2).all(|pair| pair[0] < pair[1]),
         "build report environment is not lexicographically ordered"
     );
-    Ok(build_root_snapshot)
+    Ok(())
 }
 
 fn validate_external_metallib_claim(claim: &FileClaim) -> Result<()> {
@@ -5690,7 +5595,7 @@ pub fn run_inventory(args: DflashK0sInventoryArgs, build_identity: Value) -> Res
     )?;
     let build_report_bytes = opened_bytes(&build_report_input)?;
     let (build_report, _) = parse_build_report(&build_report_bytes)?;
-    let build_root_snapshot = validate_build_report(&build_report, &spec, &build_identity)?;
+    validate_build_report(&build_report, &spec, &build_identity)?;
     let compiler_input = OpenedInput::open(
         Path::new(&build_report.compiler.path),
         "build report compiler",
@@ -6088,16 +5993,6 @@ pub fn run_inventory(args: DflashK0sInventoryArgs, build_identity: Value) -> Res
         target_g.revalidate_retained_shard_stamps()?.len() == 1
             && drafter_g.revalidate_retained_shard_stamps()?.len() == 1,
         "inventory GGUF custody changed"
-    );
-    let final_build_root_snapshot = measure_build_root(
-        Path::new(&build_report.build_root.path),
-        Path::new(&spec.checkout.path),
-        build_report.build_root.max_bytes,
-    )?;
-    ensure!(
-        final_build_root_snapshot == build_root_snapshot
-            && final_build_root_snapshot.total_bytes == build_report.build_root.bytes,
-        "build root snapshot changed during inventory"
     );
     output.write_all(&bytes)?;
     output.flush()?;
@@ -8358,7 +8253,7 @@ mod tests {
         let reordered_report = serde_json::json!({
             "schema": BUILD_REPORT_SCHEMA,
             "authority": BUILD_REPORT_AUTHORITY,
-            "schema_version": 1
+            "schema_version": BUILD_REPORT_VERSION
         });
         assert!(validate_build_report_order(&reordered_report).is_err());
         for bytes in [
@@ -8369,17 +8264,17 @@ mod tests {
             assert!(parse_strict_json(bytes, "duplicate fixture").is_err());
         }
         let ordered_environment = parse_strict_json(
-            br#"{"CARGO_TARGET_DIR":"/synthetic/target","QWEN_METAL_LEASE_WAIT":"1"}"#,
+            br#"{"QWEN_METAL_LEASE_WAIT":"1"}"#,
             "ordered build environment",
         )
         .unwrap();
         validate_build_report_environment_order(&ordered_environment).unwrap();
-        let reversed_environment = parse_strict_json(
-            br#"{"QWEN_METAL_LEASE_WAIT":"1","CARGO_TARGET_DIR":"/synthetic/target"}"#,
-            "reversed build environment",
+        let overridden_environment = parse_strict_json(
+            br#"{"CARGO_TARGET_DIR":"/synthetic/target","QWEN_METAL_LEASE_WAIT":"1"}"#,
+            "overridden build environment",
         )
         .unwrap();
-        assert!(validate_build_report_environment_order(&reversed_environment).is_err());
+        assert!(validate_build_report_environment_order(&overridden_environment).is_err());
     }
 
     #[test]
@@ -8804,13 +8699,10 @@ mod tests {
             serde_json::to_string(&caps).unwrap(),
             r#"{"header_bytes":67108864,"metadata":4096,"tensors":8192,"strings_bytes":16777216,"array_items_per_array":500000,"array_items":2000000,"objects":2500000}"#
         );
-        let environment = BTreeMap::from([
-            ("CARGO_TARGET_DIR".to_owned(), "/x/target-k0s".to_owned()),
-            ("QWEN_METAL_LEASE_WAIT".to_owned(), "1".to_owned()),
-        ]);
+        let environment = BTreeMap::from([("QWEN_METAL_LEASE_WAIT".to_owned(), "1".to_owned())]);
         assert_eq!(
             serde_json::to_string(&environment).unwrap(),
-            r#"{"CARGO_TARGET_DIR":"/x/target-k0s","QWEN_METAL_LEASE_WAIT":"1"}"#
+            r#"{"QWEN_METAL_LEASE_WAIT":"1"}"#
         );
     }
 
@@ -9084,45 +8976,15 @@ mod tests {
     }
 
     #[test]
-    fn build_root_command_and_environment_are_exact_and_bounded() {
+    fn build_command_and_environment_require_the_resolved_default_target() {
         use std::os::unix::fs::symlink;
         let checkout = temp_dir();
-        let root = checkout.join("target-k0s");
-        std::fs::create_dir(&root).unwrap();
-        std::fs::write(root.join("a"), b"abc").unwrap();
-        let nested = root.join("nested");
-        std::fs::create_dir(&nested).unwrap();
-        std::fs::write(nested.join("b"), b"12345").unwrap();
-        let snapshot = measure_build_root(&root, &checkout, 8).unwrap();
-        assert_eq!(snapshot.total_bytes, 8);
-        assert_eq!(snapshot.entries.len(), 3);
-        assert!(!snapshot.entries.iter().any(|entry| entry.path == checkout));
-        assert!(!snapshot.entries.iter().any(|entry| entry.path == root));
-        assert!(snapshot.custody.iter().any(|entry| entry.path == checkout));
-        assert!(snapshot.custody.iter().any(|entry| entry.path == root));
-        assert_eq!(MAX_BUILD_ROOT_ENTRIES, 200_000);
-        assert_eq!(MAX_BUILD_ROOT_BYTES, 64 << 30);
-        validate_build_root_entry_count(199_999).unwrap();
-        assert!(validate_build_root_entry_count(200_000).is_err());
-        assert!(measure_build_root(&root, &checkout, 0).is_err());
-        let repeated = measure_build_root(&root, &checkout, 8).unwrap();
-        assert_eq!(repeated, snapshot);
-        std::fs::write(nested.join("b"), b"54321").unwrap();
-        assert_ne!(measure_build_root(&root, &checkout, 8).unwrap(), snapshot);
-        std::fs::write(nested.join("b"), b"12345").unwrap();
-        assert!(measure_build_root(&root, &checkout, 7).is_err());
-        let hardlink = nested.join("hardlink");
-        std::fs::hard_link(root.join("a"), &hardlink).unwrap();
-        assert!(measure_build_root(&root, &checkout, 64).is_err());
-        std::fs::remove_file(&hardlink).unwrap();
-        symlink(root.join("a"), nested.join("link")).unwrap();
-        assert!(measure_build_root(&root, &checkout, 64).is_err());
-        std::fs::remove_file(nested.join("link")).unwrap();
-
         let cargo = PathBuf::from(std::env::var_os("CARGO").unwrap())
             .canonicalize()
             .unwrap();
-        let command = std::iter::once(cargo.to_string_lossy().into_owned())
+        let cargo_alias = checkout.join("cargo");
+        symlink(&cargo, &cargo_alias).unwrap();
+        let command = std::iter::once(cargo_alias.to_string_lossy().into_owned())
             .chain(
                 [
                     "build",
@@ -9135,45 +8997,58 @@ mod tests {
                     "qwen-bench",
                     "--features",
                     "dflash-k0s-diagnostics",
+                    "--message-format=json-render-diagnostics",
                 ]
                 .into_iter()
                 .map(str::to_owned),
             )
             .collect::<Vec<_>>();
-        let root_claim = BuildRootClaim {
-            path: root.to_string_lossy().into_owned(),
-            bytes: 8,
-            max_bytes: 64,
-        };
-        let environment = BTreeMap::from([
-            ("CARGO_TARGET_DIR".into(), root_claim.path.clone()),
-            ("QWEN_METAL_LEASE_WAIT".into(), "1".into()),
-        ]);
-        validate_build_command_and_environment(&command, &root_claim, &environment).unwrap();
+        let environment = BTreeMap::from([("QWEN_METAL_LEASE_WAIT".into(), "1".into())]);
+        let actual_cargo = validate_build_command_and_environment(&command, &environment).unwrap();
+        assert_eq!(actual_cargo, cargo_alias);
+        assert_eq!(actual_cargo.canonicalize().unwrap(), cargo);
+        let manifest = format!(
+            "[package]\nname = \"target-path-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"
+        );
+        std::fs::write(checkout.join("Cargo.toml"), manifest).unwrap();
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::write(checkout.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let resolved = resolve_cargo_target_directory(&cargo, &checkout, &environment).unwrap();
+        assert!(resolved.is_absolute());
+        let synthetic_target = checkout.with_file_name(format!(
+            "{}-managed-target",
+            checkout.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(synthetic_target.join("release/build")).unwrap();
         let claim = |path: PathBuf| FileClaim {
             path: path.to_string_lossy().into_owned(),
             bytes: 1,
             sha256: "0".repeat(64),
             max_bytes: 1,
         };
-        let executable = claim(root.join("release/qwen-bench"));
-        let metallib = claim(root.join("release/build/qwen/out/default.metallib"));
+        let executable = claim(synthetic_target.join("release/qwen-bench"));
+        let metallib = claim(synthetic_target.join("release/build/default.metallib"));
         let report = claim(checkout.join("planner/build-report.json"));
-        validate_build_artifact_paths(&root_claim, &executable, &metallib, &report).unwrap();
-        let wrong_executable = claim(root.join("debug/qwen-bench"));
+        validate_build_artifact_paths(&synthetic_target, &executable, &metallib, &report).unwrap();
+        let wrong_executable = claim(synthetic_target.join("debug/qwen-bench"));
         assert!(
-            validate_build_artifact_paths(&root_claim, &wrong_executable, &metallib, &report)
+            validate_build_artifact_paths(&synthetic_target, &wrong_executable, &metallib, &report)
                 .is_err()
         );
         let mut reordered = command.clone();
         reordered.swap(2, 3);
-        assert!(
-            validate_build_command_and_environment(&reordered, &root_claim, &environment).is_err()
+        assert!(validate_build_command_and_environment(&reordered, &environment).is_err());
+        let mut extra = environment.clone();
+        extra.insert(
+            "CARGO_TARGET_DIR".into(),
+            synthetic_target.to_string_lossy().into_owned(),
         );
-        let mut extra = environment;
+        assert!(validate_build_command_and_environment(&command, &extra).is_err());
+        extra.remove("CARGO_TARGET_DIR");
         extra.insert("RUSTFLAGS".into(), "-Ctarget-cpu=native".into());
-        assert!(validate_build_command_and_environment(&command, &root_claim, &extra).is_err());
+        assert!(validate_build_command_and_environment(&command, &extra).is_err());
         std::fs::remove_dir_all(checkout).unwrap();
+        std::fs::remove_dir_all(synthetic_target).unwrap();
     }
 
     #[test]

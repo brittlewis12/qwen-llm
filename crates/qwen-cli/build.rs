@@ -41,10 +41,10 @@ fn watch_git_metadata(manifest_dir: &Path) {
     }
     if let Some(symbolic_ref) = git_text(manifest_dir, &["symbolic-ref", "-q", "HEAD"])
         && let Some(path) = git_path(manifest_dir, &symbolic_ref)
-        && path.exists()
     {
-        // Watching the symbolic ref target is the critical part: committing on
-        // a branch changes refs/heads/<branch>, while .git/HEAD stays unchanged.
+        // Watch the symbolic ref even while packed. After `pack-refs`, a later
+        // commit may recreate this currently absent loose ref; Cargo treats a
+        // missing rerun path as changed on the next invocation.
         println!("cargo:rerun-if-changed={}", path.display());
     }
 }

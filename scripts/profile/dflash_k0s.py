@@ -20,6 +20,7 @@ import json
 import math
 import os
 import selectors
+import shutil
 import stat
 import struct
 import subprocess
@@ -182,6 +183,7 @@ HOST_PREDICATE_V2_KEYS = (
     "family_match",
 )
 BUILD_REPORT_SCHEMA = "qwen.dflash_k0s_build_identity_report"
+BUILD_REPORT_VERSION = 2
 BUILD_REPORT_AUTHORITY = "development_k0s_build_identity_only_no_asset_model_forward_or_acquisition_authority"
 BUILD_REPORT_KEYS = (
     "schema",
@@ -191,7 +193,7 @@ BUILD_REPORT_KEYS = (
     "attempt_id",
     "checkout",
     "build_command",
-    "build_root",
+    "target_directory",
     "executable",
     "embedded_metallib",
     "reducer",
@@ -210,7 +212,6 @@ BUILD_REPORT_COMPILER_KEYS = (
     "version_verbose",
     "version_verbose_sha256",
 )
-BUILD_ROOT_KEYS = ("path", "bytes", "max_bytes")
 RUST_BUILD_COMMAND_SUFFIX = [
     "build",
     "--locked",
@@ -222,6 +223,7 @@ RUST_BUILD_COMMAND_SUFFIX = [
     "qwen-bench",
     "--features",
     "dflash-k0s-diagnostics",
+    "--message-format=json-render-diagnostics",
 ]
 BUILD_INFO_REPORT_KEYS = (
     "artifact",
@@ -300,7 +302,7 @@ MAX_BOOTSTRAP_SPEC_BYTES = 1 << 20
 MAX_PREPARATION_HASH_REPORT_BYTES = 65536
 MAX_GIT_STDOUT_BYTES = 64 << 20
 MAX_GIT_STDERR_BYTES = 1 << 20
-MAX_BUILD_ROOT_BYTES = 64 << 30
+MAX_MEASURED_DIRECTORY_BYTES = 64 << 30
 MAX_COMPILER_BYTES = 1 << 30
 PREPARATION_HASH_REPORT_SCHEMA = "qwen.dflash_k0s_preparation_hash_observation"
 PREPARATION_HASH_REPORT_AUTHORITY = "development_k0s_preparation_hashes_only_no_asset_discovery_model_forward_or_acquisition_authority"
@@ -1228,18 +1230,8 @@ class ParentCustodyTransition:
 class InventoryContext:
     inventory: dict[str, Any]
     opened: list[OpenFile]
-    build_root_custody: dict[str, Any] | None = None
 
     def final_check(self, transition: ParentCustodyTransition | None = None) -> None:
-        if self.build_root_custody is not None:
-            require(
-                measure_directory(
-                    self.build_root_custody["path"],
-                    self.build_root_custody["maximum"],
-                )
-                == self.build_root_custody["measurement"],
-                "build root changed after inventory validation",
-            )
         for item in self.opened:
             final_custody_check(
                 item, transition.snapshot_for(item) if transition is not None else None
@@ -5066,7 +5058,7 @@ def validate_ignored_entries(
     return absolute
 
 
-def inventory_build_root(facts: dict[str, Any], x_path: Path) -> Path:
+def inventory_target_directory(facts: dict[str, Any]) -> Path:
     claim = identity_from_claim(facts["build_report"], "inventory build report")
     opened = open_regular(
         Path(claim["path"]), "inventory build report", claim["max_bytes"]
@@ -5081,14 +5073,12 @@ def inventory_build_root(facts: dict[str, Any], x_path: Path) -> Path:
             BUILD_REPORT_KEYS,
             "inventory build report",
         )
-        root_claim = exact_keys(report["build_root"], BUILD_ROOT_KEYS, "build root")
-        root = Path(root_claim["path"])
+        root = Path(text(report["target_directory"], "Cargo target_directory"))
         require(
             root.is_absolute()
             and root.resolve(strict=True) == root
-            and root.is_dir()
-            and root.is_relative_to(x_path),
-            "inventory build root is not canonical under X",
+            and root.is_dir(),
+            "inventory Cargo target_directory is not canonical",
         )
         return root
     finally:
@@ -5110,10 +5100,15 @@ def validate_preparation_git_state(
         Path(control["path"]), "preparation control Y", require_clean=False
     )
     if git_x["ignored"]:
+        target_directory = inventory_target_directory(inventory_facts)
         validate_ignored_entries(
             git_x,
             "preparation worktree X",
-            allowed_root=inventory_build_root(inventory_facts, git_x["path"]),
+            allowed_root=(
+                target_directory
+                if target_directory.is_relative_to(Path(git_x["path"]))
+                else None
+            ),
         )
     ignored_outputs = validate_ignored_entries(
         git_y,
@@ -5382,6 +5377,45 @@ def validate_build_info_report(
     return info
 
 
+def resolve_cargo_target_directory(
+    cargo_path: Path, checkout_path: Path, environment: dict[str, str]
+) -> Path:
+    cargo_environment = os.environ.copy()
+    cargo_environment.pop("CARGO_TARGET_DIR", None)
+    cargo_environment.update(environment)
+    proc = subprocess.run(
+        [
+            str(cargo_path),
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+        ],
+        cwd=checkout_path,
+        env=cargo_environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    require(
+        proc.returncode == 0,
+        "Cargo metadata failed while resolving the default target directory",
+    )
+    require(
+        len(proc.stdout.encode("utf-8")) <= 16 << 20,
+        "Cargo metadata output exceeds 16 MiB",
+    )
+    metadata = parse_json(proc.stdout.encode("utf-8"), "Cargo metadata")
+    target = text(metadata.get("target_directory"), "Cargo target_directory")
+    path = Path(target)
+    canonical = path.resolve(strict=False)
+    require(
+        path.is_absolute(),
+        "Cargo target_directory is not absolute",
+    )
+    return canonical
+
+
 def validate_build_identity_report(
     value: Any,
     claim: dict[str, Any],
@@ -5392,12 +5426,12 @@ def validate_build_identity_report(
     executable: dict[str, Any],
     metallib: dict[str, Any],
     reducer: dict[str, Any],
-    measurement_out: dict[str, Any] | None = None,
+    resolved_target_directory: Path | None = None,
 ) -> dict[str, Any]:
     report = exact_keys(value, BUILD_REPORT_KEYS, "build identity report")
     require(
         report["schema"] == BUILD_REPORT_SCHEMA
-        and report["schema_version"] == 1
+        and report["schema_version"] == BUILD_REPORT_VERSION
         and report["authority"] == BUILD_REPORT_AUTHORITY
         and report["run_id"] == run_id,
         "build identity report schema/authority/run mismatch",
@@ -5411,36 +5445,39 @@ def validate_build_identity_report(
         and all(isinstance(v, str) and v for v in report["build_command"]),
         "build report command invalid",
     )
-    root = exact_keys(report["build_root"], BUILD_ROOT_KEYS, "build root")
-    build_root_path = Path(text(root["path"], "build root path"))
+    target_directory = Path(text(report["target_directory"], "Cargo target_directory"))
     require(
-        build_root_path.is_absolute()
-        and build_root_path.resolve(strict=True) == build_root_path,
-        "build root path is not canonical absolute",
-    )
-    require(build_root_path.is_dir(), "build root is not an existing directory")
-    require(
-        build_root_path.is_relative_to(checkout_path),
-        "build root is not contained under worktree X",
-    )
-    root_maximum = integer(root["max_bytes"], "build root max", 1, MAX_BUILD_ROOT_BYTES)
-    measurement_before = measure_directory(build_root_path, root_maximum)
-    measured_root_bytes = measurement_before["bytes"]
-    integer(root["bytes"], "build root bytes")
-    require(
-        root["bytes"] == measured_root_bytes,
-        "build root measured-byte claim mismatch",
+        target_directory.is_absolute()
+        and target_directory.resolve(strict=True) == target_directory
+        and target_directory.is_dir(),
+        "Cargo target_directory is not canonical absolute",
     )
     build_command = report["build_command"]
     cargo_path = Path(build_command[0])
     require(
         cargo_path.is_absolute()
-        and cargo_path.resolve(strict=True) == cargo_path
+        and cargo_path.resolve(strict=True).is_file()
         and cargo_path.is_file()
         and os.access(cargo_path, os.X_OK)
         and build_command[1:] == RUST_BUILD_COMMAND_SUFFIX,
         "build report cargo argv suffix/order mismatch",
     )
+    expected_environment = {"QWEN_METAL_LEASE_WAIT": "1"}
+    require(
+        report["environment"] == expected_environment
+        and list(report["environment"]) == ["QWEN_METAL_LEASE_WAIT"],
+        "build report environment map is not exact",
+    )
+    resolved_target_directory = resolved_target_directory or resolve_cargo_target_directory(
+        cargo_path, checkout_path, report["environment"]
+    )
+    require(
+        resolved_target_directory.is_absolute()
+        and resolved_target_directory.resolve(strict=True) == resolved_target_directory
+        and resolved_target_directory == target_directory,
+        "reported target_directory differs from Cargo metadata",
+    )
+    require(target_directory.is_dir(), "Cargo target_directory is not an existing directory")
     for key, expected in (
         ("executable", executable),
         ("embedded_metallib", metallib),
@@ -5449,9 +5486,16 @@ def validate_build_identity_report(
         identity_from_claim(report[key], f"build report {key}")
         require(report[key] == expected, f"build report {key} mismatch")
     require(report["sources"] == sources, "build report source claims mismatch")
+    executable_path = Path(executable["path"])
     require(
-        Path(executable["path"]) == build_root_path / "release" / "qwen-bench",
-        "build executable is not exact root/release/qwen-bench",
+        executable_path.is_absolute()
+        and executable_path.is_relative_to(target_directory)
+        and executable_path.name == "qwen-bench",
+        "build executable path is not the reported Cargo artifact",
+    )
+    require(
+        Path(metallib["path"]).is_relative_to(target_directory),
+        "embedded metallib is outside Cargo target_directory",
     )
     for label, item in (
         ("embedded metallib", metallib),
@@ -5470,6 +5514,10 @@ def validate_build_identity_report(
         compiler_path.is_absolute()
         and compiler_path.resolve(strict=True) == compiler_path,
         "compiler path is not canonical",
+    )
+    require(
+        cargo_path.resolve(strict=True) == compiler_path,
+        "Cargo invocation path does not resolve to the reported compiler",
     )
     integer(compiler["bytes"], "compiler bytes", 1, MAX_COMPILER_BYTES)
     sha256_text(compiler["sha256"], "compiler sha256")
@@ -5493,36 +5541,9 @@ def validate_build_identity_report(
     info = validate_build_info_report(report["build_info"], checkout, build)
     identity_from_claim(info["artifact"], "build-info artifact")
     require(
-        report["environment"]
-        == {
-            "CARGO_TARGET_DIR": str(build_root_path),
-            "QWEN_METAL_LEASE_WAIT": "1",
-        }
-        and list(report["environment"])
-        == [
-            "CARGO_TARGET_DIR",
-            "QWEN_METAL_LEASE_WAIT",
-        ],
-        "build report environment map is not exact",
+        Path(info["artifact"]["path"]).is_relative_to(target_directory),
+        "build-info artifact is outside Cargo target_directory",
     )
-    require(
-        Path(info["artifact"]["path"]).is_relative_to(checkout_path),
-        "build-info artifact escapes worktree X",
-    )
-    measurement_after = measure_directory(build_root_path, root_maximum)
-    require(
-        measurement_after == measurement_before
-        and measurement_after["bytes"] == root["bytes"],
-        "build root changed across report validation",
-    )
-    if measurement_out is not None:
-        measurement_out.update(
-            {
-                "path": build_root_path,
-                "maximum": root_maximum,
-                "measurement": measurement_before,
-            }
-        )
     return report
 
 
@@ -5716,7 +5737,6 @@ def validate_inventory(
             pread_exact(report_file, 0, report_file.size, "build report"),
             "build report",
         )
-        build_root_custody: dict[str, Any] = {}
         validate_build_identity_report(
             report_json,
             build_report_claim,
@@ -5727,12 +5747,14 @@ def validate_inventory(
             spec["executable"],
             spec["embedded_metallib"],
             spec["reducer"],
-            build_root_custody,
         )
+        target_directory = Path(report_json["target_directory"])
         validate_ignored_entries(
             git_x,
             "inventory worktree X",
-            allowed_root=Path(report_json["build_root"]["path"]),
+            allowed_root=(
+                target_directory if target_directory.is_relative_to(x_path) else None
+            ),
         )
         compiler_claim = report_json["compiler"]
         compiler_file = open_regular(
@@ -6205,16 +6227,11 @@ def validate_inventory(
             == {"QWEN_METAL_LEASE_WAIT": "1"},
             "inventory command/environment mismatch",
         )
-        require(
-            measure_directory(build_root_custody["path"], build_root_custody["maximum"])
-            == build_root_custody["measurement"],
-            "build root changed across the complete inventory operation",
-        )
         for item in opened:
             final_custody_check(item)
         if retain_open:
             retained = True
-            return InventoryContext(inventory, opened, build_root_custody)
+            return InventoryContext(inventory, opened)
         return inventory
     except (
         KeyError,
@@ -6627,10 +6644,11 @@ def validate_preparation_prerender(
     validate_ignored_entries(git_p, "preparation planner P")
     validate_ignored_entries(git_y, "preparation control Y")
     if git_x["ignored"]:
+        target_directory = inventory_target_directory(facts)
         validate_ignored_entries(
             git_x,
             "preparation worktree X",
-            allowed_root=inventory_build_root(facts, x_path),
+            allowed_root=(target_directory if target_directory.is_relative_to(x_path) else None),
         )
     require(
         checkout
@@ -9947,6 +9965,34 @@ def self_test() -> None:
         os.access(reducer_script, os.X_OK)
         and reducer_script.read_bytes().startswith(b"#!/usr/bin/env -S uv run\n")
     )
+    cargo_path = shutil.which("cargo")
+    require(cargo_path is not None, "Cargo is required for target-directory provenance")
+    with tempfile.TemporaryDirectory() as temp:
+        cargo_checkout = Path(temp)
+        (cargo_checkout / "Cargo.toml").write_text(
+            '[package]\nname = "cargo-target-fixture"\nversion = "0.0.0"\nedition = "2024"\n',
+            encoding="utf-8",
+        )
+        (cargo_checkout / "src").mkdir()
+        (cargo_checkout / "src/main.rs").write_text("fn main() {}\n", encoding="utf-8")
+        cargo_environment = os.environ.copy()
+        cargo_environment.pop("CARGO_TARGET_DIR", None)
+        cargo_environment["QWEN_METAL_LEASE_WAIT"] = "1"
+        metadata = subprocess.run(
+            [cargo_path, "metadata", "--no-deps", "--format-version", "1"],
+            cwd=cargo_checkout,
+            env=cargo_environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        expected_target = Path(json.loads(metadata.stdout)["target_directory"]).resolve()
+        resolved_target = resolve_cargo_target_directory(
+            Path(cargo_path),
+            cargo_checkout,
+            {"QWEN_METAL_LEASE_WAIT": "1"},
+        )
+        ok(resolved_target == expected_target)
 
     # Fixed Rust interoperability vectors; expected digests are literal fixtures.
     ok(
@@ -10041,6 +10087,7 @@ def self_test() -> None:
             "qwen-bench",
             "--features",
             "dflash-k0s-diagnostics",
+            "--message-format=json-render-diagnostics",
         ]
     )
     literal_frozen = [
@@ -10743,8 +10790,8 @@ def self_test() -> None:
         ok(measure_directory_bytes(measured_root, 5) == 5)
         ok(measure_directory(measured_root, 5)["entry_count"] == 3)
         ok(
-            measure_directory(measured_root, MAX_BUILD_ROOT_BYTES)
-            == measure_directory(measured_root, MAX_BUILD_ROOT_BYTES)
+            measure_directory(measured_root, MAX_MEASURED_DIRECTORY_BYTES)
+            == measure_directory(measured_root, MAX_MEASURED_DIRECTORY_BYTES)
         )
         expect_error(lambda: measure_directory_bytes(measured_root, 4), "exceed cap")
         (measured_root / "bad-link").symlink_to(measured_root / "a")
@@ -10773,10 +10820,12 @@ def self_test() -> None:
         report_x = root / "build-report-x"
         report_x.mkdir()
         report_root = report_x / "target"
-        (report_root / "release").mkdir(parents=True)
+        (report_root / "release" / "build").mkdir(parents=True)
+        wrong_target = report_x / "wrong-target"
+        wrong_target.mkdir()
         report_executable_path = report_root / "release" / "qwen-bench"
         report_executable_path.write_bytes(b"qwen-bench")
-        report_metallib_path = report_x / "embedded.metallib"
+        report_metallib_path = report_root / "release" / "build" / "embedded.metallib"
         report_metallib_path.write_bytes(b"metallib")
         report_reducer_path = report_x / "reducer.py"
         report_reducer_path.write_bytes(b"reducer")
@@ -10785,7 +10834,7 @@ def self_test() -> None:
         report_compiler_path = report_x / "cargo"
         report_compiler_path.write_bytes(b"cargo")
         report_compiler_path.chmod(0o700)
-        report_info_path = report_x / "build-info.json"
+        report_info_path = report_root / "release" / "build" / "build-info.json"
         report_info_path.write_bytes(b"{}")
         report_commit = "c" * 40
         report_source_digest = "d" * 64
@@ -10829,12 +10878,9 @@ def self_test() -> None:
             "problems": [],
             "overrides": [],
         }
-        measured_report_root = measure_directory(report_root, MAX_BUILD_ROOT_BYTES)[
-            "bytes"
-        ]
         build_report = {
             "schema": BUILD_REPORT_SCHEMA,
-            "schema_version": 1,
+            "schema_version": BUILD_REPORT_VERSION,
             "authority": BUILD_REPORT_AUTHORITY,
             "run_id": "synthetic-build-report",
             "attempt_id": "synthetic-build-attempt",
@@ -10843,11 +10889,7 @@ def self_test() -> None:
                 str(report_compiler_path),
                 *RUST_BUILD_COMMAND_SUFFIX,
             ],
-            "build_root": {
-                "path": str(report_root),
-                "bytes": measured_report_root,
-                "max_bytes": MAX_BUILD_ROOT_BYTES,
-            },
+            "target_directory": str(report_root),
             "executable": report_executable,
             "embedded_metallib": report_metallib,
             "reducer": report_reducer,
@@ -10865,12 +10907,8 @@ def self_test() -> None:
             "profile": "release",
             "features": ["dflash-k0s-diagnostics"],
             "build_info": report_build_info,
-            "environment": {
-                "CARGO_TARGET_DIR": str(report_root),
-                "QWEN_METAL_LEASE_WAIT": "1",
-            },
+            "environment": {"QWEN_METAL_LEASE_WAIT": "1"},
         }
-        synthetic_root_custody: dict[str, Any] = {}
         validate_build_identity_report(
             build_report,
             report_info_claim,
@@ -10881,41 +10919,26 @@ def self_test() -> None:
             report_executable,
             report_metallib,
             report_reducer,
-            synthetic_root_custody,
-        )
-        ok(
-            synthetic_root_custody["measurement"]
-            == measure_directory(
-                synthetic_root_custody["path"], synthetic_root_custody["maximum"]
-            )
-        )
-        tight_cap_report = copy.deepcopy(build_report)
-        tight_cap_report["build_root"]["max_bytes"] = measured_report_root
-        validate_build_identity_report(
-            tight_cap_report,
-            report_info_claim,
-            "synthetic-build-report",
-            report_checkout,
-            report_build,
-            report_sources,
-            report_executable,
-            report_metallib,
-            report_reducer,
+            report_root,
         )
         ok(True)
         for field, replacement, reason in (
             ("build_command", [str(report_compiler_path), "build"], "cargo argv"),
-            ("environment", {"QWEN_METAL_LEASE_WAIT": "1"}, "environment map"),
+            ("environment", {}, "environment map"),
+            (
+                "environment",
+                {
+                    "CARGO_TARGET_DIR": str(report_root),
+                    "QWEN_METAL_LEASE_WAIT": "1",
+                },
+                "environment map",
+            ),
             (
                 "executable",
                 {**report_executable, "path": str(report_x / "wrong-qwen-bench")},
                 "executable",
             ),
-            (
-                "build_root",
-                {**build_report["build_root"], "max_bytes": measured_report_root - 1},
-                "exceed cap",
-            ),
+            ("target_directory", str(wrong_target), "target_directory"),
             (
                 "compiler",
                 {**build_report["compiler"], "bytes": MAX_COMPILER_BYTES + 1},
@@ -10935,6 +10958,7 @@ def self_test() -> None:
                     report_executable,
                     report_metallib,
                     report_reducer,
+                    report_root,
                 ),
                 reason,
             )
@@ -10952,6 +10976,7 @@ def self_test() -> None:
                     report_executable,
                     report_metallib,
                     report_reducer,
+                    report_root,
                 ),
                 "build report attempt",
             )
@@ -10970,13 +10995,6 @@ def self_test() -> None:
         expect_error(
             lambda: bounded_utf8_bytes("", "tokenizer architecture", 1 << 20),
             "bounded nonempty UTF-8",
-        )
-        (report_root / "late-mutation").write_bytes(b"late")
-        ok(
-            measure_directory(
-                synthetic_root_custody["path"], synthetic_root_custody["maximum"]
-            )
-            != synthetic_root_custody["measurement"]
         )
         fd_root = root / "open-fd-custody"
         fd_root.mkdir()

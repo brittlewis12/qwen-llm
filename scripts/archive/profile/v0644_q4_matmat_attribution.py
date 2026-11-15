@@ -243,7 +243,6 @@ def canonical_environment() -> tuple[dict[str, str], list[str]]:
         "CARGO_BUILD_TARGET",
         "CARGO_ENCODED_RUSTFLAGS",
         "CARGO_INCREMENTAL",
-        "CARGO_TARGET_DIR",
         "CC",
         "CFLAGS",
         "CXX",

@@ -106,3 +106,12 @@ inference source from `deepseek-ai/DeepSeek-V4.1-Flash-1017`, revision
 not a runtime dependency. SHA256 provenance is in the adjacent `sources.json`.
 The upstream MIT license, copyright (c) 2023 DeepSeek, is retained verbatim in
 `scripts/reference/deepseek_v41/fixtures/LICENSE`.
+
+## oMLX mechanism reference
+
+`kernels/glm_index_reuse.metal` is an independent classic SIMD-matrix
+implementation of cross-query key reuse, informed by
+[`omlx/patches/glm_moe_dsa/indexer_nax.py:54-195`](https://github.com/jundot/omlx/blob/624cff0e23519ba46a4d5ed2802c2c236ad1a9ac/omlx/patches/glm_moe_dsa/indexer_nax.py#L54)
+(revision `624cff0e23519ba46a4d5ed2802c2c236ad1a9ac`, Apache-2.0).
+No upstream shader code is copied. Its dot arithmetic and head reduction come
+from this project's incumbent `lightning_indexer_scores_f16_matrix_impl<32>`.

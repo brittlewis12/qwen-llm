@@ -1133,8 +1133,8 @@ mod tests {
 }
 
 crate::env_flag!(
-    /// Default-off M5 GLM packed-prefill index scorer reusing each key tile across eight queries with incumbent K8 arithmetic. Zero restores incumbent scoring.
-    default_off glm_prefill_index_reuse_requested,
+    /// Default-on M5 GLM Fast/Half packed-prefill index scorer reusing each key tile across eight queries with incumbent K8 arithmetic. Zero restores incumbent scoring; decode, Exact/F32 and unsupported hardware use the incumbent.
+    default_on glm_prefill_index_reuse_requested,
     "QWEN_GLM53_PREFILL_INDEX_REUSE"
 );
 
@@ -1204,7 +1204,7 @@ fn glm_index_reuse_shape(capacity: usize, max_rows: usize, queries: usize) -> bo
         .all(|n| n.is_some_and(|n| u32::try_from(n).is_ok()))
 }
 
-/// Experimental GLM scorer. Returns false without encoding for unsupported
+/// GLM query-reuse scorer. Returns false without encoding for unsupported
 /// geometry, hardware, or a disabled knob. Full groups use eight query rows;
 /// remaining queries use the incumbent. K8 dot grouping and head order are unchanged.
 pub fn try_encode_glm_index_scores_reuse(

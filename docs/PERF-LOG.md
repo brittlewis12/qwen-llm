@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-15 - GLM Bitwise Micro64 Indexer: Gate PASS, Default On
+
+- Classic K8 SIMD query tiling reuses each key tile across eight queries,
+  retaining incumbent F16 operands, 16 ordered K8 operations, F32 accumulation
+  and ordered head epilogue. **Zero score-bit mismatches** on all 2,048 real
+  48K/128K capture rows; selections/counts/status/expansion identical, including
+  the previous near-tie rows. No NI campaign required.
+- Production-scratch score -> select -> expand, nice0 `iter`, warmup + three
+  AB/BA/AB pairs: **1.365181x / 1.371273x** at 48K/128K, saving
+  **4.249 / 11.310 ms per layer**. Both clear frozen >=1.25x.
+- Native 2K chunks, one binary, three pairs each: **1.022185x / 1.059581x**,
+  saving **42.61 / 126.29 ms**. Every pair positive; last-row logits and all
+  persistent state bitwise in every pair. **96 operator / 24 model frontier**
+  cases pass, including offsets, Q31/32/33, ties and scratch reuse.
+- Default-on M5 Fast/Half only; `QWEN_GLM53_PREFILL_INDEX_REUSE=0` rollback.
+  Decode/Exact/F32/unsupported cases remain incumbent. Session scratch unchanged.
+  Shader source is identical to measured packets; final product change is the
+  default flip. ENV regenerated; CPU control/policy tests pass. Final contracts,
+  provenance and cleanup are in the verification manifest. No serve run or push.
+  [Rule, all pairs, arithmetic, boundaries and hashes](bench/2026-11-15-glm-indexer-bitwise.md).
+
 ## 2026-11-14 - V4.1 Conditional Yield: Frozen Served Gate PASS, Default On
 
 - Replacement BA pair B2r/A2r, retained release pins `e41e037e2`; standing pairs

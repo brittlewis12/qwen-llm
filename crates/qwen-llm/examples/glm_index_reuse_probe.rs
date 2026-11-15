@@ -193,7 +193,7 @@ mod probe {
             host.elapsed().as_secs_f64() * 1e3 / repeats as f64,
         ))
     }
-    fn replay(ctx: &MetalContext, dir: &Path) -> Result<()> {
+    fn replay(ctx: &MetalContext, dir: &Path, functional_only: bool) -> Result<()> {
         for depth in [49152, 131072] {
             let x = load(ctx, &dir.join(depth.to_string()))?;
             let n = x.queries.shape[2];
@@ -297,9 +297,9 @@ mod probe {
                 .collect();
             let selections:Vec<_>=changed.iter().map(|r|json!({"query":r,"A":&ints(&a.pools)[r*512..(r+1)*512],"B":&ints(&b.pools)[r*512..(r+1)*512]})).collect();
             emit(
-                json!({"kind":"chain_functional","position":depth,"queries":n,"changed_queries":changed,"selections":selections,"ordered_ids_counts_status_expansion_valid":true,"score_scratch_bytes":scratch.scores.n_bytes(),"same_scratch_across_arms":true,"copies_outside_timing":true}),
+                json!({"kind":"chain_functional","position":depth,"layer":x.layer,"queries":n,"changed_queries":changed,"selections":selections,"ordered_ids_counts_status_expansion_valid":true,"score_scratch_bytes":scratch.scores.n_bytes(),"same_scratch_across_arms":true,"copies_outside_timing":true}),
             );
-            if std::env::var_os("QWEN_PROBE_FUNCTIONAL_ONLY").is_some() {
+            if functional_only {
                 continue;
             }
             for _ in 0..2 {
@@ -578,9 +578,16 @@ mod probe {
                     let state = session.capture_snapshot()?;
                     if let Some((ref a, ref astate)) = baseline {
                         let a: &Vec<f32> = a;
-                        ensure!(a.iter().zip(&logits).all(|(a,b)|a.to_bits()==b.to_bits()), "frontier logits differ");
+                        ensure!(
+                            a.iter()
+                                .zip(&logits)
+                                .all(|(a, b)| a.to_bits() == b.to_bits()),
+                            "frontier logits differ"
+                        );
                         ensure!(state.same_state(astate), "frontier states differ");
-                    } else { baseline = Some((logits, state)); }
+                    } else {
+                        baseline = Some((logits, state));
+                    }
                     emit(
                         json!({"kind":"native_frontier","position":position,"residue":residue,"first":first,"queries":n,"candidate":candidate,"events":events,"passed":true}),
                     );
@@ -630,22 +637,24 @@ mod probe {
                     );
                 }
                 ensure!(
-                last[0]
-                    .as_ref()
-                    .unwrap()
-                    .iter()
-                    .zip(last[1].as_ref().unwrap())
-                    .all(|(a, b)| a.to_bits() == b.to_bits()),
-                "native logits differ"
-            );
-            ensure!(
-                states[0]
-                    .as_ref()
-                    .unwrap()
-                    .same_state(states[1].as_ref().unwrap()),
-                "native states differ"
-            );
-                emit(json!({"kind":"native_bitwise","position":depth,"pair":pair,"logits":true,"state":true}));
+                    last[0]
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .zip(last[1].as_ref().unwrap())
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "native logits differ"
+                );
+                ensure!(
+                    states[0]
+                        .as_ref()
+                        .unwrap()
+                        .same_state(states[1].as_ref().unwrap()),
+                    "native states differ"
+                );
+                emit(
+                    json!({"kind":"native_bitwise","position":depth,"pair":pair,"logits":true,"state":true}),
+                );
             }
             let ratios: Vec<_> = samples[0]
                 .iter()
@@ -669,7 +678,8 @@ mod probe {
         emit(json!({"kind":"device","description":ctx.describe(),"mode":args[1]}));
         let dir = Path::new(&args[2]);
         with_glm_index_reuse(true, || match args[1].as_str() {
-            "replay" => replay(&ctx, dir),
+            "replay" => replay(&ctx, dir, false),
+            "functional" => replay(&ctx, dir, true),
             "boundaries" => boundaries(&ctx, dir),
             "native" => native(&ctx, dir, Path::new(args.get(3).unwrap_or(&args[2]))),
             _ => anyhow::bail!("unknown mode"),

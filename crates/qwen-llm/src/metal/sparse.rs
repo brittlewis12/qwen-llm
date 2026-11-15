@@ -1131,3 +1131,243 @@ mod tests {
         enc.end();
     }
 }
+
+crate::env_flag!(
+    /// Default-off M5 GLM packed-prefill index scorer reusing each key tile across eight queries with incumbent K8 arithmetic. Zero restores incumbent scoring.
+    default_off glm_prefill_index_reuse_requested,
+    "QWEN_GLM53_PREFILL_INDEX_REUSE"
+);
+
+#[cfg(any(test, feature = "perf-ablations"))]
+thread_local! {
+    static GLM_INDEX_REUSE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static GLM_INDEX_TRACE: std::cell::RefCell<Option<Vec<(usize,usize,usize,bool)>>> = const { std::cell::RefCell::new(None) };
+}
+fn glm_index_reuse_requested() -> bool {
+    #[cfg(any(test, feature = "perf-ablations"))]
+    if let Some(enabled) = GLM_INDEX_REUSE_OVERRIDE.with(|s| s.get()) {
+        return enabled;
+    }
+    glm_prefill_index_reuse_requested()
+}
+/// Perf-only scoped A/B using one binary; restores controls even after panic.
+#[cfg(any(test, feature = "perf-ablations"))]
+pub fn with_glm_index_reuse<R>(enabled: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<bool>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            GLM_INDEX_REUSE_OVERRIDE.with(|s| s.set(self.0));
+        }
+    }
+    let _restore = Restore(GLM_INDEX_REUSE_OVERRIDE.with(|s| s.replace(Some(enabled))));
+    f()
+}
+/// Perf-only capture of (first sparse row, microbatch start, rows, REUSE used).
+#[cfg(feature = "perf-ablations")]
+pub fn with_glm_index_dispatch_trace<R>(
+    f: impl FnOnce() -> R,
+) -> (R, Vec<(usize, usize, usize, bool)>) {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            GLM_INDEX_TRACE.with(|s| *s.borrow_mut() = None);
+        }
+    }
+    GLM_INDEX_TRACE.with(|s| {
+        assert!(s.borrow().is_none(), "nested index trace");
+        *s.borrow_mut() = Some(Vec::new());
+    });
+    let _restore = Restore;
+    let result = f();
+    let events = GLM_INDEX_TRACE.with(|s| s.borrow_mut().take().unwrap());
+    (result, events)
+}
+#[cfg(feature = "perf-ablations")]
+pub(crate) fn record_glm_index_dispatch(first: usize, start: usize, n: usize, reuse: bool) {
+    GLM_INDEX_TRACE.with(|s| {
+        if let Some(v) = s.borrow_mut().as_mut() {
+            v.push((first, start, n, reuse));
+        }
+    });
+}
+
+fn glm_index_reuse_shape(capacity: usize, max_rows: usize, queries: usize) -> bool {
+    (32..=2048).contains(&queries)
+        && max_rows > 0
+        && max_rows <= capacity
+        && [
+            capacity.checked_mul(queries),
+            capacity.checked_mul(128),
+            queries.checked_mul(4096),
+        ]
+        .iter()
+        .all(|n| n.is_some_and(|n| u32::try_from(n).is_ok()))
+}
+
+/// Experimental GLM scorer. Returns false without encoding for unsupported
+/// geometry, hardware, or a disabled knob. Full groups use eight query rows;
+/// remaining queries use the incumbent. K8 dot grouping and head order are unchanged.
+pub fn try_encode_glm_index_scores_reuse(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    b: &LightningScores<'_>,
+    row_capacity: usize,
+    max_dispatched_rows: usize,
+    query_count: usize,
+) -> Result<bool, MetalError> {
+    if !glm_index_reuse_requested()
+        || !ctx.device_facts().gpu_families.apple10
+        || !glm_index_reuse_shape(row_capacity, max_dispatched_rows, query_count)
+    {
+        return Ok(false);
+    }
+    const K: &str = "glm_index_scores_reuse";
+    require_serial(K, enc)?;
+    let (head_count, head_dim) = (32, 128);
+    let (h, d, r, q) = (
+        head_count as u64,
+        head_dim as u64,
+        row_capacity as u64,
+        query_count as u64,
+    );
+    check_tensor(K, b.queries, GgmlType::F16, &[d, h, q], false, "queries")?;
+    check_tensor(
+        K,
+        b.head_weights,
+        GgmlType::F32,
+        &[h, q],
+        false,
+        "head weights",
+    )?;
+    check_tensor(K, b.keys, GgmlType::F16, &[d, r], false, "keys")?;
+    check_tensor(
+        K,
+        b.visible_counts,
+        GgmlType::I32,
+        &[q],
+        false,
+        "visible counts",
+    )?;
+    check_tensor(K, b.scores, GgmlType::F32, &[r, q], true, "scores")?;
+    check_disjoint(
+        K,
+        b.scores,
+        &[
+            (b.queries, "queries"),
+            (b.head_weights, "head weights"),
+            (b.keys, "keys"),
+            (b.visible_counts, "visible counts"),
+        ],
+    )?;
+
+    let pso = match ctx.pipeline("kernel_glm_index_scores_reuse") {
+        Ok(pso) => pso,
+        Err(MetalError::NoFunction(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if pso.threadExecutionWidth() != 32
+        || pso.maxTotalThreadsPerThreadgroup() < 128
+        || ctx.device.maxThreadgroupMemoryLength() < 10496
+    {
+        return Ok(false);
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        row_capacity: u32,
+        query_count: u32,
+        max_rows: u32,
+        pad: u32,
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            row_capacity: row_capacity as u32,
+            query_count: query_count as u32,
+            max_rows: max_dispatched_rows as u32,
+            pad: 0,
+        },
+    );
+    enc.set_tensor(1, b.queries);
+    enc.set_tensor(2, b.head_weights);
+    enc.set_tensor(3, b.keys);
+    enc.set_tensor(4, b.visible_counts);
+    enc.set_tensor(5, b.scores);
+    enc.set_threadgroup_memory(0, 2048);
+    enc.set_threadgroup_memory(1, 8448);
+    enc.dispatch(
+        MTLSize {
+            width: max_dispatched_rows.div_ceil(8),
+            height: query_count / 8,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    let full = query_count / 8 * 8;
+    if full < query_count {
+        let tail = query_count - full;
+        let q = b
+            .queries
+            .view_subrange((full * 4096) as u64, vec![128, 32, tail as u64]);
+        let w = b
+            .head_weights
+            .view_subrange((full * 32) as u64, vec![32, tail as u64]);
+        let v = b
+            .visible_counts
+            .view_subrange(full as u64, vec![tail as u64]);
+        let s = b.scores.view_subrange(
+            (full * row_capacity) as u64,
+            vec![row_capacity as u64, tail as u64],
+        );
+        encode_lightning_scores_f16_matrix(
+            ctx,
+            enc,
+            &LightningScores {
+                queries: &q,
+                head_weights: &w,
+                keys: b.keys,
+                visible_counts: &v,
+                scores: &s,
+            },
+            32,
+            128,
+            row_capacity,
+            max_dispatched_rows,
+            tail,
+        )?;
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod reuse_shape_tests {
+    use super::glm_index_reuse_shape;
+    #[test]
+    fn scoped_index_override_restores_nested_and_panicking_controls() {
+        super::with_glm_index_reuse(false, || {
+            assert!(!super::glm_index_reuse_requested());
+            super::with_glm_index_reuse(true, || assert!(super::glm_index_reuse_requested()));
+            let _ = std::panic::catch_unwind(|| {
+                super::with_glm_index_reuse(true, || panic!("control unwind"))
+            });
+            assert!(!super::glm_index_reuse_requested());
+        });
+    }
+    #[test]
+    fn rejects_decode_empty_and_overflow_before_encoding() {
+        for q in [0, 1, 2, 3, 4, 31, 2049] {
+            assert!(!glm_index_reuse_shape(32768, 32768, q));
+        }
+        assert!(!glm_index_reuse_shape(0, 0, 64));
+        assert!(!glm_index_reuse_shape(100, 101, 64));
+        assert!(!glm_index_reuse_shape(usize::MAX, 1, 64));
+        for q in [32, 33, 64, 65, 1024, 2048] {
+            assert!(glm_index_reuse_shape(36864, 33280, q));
+        }
+    }
+}

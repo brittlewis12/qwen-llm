@@ -1808,7 +1808,48 @@ fn absorb_rows(
     Ok(())
 }
 
+fn index_reuse_policy(arith: Arith, heads: usize, dim: usize, queries: usize) -> bool {
+    arith.lineage == PackedLineage::Fast
+        && arith.precision == FastPrecision::Half
+        && heads == 32
+        && dim == 128
+        && (32..=64).contains(&queries)
+}
+#[cfg(test)]
+mod index_reuse_policy_tests {
+    use super::*;
+    #[test]
+    fn index_reuse_policy_preserves_exact_f32_decode_and_short_tails() {
+        for lineage in [PackedLineage::Exact, PackedLineage::Fast] {
+            for precision in FastPrecision::ALL {
+                let arith = Arith { lineage, precision };
+                for q in [0, 1, 3, 31, 32, 33, 64, 65] {
+                    assert_eq!(
+                        index_reuse_policy(arith, 32, 128, q),
+                        lineage == PackedLineage::Fast
+                            && precision == FastPrecision::Half
+                            && (32..=64).contains(&q)
+                    );
+                }
+                assert!(!index_reuse_policy(arith, 64, 128, 64));
+                assert!(!index_reuse_policy(arith, 32, 64, 64));
+            }
+        }
+    }
+}
+
 impl Glm5NextSession<'_> {
+    /// Perf-only direct packed chunk to reach a mixed dense/sparse frontier.
+    #[cfg(feature = "perf-ablations")]
+    pub fn prefill_index_boundary_probe(
+        &mut self,
+        ctx: &MetalContext,
+        tokens: &[u32],
+    ) -> Result<Vec<f32>> {
+        self.step_packed(ctx, tokens, true)?
+            .ok_or_else(|| Glm5NextMetalError::Invalid("boundary probe omitted logits".into()))
+    }
+
     /// Packed prefill of `tokens` in chunks of the session's prefill rows;
     /// returns the last token's logits. Falls back to serial decode when the
     /// session has no packed scratch. Rows below the sparse frontier attend
@@ -3059,22 +3100,36 @@ impl Glm5NextSession<'_> {
             let status = sp
                 .select_status
                 .view_subrange((mla_index * sp.rows + start) as u64, vec![n as u64]);
-            crate::metal::encode_lightning_scores_f16_matrix(
-                ctx,
-                enc,
-                &crate::metal::LightningScores {
-                    queries: &queries_f16,
-                    head_weights: &head_weights,
-                    keys: pooled,
-                    visible_counts: &visible_pools,
-                    scores: &scores,
-                },
-                ih,
-                id,
-                pool_capacity,
-                max_pools,
-                n,
-            )?;
+            let index_inputs = crate::metal::LightningScores {
+                queries: &queries_f16,
+                head_weights: &head_weights,
+                keys: pooled,
+                visible_counts: &visible_pools,
+                scores: &scores,
+            };
+            let index_reuse = index_reuse_policy(p.arith(), ih, id, n)
+                && crate::metal::try_encode_glm_index_scores_reuse(
+                    ctx,
+                    enc,
+                    &index_inputs,
+                    pool_capacity,
+                    max_pools,
+                    n,
+                )?;
+            if !index_reuse {
+                crate::metal::encode_lightning_scores_f16_matrix(
+                    ctx,
+                    enc,
+                    &index_inputs,
+                    ih,
+                    id,
+                    pool_capacity,
+                    max_pools,
+                    n,
+                )?;
+            }
+            #[cfg(feature = "perf-ablations")]
+            crate::metal::record_glm_index_dispatch(first, start, n, index_reuse);
             self.stage(enc, Glm5NextStage::SparseSelect, Some(mla_index))?;
             crate::metal::encode_select_top_k_ids(
                 ctx,

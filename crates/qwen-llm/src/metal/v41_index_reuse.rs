@@ -2,8 +2,8 @@
 use super::checks::{bad_shape, check_disjoint, check_tensor, require_serial};
 use super::*;
 crate::env_flag!(
-    /// Default-off M5 V4.1 Half index query reuse. Shares key panels across queries with incumbent K128/head arithmetic and reuses selection-pair scratch. Zero restores the incumbent; F32 MID/short/compact paths are unchanged.
-    default_off v41_root_index_reuse_env,
+    /// M5 V4.1 Half index query reuse. Shares key panels across queries with incumbent K128/head arithmetic and reuses selection-pair scratch. Zero restores the incumbent; F32 MID/short/compact paths are unchanged.
+    default_on v41_root_index_reuse_env,
     "QWEN_V41_ROOT_INDEX_REUSE"
 );
 #[cfg(any(test, feature = "perf-ablations"))]

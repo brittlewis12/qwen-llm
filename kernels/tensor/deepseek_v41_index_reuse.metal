@@ -37,7 +37,10 @@ kernel void kernel_deepseek_v41_attention_index_scores_reuse_serial(
     s_t st(sblk, extents<int,64,32>());
     auto acc = op.get_destination_cooperative_tensor<q_t,k_t,float>();
     const float scale = rsqrt(float(b.x)) * rsqrt(float(b.y));
-    for (uint k0 = 0; k0 < maximum; k0 += 64) {
+    const uint panels = (maximum + 63) / 64;
+    const uint begin = (panels * group.x / 4) * 64;
+    const uint end = (panels * (group.x + 1) / 4) * 64;
+    for (uint k0 = begin; k0 < end; k0 += 64) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint e=tid;e<64*128/4;e+=128) {
             const uint key=e/(128/4), c4=e%(128/4), t=k0+key;

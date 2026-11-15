@@ -139,7 +139,7 @@ pub fn try_encode_v41_root_index_reuse(
     }
     enc.dispatch(
         MTLSize {
-            width: 1,
+            width: 4,
             height: n.div_ceil(group),
             depth: 1,
         },

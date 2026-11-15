@@ -162,6 +162,7 @@ fn geometry(
     group: usize,
 ) -> bool {
     ratio > 0
+        && ratio <= u32::MAX as usize
         && n > 0
         && n <= 512
         && matches!(group, 2 | 4 | 8 | 16)
@@ -184,6 +185,7 @@ mod tests {
     fn rejects_bad_bounds_and_restores_scoped_controls() {
         assert!(!geometry(usize::MAX, 2, 0, 512, 16384, 4));
         assert!(!geometry(0, 0, 0, 512, 16384, 4));
+        assert!(!geometry(0, u32::MAX as usize + 1, 0, 512, 16384, 4));
         assert!(!geometry(0, 2, 0, 513, 16384, 4));
         assert!(!geometry(32768, 2, 0, 512, 16384, 4));
         assert!(geometry(28672, 2, 3584, 512, 16384, 4));

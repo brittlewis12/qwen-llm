@@ -106,7 +106,7 @@ pub fn try_encode_v41_root_index_reuse(
         b.scratch,
         &[(b.query, "query"), (b.weights, "weights"), (b.keys, "keys")],
     )?;
-    let pso = match ctx.tensor_pipeline("kernel_deepseek_v41_attention_index_scores_reuse") {
+    let pso = match ctx.tensor_pipeline("kernel_deepseek_v41_attention_index_scores_reuse_serial") {
         Ok(p) => p,
         Err(MetalError::NoFunction(_)) => return Ok(false),
         Err(e) => return Err(e),

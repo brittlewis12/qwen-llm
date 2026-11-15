@@ -1270,7 +1270,7 @@ impl Workspace {
                 && c.index_dim == 128
                 && metal::moe_grouped_tensor_selected(ctx)
                 && index_tensor_enabled();
-            let reused = if tensor_index {
+            let reused = if tensor_index && c.index_topk == 512 {
                 if let Some(pairs) = rows.select_pairs.as_ref() {
                     metal::try_encode_v41_root_index_reuse(
                         ctx,

@@ -299,7 +299,9 @@ mod probe {
             emit(
                 json!({"kind":"chain_functional","position":depth,"queries":n,"changed_queries":changed,"selections":selections,"ordered_ids_counts_status_expansion_valid":true,"score_scratch_bytes":scratch.scores.n_bytes(),"same_scratch_across_arms":true,"copies_outside_timing":true}),
             );
-            if std::env::var_os("QWEN_PROBE_FUNCTIONAL_ONLY").is_some() { continue; }
+            if std::env::var_os("QWEN_PROBE_FUNCTIONAL_ONLY").is_some() {
+                continue;
+            }
             for _ in 0..2 {
                 chain(ctx, &x, &scratch, false, 3, 0, None)?;
                 chain(ctx, &x, &scratch, true, 3, 0, None)?;
@@ -549,6 +551,7 @@ mod probe {
             let prefix = session.capture_snapshot()?;
             let first = 2051 - position;
             for n in [31usize, 32, 33] {
+                let mut baseline = None;
                 for candidate in [false, true] {
                     session.restore_snapshot(&prefix)?;
                     let (result, events) = with_glm_index_dispatch_trace(|| {
@@ -572,6 +575,12 @@ mod probe {
                         "frontier dispatch {:?}",
                         events
                     );
+                    let state = session.capture_snapshot()?;
+                    if let Some((ref a, ref astate)) = baseline {
+                        let a: &Vec<f32> = a;
+                        ensure!(a.iter().zip(&logits).all(|(a,b)|a.to_bits()==b.to_bits()), "frontier logits differ");
+                        ensure!(state.same_state(astate), "frontier states differ");
+                    } else { baseline = Some((logits, state)); }
                     emit(
                         json!({"kind":"native_frontier","position":position,"residue":residue,"first":first,"queries":n,"candidate":candidate,"events":events,"passed":true}),
                     );
@@ -620,8 +629,7 @@ mod probe {
                         json!({"kind":"native_timing","position":depth,"rows":2048,"pair":pair,"arm":if candidate{"B"}else{"A"},"wall_ms":wall}),
                     );
                 }
-            }
-            ensure!(
+                ensure!(
                 last[0]
                     .as_ref()
                     .unwrap()
@@ -637,6 +645,8 @@ mod probe {
                     .same_state(states[1].as_ref().unwrap()),
                 "native states differ"
             );
+                emit(json!({"kind":"native_bitwise","position":depth,"pair":pair,"logits":true,"state":true}));
+            }
             let ratios: Vec<_> = samples[0]
                 .iter()
                 .zip(&samples[1])

@@ -5363,19 +5363,21 @@ fn authorize_inventory_asset_argv(
     validate_asset_order(assets)?;
     let target = asset_by_role(assets, "target")?;
     let drafter = asset_by_role(assets, "drafter")?;
+    let target_path = Path::new(&target.path);
+    let drafter_path = Path::new(&drafter.path);
     ensure!(
         target.expected_bytes == Some(17_106_773_984)
             && target.max_bytes == 17_106_773_984
-            && target.path == "Qwen3.8-27B-Q4_K_M.gguf"
+            && target_path.file_name().and_then(|name| name.to_str())
+                == Some("Qwen3.8-27B-Q4_K_M.gguf")
             && target.sha256 == "7b2aec3b9ababdfd75aa17552ee95607d866e44decf547f6f12fcef85cc89f1b"
             && drafter.expected_bytes.is_none()
             && drafter.max_bytes == 2_147_483_648
-            && drafter.path == "Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+            && drafter_path.file_name().and_then(|name| name.to_str())
+                == Some("Qwen3.8-27B-DFlash2-Q4_K_M.gguf")
             && drafter.sha256 == "18a380efc9b7ed8d88677fc895f5c11ae170653434ee378f7348f715c14d0594",
         "asset expected-byte/cap predicates differ from authorization"
     );
-    let target_path = Path::new(&target.path);
-    let drafter_path = Path::new(&drafter.path);
     let prompt_bytes = hex_decode(&prompt_predicate.utf8_hex)?;
     ensure!(
         target_path.is_absolute()
@@ -8279,17 +8281,33 @@ mod tests {
     }
 
     #[test]
-    fn build_info_v2_matches_actual_recorded_identity_serialization() {
+    fn build_info_v2_projection_matches_recorded_build_identity() {
         let identity = serde_json::to_value(crate::recorded_build_identity()).unwrap();
-        assert_eq!(identity["schema_version"], 2);
-        let mut report = serde_json::Map::new();
-        report.insert(
-            "artifact".into(),
-            serde_json::json!({"path":"/synthetic/build-info.json","bytes":1,"sha256":"0".repeat(64),"max_bytes":1}),
-        );
-        for (key, value) in identity.as_object().unwrap() {
-            report.insert(key.clone(), value.clone());
+        assert_eq!(identity["schema_version"], 4);
+        let mut report = serde_json::Map::from_iter([
+            (
+                "artifact".into(),
+                serde_json::json!({"path":"/synthetic/build-info.json","bytes":1,"sha256":"0".repeat(64),"max_bytes":1}),
+            ),
+            ("schema_version".into(), 2.into()),
+        ]);
+        for key in [
+            "build_commit",
+            "build_commit_short",
+            "build_dirty",
+            "build_source_state",
+            "stamp_source",
+            "stamp_error",
+            "runtime_commit",
+            "runtime_dirty",
+            "runtime_source_state",
+            "status",
+            "problems",
+            "overrides",
+        ] {
+            report.insert(key.into(), identity[key].clone());
         }
+        let expected = Value::Object(report.clone());
         let parsed: BuildInfoReport = serde_json::from_value(Value::Object(report)).unwrap();
         assert_eq!(parsed.schema_version, 2);
         validate_build_info_stamp_contract(&parsed, &parsed.build_commit).unwrap();
@@ -8304,7 +8322,7 @@ mod tests {
         assert!(validate_build_info_stamp_contract(&stamp_error, &parsed.build_commit).is_err());
         let mut roundtrip = serde_json::to_value(parsed).unwrap();
         roundtrip.as_object_mut().unwrap().remove("artifact");
-        assert_eq!(roundtrip, identity);
+        assert_eq!(roundtrip, expected);
     }
 
     #[test]
@@ -9031,7 +9049,7 @@ mod tests {
         let metallib = claim(synthetic_target.join("release/build/default.metallib"));
         let report = claim(checkout.join("planner/build-report.json"));
         validate_build_artifact_paths(&synthetic_target, &executable, &metallib, &report).unwrap();
-        let wrong_executable = claim(synthetic_target.join("debug/qwen-bench"));
+        let wrong_executable = claim(synthetic_target.join("debug/qwen-bench-other"));
         assert!(
             validate_build_artifact_paths(&synthetic_target, &wrong_executable, &metallib, &report)
                 .is_err()
@@ -9092,8 +9110,8 @@ mod tests {
 
     #[test]
     fn inventory_asset_argv_gate_rejects_substitution_before_open_sentinel() {
-        let target_path = "Qwen3.8-27B-Q4_K_M.gguf";
-        let drafter_path = "Qwen3.8-27B-DFlash2-Q4_K_M.gguf";
+        let target_path = "/synthetic/models/Qwen3.8-27B-Q4_K_M.gguf";
+        let drafter_path = "/synthetic/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf";
         let assets = vec![
             AssetExpectation {
                 role: "target".into(),

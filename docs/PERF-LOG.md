@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the current state and evidence index.
 
+## 2026-11-15 - V4.1 Bitwise Root Index Reuse: Gate PASS, Default On
+
+- Four-query key reuse plus four independent key ranges preserves the
+  incumbent Half K128 tensor multiply and complete ordered F32 head sum.
+  All 4,096 real 32K capture rows: **zero score/selection mismatches**;
+  **704 boundary cases** pass, including offsets, frontiers and exact ties.
+- Nice0 `iter`, symmetric warmups + three AB/BA/AB pairs: root final-4K
+  scorer **1.655142x**, score+production-selection **1.476902x**,
+  saving **15.44 / 15.72 ms per captured layer**. Both clear frozen >=1.25x.
+- Native cold32K **1.012264x** (148.59 ms saved); cold4K/8K
+  **0.999959/1.000080x**; 1K@80K F32 control **0.995121x**, inactive.
+  Every cell clears >=0.98x. All paired logits/causal payloads are bitwise;
+  cold-root follow-on decode logits also bitwise. No NI or served claim.
+- Default-on M5 eligible Half branch; `QWEN_V41_ROOT_INDEX_REUSE=0` rollback.
+  Existing selection-pair slab supplies temporary Half query scratch; no
+  session-memory increase. F32 MID/short/compact unchanged. Shader is identical
+  to the native packet. Library **2509 pass / 0 fail**, no new ignores;
+  ENV/contracts and cleanup provenance retained. No push or merge.
+  [Rule, all pairs, rejected controls, boundaries and hashes](bench/2026-11-15-v41-root-index-reuse.md).
+
 ## 2026-11-15 - GLM Bitwise Micro64 Indexer: Gate PASS, Default On
 
 - Classic K8 SIMD query tiling reuses each key tile across eight queries,

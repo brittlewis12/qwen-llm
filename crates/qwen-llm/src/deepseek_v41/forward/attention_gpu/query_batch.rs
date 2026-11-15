@@ -1270,51 +1270,79 @@ impl Workspace {
                 && c.index_dim == 128
                 && metal::moe_grouped_tensor_selected(ctx)
                 && index_tensor_enabled();
-            if tensor_index {
-                tensor_pipeline(ctx, enc, "index_scores_tensor")?;
+            let reused = if tensor_index {
+                if let Some(pairs) = rows.select_pairs.as_ref() {
+                    metal::try_encode_v41_root_index_reuse(
+                        ctx,
+                        enc,
+                        &metal::V41RootIndexReuse {
+                            query: &rows.index_query,
+                            weights: &rows.index_weights,
+                            keys: &self.owners[owner].keys,
+                            scores: &rows.select_scores,
+                            scratch: pairs,
+                        },
+                        start,
+                        ratio,
+                        first,
+                        n,
+                        select_width,
+                        4,
+                    )
+                    .map_err(|e| e.to_string())?
+                } else {
+                    false
+                }
             } else {
-                pipeline(ctx, enc, "index_heads_rows")?;
-            }
-            enc.set_bytes(
-                0,
-                &[
-                    start as u32,
-                    ratio as u32,
-                    c.index_topk as u32,
-                    last_length as u32,
-                ],
-            );
-            enc.set_bytes(
-                1,
-                &[
-                    c.index_dim as u32,
-                    c.index_heads as u32,
-                    (c.index_heads * c.index_dim) as u32,
-                    c.index_heads as u32,
-                ],
-            );
-            enc.set_bytes(2, &[select_width as u32, n as u32, 0, 0]);
-            enc.set_tensor(3, &rows.index_query);
-            enc.set_tensor(4, &rows.index_weights);
-            enc.set_tensor(5, &self.owners[owner].keys);
-            enc.set_tensor(6, &rows.select_scores);
-            enc.set_bytes(7, &(first as u32));
-            enc.dispatch(
-                MTLSize {
-                    width: if tensor_index {
-                        1
-                    } else {
-                        last_length.div_ceil(8)
+                false
+            };
+            if !reused {
+                if tensor_index {
+                    tensor_pipeline(ctx, enc, "index_scores_tensor")?;
+                } else {
+                    pipeline(ctx, enc, "index_heads_rows")?;
+                }
+                enc.set_bytes(
+                    0,
+                    &[
+                        start as u32,
+                        ratio as u32,
+                        c.index_topk as u32,
+                        last_length as u32,
+                    ],
+                );
+                enc.set_bytes(
+                    1,
+                    &[
+                        c.index_dim as u32,
+                        c.index_heads as u32,
+                        (c.index_heads * c.index_dim) as u32,
+                        c.index_heads as u32,
+                    ],
+                );
+                enc.set_bytes(2, &[select_width as u32, n as u32, 0, 0]);
+                enc.set_tensor(3, &rows.index_query);
+                enc.set_tensor(4, &rows.index_weights);
+                enc.set_tensor(5, &self.owners[owner].keys);
+                enc.set_tensor(6, &rows.select_scores);
+                enc.set_bytes(7, &(first as u32));
+                enc.dispatch(
+                    MTLSize {
+                        width: if tensor_index {
+                            1
+                        } else {
+                            last_length.div_ceil(8)
+                        },
+                        height: n,
+                        depth: 1,
                     },
-                    height: n,
-                    depth: 1,
-                },
-                MTLSize {
-                    width: if tensor_index { 128 } else { 256 },
-                    height: 1,
-                    depth: 1,
-                },
-            );
+                    MTLSize {
+                        width: if tensor_index { 128 } else { 256 },
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+            }
             let route = selection_route(c, last_length, SelectionOverrides::env());
             if let SelectionRoute::Hier(partitions) = route {
                 select_hier_rows(

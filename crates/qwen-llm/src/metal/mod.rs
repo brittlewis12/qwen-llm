@@ -352,6 +352,7 @@ mod tensor;
 mod tensor_ops;
 #[cfg(test)]
 pub(crate) mod test_support;
+mod v41_index_reuse;
 
 #[cfg(test)]
 pub(crate) mod test_cancellation;
@@ -413,6 +414,7 @@ pub use sparse::*;
 pub use tensor::*;
 pub use tensor_ops::{TensorOpsStatus, TensorOpsUnavailableReason, probe_tensor_ops_status};
 pub use testing::*;
+pub use v41_index_reuse::*;
 pub use vjp::*;
 
 #[derive(Debug, thiserror::Error)]

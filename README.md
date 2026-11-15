@@ -64,9 +64,7 @@ newer, and Xcode with its Metal toolchain, so that `xcrun metal` and
 26 the toolchain is a separate download:
 `xcodebuild -downloadComponent MetalToolchain`.
 
-Always build with Cargo's worktree default target directory. Never pass
-`--target-dir` or set `CARGO_TARGET_DIR`; on zekrom, use mise-wrapped Cargo so
-mbx can manage target storage.
+Never pass `--target-dir` or set `CARGO_TARGET_DIR`; build with plain Cargo from the worktree, using mise-wrapped Cargo on zekrom so mbx manages targets.
 
 ```sh
 cargo build --release -p qwen-cli --bin qwen --bin qwen-bench

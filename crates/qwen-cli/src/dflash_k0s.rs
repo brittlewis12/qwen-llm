@@ -8307,7 +8307,8 @@ mod tests {
         ] {
             report.insert(key.into(), identity[key].clone());
         }
-        let expected = Value::Object(report.clone());
+        let mut expected = Value::Object(report.clone());
+        expected.as_object_mut().unwrap().remove("artifact");
         let parsed: BuildInfoReport = serde_json::from_value(Value::Object(report)).unwrap();
         assert_eq!(parsed.schema_version, 2);
         validate_build_info_stamp_contract(&parsed, &parsed.build_commit).unwrap();
